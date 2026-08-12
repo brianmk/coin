@@ -161,8 +161,16 @@ target_include_directories(RetainedMixedTopologyTest PRIVATE
 	${PROJECT_BINARY_DIR}/include
 	${COIN_TARGET_INCLUDE_DIRECTORIES}
 )
+add_executable(RetainedMaterialLightingTest retained-material-lighting-test.cpp)
+target_link_libraries(RetainedMaterialLightingTest Coin ${COIN_TARGET_LINK_LIBRARIES})
+target_include_directories(RetainedMaterialLightingTest PRIVATE
+	${PROJECT_SOURCE_DIR}/include
+	${PROJECT_BINARY_DIR}/include
+	${COIN_TARGET_INCLUDE_DIRECTORIES}
+)
 add_test(NAME RetainedMixedTopologyTest COMMAND RetainedMixedTopologyTest)
 
+add_test(NAME RetainedMaterialLightingTest COMMAND RetainedMaterialLightingTest)
 if(HAVE_EGL)
 	add_executable(DrawListGLTest drawlist-gl-test.cpp)
 	target_link_libraries(DrawListGLTest Coin ${COIN_TARGET_LINK_LIBRARIES})
