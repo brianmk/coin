@@ -42,6 +42,13 @@ enum SoPrimitiveTopology : uint8_t {
   SO_TOPOLOGY_COUNT
 };
 
+// Semantic point coverage requested by the retained traversal.  Backends may
+// emulate this when their native point rasterization cannot provide it.
+enum SoPointShape : uint8_t {
+  SO_POINT_SHAPE_SQUARE = 0,
+  SO_POINT_SHAPE_ROUND
+};
+
 /*!
   \struct SoGeometryDesc
   \brief Describes vertex/index data for a single draw call.
@@ -305,6 +312,7 @@ struct SoAlphaTestState {
 */
 struct SoRasterState {
   uint8_t fillMode = 0;         // 0=filled, 1=lines (wireframe), 2=points
+  SoPointShape pointShape = SO_POINT_SHAPE_SQUARE;
   uint8_t cullMode = 0;
   SbBool  scissorEnabled = FALSE;
   SbBool  viewportEnabled = FALSE;

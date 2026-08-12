@@ -788,6 +788,7 @@ ensureMaterialBlendState(SoRenderState & renderState,
   renderState.blend.dstAlphaFactor = SO_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA;
   renderState.blend.rgbEquation = SO_BLEND_EQUATION_ADD;
   renderState.blend.alphaEquation = SO_BLEND_EQUATION_ADD;
+  renderState.raster.pointShape = SO_POINT_SHAPE_SQUARE;
 }
 
 } // namespace SoRenderIR
