@@ -111,6 +111,15 @@ enum SoTextureWrap : uint8_t {
   SO_TEXTURE_WRAP_CLAMP_TO_BORDER
 };
 
+// Texture environment models retained from SoMultiTextureImageElement. These
+// are semantic values; a backend maps them to its own texture-combine API.
+enum SoTextureModel : uint8_t {
+  SO_TEXTURE_MODEL_MODULATE = 0,
+  SO_TEXTURE_MODEL_DECAL,
+  SO_TEXTURE_MODEL_BLEND,
+  SO_TEXTURE_MODEL_REPLACE
+};
+
 // --- Depth state ---------------------------------------------------------
 
 // Semantic comparison functions. These deliberately do not use GL enum
@@ -144,7 +153,11 @@ enum SoBlendFactor : uint8_t {
   SO_BLEND_FACTOR_ONE_MINUS_CONSTANT_COLOR,
   SO_BLEND_FACTOR_CONSTANT_ALPHA,
   SO_BLEND_FACTOR_ONE_MINUS_CONSTANT_ALPHA,
-  SO_BLEND_FACTOR_SRC_ALPHA_SATURATE
+  SO_BLEND_FACTOR_SRC_ALPHA_SATURATE,
+  SO_BLEND_FACTOR_SRC1_COLOR,
+  SO_BLEND_FACTOR_ONE_MINUS_SRC1_COLOR,
+  SO_BLEND_FACTOR_SRC1_ALPHA,
+  SO_BLEND_FACTOR_ONE_MINUS_SRC1_ALPHA
 };
 
 enum SoBlendEquation : uint8_t {
@@ -198,6 +211,8 @@ struct SoTextureData {
   SoTextureFilter magFilter = SO_TEXTURE_FILTER_NEAREST;
   SoTextureWrap wrapS = SO_TEXTURE_WRAP_CLAMP_TO_EDGE;
   SoTextureWrap wrapT = SO_TEXTURE_WRAP_CLAMP_TO_EDGE;
+  SoTextureModel model = SO_TEXTURE_MODEL_MODULATE;
+  SbVec4f blendColor = SbVec4f(0.0f, 0.0f, 0.0f, 1.0f);
 };
 
 /*!
@@ -211,7 +226,10 @@ struct SoMaterialData {
   SbVec4f  ambient = {0.2f, 0.2f, 0.2f, 1.0f};
   SbVec4f  specular = {0.0f, 0.0f, 0.0f, 1.0f};
   SbVec4f  emissive = {0.0f, 0.0f, 0.0f, 1.0f};
-  SoShadingModel shadingModel = SO_SHADING_LEGACY_GOURAUD;
+  // A command with no retained lighting setup is explicitly unlit. Scene
+  // traversal fills this with the effective Gouraud model when lighting is
+  // present, so the executor never needs to invent a headlight.
+  SoShadingModel shadingModel = SO_SHADING_UNLIT;
   float    shininess = 0.2f;
   float    opacity = 1.0f;
 
@@ -262,11 +280,6 @@ struct SoBlendState {
   SoBlendFactor dstRGBFactor = SO_BLEND_FACTOR_ZERO;
   SoBlendFactor srcAlphaFactor = SO_BLEND_FACTOR_ONE;
   SoBlendFactor dstAlphaFactor = SO_BLEND_FACTOR_ZERO;
-
-  // Set when legacy traversal requested an unrepresentable dual-source
-  // blending factor. The retained renderer uses the corresponding primary
-  // source factor as an explicit fallback.
-  SbBool unsupportedFactor = FALSE;
 
   // Coin's current LegacyGL state API exposes blend factors but not blend
   // equations. ADD is therefore the only equation that can be captured

@@ -11,9 +11,12 @@
 #include <Inventor/elements/SoLightElement.h>
 #include <Inventor/elements/SoLightModelElement.h>
 #include <Inventor/elements/SoLineWidthElement.h>
+#include <Inventor/elements/SoMultiTextureEnabledElement.h>
+#include <Inventor/elements/SoMultiTextureImageElement.h>
 #include <Inventor/elements/SoPointSizeElement.h>
 #include <Inventor/elements/SoModelMatrixElement.h>
 #include <Inventor/elements/SoProjectionMatrixElement.h>
+#include <Inventor/elements/SoTextureQualityElement.h>
 #include <Inventor/elements/SoShapeHintsElement.h>
 #include <Inventor/elements/SoViewportRegionElement.h>
 #include <Inventor/elements/SoViewingMatrixElement.h>
@@ -29,8 +32,8 @@
 #include <cmath>
 #include <cstring>
 #include <climits>
+#include <cstdlib>
 #include <inttypes.h>
-#include <mutex>
 
 namespace {
 
@@ -61,7 +64,7 @@ lightingEqual(const SoLightingData & lhs, const SoLightingData & rhs)
 }
 
 SoBlendFactor
-blendFactorFromLegacyGL(const int value, SbBool & unsupported)
+blendFactorFromLegacyGL(const int value)
 {
   // Keep the GL values local to this conversion boundary. No GL enum is
   // stored in the public IR.
@@ -81,39 +84,71 @@ blendFactorFromLegacyGL(const int value, SbBool & unsupported)
   case 0x8002: return SO_BLEND_FACTOR_ONE_MINUS_CONSTANT_COLOR;
   case 0x8003: return SO_BLEND_FACTOR_CONSTANT_ALPHA;
   case 0x8004: return SO_BLEND_FACTOR_ONE_MINUS_CONSTANT_ALPHA;
-  // The retained shaders emit one fragment color and cannot represent the
-  // secondary source required by dual-source blending. Approximate these
-  // legacy factors with the corresponding primary source factor and retain
-  // an explicit marker for diagnostics.
   case 0x8589:
-    unsupported = TRUE;
-    return SO_BLEND_FACTOR_SRC_ALPHA;                    // GL_SRC1_ALPHA
+    return SO_BLEND_FACTOR_SRC1_ALPHA;                    // GL_SRC1_ALPHA
   case 0x88F9:
-    unsupported = TRUE;
-    return SO_BLEND_FACTOR_SRC_COLOR;                    // GL_SRC1_COLOR
+    return SO_BLEND_FACTOR_SRC1_COLOR;                    // GL_SRC1_COLOR
   case 0x88FA:
-    unsupported = TRUE;
-    return SO_BLEND_FACTOR_ONE_MINUS_SRC_COLOR;          // GL_ONE_MINUS_SRC1_COLOR
+    return SO_BLEND_FACTOR_ONE_MINUS_SRC1_COLOR;          // GL_ONE_MINUS_SRC1_COLOR
   case 0x88FB:
-    unsupported = TRUE;
-    return SO_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA;           // GL_ONE_MINUS_SRC1_ALPHA
+    return SO_BLEND_FACTOR_ONE_MINUS_SRC1_ALPHA;           // GL_ONE_MINUS_SRC1_ALPHA
   default:     return SO_BLEND_FACTOR_ONE;
   }
 }
 
-SoAlphaTestFunction
-alphaTestFunctionFromLegacyGL(const int value)
+SoTextureModel
+textureModelFromLegacy(SoMultiTextureImageElement::Model model)
 {
-  switch (value) {
-  case 0x0200: return SO_ALPHA_TEST_NEVER;
-  case 0x0207: return SO_ALPHA_TEST_ALWAYS;
-  case 0x0201: return SO_ALPHA_TEST_LESS;
-  case 0x0203: return SO_ALPHA_TEST_LEQUAL;
-  case 0x0202: return SO_ALPHA_TEST_EQUAL;
-  case 0x0206: return SO_ALPHA_TEST_GEQUAL;
-  case 0x0204: return SO_ALPHA_TEST_GREATER;
-  case 0x0205: return SO_ALPHA_TEST_NOTEQUAL;
-  default:     return SO_ALPHA_TEST_NONE;
+  switch (model) {
+  case SoMultiTextureImageElement::DECAL:
+    return SO_TEXTURE_MODEL_DECAL;
+  case SoMultiTextureImageElement::BLEND:
+    return SO_TEXTURE_MODEL_BLEND;
+  case SoMultiTextureImageElement::REPLACE:
+    return SO_TEXTURE_MODEL_REPLACE;
+  case SoMultiTextureImageElement::MODULATE:
+  default:
+    return SO_TEXTURE_MODEL_MODULATE;
+  }
+}
+
+float
+textureQualityLimit(const char * name, const float fallback)
+{
+  const char * value = coin_getenv(name);
+  if (!value) return fallback;
+  const float parsed = static_cast<float>(std::atof(value));
+  return parsed >= 0.0f && parsed <= 1.0f ? parsed : fallback;
+}
+
+void
+textureFiltersFromQuality(const float quality, SoTextureData & texture)
+{
+  // Keep this mapping in lockstep with SoGLImageP::applyFilter() and its
+  // documented LegacyGL quality thresholds. The IR stores the effective
+  // sampler state so a backend does not need to know Coin's quality policy.
+  static const float linearLimit =
+    textureQualityLimit("COIN_TEX2_LINEAR_LIMIT", 0.2f);
+  static const float mipmapLimit =
+    textureQualityLimit("COIN_TEX2_MIPMAP_LIMIT", 0.5f);
+  static const float linearMipmapLimit =
+    textureQualityLimit("COIN_TEX2_LINEAR_MIPMAP_LIMIT", 0.8f);
+
+  if (quality < linearLimit) {
+    texture.minFilter = SO_TEXTURE_FILTER_NEAREST;
+    texture.magFilter = SO_TEXTURE_FILTER_NEAREST;
+  }
+  else if (quality < mipmapLimit) {
+    texture.minFilter = SO_TEXTURE_FILTER_LINEAR;
+    texture.magFilter = SO_TEXTURE_FILTER_LINEAR;
+  }
+  else if (quality < linearMipmapLimit) {
+    texture.minFilter = SO_TEXTURE_FILTER_NEAREST_MIPMAP_LINEAR;
+    texture.magFilter = SO_TEXTURE_FILTER_LINEAR;
+  }
+  else {
+    texture.minFilter = SO_TEXTURE_FILTER_LINEAR_MIPMAP_LINEAR;
+    texture.magFilter = SO_TEXTURE_FILTER_LINEAR;
   }
 }
 
@@ -442,35 +477,37 @@ SoIRDumpFirstN(const SoDrawList & drawlist, int count)
 
 namespace SoRenderIR {
 
+static SoTextureWrap
+textureWrapFromLegacy(SoMultiTextureImageElement::Wrap wrap)
+{
+  switch (wrap) {
+  case SoMultiTextureImageElement::REPEAT:
+    return SO_TEXTURE_WRAP_REPEAT;
+  case SoMultiTextureImageElement::CLAMP_TO_BORDER:
+    return SO_TEXTURE_WRAP_CLAMP_TO_BORDER;
+  case SoMultiTextureImageElement::CLAMP:
+  default:
+    // GL_CLAMP is the historical Coin spelling for edge clamping here.
+    return SO_TEXTURE_WRAP_CLAMP_TO_EDGE;
+  }
+}
+
 void
-fillMaterialFromState(SoState * state, SoMaterialData & material)
+fillMaterialFromState(SoState * state, SoMaterialData & material,
+                      int materialIndex)
 {
   SoState * mutableState = state;
-  const SbColor & diffuse = SoLazyElement::getDiffuse(mutableState, 0);
+  const SbColor & diffuse = SoLazyElement::getDiffuse(mutableState, materialIndex);
   const SbColor & ambient = SoLazyElement::getAmbient(mutableState);
   const SbColor & specular = SoLazyElement::getSpecular(mutableState);
   const SbColor & emissive = SoLazyElement::getEmissive(mutableState);
-  const float transparency = SoLazyElement::getTransparency(mutableState, 0);
+  const float transparency = SoLazyElement::getTransparency(mutableState, materialIndex);
 
-  // When light model is BASE_COLOR, use emissive as the display color
-  // and flag for flat (unlit) rendering. This handles materials that only
-  // set emissiveColor (e.g. rotation center sphere, annotations).
-  // When emissive is set and diffuse is near-default (0.8,0.8,0.8),
-  // use emissive as the diffuse color. This handles materials that only
-  // set emissiveColor (e.g. rotation center sphere) — the intent is to
-  // display the emissive color, not the default gray.
-  // TODO: revisit with proper emissive shader handling.
-  bool hasEmissive = (emissive[0] > 0.01f || emissive[1] > 0.01f || emissive[2] > 0.01f);
-  bool isDefaultDiffuse = (diffuse[0] > 0.79f && diffuse[0] < 0.81f
-                        && diffuse[1] > 0.79f && diffuse[1] < 0.81f
-                        && diffuse[2] > 0.79f && diffuse[2] < 0.81f);
-  if (hasEmissive && isDefaultDiffuse) {
-    material.diffuse.setValue(emissive[0], emissive[1], emissive[2],
-                              1.0f - transparency);
-  } else {
-    material.diffuse.setValue(diffuse[0], diffuse[1], diffuse[2],
-                              1.0f - transparency);
-  }
+  // Keep diffuse and emissive independent. The explicit lighting shader owns
+  // emissive contribution, so inferring diffuse from a default-looking
+  // material would double-count emissive-only materials.
+  material.diffuse.setValue(diffuse[0], diffuse[1], diffuse[2],
+                            1.0f - transparency);
 
   // Capture the effective shading contract explicitly. Coin's traditional
   // PHONG light model currently maps to the legacy-compatible Gouraud path;
@@ -496,8 +533,51 @@ fillMaterialFromState(SoState * state, SoMaterialData & material)
   material.normalTexture = NULL;
   material.emissiveTexture = NULL;
   material.flags = 0;
+  material.texture = SoTextureData();
   material.textureAlphaIncludesOpacity = false;
   material.vertexColorAlphaIncludesOpacity = false;
+}
+
+void
+fillTextureFromState(SoState * state, SoIRRenderAction * action,
+                     SoMaterialData & material)
+{
+  if (!state || !action || !SoMultiTextureEnabledElement::get(state, 0)) {
+    return;
+  }
+
+  SbVec2s size;
+  int numComponents = 0;
+  SoMultiTextureImageElement::Wrap wrapS;
+  SoMultiTextureImageElement::Wrap wrapT;
+  SoMultiTextureImageElement::Model model;
+  SbColor blendColor;
+  const unsigned char * bytes = SoMultiTextureImageElement::get(
+    state, 0, size, numComponents, wrapS, wrapT, model, blendColor);
+  if (!bytes || size[0] <= 0 || size[1] <= 0 ||
+      numComponents < 1 || numComponents > 4) {
+    return;
+  }
+
+  const size_t pixelCount = static_cast<size_t>(size[0]) *
+                            static_cast<size_t>(size[1]);
+  const size_t byteCount = pixelCount * static_cast<size_t>(numComponents);
+  unsigned char * copy = static_cast<unsigned char *>(
+    action->allocateGeometryStorage(byteCount, alignof(unsigned char)));
+  std::memcpy(copy, bytes, byteCount);
+
+  material.texture.pixels = copy;
+  material.texture.width = size[0];
+  material.texture.height = size[1];
+  material.texture.numComponents = numComponents;
+  material.texture.wrapS = textureWrapFromLegacy(wrapS);
+  material.texture.wrapT = textureWrapFromLegacy(wrapT);
+  material.texture.model = textureModelFromLegacy(model);
+  material.texture.blendColor.setValue(blendColor[0], blendColor[1],
+                                       blendColor[2], 1.0f);
+  textureFiltersFromQuality(SoTextureQualityElement::get(state),
+                            material.texture);
+  material.flags |= SO_MAT_HAS_TEXTURE;
 }
 
 void
@@ -518,10 +598,9 @@ fillRenderStateFromState(SoState * state, SoRenderState & rs)
 
   int srcfactor = 0;
   int dstfactor = 0;
-  SbBool unsupportedBlendFactor = FALSE;
   rs.blend.enabled = SoLazyElement::getBlending(mutableState, srcfactor, dstfactor);
-  rs.blend.srcRGBFactor = blendFactorFromLegacyGL(srcfactor, unsupportedBlendFactor);
-  rs.blend.dstRGBFactor = blendFactorFromLegacyGL(dstfactor, unsupportedBlendFactor);
+  rs.blend.srcRGBFactor = blendFactorFromLegacyGL(srcfactor);
+  rs.blend.dstRGBFactor = blendFactorFromLegacyGL(dstfactor);
 
   // A regular glBlendFunc applies the RGB factors to alpha as well. When
   // Coin's separate-alpha state is present, retain its factors verbatim,
@@ -530,23 +609,13 @@ fillRenderStateFromState(SoState * state, SoRenderState & rs)
   int dstAlphaFactor = 0;
   if (SoLazyElement::getAlphaBlending(mutableState,
                                       srcAlphaFactor, dstAlphaFactor)) {
-    rs.blend.srcAlphaFactor = blendFactorFromLegacyGL(srcAlphaFactor, unsupportedBlendFactor);
-    rs.blend.dstAlphaFactor = blendFactorFromLegacyGL(dstAlphaFactor, unsupportedBlendFactor);
+    rs.blend.srcAlphaFactor = blendFactorFromLegacyGL(srcAlphaFactor);
+    rs.blend.dstAlphaFactor = blendFactorFromLegacyGL(dstAlphaFactor);
   } else {
     rs.blend.srcAlphaFactor = rs.blend.srcRGBFactor;
     rs.blend.dstAlphaFactor = rs.blend.dstRGBFactor;
   }
 
-  rs.blend.unsupportedFactor = unsupportedBlendFactor;
-  if (unsupportedBlendFactor) {
-    static std::once_flag warningOnce;
-    std::call_once(warningOnce, []() {
-      SoDebugError::postWarning(
-        "SoRenderIR::fillRenderStateFromState",
-        "Dual-source legacy blend factors are not supported by retained "
-        "rendering; using the corresponding primary source factors.");
-    });
-  }
 
   // LegacyGL does not expose a Coin state element for blend equations. ADD
   // is its effective equation and is the only value that can be captured
@@ -555,9 +624,9 @@ fillRenderStateFromState(SoState * state, SoRenderState & rs)
   rs.blend.alphaEquation = SO_BLEND_EQUATION_ADD;
 
   float alphaTestValue = 0.5f;
-  const int alphaTestFunction = SoLazyElement::getAlphaTest(mutableState,
-                                                              alphaTestValue);
-  rs.alphaTest.function = alphaTestFunctionFromLegacyGL(alphaTestFunction);
+  const int alphaTestFunction = SoLazyElement::getAlphaTestSemantic(
+    mutableState, alphaTestValue);
+  rs.alphaTest.function = static_cast<SoAlphaTestFunction>(alphaTestFunction);
   rs.alphaTest.reference = alphaTestValue;
   rs.alphaTest.policy = rs.alphaTest.function == SO_ALPHA_TEST_NONE
     ? SO_ALPHA_TEST_POLICY_NONE

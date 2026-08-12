@@ -65,7 +65,11 @@ SbBool coin_render_ir_trace_enabled();
 */
 namespace SoRenderIR {
 //! Fill a material snapshot from the current Inventor traversal state.
-void fillMaterialFromState(SoState * state, SoMaterialData & material);
+void fillMaterialFromState(SoState * state, SoMaterialData & material,
+                           int materialIndex = 0);
+//! Copy the current texture image into action-owned frame storage.
+void fillTextureFromState(SoState * state, SoIRRenderAction * action,
+                          SoMaterialData & material);
 //! Fill render-state fields from the current Inventor traversal state.
 void fillRenderStateFromState(SoState * state, SoRenderState & renderState);
 //! Complete blend state after material opacity has been captured.
