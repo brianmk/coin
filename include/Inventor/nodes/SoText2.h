@@ -39,6 +39,8 @@
 #include <Inventor/fields/SoSFFloat.h>
 #include <Inventor/fields/SoSFEnum.h>
 
+class SoIRRenderAction;
+
 class COIN_DLL_API SoText2 : public SoShape {
   typedef SoShape inherited;
 
@@ -61,6 +63,7 @@ public:
 #if COIN_HAVE_LEGACY_GL_RENDERER
   void GLRender(SoGLRenderAction * action) override;
 #endif
+  void IRRender(SoIRRenderAction * action) override;
   void rayPick(SoRayPickAction * action) override;
   void getPrimitiveCount(SoGetPrimitiveCountAction * action) override;
 
