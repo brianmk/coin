@@ -158,6 +158,16 @@ struct SoIRVertex {
   SbVec3f position;
   SbVec3f normal;
   SbVec4f texcoord;
+  int materialIndex = 0;
+};
+
+struct SoIRBatch {
+  size_t first = 0;
+  size_t count = 0;
+  int materialIndex = -1;
+
+  SoIRBatch(size_t first, size_t count, int materialIndex)
+    : first(first), count(count), materialIndex(materialIndex) {}
 };
 
 class SoIRPrimitiveAssembler : public SoIRRenderAction::PrimitiveCollector {
@@ -170,9 +180,9 @@ public:
                   const SoPrimitiveVertex * v3) override
   {
     if (this->ensureTopology(SO_TOPOLOGY_TRIANGLES)) {
-      this->append(v1);
-      this->append(v2);
-      this->append(v3);
+      this->append(v1, v1->getMaterialIndex());
+      this->append(v2, v2->getMaterialIndex());
+      this->append(v3, v3->getMaterialIndex());
     }
   }
 
@@ -180,14 +190,16 @@ public:
               const SoPrimitiveVertex * v2) override
   {
     if (this->ensureTopology(SO_TOPOLOGY_LINES)) {
-      this->append(v1);
-      this->append(v2);
+      this->append(v1, v1->getMaterialIndex());
+      this->append(v2, v2->getMaterialIndex());
     }
   }
 
   void onPoint(const SoPrimitiveVertex * v) override
   {
-    if (this->ensureTopology(SO_TOPOLOGY_POINTS)) this->append(v);
+    if (this->ensureTopology(SO_TOPOLOGY_POINTS)) {
+      this->append(v, v->getMaterialIndex());
+    }
   }
 
   void finalize()
@@ -201,13 +213,6 @@ private:
     if (this->vertices.empty()) return;
 
     SoState * state = this->action->getState();
-    SoRenderCommand command = {};
-    command.geometry.topology = this->topology;
-    command.geometry.vertexCount = static_cast<uint32_t>(this->vertices.size());
-    command.geometry.normalCount = command.geometry.vertexCount;
-    command.geometry.vertexStride = sizeof(float) * 3;
-    command.geometry.texcoordStride = sizeof(float) * 4;
-
     const size_t count = this->vertices.size();
     float * positions = static_cast<float *>(
       this->action->allocateGeometryStorage(sizeof(float) * 3 * count));
@@ -215,6 +220,52 @@ private:
       this->action->allocateGeometryStorage(sizeof(float) * 3 * count));
     float * texcoords = static_cast<float *>(
       this->action->allocateGeometryStorage(sizeof(float) * 4 * count));
+
+    const size_t primitiveWidth = this->topology == SO_TOPOLOGY_TRIANGLES ? 3
+      : this->topology == SO_TOPOLOGY_LINES ? 2 : 1;
+    std::vector<SoIRBatch> batches;
+    batches.reserve((count + primitiveWidth - 1) / primitiveWidth);
+    bool hasMixedMaterials = false;
+
+    const SoMaterialBindingElement::Binding materialBinding =
+      SoMaterialBindingElement::get(state);
+    const bool hasExplicitMaterialIndices =
+      materialBinding == SoMaterialBindingElement::PER_PART ||
+      materialBinding == SoMaterialBindingElement::PER_PART_INDEXED ||
+      materialBinding == SoMaterialBindingElement::PER_FACE ||
+      materialBinding == SoMaterialBindingElement::PER_FACE_INDEXED ||
+      materialBinding == SoMaterialBindingElement::PER_VERTEX_INDEXED;
+    const bool hasPerVertexMaterials =
+      materialBinding == SoMaterialBindingElement::PER_VERTEX ||
+      materialBinding == SoMaterialBindingElement::PER_VERTEX_INDEXED;
+    if (!hasExplicitMaterialIndices) {
+      batches.push_back(SoIRBatch(0, count, 0));
+    }
+    for (size_t first = 0; hasExplicitMaterialIndices && first < count;) {
+      const size_t primitiveCount = std::min(primitiveWidth, count - first);
+      int materialIndex = this->vertices[first].materialIndex;
+      for (size_t i = 1; i < primitiveCount; ++i) {
+        if (this->vertices[first + i].materialIndex != materialIndex) {
+          materialIndex = -1;
+          hasMixedMaterials = true;
+          break;
+        }
+      }
+
+      if (batches.empty() || batches.back().materialIndex != materialIndex) {
+        batches.push_back(SoIRBatch(first, primitiveCount, materialIndex));
+      }
+      else {
+        batches.back().count += primitiveCount;
+      }
+      first += primitiveCount;
+    }
+
+    float * colors = nullptr;
+    if (hasMixedMaterials || hasPerVertexMaterials) {
+      colors = static_cast<float *>(
+        this->action->allocateGeometryStorage(sizeof(float) * 4 * count));
+    }
 
     for (size_t i = 0; i < count; ++i) {
       const SoIRVertex & vertex = this->vertices[i];
@@ -228,26 +279,57 @@ private:
       texcoords[i * 4 + 1] = vertex.texcoord[1];
       texcoords[i * 4 + 2] = vertex.texcoord[2];
       texcoords[i * 4 + 3] = vertex.texcoord[3];
+      if (colors) {
+        const int materialIndex = std::max(vertex.materialIndex, 0);
+        const SbColor & color = SoLazyElement::getDiffuse(state, materialIndex);
+        const float alpha = 1.0f - SoLazyElement::getTransparency(state, materialIndex);
+        colors[i * 4 + 0] = color[0];
+        colors[i * 4 + 1] = color[1];
+        colors[i * 4 + 2] = color[2];
+        colors[i * 4 + 3] = alpha;
+      }
     }
 
-    command.geometry.positions = positions;
-    command.geometry.normals = normals;
-    command.geometry.texcoords = texcoords;
-    command.modelMatrix = SoModelMatrixElement::get(state);
-    command.viewMatrix = SoViewingMatrixElement::get(state);
-    command.projMatrix = SoProjectionMatrixElement::get(state);
-    SoRenderIR::fillMaterialFromState(state, command.material);
-    SoRenderIR::fillRenderStateFromState(state, command.state);
-    SoRenderIR::ensureMaterialBlendState(command.state, command.material);
-    command.pass = SoRenderIR::isMaterialTransparent(command.material)
-      ? SO_RENDERPASS_TRANSPARENT : SO_RENDERPASS_OPAQUE;
-    command.lightingHandle = SoRenderIR::fillLightingFromState(
-      state, this->action->getMutableDrawList());
-    command.sortKey = SoIRComputeSortKey(command,
-                                          static_cast<uint32_t>(command.pass),
-                                          0);
-    command.userData = this->shape;
-    this->action->getMutableDrawList().addCommand(command);
+    for (const SoIRBatch & batch : batches) {
+      SoRenderCommand command = {};
+      command.geometry.topology = this->topology;
+      command.geometry.vertexCount = static_cast<uint32_t>(batch.count);
+      command.geometry.normalCount = command.geometry.vertexCount;
+      command.geometry.vertexStride = sizeof(float) * 3;
+      command.geometry.texcoordStride = sizeof(float) * 4;
+      command.geometry.positions = positions + batch.first * 3;
+      command.geometry.normals = normals + batch.first * 3;
+      command.geometry.texcoords = texcoords + batch.first * 4;
+      command.geometry.colors = colors ? colors + batch.first * 4 : nullptr;
+      command.modelMatrix = SoModelMatrixElement::get(state);
+      command.viewMatrix = SoViewingMatrixElement::get(state);
+      command.projMatrix = SoProjectionMatrixElement::get(state);
+      SoRenderIR::fillMaterialFromState(
+        state, command.material, std::max(batch.materialIndex, 0));
+      command.material.vertexColorAlphaIncludesOpacity =
+        command.geometry.colors != nullptr;
+      SoRenderIR::fillTextureFromState(state, this->action, command.material);
+      SoRenderIR::fillRenderStateFromState(state, command.state);
+      SoRenderIR::ensureMaterialBlendState(command.state, command.material);
+      bool transparent = SoRenderIR::isMaterialTransparent(command.material);
+      if (!transparent && command.geometry.colors) {
+        for (uint32_t i = 0; i < command.geometry.vertexCount; ++i) {
+          if (command.geometry.colors[i * 4 + 3] < 0.999f) {
+            transparent = true;
+            break;
+          }
+        }
+      }
+      command.pass = transparent ? SO_RENDERPASS_TRANSPARENT
+                                 : SO_RENDERPASS_OPAQUE;
+      command.lightingHandle = SoRenderIR::fillLightingFromState(
+        state, this->action->getMutableDrawList());
+      command.sortKey = SoIRComputeSortKey(command,
+                                            static_cast<uint32_t>(command.pass),
+                                            0);
+      command.userData = this->shape;
+      this->action->getMutableDrawList().addCommand(command);
+    }
 
     this->vertices.clear();
   }
@@ -265,12 +347,13 @@ private:
     return true;
   }
 
-  void append(const SoPrimitiveVertex * vertex)
+  void append(const SoPrimitiveVertex * vertex, int materialIndex)
   {
     SoIRVertex copy;
     copy.position = vertex->getPoint();
     copy.normal = vertex->getNormal();
     copy.texcoord = vertex->getTextureCoords();
+    copy.materialIndex = materialIndex;
     this->vertices.push_back(copy);
   }
 
