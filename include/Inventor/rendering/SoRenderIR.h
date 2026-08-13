@@ -83,6 +83,8 @@ struct SoGeometryDesc {
 
 // --- Material flags (SoMaterialData::flags) ---
 static constexpr uint32_t SO_MAT_HAS_TEXTURE = 0x1;  //!< Command carries embedded texture data
+static constexpr uint32_t SO_MAT_IS_PIXEL_TEXT = 0x2;
+static constexpr uint32_t SO_MAT_IS_PIXEL_IMAGE = 0x4;
 
 // --- Feature flags (SoMaterialData::featureFlags) ---
 static constexpr uint32_t SO_FEAT_BASE_COLOR = 0x1;   //!< Flat/unlit rendering (BASE_COLOR light model)
@@ -222,6 +224,11 @@ struct SoTextureData {
   SbVec4f blendColor = SbVec4f(0.0f, 0.0f, 0.0f, 1.0f);
 };
 
+struct SoPixelTextData {
+  int originX = 0;
+  int originY = 0;
+};
+
 /*!
   \struct SoMaterialData
   \brief Snapshot of the logical Inventor material state for one draw call.
@@ -322,6 +329,8 @@ struct SoRasterState {
   int     viewportHeight = 0;
   float   lineWidth = 1.0f;
   float   pointSize = 1.0f;
+  uint16_t linePattern = 0xFFFF;
+  int16_t  linePatternScale = 1;
   float   polygonOffsetFactor = 0.0f;
   float   polygonOffsetUnits = 0.0f;
 };
@@ -411,6 +420,7 @@ struct SoRenderCommand {
 
   SoRenderPassType pass = SO_RENDERPASS_OPAQUE;
   SoLightingHandle lightingHandle = 0;
+  SoPixelTextData pixelText;
   SoPipelineKey    pipelineKey = 0;
   uint64_t         sortKey = 0; //!< Backend-computed key used by sorting.
   void *           userData = nullptr; //!< Opaque, non-owned producer data.

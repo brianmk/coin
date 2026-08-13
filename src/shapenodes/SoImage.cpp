@@ -607,7 +607,7 @@ SoImage::IRRender(SoIRRenderAction * action)
   command.viewMatrix = SoViewingMatrixElement::get(state);
   command.projMatrix = SoProjectionMatrixElement::get(state);
   SoRenderIR::fillMaterialFromState(state, command.material);
-  command.material.flags |= SO_MAT_HAS_TEXTURE | SO_MAT_IS_PIXEL_TEXT;
+  command.material.flags |= SO_MAT_HAS_TEXTURE | SO_MAT_IS_PIXEL_IMAGE;
   command.material.texture.pixels = pixels;
   command.material.texture.width = size[0];
   command.material.texture.height = size[1];
@@ -621,7 +621,6 @@ SoImage::IRRender(SoIRRenderAction * action)
   command.pass = (this->transparency ||
                   SoRenderIR::isMaterialTransparent(command.material))
     ? SO_RENDERPASS_TRANSPARENT : SO_RENDERPASS_OPAQUE;
-  action->applyRenderStage(command);
   command.lightingHandle = SoRenderIR::fillLightingFromState(
     state, action->getMutableDrawList());
   action->getMutableDrawList().addCommand(command);

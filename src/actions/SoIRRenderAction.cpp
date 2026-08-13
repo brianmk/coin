@@ -9,6 +9,7 @@
 #include <Inventor/elements/SoDepthBufferElement.h>
 #include <Inventor/elements/SoDrawStyleElement.h>
 #include <Inventor/elements/SoLineWidthElement.h>
+#include <Inventor/elements/SoLinePatternElement.h>
 #include <Inventor/elements/SoLazyElement.h>
 #include <Inventor/elements/SoEnvironmentElement.h>
 #include <Inventor/elements/SoLightAttenuationElement.h>
@@ -94,6 +95,7 @@ SoIRRenderAction::initClass(void)
   SO_ENABLE(SoIRRenderAction, SoDepthBufferElement);
   SO_ENABLE(SoIRRenderAction, SoDrawStyleElement);
   SO_ENABLE(SoIRRenderAction, SoLineWidthElement);
+  SO_ENABLE(SoIRRenderAction, SoLinePatternElement);
   SO_ENABLE(SoIRRenderAction, SoPolygonOffsetElement);
   SO_ENABLE(SoIRRenderAction, SoShapeStyleElement);
   SO_ENABLE(SoIRRenderAction, SoLightModelElement);

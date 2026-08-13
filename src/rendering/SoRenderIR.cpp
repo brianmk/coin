@@ -10,6 +10,7 @@
 #include <Inventor/elements/SoLightAttenuationElement.h>
 #include <Inventor/elements/SoLightElement.h>
 #include <Inventor/elements/SoLightModelElement.h>
+#include <Inventor/elements/SoLinePatternElement.h>
 #include <Inventor/elements/SoLineWidthElement.h>
 #include <Inventor/elements/SoMultiTextureEnabledElement.h>
 #include <Inventor/elements/SoMultiTextureImageElement.h>
@@ -662,6 +663,10 @@ fillRenderStateFromState(SoState * state, SoRenderState & rs)
   rs.raster.scissorEnabled = FALSE;
   rs.raster.lineWidth = SoLineWidthElement::get(mutableState);
   rs.raster.pointSize = SoPointSizeElement::get(mutableState);
+  rs.raster.linePattern = static_cast<uint16_t>(
+    SoLinePatternElement::get(mutableState));
+  rs.raster.linePatternScale = static_cast<int16_t>(std::max(
+    1, SoLinePatternElement::getScaleFactor(mutableState)));
 
   const SbViewportRegion & viewport = SoViewportRegionElement::get(mutableState);
   const SbVec2s & viewportOrigin = viewport.getViewportOriginPixels();
