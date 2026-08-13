@@ -634,6 +634,14 @@ SoShape::~SoShape()
   delete PRIVATE(this);
 }
 
+#if COIN_BUILD_LEGACY_GL_RENDERER
+SbBool
+SoShape::canRenderSortedTriangles(void) const
+{
+  return TRUE;
+}
+#endif
+
 /*!
   \copybrief SoBase::initClass(void)
 */
@@ -894,7 +902,8 @@ SoShape::shouldGLRender(SoGLRenderAction * action)
   }
 
   // test if we should sort triangles before rendering
-  if (transparent && (shapestyleflags & SoShapeStyleElement::TRANSP_SORTED_TRIANGLES)) {
+  if (transparent && this->canRenderSortedTriangles() &&
+      (shapestyleflags & SoShapeStyleElement::TRANSP_SORTED_TRIANGLES)) {
     // lock since pvcache is shared among all threads
     PRIVATE(this)->lock();
     this->validatePVCache(action);

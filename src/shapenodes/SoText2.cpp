@@ -333,6 +333,14 @@ SoText2::initClass(void)
 
 // doc in super
 #if COIN_BUILD_LEGACY_GL_RENDERER
+SbBool
+SoText2::canRenderSortedTriangles(void) const
+{
+  // SoText2 is rasterized directly and intentionally has no generated
+  // primitives for the primitive-cache transparency path.
+  return FALSE;
+}
+
 void
 SoText2::GLRender(SoGLRenderAction * action)
 {

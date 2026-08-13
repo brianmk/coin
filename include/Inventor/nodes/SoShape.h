@@ -91,6 +91,7 @@ protected:
   virtual void generatePrimitives(SoAction * action) =  0;
 #if COIN_HAVE_LEGACY_GL_RENDERER
   virtual SbBool shouldGLRender(SoGLRenderAction * action);
+  virtual SbBool canRenderSortedTriangles(void) const;
   void beginSolidShape(SoGLRenderAction * action);
   void endSolidShape(SoGLRenderAction * action);
   void GLRenderBoundingBox(SoGLRenderAction * action);

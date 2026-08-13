@@ -67,6 +67,9 @@ public:
 protected:
   virtual ~SoText2();
 
+#if COIN_HAVE_LEGACY_GL_RENDERER
+  SbBool canRenderSortedTriangles(void) const override;
+#endif
   void generatePrimitives(SoAction * action) override;
   void computeBBox(SoAction * action, SbBox3f & box, SbVec3f & center) override;
 
