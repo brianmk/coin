@@ -591,8 +591,9 @@ SoImage::IRRender(SoIRRenderAction * action)
   const size_t byteCount = static_cast<size_t>(size[0]) *
                            static_cast<size_t>(size[1]) *
                            static_cast<size_t>(numComponents);
-  const unsigned char * pixels = action->retainTextureData(dataptr, byteCount);
-  if (!pixels) return;
+  unsigned char * pixels = static_cast<unsigned char *>(
+    action->allocateGeometryStorage(byteCount, alignof(unsigned char)));
+  std::memcpy(pixels, dataptr, byteCount);
 
   SoRenderCommand command = {};
   command.geometry.topology = SO_TOPOLOGY_TRIANGLES;
