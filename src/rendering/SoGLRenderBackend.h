@@ -19,6 +19,7 @@ struct CachedGPUCommand {
   GLuint normVBO = 0;
   GLuint colorVBO = 0;
   GLuint texcoordVBO = 0;
+  GLuint lineDistVBO = 0;
   GLuint textureId = 0;
   GLuint idxVBO = 0;
   GLuint vao = 0;
@@ -26,6 +27,7 @@ struct CachedGPUCommand {
   const float * posKey = nullptr;
   const float * normKey = nullptr;
   const float * colorKey = nullptr;
+  const float * lineDistKey = nullptr;
   const float * texcoordKey = nullptr;
   const unsigned char * texturePixelsKey = nullptr;
   const uint32_t * idxKey = nullptr;
@@ -76,6 +78,24 @@ private:
                    const SoRenderParams & params);
   void uploadLighting(const SoDrawList & drawlist,
                       const SoRenderCommand & command);
+  void bindPointShader(const SoRenderCommand & command,
+                       const SbMat & viewMat,
+                       const SbMat & projMat,
+                       const SbVec4f & color,
+                       bool useVertexColor,
+                       float pointSize,
+                       const SbVec2s & viewportSize);
+  void bindLineShader(const SoRenderCommand & command,
+                      const SbMat & viewMat,
+                      const SbMat & projMat,
+                      const SbVec4f & color,
+                      bool useVertexColor,
+                      float lineWidth,
+                      const SbVec2s & viewportSize);
+  void bindPixelShader(const SoRenderCommand & command,
+                       const SbMat & viewMat,
+                       const SbMat & projMat,
+                       const SbVec2s & viewportSize);
 
   CachedGPUCommand & getOrCreateCache(const SoRenderCommand * command);
   void uploadGeometry(CachedGPUCommand & entry,
@@ -85,6 +105,39 @@ private:
 
   const cc_glglue * glue = nullptr;
   GLuint shaderProgram = 0;
+  GLuint lineShaderProgram = 0;
+  GLuint pointShaderProgram = 0;
+  GLuint pixelShaderProgram = 0;
+  GLint lineUViewLocation = -1;
+  GLint lineUProjLocation = -1;
+  GLint lineUModelLocation = -1;
+  GLint lineUColorLocation = -1;
+  GLint lineUUseVertexColorLocation = -1;
+  GLint lineULineWidthLocation = -1;
+  GLint lineUVpSizeLocation = -1;
+  GLint lineUStipplePeriodLocation = -1;
+  GLint pointUViewLocation = -1;
+  GLint pointUProjLocation = -1;
+  GLint pointUModelLocation = -1;
+  GLint pointUColorLocation = -1;
+  GLint pointUUseVertexColorLocation = -1;
+  GLint pointUPointSizeLocation = -1;
+  GLint pointURoundPointsLocation = -1;
+  GLint pointUVpSizeLocation = -1;
+  GLint pixelUViewLocation = -1;
+  GLint pixelUProjLocation = -1;
+  GLint pixelUModelLocation = -1;
+  GLint pixelUQuadCenterLocation = -1;
+  GLint pixelUTexSizeLocation = -1;
+  GLint pixelUVpSizeLocation = -1;
+  GLint pixelUPixelOriginLocation = -1;
+  GLint pixelUTextureLocation = -1;
+  GLint pixelUTexModColorLocation = -1;
+  GLint pixelUColorLocation = -1;
+  GLint pixelUVertexColorAlphaIncludesOpacityLocation = -1;
+  GLint pixelUTextureAlphaIncludesOpacityLocation = -1;
+  GLint pixelUAlphaTestFunctionLocation = -1;
+  GLint pixelUAlphaTestReferenceLocation = -1;
   GLint uViewLocation = -1;
   GLint uProjLocation = -1;
   GLint uModelLocation = -1;
@@ -116,6 +169,7 @@ private:
   GLint normLoc = -1;
   GLint colorLoc = -1;
   GLint texcoordLoc = -1;
+  GLint lineDistLoc = 4;
 
   std::vector<CachedGPUCommand> gpuCache;
   std::unordered_map<const SoRenderCommand *, size_t> commandToCache;

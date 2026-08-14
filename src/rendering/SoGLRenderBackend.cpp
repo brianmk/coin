@@ -11,12 +11,21 @@
 #include <cstddef>
 #include <cstdint>
 #include <algorithm>
+#include <cmath>
 #include <mutex>
 #include <string>
 #include <vector>
 
 #include <data/shaders/gl/visual/Fragment.h>
 #include <data/shaders/gl/visual/Vertex.h>
+#include <data/shaders/gl/wide-line/Fragment.h>
+#include <data/shaders/gl/wide-line/Geometry.h>
+#include <data/shaders/gl/wide-line/Vertex.h>
+#include <data/shaders/gl/point/Fragment.h>
+#include <data/shaders/gl/point/Geometry.h>
+#include <data/shaders/gl/point/Vertex.h>
+#include <data/shaders/gl/pixel/Fragment.h>
+#include <data/shaders/gl/pixel/Vertex.h>
 
 namespace {
 
@@ -191,6 +200,45 @@ compileShader(const cc_glglue * glue, const GLenum type, const char * source)
   return shader;
 }
 
+GLuint
+linkProgram(const cc_glglue * glue, const char * vertexSource,
+            const char * fragmentSource, const char * geometrySource = nullptr)
+{
+  const GLuint vertex = compileShader(glue, GL_VERTEX_SHADER, vertexSource);
+  const GLuint fragment = compileShader(glue, GL_FRAGMENT_SHADER, fragmentSource);
+  const GLuint geometry = geometrySource
+    ? compileShader(glue, GL_GEOMETRY_SHADER, geometrySource) : 0;
+  if (!vertex || !fragment || (geometrySource && !geometry)) {
+    if (vertex) cc_glglue_glDeleteShader(glue, vertex);
+    if (fragment) cc_glglue_glDeleteShader(glue, fragment);
+    if (geometry) cc_glglue_glDeleteShader(glue, geometry);
+    return 0;
+  }
+
+  const GLuint program = cc_glglue_glCreateProgram(glue);
+  cc_glglue_glAttachShader(glue, program, vertex);
+  cc_glglue_glAttachShader(glue, program, fragment);
+  if (geometry) cc_glglue_glAttachShader(glue, program, geometry);
+  cc_glglue_glLinkProgram(glue, program);
+  GLint linked = GL_FALSE;
+  cc_glglue_glGetGLSLProgramiv(glue, program, GL_LINK_STATUS, &linked);
+  if (linked == GL_FALSE) {
+    GLint length = 0;
+    cc_glglue_glGetGLSLProgramiv(glue, program, GL_INFO_LOG_LENGTH, &length);
+    if (length > 0) {
+      std::string log(static_cast<size_t>(length), '\0');
+      cc_glglue_glGetProgramInfoLog(glue, program, length, &length, &log[0]);
+      SoDebugError::postInfo("SoGLRenderBackend::linkProgram", "%s",
+                             log.c_str());
+    }
+    cc_glglue_glDeleteProgram(glue, program);
+  }
+  cc_glglue_glDeleteShader(glue, vertex);
+  cc_glglue_glDeleteShader(glue, fragment);
+  if (geometry) cc_glglue_glDeleteShader(glue, geometry);
+  return linked == GL_FALSE ? 0 : program;
+}
+
 bool
 textureDescriptionMatches(const CachedGPUCommand & entry,
                            const SoRenderCommand & command)
@@ -241,7 +289,9 @@ SoGLRenderBackend::initialize(const SoRenderBackendInitParams & params)
       !this->glue->glVertexAttrib4f ||
       !this->glue->glVertexAttrib3f ||
       !this->glue->glVertexAttrib2f ||
+      !this->glue->glVertexAttrib1f ||
       !this->glue->glUniform1f || !this->glue->glUniform1i ||
+      !this->glue->glUniform2f ||
       !this->glue->glUniform3f || !this->glue->glUniform1iv ||
       !this->glue->glUniform2fv || !this->glue->glUniform3fv ||
       !this->glue->glUniform4f || !this->glue->glUniformMatrix4fv ||
@@ -278,6 +328,9 @@ SoGLRenderBackend::destroyCacheEntry(CachedGPUCommand & entry)
   if (entry.texcoordVBO) {
     cc_glglue_glDeleteBuffers(this->glue, 1, &entry.texcoordVBO);
   }
+  if (entry.lineDistVBO) {
+    cc_glglue_glDeleteBuffers(this->glue, 1, &entry.lineDistVBO);
+  }
   if (entry.textureId) {
     cc_glglue_glDeleteTextures(this->glue, 1, &entry.textureId);
   }
@@ -309,6 +362,18 @@ SoGLRenderBackend::shutdown()
   if (this->shaderProgram) {
     cc_glglue_glDeleteProgram(this->glue, this->shaderProgram);
     this->shaderProgram = 0;
+  }
+  if (this->lineShaderProgram) {
+    cc_glglue_glDeleteProgram(this->glue, this->lineShaderProgram);
+    this->lineShaderProgram = 0;
+  }
+  if (this->pointShaderProgram) {
+    cc_glglue_glDeleteProgram(this->glue, this->pointShaderProgram);
+    this->pointShaderProgram = 0;
+  }
+  if (this->pixelShaderProgram) {
+    cc_glglue_glDeleteProgram(this->glue, this->pixelShaderProgram);
+    this->pixelShaderProgram = 0;
   }
   this->glue = nullptr;
   this->setInitialized(FALSE);
@@ -450,6 +515,55 @@ SoGLRenderBackend::uploadGeometry(CachedGPUCommand & entry,
     }
   }
 
+  const bool lineGeometry = geometry.topology == SO_TOPOLOGY_LINES ||
+    geometry.topology == SO_TOPOLOGY_LINE_STRIP;
+  if (lineGeometry && geometry.vertexCount) {
+    if (!entry.lineDistVBO) {
+      cc_glglue_glGenBuffers(this->glue, 1, &entry.lineDistVBO);
+    }
+    std::vector<float> distances(geometry.vertexCount, 0.0f);
+    const uint32_t strideFloats = static_cast<uint32_t>(vertexStride) /
+      sizeof(float);
+    const uint32_t count = geometry.indexCount && geometry.indices
+      ? geometry.indexCount : geometry.vertexCount;
+    if (geometry.topology == SO_TOPOLOGY_LINE_STRIP) {
+      for (uint32_t i = 1; i < count; ++i) {
+        const uint32_t previous = geometry.indices ? geometry.indices[i - 1] : i - 1;
+        const uint32_t current = geometry.indices ? geometry.indices[i] : i;
+        const float * p0 = geometry.positions + previous * strideFloats;
+        const float * p1 = geometry.positions + current * strideFloats;
+        const float dx = p1[0] - p0[0];
+        const float dy = p1[1] - p0[1];
+        const float dz = p1[2] - p0[2];
+        distances[current] = distances[previous] +
+          std::sqrt(dx * dx + dy * dy + dz * dz);
+      }
+    }
+    else {
+      for (uint32_t i = 0; i + 1 < count; i += 2) {
+        const uint32_t first = geometry.indices ? geometry.indices[i] : i;
+        const uint32_t second = geometry.indices ? geometry.indices[i + 1] : i + 1;
+        const float * p0 = geometry.positions + first * strideFloats;
+        const float * p1 = geometry.positions + second * strideFloats;
+        const float dx = p1[0] - p0[0];
+        const float dy = p1[1] - p0[1];
+        const float dz = p1[2] - p0[2];
+        distances[first] = 0.0f;
+        distances[second] = std::sqrt(dx * dx + dy * dy + dz * dz);
+      }
+    }
+    cc_glglue_glBindBuffer(this->glue, GL_ARRAY_BUFFER, entry.lineDistVBO);
+    cc_glglue_glBufferData(this->glue, GL_ARRAY_BUFFER,
+                           distances.size() * sizeof(float), distances.data(),
+                           GL_STATIC_DRAW);
+    entry.lineDistKey = geometry.positions;
+  }
+  else if (entry.lineDistVBO) {
+    cc_glglue_glDeleteBuffers(this->glue, 1, &entry.lineDistVBO);
+    entry.lineDistVBO = 0;
+    entry.lineDistKey = nullptr;
+  }
+
   if (geometry.indexCount && geometry.indices) {
     if (!entry.idxVBO) cc_glglue_glGenBuffers(this->glue, 1, &entry.idxVBO);
     cc_glglue_glBindBuffer(this->glue, GL_ELEMENT_ARRAY_BUFFER, entry.idxVBO);
@@ -539,6 +653,18 @@ SoGLRenderBackend::setupVisualVAO(CachedGPUCommand & entry)
       cc_glglue_glVertexAttrib2f(this->glue, this->texcoordLoc, 0.0f, 0.0f);
     }
   }
+  if (this->lineDistLoc >= 0) {
+    if (entry.lineDistVBO) {
+      cc_glglue_glBindBuffer(this->glue, GL_ARRAY_BUFFER, entry.lineDistVBO);
+      cc_glglue_glEnableVertexAttribArray(this->glue, this->lineDistLoc);
+      cc_glglue_glVertexAttribPointer(this->glue, this->lineDistLoc, 1,
+                                      GL_FLOAT, GL_FALSE, 0, nullptr);
+    }
+    else {
+      cc_glglue_glDisableVertexAttribArray(this->glue, this->lineDistLoc);
+      this->glue->glVertexAttrib1f(this->lineDistLoc, 0.0f);
+    }
+  }
   if (entry.idxVBO) {
     cc_glglue_glBindBuffer(this->glue, GL_ELEMENT_ARRAY_BUFFER, entry.idxVBO);
   }
@@ -569,6 +695,8 @@ SoGLRenderBackend::updateGeometryCache(const SoDrawList & drawlist)
     CachedGPUCommand & entry = this->getOrCreateCache(&command);
     const uint32_t vertexStride = geometry.vertexStride
       ? geometry.vertexStride : sizeof(float) * 3;
+    const bool lineGeometry = geometry.topology == SO_TOPOLOGY_LINES ||
+      geometry.topology == SO_TOPOLOGY_LINE_STRIP;
     const bool geometryMatches = entry.posVBO != 0 &&
       entry.cacheGeneration == generation &&
       entry.posKey == geometry.positions &&
@@ -581,6 +709,7 @@ SoGLRenderBackend::updateGeometryCache(const SoDrawList & drawlist)
       entry.indexCount == geometry.indexCount &&
       entry.vertexStride == vertexStride &&
       entry.texcoordStride == geometry.texcoordStride &&
+      entry.lineDistKey == (lineGeometry ? geometry.positions : nullptr) &&
       textureDescriptionMatches(entry, command) &&
       ((entry.texturePixelsKey != nullptr) ==
        (command.material.texture.pixels != nullptr));
@@ -605,7 +734,8 @@ SoGLRenderBackend::uploadLighting(const SoDrawList & drawlist,
       std::call_once(invalidHandleWarning, []() {
         SoDebugError::postWarning(
           "SoGLRenderBackend::uploadLighting",
-          "Ignoring an invalid retained lighting handle; no headlight is synthesized.");
+          "Draw command references missing lighting data; no headlight is "
+          "synthesized.");
       });
     }
   }
@@ -627,8 +757,8 @@ SoGLRenderBackend::uploadLighting(const SoDrawList & drawlist,
     std::call_once(lightLimitWarning, []() {
       SoDebugError::postWarning(
         "SoGLRenderBackend::uploadLighting",
-        "The retained GL Visual program supports eight lights; additional "
-        "retained lights are not uploaded.");
+        "The Visual program supports eight lights; additional retained "
+        "lights are ignored by this executor.");
     });
   }
   for (int i = 0; i < count; ++i) {
@@ -664,6 +794,124 @@ SoGLRenderBackend::uploadLighting(const SoDrawList & drawlist,
 }
 
 void
+SoGLRenderBackend::bindPointShader(const SoRenderCommand & command,
+                                   const SbMat & viewMat,
+                                   const SbMat & projMat,
+                                   const SbVec4f & color,
+                                   const bool useVertexColor,
+                                   const float pointSize,
+                                   const SbVec2s & viewportSize)
+{
+  cc_glglue_glUseProgram(this->glue, this->pointShaderProgram);
+  SbMat model;
+  command.modelMatrix.getValue(model);
+  this->glue->glUniformMatrix4fv(this->pointUViewLocation, 1, GL_FALSE,
+                                 &viewMat[0][0]);
+  this->glue->glUniformMatrix4fv(this->pointUProjLocation, 1, GL_FALSE,
+                                 &projMat[0][0]);
+  this->glue->glUniformMatrix4fv(this->pointUModelLocation, 1, GL_FALSE,
+                                 &model[0][0]);
+  this->glue->glUniform4f(this->pointUColorLocation,
+                          color[0], color[1], color[2], color[3]);
+  this->glue->glUniform1f(this->pointUUseVertexColorLocation,
+                          useVertexColor ? 1.0f : 0.0f);
+  this->glue->glUniform1f(this->pointUPointSizeLocation, pointSize);
+  this->glue->glUniform1f(
+    this->pointURoundPointsLocation,
+    command.state.raster.pointShape == SO_POINT_SHAPE_ROUND ? 1.0f : 0.0f);
+  this->glue->glUniform2f(this->pointUVpSizeLocation,
+                          static_cast<float>(viewportSize[0]),
+                          static_cast<float>(viewportSize[1]));
+}
+
+void
+SoGLRenderBackend::bindLineShader(const SoRenderCommand & command,
+                                  const SbMat & viewMat,
+                                  const SbMat & projMat,
+                                  const SbVec4f & color,
+                                  const bool useVertexColor,
+                                  const float lineWidth,
+                                  const SbVec2s & viewportSize)
+{
+  cc_glglue_glUseProgram(this->glue, this->lineShaderProgram);
+  SbMat model;
+  command.modelMatrix.getValue(model);
+  this->glue->glUniformMatrix4fv(this->lineUViewLocation, 1, GL_FALSE,
+                                 &viewMat[0][0]);
+  this->glue->glUniformMatrix4fv(this->lineUProjLocation, 1, GL_FALSE,
+                                 &projMat[0][0]);
+  this->glue->glUniformMatrix4fv(this->lineUModelLocation, 1, GL_FALSE,
+                                 &model[0][0]);
+  this->glue->glUniform4f(this->lineUColorLocation,
+                          color[0], color[1], color[2], color[3]);
+  this->glue->glUniform1f(this->lineUUseVertexColorLocation,
+                          useVertexColor ? 1.0f : 0.0f);
+  this->glue->glUniform1f(this->lineULineWidthLocation, lineWidth);
+  this->glue->glUniform2f(this->lineUVpSizeLocation,
+                          static_cast<float>(viewportSize[0]),
+                          static_cast<float>(viewportSize[1]));
+  this->glue->glUniform1f(this->lineUStipplePeriodLocation, 0.0f);
+}
+
+void
+SoGLRenderBackend::bindPixelShader(const SoRenderCommand & command,
+                                   const SbMat & viewMat,
+                                   const SbMat & projMat,
+                                   const SbVec2s & viewportSize)
+{
+  cc_glglue_glUseProgram(this->glue, this->pixelShaderProgram);
+  SbMat model;
+  command.modelMatrix.getValue(model);
+  this->glue->glUniformMatrix4fv(this->pixelUViewLocation, 1, GL_FALSE,
+                                 &viewMat[0][0]);
+  this->glue->glUniformMatrix4fv(this->pixelUProjLocation, 1, GL_FALSE,
+                                 &projMat[0][0]);
+  this->glue->glUniformMatrix4fv(this->pixelUModelLocation, 1, GL_FALSE,
+                                 &model[0][0]);
+
+  const GLsizei stride = static_cast<GLsizei>(
+    command.geometry.vertexStride ? command.geometry.vertexStride : sizeof(float) * 3);
+  const char * raw = reinterpret_cast<const char *>(command.geometry.positions);
+  SbVec3f center(0.0f, 0.0f, 0.0f);
+  for (uint32_t i = 0; i < command.geometry.vertexCount; ++i) {
+    const float * position = reinterpret_cast<const float *>(raw + i * stride);
+    center += SbVec3f(position[0], position[1], position[2]);
+  }
+  if (command.geometry.vertexCount) {
+    center /= static_cast<float>(command.geometry.vertexCount);
+  }
+  this->glue->glUniform3f(this->pixelUQuadCenterLocation,
+                          center[0], center[1], center[2]);
+  this->glue->glUniform2f(this->pixelUTexSizeLocation,
+                          static_cast<float>(command.material.texture.width),
+                          static_cast<float>(command.material.texture.height));
+  this->glue->glUniform2f(this->pixelUVpSizeLocation,
+                          static_cast<float>(viewportSize[0]),
+                          static_cast<float>(viewportSize[1]));
+  this->glue->glUniform2f(this->pixelUPixelOriginLocation,
+                          static_cast<float>(command.pixelText.originX),
+                          static_cast<float>(command.pixelText.originY));
+  this->glue->glUniform1i(this->pixelUTextureLocation, 0);
+  this->glue->glUniform4f(this->pixelUTexModColorLocation, 1.0f, 1.0f,
+                          1.0f, 1.0f);
+  const SbVec4f & color = command.material.diffuse;
+  this->glue->glUniform4f(this->pixelUColorLocation,
+                          color[0], color[1], color[2], color[3]);
+  this->glue->glUniform1f(
+    this->pixelUVertexColorAlphaIncludesOpacityLocation,
+    command.material.vertexColorAlphaIncludesOpacity ? 1.0f : 0.0f);
+  this->glue->glUniform1f(
+    this->pixelUTextureAlphaIncludesOpacityLocation,
+    command.material.textureAlphaIncludesOpacity ? 1.0f : 0.0f);
+  this->glue->glUniform1i(
+    this->pixelUAlphaTestFunctionLocation,
+    command.state.alphaTest.policy == SO_ALPHA_TEST_POLICY_NONE
+      ? 0 : static_cast<GLint>(command.state.alphaTest.function));
+  this->glue->glUniform1f(this->pixelUAlphaTestReferenceLocation,
+                          command.state.alphaTest.reference);
+}
+
+void
 SoGLRenderBackend::drawCommand(const SoDrawList & drawlist,
                                const SoRenderCommand & command,
                                const SbMat & viewMat,
@@ -675,6 +923,23 @@ SoGLRenderBackend::drawCommand(const SoDrawList & drawlist,
   if (found == this->commandToCache.end()) return;
   const CachedGPUCommand & entry = this->gpuCache[found->second];
   if (!entry.vao) return;
+
+  const GLenum primitive = topologyToGL(command.geometry.topology);
+  const bool textured = entry.textureId != 0 && entry.texcoordVBO != 0;
+  const bool pixelRaster = textured &&
+    (command.material.flags & (SO_MAT_IS_PIXEL_TEXT | SO_MAT_IS_PIXEL_IMAGE));
+  const float dpr = params.devicePixelRatio > 0.0f
+    ? params.devicePixelRatio : 1.0f;
+  const float pointSize = std::max(1.0f, command.state.raster.pointSize) * dpr;
+  const float lineWidth = std::max(1.0f, command.state.raster.lineWidth) * dpr;
+  const bool patternedLine = command.state.raster.linePattern != 0xFFFF &&
+    command.state.raster.linePattern != 0;
+  const bool usePointShader = !pixelRaster && primitive == GL_POINTS &&
+    this->pointShaderProgram != 0 &&
+    (pointSize > 1.0f || command.state.raster.pointShape == SO_POINT_SHAPE_ROUND);
+  const bool useLineShader = !pixelRaster &&
+    (primitive == GL_LINES || primitive == GL_LINE_STRIP) &&
+    this->lineShaderProgram != 0 && (lineWidth > 1.0f || patternedLine);
 
   applyViewport(params);
   this->glue->glUniformMatrix4fv(this->uViewLocation, 1, GL_FALSE,
@@ -733,6 +998,30 @@ SoGLRenderBackend::drawCommand(const SoDrawList & drawlist,
                 ? GL_TRUE : GL_FALSE);
   glDepthRange(command.state.depth.range[0], command.state.depth.range[1]);
 
+  if (command.state.raster.cullMode) {
+    glEnable(GL_CULL_FACE);
+    glCullFace(GL_BACK);
+  }
+  else {
+    glDisable(GL_CULL_FACE);
+  }
+  const uint8_t fillMode = command.state.raster.fillMode;
+  if (fillMode == 1 &&
+      (primitive == GL_TRIANGLES || primitive == GL_TRIANGLE_STRIP)) {
+    glPolygonMode(GL_FRONT_AND_BACK, GL_LINE);
+  }
+  else if (fillMode == 2 &&
+           (primitive == GL_TRIANGLES || primitive == GL_TRIANGLE_STRIP)) {
+    glPolygonMode(GL_FRONT_AND_BACK, GL_POINT);
+  }
+  if (!usePointShader && (primitive == GL_POINTS || fillMode == 2)) {
+    glPointSize(pointSize);
+  }
+  if (!useLineShader &&
+      (primitive == GL_LINES || primitive == GL_LINE_STRIP || fillMode == 1)) {
+    glLineWidth(lineWidth);
+  }
+
   const bool blending = command.state.blend.enabled ||
     command.pass == SO_RENDERPASS_TRANSPARENT || color[3] < 0.999f;
   if (blending) {
@@ -763,6 +1052,13 @@ SoGLRenderBackend::drawCommand(const SoDrawList & drawlist,
   else {
     glDisable(GL_BLEND);
   }
+  const bool polygonOffset = command.state.raster.polygonOffsetFactor != 0.0f ||
+    command.state.raster.polygonOffsetUnits != 0.0f;
+  if (polygonOffset) {
+    glEnable(GL_POLYGON_OFFSET_FILL);
+    glPolygonOffset(command.state.raster.polygonOffsetFactor,
+                    command.state.raster.polygonOffsetUnits);
+  }
   this->glue->glUniform1i(
     this->uAlphaTestFunctionLocation,
     command.state.alphaTest.policy == SO_ALPHA_TEST_POLICY_NONE
@@ -770,7 +1066,6 @@ SoGLRenderBackend::drawCommand(const SoDrawList & drawlist,
   this->glue->glUniform1f(this->uAlphaTestReferenceLocation,
                           command.state.alphaTest.reference);
 
-  const bool textured = entry.textureId != 0 && entry.texcoordVBO != 0;
   this->glue->glUniform1f(this->uTextureEnabledLocation,
                           textured ? 1.0f : 0.0f);
   if (textured) {
@@ -778,14 +1073,54 @@ SoGLRenderBackend::drawCommand(const SoDrawList & drawlist,
     cc_glglue_glBindTexture(this->glue, GL_TEXTURE_2D, entry.textureId);
     this->glue->glUniform1i(this->uTextureLocation, 0);
   }
-  this->glue->glUniform1i(this->uTextureModelLocation,
-                          static_cast<GLint>(command.material.texture.model));
+  this->glue->glUniform1i(
+    this->uTextureModelLocation,
+    static_cast<GLint>(command.material.texture.model));
   const SbVec4f & textureBlend = command.material.texture.blendColor;
   this->glue->glUniform4f(this->uTextureBlendColorLocation,
                           textureBlend[0], textureBlend[1],
                           textureBlend[2], textureBlend[3]);
 
-  const GLenum primitive = topologyToGL(command.geometry.topology);
+  if (pixelRaster) {
+    this->bindPixelShader(command, viewMat, projMat,
+                          params.viewport.getViewportSizePixels());
+  }
+  else if (usePointShader) {
+    this->bindPointShader(command, viewMat, projMat, color,
+                          entry.colorVBO != 0, pointSize,
+                          params.viewport.getViewportSizePixels());
+  }
+  else if (useLineShader) {
+    this->bindLineShader(command, viewMat, projMat, color,
+                         entry.colorVBO != 0, lineWidth,
+                         params.viewport.getViewportSizePixels());
+    if (patternedLine) {
+      int repeatLength = 16;
+      for (int length = 1; length <= 8; ++length) {
+        if (16 % length != 0) continue;
+        const uint16_t mask = static_cast<uint16_t>((1u << length) - 1u);
+        const uint16_t first = command.state.raster.linePattern & mask;
+        bool repeats = true;
+        for (int offset = length; offset < 16; offset += length) {
+          if (((command.state.raster.linePattern >> offset) & mask) != first) {
+            repeats = false;
+            break;
+          }
+        }
+        if (repeats) {
+          repeatLength = length;
+          break;
+        }
+      }
+      const float pixelsPerUnit = std::max(1.0f,
+        static_cast<float>(params.viewport.getViewportSizePixels()[0]) * 0.5f);
+      const float period = static_cast<float>(std::max(
+        1, static_cast<int>(command.state.raster.linePatternScale))) *
+        static_cast<float>(repeatLength) / pixelsPerUnit;
+      this->glue->glUniform1f(this->lineUStipplePeriodLocation, period);
+    }
+  }
+
   this->glue->glBindVertexArray(entry.vao);
   if (command.geometry.indexCount && command.geometry.indices) {
     cc_glglue_glDrawElements(this->glue, primitive,
@@ -797,8 +1132,18 @@ SoGLRenderBackend::drawCommand(const SoDrawList & drawlist,
                            static_cast<GLsizei>(command.geometry.vertexCount));
   }
   this->glue->glBindVertexArray(0);
+  if (pixelRaster || usePointShader || useLineShader) {
+    cc_glglue_glUseProgram(this->glue, this->shaderProgram);
+  }
   if (textured) cc_glglue_glBindTexture(this->glue, GL_TEXTURE_2D, 0);
+  if (polygonOffset) glDisable(GL_POLYGON_OFFSET_FILL);
+  if (fillMode != 0 &&
+      (primitive == GL_TRIANGLES || primitive == GL_TRIANGLE_STRIP)) {
+    glPolygonMode(GL_FRONT_AND_BACK, GL_FILL);
+  }
   glDepthRange(0.0, 1.0);
+  if (!usePointShader) glPointSize(1.0f);
+  if (!useLineShader) glLineWidth(1.0f);
 }
 
 void
@@ -868,86 +1213,102 @@ SoGLRenderBackend::beginFrame(const SoRenderParams & params)
 bool
 SoGLRenderBackend::createShaders()
 {
-  const GLuint vertex = compileShader(this->glue, GL_VERTEX_SHADER,
-                                      coin_gl_visual_vertex_shadersource);
-  const GLuint fragment = compileShader(this->glue, GL_FRAGMENT_SHADER,
-                                        coin_gl_visual_fragment_shadersource);
-  if (!vertex || !fragment) {
-    if (vertex) cc_glglue_glDeleteShader(this->glue, vertex);
-    if (fragment) cc_glglue_glDeleteShader(this->glue, fragment);
+  this->shaderProgram = linkProgram(this->glue,
+                                    coin_gl_visual_vertex_shadersource,
+                                    coin_gl_visual_fragment_shadersource);
+  this->lineShaderProgram = linkProgram(this->glue,
+                                        coin_gl_wide_line_vertex_shadersource,
+                                        coin_gl_wide_line_fragment_shadersource,
+                                        coin_gl_wide_line_geometry_shadersource);
+  this->pointShaderProgram = linkProgram(this->glue,
+                                         coin_gl_point_vertex_shadersource,
+                                         coin_gl_point_fragment_shadersource,
+                                         coin_gl_point_geometry_shadersource);
+  this->pixelShaderProgram = linkProgram(
+    this->glue, coin_gl_pixel_vertex_shadersource,
+    coin_gl_pixel_fragment_shadersource);
+  if (!this->shaderProgram || !this->lineShaderProgram ||
+      !this->pointShaderProgram || !this->pixelShaderProgram) {
+    if (this->shaderProgram) cc_glglue_glDeleteProgram(this->glue, this->shaderProgram);
+    if (this->lineShaderProgram) cc_glglue_glDeleteProgram(this->glue, this->lineShaderProgram);
+    if (this->pointShaderProgram) cc_glglue_glDeleteProgram(this->glue, this->pointShaderProgram);
+    if (this->pixelShaderProgram) cc_glglue_glDeleteProgram(this->glue, this->pixelShaderProgram);
+    this->shaderProgram = this->lineShaderProgram = this->pointShaderProgram =
+      this->pixelShaderProgram = 0;
     return false;
   }
 
-  const GLuint program = cc_glglue_glCreateProgram(this->glue);
-  cc_glglue_glAttachShader(this->glue, program, vertex);
-  cc_glglue_glAttachShader(this->glue, program, fragment);
-  cc_glglue_glLinkProgram(this->glue, program);
-  GLint linked = GL_FALSE;
-  cc_glglue_glGetGLSLProgramiv(this->glue, program, GL_LINK_STATUS, &linked);
-  cc_glglue_glDeleteShader(this->glue, vertex);
-  cc_glglue_glDeleteShader(this->glue, fragment);
-  if (linked == GL_FALSE) {
-    cc_glglue_glDeleteProgram(this->glue, program);
-    return false;
-  }
-
-  this->shaderProgram = program;
-  this->uViewLocation = cc_glglue_glGetUniformLocation(this->glue, program,
-                                                        "u_view");
-  this->uProjLocation = cc_glglue_glGetUniformLocation(this->glue, program,
-                                                         "u_proj");
-  this->uModelLocation = cc_glglue_glGetUniformLocation(this->glue, program,
-                                                          "u_model");
-  this->uColorLocation = cc_glglue_glGetUniformLocation(this->glue, program,
-                                                         "u_color");
-  this->uUseVertexColorLocation = cc_glglue_glGetUniformLocation(
-    this->glue, program, "u_useVertexColor");
-  this->uShadingModelLocation = cc_glglue_glGetUniformLocation(
-    this->glue, program, "u_shadingModel");
-  this->uEmissiveColorLocation = cc_glglue_glGetUniformLocation(
-    this->glue, program, "u_emissiveColor");
-  this->uMaterialAmbientLocation = cc_glglue_glGetUniformLocation(
-    this->glue, program, "u_materialAmbient");
-  this->uMaterialSpecularLocation = cc_glglue_glGetUniformLocation(
-    this->glue, program, "u_materialSpecular");
-  this->uMaterialShininessLocation = cc_glglue_glGetUniformLocation(
-    this->glue, program, "u_materialShininess");
-  this->uTwoSidedLightingLocation = cc_glglue_glGetUniformLocation(
-    this->glue, program, "u_twoSidedLighting");
+  auto uniform = [this](GLuint program, const char * name) {
+    return cc_glglue_glGetUniformLocation(this->glue, program, name);
+  };
+  const GLuint visual = this->shaderProgram;
+  this->uViewLocation = uniform(visual, "u_view");
+  this->uProjLocation = uniform(visual, "u_proj");
+  this->uModelLocation = uniform(visual, "u_model");
+  this->uColorLocation = uniform(visual, "u_color");
+  this->uUseVertexColorLocation = uniform(visual, "u_useVertexColor");
+  this->uShadingModelLocation = uniform(visual, "u_shadingModel");
+  this->uEmissiveColorLocation = uniform(visual, "u_emissiveColor");
+  this->uMaterialAmbientLocation = uniform(visual, "u_materialAmbient");
+  this->uMaterialSpecularLocation = uniform(visual, "u_materialSpecular");
+  this->uMaterialShininessLocation = uniform(visual, "u_materialShininess");
+  this->uTwoSidedLightingLocation = uniform(visual, "u_twoSidedLighting");
   this->uVertexColorAlphaIncludesOpacityLocation =
-    cc_glglue_glGetUniformLocation(this->glue, program,
-                                   "u_vertexColorAlphaIncludesOpacity");
+    uniform(visual, "u_vertexColorAlphaIncludesOpacity");
   this->uTextureAlphaIncludesOpacityLocation =
-    cc_glglue_glGetUniformLocation(this->glue, program,
-                                   "u_textureAlphaIncludesOpacity");
-  this->uAmbientLightLocation = cc_glglue_glGetUniformLocation(
-    this->glue, program, "u_ambientLight");
-  this->uLightCountLocation = cc_glglue_glGetUniformLocation(
-    this->glue, program, "u_lightCount");
-  this->uLightTypeLocation = cc_glglue_glGetUniformLocation(
-    this->glue, program, "u_lightType");
-  this->uLightColorLocation = cc_glglue_glGetUniformLocation(
-    this->glue, program, "u_lightColor");
-  this->uLightDirectionLocation = cc_glglue_glGetUniformLocation(
-    this->glue, program, "u_lightDirection");
-  this->uLightPositionLocation = cc_glglue_glGetUniformLocation(
-    this->glue, program, "u_lightPosition");
-  this->uLightAttenuationLocation = cc_glglue_glGetUniformLocation(
-    this->glue, program, "u_lightAttenuation");
-  this->uLightSpotParamsLocation = cc_glglue_glGetUniformLocation(
-    this->glue, program, "u_lightSpotParams");
-  this->uTextureLocation = cc_glglue_glGetUniformLocation(this->glue, program,
-                                                           "u_texture");
-  this->uTextureEnabledLocation = cc_glglue_glGetUniformLocation(
-    this->glue, program, "u_textureEnabled");
-  this->uTextureModelLocation = cc_glglue_glGetUniformLocation(
-    this->glue, program, "u_textureModel");
-  this->uTextureBlendColorLocation = cc_glglue_glGetUniformLocation(
-    this->glue, program, "u_textureBlendColor");
-  this->uAlphaTestFunctionLocation = cc_glglue_glGetUniformLocation(
-    this->glue, program, "u_alphaTestFunction");
-  this->uAlphaTestReferenceLocation = cc_glglue_glGetUniformLocation(
-    this->glue, program, "u_alphaTestReference");
+    uniform(visual, "u_textureAlphaIncludesOpacity");
+  this->uAmbientLightLocation = uniform(visual, "u_ambientLight");
+  this->uLightCountLocation = uniform(visual, "u_lightCount");
+  this->uLightTypeLocation = uniform(visual, "u_lightType");
+  this->uLightColorLocation = uniform(visual, "u_lightColor");
+  this->uLightDirectionLocation = uniform(visual, "u_lightDirection");
+  this->uLightPositionLocation = uniform(visual, "u_lightPosition");
+  this->uLightAttenuationLocation = uniform(visual, "u_lightAttenuation");
+  this->uLightSpotParamsLocation = uniform(visual, "u_lightSpotParams");
+  this->uTextureLocation = uniform(visual, "u_texture");
+  this->uTextureEnabledLocation = uniform(visual, "u_textureEnabled");
+  this->uTextureModelLocation = uniform(visual, "u_textureModel");
+  this->uTextureBlendColorLocation = uniform(visual, "u_textureBlendColor");
+  this->uAlphaTestFunctionLocation = uniform(visual, "u_alphaTestFunction");
+  this->uAlphaTestReferenceLocation = uniform(visual, "u_alphaTestReference");
+
+  const GLuint line = this->lineShaderProgram;
+  this->lineUViewLocation = uniform(line, "u_view");
+  this->lineUProjLocation = uniform(line, "u_proj");
+  this->lineUModelLocation = uniform(line, "u_model");
+  this->lineUColorLocation = uniform(line, "u_color");
+  this->lineUUseVertexColorLocation = uniform(line, "u_useVertexColor");
+  this->lineULineWidthLocation = uniform(line, "u_lineWidth");
+  this->lineUVpSizeLocation = uniform(line, "u_vpSize");
+  this->lineUStipplePeriodLocation = uniform(line, "u_stipplePeriod");
+
+  const GLuint point = this->pointShaderProgram;
+  this->pointUViewLocation = uniform(point, "u_view");
+  this->pointUProjLocation = uniform(point, "u_proj");
+  this->pointUModelLocation = uniform(point, "u_model");
+  this->pointUColorLocation = uniform(point, "u_color");
+  this->pointUUseVertexColorLocation = uniform(point, "u_useVertexColor");
+  this->pointUPointSizeLocation = uniform(point, "u_pointSize");
+  this->pointURoundPointsLocation = uniform(point, "u_roundPoints");
+  this->pointUVpSizeLocation = uniform(point, "u_vpSize");
+
+  const GLuint pixel = this->pixelShaderProgram;
+  this->pixelUViewLocation = uniform(pixel, "u_view");
+  this->pixelUProjLocation = uniform(pixel, "u_proj");
+  this->pixelUModelLocation = uniform(pixel, "u_model");
+  this->pixelUQuadCenterLocation = uniform(pixel, "u_quadCenter");
+  this->pixelUTexSizeLocation = uniform(pixel, "u_texSize");
+  this->pixelUVpSizeLocation = uniform(pixel, "u_vpSize");
+  this->pixelUPixelOriginLocation = uniform(pixel, "u_pixelOrigin");
+  this->pixelUTextureLocation = uniform(pixel, "u_texture");
+  this->pixelUTexModColorLocation = uniform(pixel, "u_texModColor");
+  this->pixelUColorLocation = uniform(pixel, "u_color");
+  this->pixelUVertexColorAlphaIncludesOpacityLocation =
+    uniform(pixel, "u_vertexColorAlphaIncludesOpacity");
+  this->pixelUTextureAlphaIncludesOpacityLocation =
+    uniform(pixel, "u_textureAlphaIncludesOpacity");
+  this->pixelUAlphaTestFunctionLocation = uniform(pixel, "u_alphaTestFunction");
+  this->pixelUAlphaTestReferenceLocation = uniform(pixel, "u_alphaTestReference");
   return true;
 }
 

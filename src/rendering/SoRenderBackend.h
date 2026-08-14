@@ -28,6 +28,7 @@ struct SoRenderParams {
   SbViewportRegion viewport;
   SbMatrix         viewMatrix;
   SbMatrix         projMatrix;
+  float            devicePixelRatio = 1.0f;
   SbColor4f        clearColor;
   float            clearDepth = 1.0f;
   uint32_t         flags = 0;

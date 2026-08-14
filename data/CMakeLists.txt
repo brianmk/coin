@@ -69,6 +69,14 @@ endmacro()
 # embedded as independent C++ resources.
 coin_embed_gl_shader(gl_visual_vertex data/shaders/gl/visual/Vertex.glsl)
 coin_embed_gl_shader(gl_visual_fragment data/shaders/gl/visual/Fragment.glsl)
+coin_embed_gl_shader(gl_wide_line_vertex data/shaders/gl/wide-line/Vertex.glsl)
+coin_embed_gl_shader(gl_wide_line_geometry data/shaders/gl/wide-line/Geometry.glsl)
+coin_embed_gl_shader(gl_wide_line_fragment data/shaders/gl/wide-line/Fragment.glsl)
+coin_embed_gl_shader(gl_point_vertex data/shaders/gl/point/Vertex.glsl)
+coin_embed_gl_shader(gl_point_geometry data/shaders/gl/point/Geometry.glsl)
+coin_embed_gl_shader(gl_point_fragment data/shaders/gl/point/Fragment.glsl)
+coin_embed_gl_shader(gl_pixel_vertex data/shaders/gl/pixel/Vertex.glsl)
+coin_embed_gl_shader(gl_pixel_fragment data/shaders/gl/pixel/Fragment.glsl)
 
 # These are legacy shader snippets exposed through Coin's built-in shader
 # dictionary. They are ordinary embedded text, not core-profile root

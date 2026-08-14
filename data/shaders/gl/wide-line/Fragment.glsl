@@ -9,9 +9,9 @@ out vec4 fragColor;
 
 void main()
 {
-  if (u_stipplePeriod > 0.0) {
-    if (mod(v_lineDistance, u_stipplePeriod) > u_stipplePeriod * 0.5) discard;
+  if (u_stipplePeriod > 0.0 &&
+      mod(v_lineDistance, u_stipplePeriod) > u_stipplePeriod * 0.5) {
+    discard;
   }
-
   fragColor = v_color;
 }

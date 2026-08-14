@@ -1,10 +1,10 @@
 #version 410 core
 
-in vec4 v_color;
-in vec2 v_uv;
-
 uniform float u_pointSize;
 uniform float u_roundPoints;
+
+in vec4 v_color;
+in vec2 v_uv;
 
 out vec4 fragColor;
 

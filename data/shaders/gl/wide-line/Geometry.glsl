@@ -1,4 +1,5 @@
 #version 410 core
+
 layout(lines) in;
 layout(triangle_strip, max_vertices = 4) out;
 
@@ -34,6 +35,5 @@ void main()
   EmitVertex();
   gl_Position = p1 - vec4(offset * p1.w, 0.0, 0.0);
   EmitVertex();
-
   EndPrimitive();
 }
