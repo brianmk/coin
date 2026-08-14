@@ -161,6 +161,10 @@ option(COIN_BUILD_LEGACY_GL_RENDERER
   "Build Coin's legacy fixed-function OpenGL renderer."
   ON)
 
+option(COIN_BUILD_VULKAN_RENDERER
+  "Build Coin's experimental Vulkan retained-renderer backend."
+  OFF)
+
 # Make the renderer selection explicit for every Coin translation unit and
 # generated public header.  This keeps core-only declarations and definitions
 # in sync even when the build uses separate object-library targets.
@@ -168,6 +172,12 @@ if(COIN_BUILD_LEGACY_GL_RENDERER)
   set(COIN_BUILD_LEGACY_GL_RENDERER_VALUE 1)
 else()
   set(COIN_BUILD_LEGACY_GL_RENDERER_VALUE 0)
+endif()
+
+if(COIN_BUILD_VULKAN_RENDERER)
+  set(COIN_BUILD_VULKAN_RENDERER_VALUE 1)
+else()
+  set(COIN_BUILD_VULKAN_RENDERER_VALUE 0)
 endif()
 
 check_include_file_cxx(thread HAVE_STD_THREAD)
@@ -307,6 +317,17 @@ else()
 endif()
 
 list(APPEND COIN_TARGET_LINK_LIBRARIES ${COIN_TARGET_LINK_LIBRARIES_GL})
+
+if(COIN_BUILD_VULKAN_RENDERER)
+  find_package(Vulkan REQUIRED)
+  if(TARGET Vulkan::Vulkan)
+    list(APPEND COIN_TARGET_LINK_LIBRARIES Vulkan::Vulkan)
+  else()
+    list(APPEND COIN_TARGET_INCLUDE_DIRECTORIES ${Vulkan_INCLUDE_DIRS})
+    list(APPEND COIN_TARGET_LINK_LIBRARIES ${Vulkan_LIBRARIES})
+  endif()
+  set(HAVE_VULKAN 1)
+endif()
 
 set(CMAKE_THREAD_PREFER_PTHREAD 1)
 set(THREADS_PREFER_PTHREAD_FLAG 1)
@@ -1015,6 +1036,7 @@ endif()
 
 add_compile_definitions(
   COIN_BUILD_LEGACY_GL_RENDERER=${COIN_BUILD_LEGACY_GL_RENDERER_VALUE}
+  COIN_BUILD_VULKAN_RENDERER=${COIN_BUILD_VULKAN_RENDERER_VALUE}
 )
 
 # ############################################################################

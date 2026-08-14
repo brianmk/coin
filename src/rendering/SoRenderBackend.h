@@ -32,6 +32,18 @@ struct SoRenderParams {
   SbColor4f        clearColor;
   float            clearDepth = 1.0f;
   uint32_t         flags = 0;
+
+  /*!
+    \brief Backend-defined render destination for this frame.
+
+    The base interface does not interpret this pointer.  Concrete backends
+    document the structure they expect.  The Vulkan backend expects it to
+    point to a SoVulkanRenderTarget (see Inventor/rendering/
+    SoVulkanRenderTarget.h).  A null pointer means "render into whatever
+    destination the backend is currently bound to", which is backend
+    specific.  The pointer is borrowed for the duration of render() only.
+  */
+  void * renderTarget = nullptr;
 };
 
 /*!

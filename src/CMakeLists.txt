@@ -234,6 +234,7 @@ endif()
 # where all translation units are linked through this target.
 target_compile_definitions(${PROJECT_NAME} PRIVATE
   COIN_BUILD_LEGACY_GL_RENDERER=${COIN_BUILD_LEGACY_GL_RENDERER_VALUE}
+  COIN_BUILD_VULKAN_RENDERER=${COIN_BUILD_VULKAN_RENDERER_VALUE}
 )
 
 if(NOT COIN_BUILD_LEGACY_GL_RENDERER AND
