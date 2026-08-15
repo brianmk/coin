@@ -5,6 +5,7 @@
 
 #include <Inventor/SbBasic.h>
 #include <Inventor/SbMatrix.h>
+#include <Inventor/SbVec2f.h>
 #include <Inventor/SbVec3f.h>
 #include <Inventor/SbVec4f.h>
 
@@ -177,6 +178,32 @@ enum SoBlendEquation : uint8_t {
   SO_BLEND_EQUATION_MAX
 };
 
+// --- Stencil state --------------------------------------------------------
+
+// Semantic stencil test/operation functions (not GL enum values).
+enum SoStencilFunction : uint8_t {
+  SO_STENCIL_FUNC_NEVER = 0,
+  SO_STENCIL_FUNC_ALWAYS,
+  SO_STENCIL_FUNC_LESS,
+  SO_STENCIL_FUNC_LEQUAL,
+  SO_STENCIL_FUNC_EQUAL,
+  SO_STENCIL_FUNC_GEQUAL,
+  SO_STENCIL_FUNC_GREATER,
+  SO_STENCIL_FUNC_NOTEQUAL
+};
+
+// Semantic stencil buffer update operations.
+enum SoStencilOp : uint8_t {
+  SO_STENCIL_OP_KEEP = 0,
+  SO_STENCIL_OP_ZERO,
+  SO_STENCIL_OP_REPLACE,
+  SO_STENCIL_OP_INCREMENT,
+  SO_STENCIL_OP_DECREMENT,
+  SO_STENCIL_OP_INVERT,
+  SO_STENCIL_OP_INCREMENT_WRAP,
+  SO_STENCIL_OP_DECREMENT_WRAP
+};
+
 // --- Alpha-test policy --------------------------------------------------
 
 enum SoAlphaTestFunction : uint8_t {
@@ -201,6 +228,7 @@ enum SoAlphaTestPolicy : uint8_t {
 // --- Render param flags (SoRenderParams::flags) ---
 static constexpr uint32_t SO_PARAM_CLEAR_WINDOW = 1u;
 static constexpr uint32_t SO_PARAM_CLEAR_DEPTH  = 4u;  //!< Clear depth buffer before rendering
+static constexpr uint32_t SO_PARAM_CLEAR_STENCIL = 8u; //!< Clear stencil buffer before rendering
 
 /*!
   \struct SoTextureData
@@ -304,6 +332,24 @@ struct SoBlendState {
 };
 
 /*!
+  \struct SoStencilState
+  \brief Backend-neutral stencil test/operation configuration.
+
+  Both faces share the same configuration (no two-sided stencil yet); a
+  backend maps this to its API's front and back stencil state.
+*/
+struct SoStencilState {
+  SbBool  enabled = FALSE;
+  SoStencilFunction function = SO_STENCIL_FUNC_ALWAYS;
+  uint8_t reference = 0;
+  uint8_t compareMask = 0xFF;
+  uint8_t writeMask = 0xFF;
+  SoStencilOp failOp = SO_STENCIL_OP_KEEP;
+  SoStencilOp zfailOp = SO_STENCIL_OP_KEEP;
+  SoStencilOp zpassOp = SO_STENCIL_OP_KEEP;
+};
+
+/*!
   \struct SoAlphaTestState
   \brief Explicit fragment alpha policy for a render command.
 */
@@ -327,6 +373,10 @@ struct SoRasterState {
   int     viewportY = 0;
   int     viewportWidth = 0;
   int     viewportHeight = 0;
+  int     scissorX = 0;
+  int     scissorY = 0;
+  int     scissorWidth = 0;
+  int     scissorHeight = 0;
   float   lineWidth = 1.0f;
   float   pointSize = 1.0f;
   uint16_t linePattern = 0xFFFF;
@@ -342,6 +392,7 @@ struct SoRasterState {
 struct SoRenderState {
   SoDepthState depth;
   SoBlendState blend;
+  SoStencilState stencil;
   SoAlphaTestState alphaTest;
   SoRasterState raster;
   uint32_t opaqueKey = 0;

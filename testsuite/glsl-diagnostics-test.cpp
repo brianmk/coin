@@ -120,6 +120,30 @@ int main()
     if (!check(contains(compileCapture, "failed to compile"),
                "shader diagnostic omitted its failure description")) break;
 
+    // A fragment shader must report the same three diagnostic properties.
+    DiagnosticCapture fragmentCompileCapture;
+    SoDebugError::setHandlerCallback(capture_diagnostic, &fragmentCompileCapture);
+
+    SoGLSLShaderObject brokenFragment(glue->contextid);
+    brokenFragment.setShaderType(SoGLShaderObject::FRAGMENT);
+    brokenFragment.sourceHint = "broken.frag";
+    brokenFragment.load("#version 330 core\n"
+                        "out vec4 color;\n"
+                        "void main() { color = not_an_identifier; }\n");
+
+    if (!check(!brokenFragment.isLoaded(),
+               "invalid fragment shader unexpectedly compiled")) break;
+    if (!check(fragmentCompileCapture.warnings > 0,
+               "fragment compilation failure was not reported as a warning"))
+      break;
+    if (!check(contains(fragmentCompileCapture, "fragment shader"),
+               "fragment shader diagnostic omitted its stage")) break;
+    if (!check(contains(fragmentCompileCapture, "broken.frag"),
+               "fragment shader diagnostic omitted its source identity")) break;
+    if (!check(contains(fragmentCompileCapture, "failed to compile"),
+               "fragment shader diagnostic omitted its failure description"))
+      break;
+
     DiagnosticCapture linkCapture;
     SoDebugError::setHandlerCallback(capture_diagnostic, &linkCapture);
 
@@ -134,10 +158,14 @@ int main()
     SoGLSLShaderObject fragmentShader(glue->contextid);
     fragmentShader.setShaderType(SoGLShaderObject::FRAGMENT);
     fragmentShader.sourceHint = "link.frag";
+    // Call a function that is never defined in any stage.  This compiles
+    // cleanly but is guaranteed to fail linking (undefined reference) on
+    // every conforming GLSL linker, independent of driver varying-conversion
+    // behavior.
     fragmentShader.load("#version 330 core\n"
-                        "in vec4 varying_color;\n"
+                        "vec4 helper();\n"
                         "out vec4 color;\n"
-                        "void main() { color = varying_color; }\n");
+                        "void main() { color = helper(); }\n");
 
     if (!check(vertexShader.isLoaded() && fragmentShader.isLoaded(),
                "link test shaders failed to compile")) break;

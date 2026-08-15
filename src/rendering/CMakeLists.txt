@@ -14,6 +14,7 @@ set(COIN_RENDERING_FILES
 if(COIN_BUILD_VULKAN_RENDERER)
 	list(APPEND COIN_RENDERING_FILES
 		SoVulkanRenderBackend.cpp
+		SoVulkanRenderManager.cpp
 	)
 endif()
 
@@ -59,6 +60,7 @@ set(COIN_RENDERING_INTERNAL_FILES
 	SoRenderBackend.h
 	SoGLRenderBackend.h
 	SoVulkanRenderBackend.h
+	SoVulkanRenderManager.h
 )
 
 # build library

@@ -217,6 +217,344 @@ if(HAVE_EGL)
 	add_test(NAME DrawListGLTest COMMAND DrawListGLTest)
 	set_tests_properties(DrawListGLTest PROPERTIES SKIP_RETURN_CODE 77)
 
+	add_executable(DrawListSortStabilityTest drawlist-sort-stability-test.cpp)
+	target_link_libraries(DrawListSortStabilityTest Coin ${COIN_TARGET_LINK_LIBRARIES})
+	target_compile_definitions(DrawListSortStabilityTest PRIVATE COIN_INTERNAL)
+	target_include_directories(DrawListSortStabilityTest PRIVATE
+		${PROJECT_SOURCE_DIR}/src
+		${PROJECT_SOURCE_DIR}/include
+		${PROJECT_BINARY_DIR}/include
+		${COIN_TARGET_INCLUDE_DIRECTORIES}
+	)
+	add_test(NAME DrawListSortStabilityTest COMMAND DrawListSortStabilityTest)
+
+	if(COIN_BUILD_VULKAN_RENDERER)
+		add_executable(DrawListVulkanTest vulkan/drawlist-vulkan-test.cpp)
+		target_link_libraries(DrawListVulkanTest Coin ${COIN_TARGET_LINK_LIBRARIES})
+		target_compile_definitions(DrawListVulkanTest PRIVATE COIN_INTERNAL)
+		target_include_directories(DrawListVulkanTest PRIVATE
+			${PROJECT_SOURCE_DIR}/src
+			${PROJECT_SOURCE_DIR}/include
+			${PROJECT_BINARY_DIR}/include
+			${PROJECT_SOURCE_DIR}/testsuite
+			${COIN_TARGET_INCLUDE_DIRECTORIES}
+		)
+		add_test(NAME DrawListVulkanTest COMMAND DrawListVulkanTest)
+		set_tests_properties(DrawListVulkanTest PROPERTIES SKIP_RETURN_CODE 77)
+
+		add_executable(VulkanBackendLifecycleTest vulkan/vulkan-backend-lifecycle-test.cpp)
+		target_link_libraries(VulkanBackendLifecycleTest Coin ${COIN_TARGET_LINK_LIBRARIES})
+		target_compile_definitions(VulkanBackendLifecycleTest PRIVATE COIN_INTERNAL)
+		target_include_directories(VulkanBackendLifecycleTest PRIVATE
+			${PROJECT_SOURCE_DIR}/src
+			${PROJECT_SOURCE_DIR}/include
+			${PROJECT_BINARY_DIR}/include
+			${PROJECT_SOURCE_DIR}/testsuite
+			${COIN_TARGET_INCLUDE_DIRECTORIES}
+		)
+		add_test(NAME VulkanBackendLifecycleTest COMMAND VulkanBackendLifecycleTest)
+		set_tests_properties(VulkanBackendLifecycleTest PROPERTIES SKIP_RETURN_CODE 77)
+
+		add_executable(VulkanBackendRenderExternalTest vulkan/vulkan-backend-render-external-test.cpp)
+		target_link_libraries(VulkanBackendRenderExternalTest Coin ${COIN_TARGET_LINK_LIBRARIES})
+		target_compile_definitions(VulkanBackendRenderExternalTest PRIVATE COIN_INTERNAL)
+		target_include_directories(VulkanBackendRenderExternalTest PRIVATE
+			${PROJECT_SOURCE_DIR}/src
+			${PROJECT_SOURCE_DIR}/include
+			${PROJECT_BINARY_DIR}/include
+			${PROJECT_SOURCE_DIR}/testsuite
+			${COIN_TARGET_INCLUDE_DIRECTORIES}
+		)
+		add_test(NAME VulkanBackendRenderExternalTest COMMAND VulkanBackendRenderExternalTest)
+		set_tests_properties(VulkanBackendRenderExternalTest PROPERTIES SKIP_RETURN_CODE 77)
+
+		add_executable(VulkanBackendTextOverlayTest vulkan/vulkan-backend-text-overlay-test.cpp)
+		target_link_libraries(VulkanBackendTextOverlayTest Coin ${COIN_TARGET_LINK_LIBRARIES})
+		target_compile_definitions(VulkanBackendTextOverlayTest PRIVATE COIN_INTERNAL)
+		target_include_directories(VulkanBackendTextOverlayTest PRIVATE
+			${PROJECT_SOURCE_DIR}/src
+			${PROJECT_SOURCE_DIR}/include
+			${PROJECT_BINARY_DIR}/include
+			${PROJECT_SOURCE_DIR}/testsuite
+			${COIN_TARGET_INCLUDE_DIRECTORIES}
+		)
+		add_test(NAME VulkanBackendTextOverlayTest COMMAND VulkanBackendTextOverlayTest)
+		set_tests_properties(VulkanBackendTextOverlayTest PROPERTIES SKIP_RETURN_CODE 77)
+
+		add_executable(VulkanBackendMixedTopologyTest vulkan/vulkan-backend-mixed-topology-test.cpp)
+		target_link_libraries(VulkanBackendMixedTopologyTest Coin ${COIN_TARGET_LINK_LIBRARIES})
+		target_compile_definitions(VulkanBackendMixedTopologyTest PRIVATE COIN_INTERNAL)
+		target_include_directories(VulkanBackendMixedTopologyTest PRIVATE
+			${PROJECT_SOURCE_DIR}/src
+			${PROJECT_SOURCE_DIR}/include
+			${PROJECT_BINARY_DIR}/include
+			${PROJECT_SOURCE_DIR}/testsuite
+			${COIN_TARGET_INCLUDE_DIRECTORIES}
+		)
+		add_test(NAME VulkanBackendMixedTopologyTest COMMAND VulkanBackendMixedTopologyTest)
+		set_tests_properties(VulkanBackendMixedTopologyTest PROPERTIES SKIP_RETURN_CODE 77)
+
+		add_executable(VulkanBackendTransparencyTest vulkan/vulkan-backend-transparency-test.cpp)
+		target_link_libraries(VulkanBackendTransparencyTest Coin ${COIN_TARGET_LINK_LIBRARIES})
+		target_compile_definitions(VulkanBackendTransparencyTest PRIVATE COIN_INTERNAL)
+		target_include_directories(VulkanBackendTransparencyTest PRIVATE
+			${PROJECT_SOURCE_DIR}/src
+			${PROJECT_SOURCE_DIR}/include
+			${PROJECT_BINARY_DIR}/include
+			${PROJECT_SOURCE_DIR}/testsuite
+			${COIN_TARGET_INCLUDE_DIRECTORIES}
+		)
+		add_test(NAME VulkanBackendTransparencyTest COMMAND VulkanBackendTransparencyTest)
+		set_tests_properties(VulkanBackendTransparencyTest PROPERTIES SKIP_RETURN_CODE 77)
+
+		add_executable(VulkanBackendLightingTest vulkan/vulkan-backend-lighting-test.cpp)
+		target_link_libraries(VulkanBackendLightingTest Coin ${COIN_TARGET_LINK_LIBRARIES})
+		target_compile_definitions(VulkanBackendLightingTest PRIVATE COIN_INTERNAL)
+		target_include_directories(VulkanBackendLightingTest PRIVATE
+			${PROJECT_SOURCE_DIR}/src
+			${PROJECT_SOURCE_DIR}/include
+			${PROJECT_BINARY_DIR}/include
+			${PROJECT_SOURCE_DIR}/testsuite
+			${COIN_TARGET_INCLUDE_DIRECTORIES}
+		)
+		add_test(NAME VulkanBackendLightingTest COMMAND VulkanBackendLightingTest)
+		set_tests_properties(VulkanBackendLightingTest PROPERTIES SKIP_RETURN_CODE 77)
+
+		add_executable(VulkanBackendDepthTest vulkan/vulkan-backend-depth-test.cpp)
+		target_link_libraries(VulkanBackendDepthTest Coin ${COIN_TARGET_LINK_LIBRARIES})
+		target_compile_definitions(VulkanBackendDepthTest PRIVATE COIN_INTERNAL)
+		target_include_directories(VulkanBackendDepthTest PRIVATE
+			${PROJECT_SOURCE_DIR}/src
+			${PROJECT_SOURCE_DIR}/include
+			${PROJECT_BINARY_DIR}/include
+			${PROJECT_SOURCE_DIR}/testsuite
+			${COIN_TARGET_INCLUDE_DIRECTORIES}
+		)
+		add_test(NAME VulkanBackendDepthTest COMMAND VulkanBackendDepthTest)
+		set_tests_properties(VulkanBackendDepthTest PROPERTIES SKIP_RETURN_CODE 77)
+
+		add_executable(VulkanBackendFillModeTest vulkan/vulkan-backend-fill-mode-test.cpp)
+		target_link_libraries(VulkanBackendFillModeTest Coin ${COIN_TARGET_LINK_LIBRARIES})
+		target_compile_definitions(VulkanBackendFillModeTest PRIVATE COIN_INTERNAL)
+		target_include_directories(VulkanBackendFillModeTest PRIVATE
+			${PROJECT_SOURCE_DIR}/src
+			${PROJECT_SOURCE_DIR}/include
+			${PROJECT_BINARY_DIR}/include
+			${PROJECT_SOURCE_DIR}/testsuite
+			${COIN_TARGET_INCLUDE_DIRECTORIES}
+		)
+		add_test(NAME VulkanBackendFillModeTest COMMAND VulkanBackendFillModeTest)
+		set_tests_properties(VulkanBackendFillModeTest PROPERTIES SKIP_RETURN_CODE 77)
+
+		add_executable(VulkanBackendCullingTest vulkan/vulkan-backend-culling-test.cpp)
+		target_link_libraries(VulkanBackendCullingTest Coin ${COIN_TARGET_LINK_LIBRARIES})
+		target_compile_definitions(VulkanBackendCullingTest PRIVATE COIN_INTERNAL)
+		target_include_directories(VulkanBackendCullingTest PRIVATE
+			${PROJECT_SOURCE_DIR}/src
+			${PROJECT_SOURCE_DIR}/include
+			${PROJECT_BINARY_DIR}/include
+			${PROJECT_SOURCE_DIR}/testsuite
+			${COIN_TARGET_INCLUDE_DIRECTORIES}
+		)
+		add_test(NAME VulkanBackendCullingTest COMMAND VulkanBackendCullingTest)
+		set_tests_properties(VulkanBackendCullingTest PROPERTIES SKIP_RETURN_CODE 77)
+
+		add_executable(VulkanBackendLightVariantsTest vulkan/vulkan-backend-light-variants-test.cpp)
+		target_link_libraries(VulkanBackendLightVariantsTest Coin ${COIN_TARGET_LINK_LIBRARIES})
+		target_compile_definitions(VulkanBackendLightVariantsTest PRIVATE COIN_INTERNAL)
+		target_include_directories(VulkanBackendLightVariantsTest PRIVATE
+			${PROJECT_SOURCE_DIR}/src
+			${PROJECT_SOURCE_DIR}/include
+			${PROJECT_BINARY_DIR}/include
+			${PROJECT_SOURCE_DIR}/testsuite
+			${COIN_TARGET_INCLUDE_DIRECTORIES}
+		)
+		add_test(NAME VulkanBackendLightVariantsTest COMMAND VulkanBackendLightVariantsTest)
+		set_tests_properties(VulkanBackendLightVariantsTest PROPERTIES SKIP_RETURN_CODE 77)
+
+		add_executable(VulkanBackendStripTopologyTest vulkan/vulkan-backend-strip-topology-test.cpp)
+		target_link_libraries(VulkanBackendStripTopologyTest Coin ${COIN_TARGET_LINK_LIBRARIES})
+		target_compile_definitions(VulkanBackendStripTopologyTest PRIVATE COIN_INTERNAL)
+		target_include_directories(VulkanBackendStripTopologyTest PRIVATE
+			${PROJECT_SOURCE_DIR}/src
+			${PROJECT_SOURCE_DIR}/include
+			${PROJECT_BINARY_DIR}/include
+			${PROJECT_SOURCE_DIR}/testsuite
+			${COIN_TARGET_INCLUDE_DIRECTORIES}
+		)
+		add_test(NAME VulkanBackendStripTopologyTest COMMAND VulkanBackendStripTopologyTest)
+		set_tests_properties(VulkanBackendStripTopologyTest PROPERTIES SKIP_RETURN_CODE 77)
+
+		add_executable(VulkanBackendTextureTest vulkan/vulkan-backend-texture-test.cpp)
+		target_link_libraries(VulkanBackendTextureTest Coin ${COIN_TARGET_LINK_LIBRARIES})
+		target_compile_definitions(VulkanBackendTextureTest PRIVATE COIN_INTERNAL)
+		target_include_directories(VulkanBackendTextureTest PRIVATE
+			${PROJECT_SOURCE_DIR}/src
+			${PROJECT_SOURCE_DIR}/include
+			${PROJECT_BINARY_DIR}/include
+			${PROJECT_SOURCE_DIR}/testsuite
+			${COIN_TARGET_INCLUDE_DIRECTORIES}
+		)
+		add_test(NAME VulkanBackendTextureTest COMMAND VulkanBackendTextureTest)
+		set_tests_properties(VulkanBackendTextureTest PROPERTIES SKIP_RETURN_CODE 77)
+
+		add_executable(VulkanBackendAlphaTestTest vulkan/vulkan-backend-alpha-test-test.cpp)
+		target_link_libraries(VulkanBackendAlphaTestTest Coin ${COIN_TARGET_LINK_LIBRARIES})
+		target_compile_definitions(VulkanBackendAlphaTestTest PRIVATE COIN_INTERNAL)
+		target_include_directories(VulkanBackendAlphaTestTest PRIVATE
+			${PROJECT_SOURCE_DIR}/src
+			${PROJECT_SOURCE_DIR}/include
+			${PROJECT_BINARY_DIR}/include
+			${PROJECT_SOURCE_DIR}/testsuite
+			${COIN_TARGET_INCLUDE_DIRECTORIES}
+		)
+		add_test(NAME VulkanBackendAlphaTestTest COMMAND VulkanBackendAlphaTestTest)
+		set_tests_properties(VulkanBackendAlphaTestTest PROPERTIES SKIP_RETURN_CODE 77)
+
+		add_executable(VulkanBackendMaterialTest vulkan/vulkan-backend-material-test.cpp)
+		target_link_libraries(VulkanBackendMaterialTest Coin ${COIN_TARGET_LINK_LIBRARIES})
+		target_compile_definitions(VulkanBackendMaterialTest PRIVATE COIN_INTERNAL)
+		target_include_directories(VulkanBackendMaterialTest PRIVATE
+			${PROJECT_SOURCE_DIR}/src
+			${PROJECT_SOURCE_DIR}/include
+			${PROJECT_BINARY_DIR}/include
+			${PROJECT_SOURCE_DIR}/testsuite
+			${COIN_TARGET_INCLUDE_DIRECTORIES}
+		)
+		add_test(NAME VulkanBackendMaterialTest COMMAND VulkanBackendMaterialTest)
+		set_tests_properties(VulkanBackendMaterialTest PROPERTIES SKIP_RETURN_CODE 77)
+
+		add_executable(VulkanBackendDepthFunctionTest vulkan/vulkan-backend-depth-function-test.cpp)
+		target_link_libraries(VulkanBackendDepthFunctionTest Coin ${COIN_TARGET_LINK_LIBRARIES})
+		target_compile_definitions(VulkanBackendDepthFunctionTest PRIVATE COIN_INTERNAL)
+		target_include_directories(VulkanBackendDepthFunctionTest PRIVATE
+			${PROJECT_SOURCE_DIR}/src
+			${PROJECT_SOURCE_DIR}/include
+			${PROJECT_BINARY_DIR}/include
+			${PROJECT_SOURCE_DIR}/testsuite
+			${COIN_TARGET_INCLUDE_DIRECTORIES}
+		)
+		add_test(NAME VulkanBackendDepthFunctionTest COMMAND VulkanBackendDepthFunctionTest)
+		set_tests_properties(VulkanBackendDepthFunctionTest PROPERTIES SKIP_RETURN_CODE 77)
+
+		add_executable(VulkanBackendSortedOrderTest vulkan/vulkan-backend-sorted-order-test.cpp)
+		target_link_libraries(VulkanBackendSortedOrderTest Coin ${COIN_TARGET_LINK_LIBRARIES})
+		target_compile_definitions(VulkanBackendSortedOrderTest PRIVATE COIN_INTERNAL)
+		target_include_directories(VulkanBackendSortedOrderTest PRIVATE
+			${PROJECT_SOURCE_DIR}/src
+			${PROJECT_SOURCE_DIR}/include
+			${PROJECT_BINARY_DIR}/include
+			${PROJECT_SOURCE_DIR}/testsuite
+			${COIN_TARGET_INCLUDE_DIRECTORIES}
+		)
+		add_test(NAME VulkanBackendSortedOrderTest COMMAND VulkanBackendSortedOrderTest)
+		set_tests_properties(VulkanBackendSortedOrderTest PROPERTIES SKIP_RETURN_CODE 77)
+
+		add_executable(VulkanBackendTextureModelsTest vulkan/vulkan-backend-texture-models-test.cpp)
+		target_link_libraries(VulkanBackendTextureModelsTest Coin ${COIN_TARGET_LINK_LIBRARIES})
+		target_compile_definitions(VulkanBackendTextureModelsTest PRIVATE COIN_INTERNAL)
+		target_include_directories(VulkanBackendTextureModelsTest PRIVATE
+			${PROJECT_SOURCE_DIR}/src
+			${PROJECT_SOURCE_DIR}/include
+			${PROJECT_BINARY_DIR}/include
+			${PROJECT_SOURCE_DIR}/testsuite
+			${COIN_TARGET_INCLUDE_DIRECTORIES}
+		)
+	add_test(NAME VulkanBackendTextureModelsTest COMMAND VulkanBackendTextureModelsTest)
+		set_tests_properties(VulkanBackendTextureModelsTest PROPERTIES SKIP_RETURN_CODE 77)
+
+		add_executable(VulkanBackendScissorTest vulkan/vulkan-backend-scissor-test.cpp)
+		target_link_libraries(VulkanBackendScissorTest Coin ${COIN_TARGET_LINK_LIBRARIES})
+		target_compile_definitions(VulkanBackendScissorTest PRIVATE COIN_INTERNAL)
+		target_include_directories(VulkanBackendScissorTest PRIVATE
+			${PROJECT_SOURCE_DIR}/src
+			${PROJECT_SOURCE_DIR}/include
+			${PROJECT_BINARY_DIR}/include
+			${PROJECT_SOURCE_DIR}/testsuite
+			${COIN_TARGET_INCLUDE_DIRECTORIES}
+		)
+		add_test(NAME VulkanBackendScissorTest COMMAND VulkanBackendScissorTest)
+		set_tests_properties(VulkanBackendScissorTest PROPERTIES SKIP_RETURN_CODE 77)
+
+		add_executable(VulkanBackendBlendingTest vulkan/vulkan-backend-blending-test.cpp)
+		target_link_libraries(VulkanBackendBlendingTest Coin ${COIN_TARGET_LINK_LIBRARIES})
+		target_compile_definitions(VulkanBackendBlendingTest PRIVATE COIN_INTERNAL)
+		target_include_directories(VulkanBackendBlendingTest PRIVATE
+			${PROJECT_SOURCE_DIR}/src
+			${PROJECT_SOURCE_DIR}/include
+			${PROJECT_BINARY_DIR}/include
+			${PROJECT_SOURCE_DIR}/testsuite
+			${COIN_TARGET_INCLUDE_DIRECTORIES}
+		)
+		add_test(NAME VulkanBackendBlendingTest COMMAND VulkanBackendBlendingTest)
+		set_tests_properties(VulkanBackendBlendingTest PROPERTIES SKIP_RETURN_CODE 77)
+
+		add_executable(VulkanBackendClearTest vulkan/vulkan-backend-clear-test.cpp)
+		target_link_libraries(VulkanBackendClearTest Coin ${COIN_TARGET_LINK_LIBRARIES})
+		target_compile_definitions(VulkanBackendClearTest PRIVATE COIN_INTERNAL)
+		target_include_directories(VulkanBackendClearTest PRIVATE
+			${PROJECT_SOURCE_DIR}/src
+			${PROJECT_SOURCE_DIR}/include
+			${PROJECT_BINARY_DIR}/include
+			${PROJECT_SOURCE_DIR}/testsuite
+			${COIN_TARGET_INCLUDE_DIRECTORIES}
+		)
+		add_test(NAME VulkanBackendClearTest COMMAND VulkanBackendClearTest)
+		set_tests_properties(VulkanBackendClearTest PROPERTIES SKIP_RETURN_CODE 77)
+
+		add_executable(VulkanBackendVertexColorTest vulkan/vulkan-backend-vertex-color-test.cpp)
+		target_link_libraries(VulkanBackendVertexColorTest Coin ${COIN_TARGET_LINK_LIBRARIES})
+		target_compile_definitions(VulkanBackendVertexColorTest PRIVATE COIN_INTERNAL)
+		target_include_directories(VulkanBackendVertexColorTest PRIVATE
+			${PROJECT_SOURCE_DIR}/src
+			${PROJECT_SOURCE_DIR}/include
+			${PROJECT_BINARY_DIR}/include
+			${PROJECT_SOURCE_DIR}/testsuite
+			${COIN_TARGET_INCLUDE_DIRECTORIES}
+		)
+		add_test(NAME VulkanBackendVertexColorTest COMMAND VulkanBackendVertexColorTest)
+		set_tests_properties(VulkanBackendVertexColorTest PROPERTIES SKIP_RETURN_CODE 77)
+
+		add_executable(VulkanBackendStencilTest vulkan/vulkan-backend-stencil-test.cpp)
+		target_link_libraries(VulkanBackendStencilTest Coin ${COIN_TARGET_LINK_LIBRARIES})
+		target_compile_definitions(VulkanBackendStencilTest PRIVATE COIN_INTERNAL)
+		target_include_directories(VulkanBackendStencilTest PRIVATE
+			${PROJECT_SOURCE_DIR}/src
+			${PROJECT_SOURCE_DIR}/include
+			${PROJECT_BINARY_DIR}/include
+			${PROJECT_SOURCE_DIR}/testsuite
+			${COIN_TARGET_INCLUDE_DIRECTORIES}
+		)
+		add_test(NAME VulkanBackendStencilTest COMMAND VulkanBackendStencilTest)
+		set_tests_properties(VulkanBackendStencilTest PROPERTIES SKIP_RETURN_CODE 77)
+
+		add_executable(VulkanBackendUniformPackingTest vulkan/vulkan-backend-uniform-packing-test.cpp)
+		target_link_libraries(VulkanBackendUniformPackingTest Coin ${COIN_TARGET_LINK_LIBRARIES})
+		target_compile_definitions(VulkanBackendUniformPackingTest PRIVATE COIN_INTERNAL)
+		target_include_directories(VulkanBackendUniformPackingTest PRIVATE
+			${PROJECT_SOURCE_DIR}/src
+			${PROJECT_SOURCE_DIR}/include
+			${PROJECT_BINARY_DIR}/include
+			${PROJECT_SOURCE_DIR}/testsuite
+			${COIN_TARGET_INCLUDE_DIRECTORIES}
+		)
+		add_test(NAME VulkanBackendUniformPackingTest COMMAND VulkanBackendUniformPackingTest)
+		set_tests_properties(VulkanBackendUniformPackingTest PROPERTIES SKIP_RETURN_CODE 77)
+
+		add_executable(VulkanRenderManagerTest vulkan/vulkan-rendermanager-test.cpp)
+		target_link_libraries(VulkanRenderManagerTest Coin ${COIN_TARGET_LINK_LIBRARIES})
+		target_compile_definitions(VulkanRenderManagerTest PRIVATE COIN_INTERNAL)
+		target_include_directories(VulkanRenderManagerTest PRIVATE
+			${PROJECT_SOURCE_DIR}/src
+			${PROJECT_SOURCE_DIR}/include
+			${PROJECT_BINARY_DIR}/include
+			${PROJECT_SOURCE_DIR}/testsuite
+			${COIN_TARGET_INCLUDE_DIRECTORIES}
+		)
+		add_test(NAME VulkanRenderManagerTest COMMAND VulkanRenderManagerTest)
+		set_tests_properties(VulkanRenderManagerTest PROPERTIES SKIP_RETURN_CODE 77)
+	endif()
+
 	add_executable(EGLBindingTest egl-binding-test.cpp)
 	target_link_libraries(EGLBindingTest Coin ${COIN_TARGET_LINK_LIBRARIES})
 	target_compile_definitions(EGLBindingTest PRIVATE COIN_INTERNAL)

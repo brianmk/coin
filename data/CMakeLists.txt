@@ -78,6 +78,66 @@ coin_embed_gl_shader(gl_point_fragment data/shaders/gl/point/Fragment.glsl)
 coin_embed_gl_shader(gl_pixel_vertex data/shaders/gl/pixel/Vertex.glsl)
 coin_embed_gl_shader(gl_pixel_fragment data/shaders/gl/pixel/Fragment.glsl)
 
+# Vulkan SPIR-V headers are committed to the source tree
+# (src/rendering/vulkan/visual/*.spv.h) so the backend builds without a
+# runtime shader compiler.  Regeneration is an explicit, offline step driven
+# by the `coin_regenerate_vulkan_spirv` target; it is intentionally not part
+# of the default build so glslangValidator is never a build dependency.
+if(COIN_BUILD_VULKAN_RENDERER)
+  find_program(COIN_GLSLANG_VALIDATOR glslangValidator DOC
+    "Path to glslangValidator for offline Vulkan SPIR-V regeneration")
+
+  set(COIN_VULKAN_SPIRV_REGENERATE_TARGETS "")
+
+  macro(coin_embed_vulkan_spirv _name _input _stage)
+    set(_input_file "${PROJECT_SOURCE_DIR}/${_input}")
+    if(NOT EXISTS "${_input_file}")
+      message(FATAL_ERROR "Vulkan GLSL shader does not exist: ${_input}")
+    endif()
+
+    get_filename_component(_basename "${_input}" NAME_WE)
+    set(_output_file "${PROJECT_SOURCE_DIR}/src/rendering/vulkan/visual/${_basename}.spv.h")
+
+    string(REGEX REPLACE "[^A-Za-z0-9_]" "_" _logical_name "${_name}")
+    set(_variable_name "coin_${_logical_name}_spirv")
+    set(_target_name "coin_regenerate_vulkan_spirv_${_logical_name}")
+
+    add_custom_command(
+      OUTPUT "${_output_file}"
+      COMMAND "${CMAKE_COMMAND}"
+        "-DGLSLANG_VALIDATOR=${COIN_GLSLANG_VALIDATOR}"
+        "-DINPUT_FILE=${_input_file}"
+        "-DOUTPUT_FILE=${_output_file}"
+        "-DSTAGE=${_stage}"
+        "-DVARIABLE_NAME=${_variable_name}"
+        -P "${CMAKE_CURRENT_SOURCE_DIR}/GenerateVulkanSpirvHeader.cmake"
+      DEPENDS
+        "${_input_file}"
+        "${CMAKE_CURRENT_SOURCE_DIR}/GenerateVulkanSpirvHeader.cmake"
+      VERBATIM
+      COMMENT "Regenerating Vulkan SPIR-V for ${_name} (${_stage})"
+    )
+    add_custom_target(${_target_name}
+      DEPENDS "${_output_file}"
+    )
+    list(APPEND COIN_VULKAN_SPIRV_REGENERATE_TARGETS "${_target_name}")
+  endmacro()
+
+  if(NOT COIN_GLSLANG_VALIDATOR)
+    message(WARNING
+      "glslangValidator not found; the coin_regenerate_vulkan_spirv target is unavailable")
+  else()
+    coin_embed_vulkan_spirv(vulkan_visual_vertex
+      data/shaders/vulkan/visual/Vertex.glsl vert)
+    coin_embed_vulkan_spirv(vulkan_visual_fragment
+      data/shaders/vulkan/visual/Fragment.glsl frag)
+
+    add_custom_target(coin_regenerate_vulkan_spirv
+      DEPENDS ${COIN_VULKAN_SPIRV_REGENERATE_TARGETS}
+      COMMENT "Regenerating all committed Vulkan SPIR-V headers")
+  endif()
+endif()
+
 # These are legacy shader snippets exposed through Coin's built-in shader
 # dictionary. They are ordinary embedded text, not core-profile root
 # programs, and therefore remain on the compatibility resource path.

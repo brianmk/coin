@@ -31,6 +31,7 @@ struct SoRenderParams {
   float            devicePixelRatio = 1.0f;
   SbColor4f        clearColor;
   float            clearDepth = 1.0f;
+  uint32_t         clearStencil = 0;
   uint32_t         flags = 0;
 
   /*!

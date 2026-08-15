@@ -9,6 +9,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <functional>
 #include <unordered_map>
 #include <vector>
 
@@ -41,6 +42,27 @@ struct VulkanCachedCommand {
   uint32_t cacheGeneration = 0;
 };
 
+/*! \brief Cached GPU texture for one retained command's SoTextureData. */
+struct VulkanCachedTexture {
+  VkImage image = VK_NULL_HANDLE;
+  VkDeviceMemory memory = VK_NULL_HANDLE;
+  VkImageView view = VK_NULL_HANDLE;
+  VkSampler sampler = VK_NULL_HANDLE;
+  VkDescriptorSet descriptorSet = VK_NULL_HANDLE;
+
+  // Identity of the last upload.
+  const unsigned char * pixelsKey = nullptr;
+  int width = 0;
+  int height = 0;
+  int numComponents = 0;
+  SoTextureFilter minFilter = SO_TEXTURE_FILTER_NEAREST;
+  SoTextureFilter magFilter = SO_TEXTURE_FILTER_NEAREST;
+  SoTextureWrap wrapS = SO_TEXTURE_WRAP_CLAMP_TO_EDGE;
+  SoTextureWrap wrapT = SO_TEXTURE_WRAP_CLAMP_TO_EDGE;
+  SoTextureModel model = SO_TEXTURE_MODEL_MODULATE;
+  uint32_t cacheGeneration = 0;
+};
+
 /*! \brief Minimal Vulkan executor for retained DrawList IR. */
 class SoVulkanRenderBackend : public SoRenderBackend {
 public:
@@ -53,10 +75,27 @@ public:
   SbBool render(const SoDrawList & drawlist,
                 const SoRenderParams & params) override;
 
+  /*!
+    \brief Record the draw list into a caller-owned command buffer/render pass.
+
+    The caller must already have begun \a commandBuffer and started
+    \a renderPass with a compatible framebuffer; it also owns submission and
+    presentation.  This path does not begin/end the command buffer, begin/end
+    the render pass, create a framebuffer, or submit to the queue.  It is used
+    by embedding surfaces such as QVulkanWindow whose command buffer and render
+    pass lifecycle are managed by the window system.
+  */
+  SbBool renderExternal(const SoDrawList & drawlist,
+                        const SoRenderParams & params,
+                        VkCommandBuffer commandBuffer,
+                        VkRenderPass renderPass);
+
 private:
   // --- Initialization helpers -------------------------------------------
   bool createCommandPool();
   bool createDescriptorSetLayout();
+  bool createDescriptorPool();
+  bool createLightingUniformBuffer();
   bool createPipelineLayout();
   bool createRenderPass(const SoVulkanRenderTarget & target,
                         VkRenderPass & renderPass);
@@ -68,6 +107,11 @@ private:
                            VkPipeline & pipeline,
                            bool transparent);
 
+  // --- Per-draw lighting ------------------------------------------------
+  void updateLightingUniforms(const SoDrawList & drawlist,
+                              const SoRenderCommand & command,
+                              const SoRenderParams & params);
+
   // --- Geometry cache ---------------------------------------------------
   void invalidateCache();
   void updateGeometryCache(const SoDrawList & drawlist);
@@ -76,6 +120,18 @@ private:
                       const SoRenderCommand & command);
   void destroyCacheEntry(VulkanCachedCommand & entry);
 
+  // --- Texture cache ----------------------------------------------------
+  bool createWhiteTexture();
+  void invalidateTextureCache();
+  void destroyTextureEntry(VulkanCachedTexture & entry);
+  VulkanCachedTexture & getOrCreateTexture(const SoRenderCommand * command);
+  bool uploadTexture(VulkanCachedTexture & entry,
+                     const SoTextureData & texture);
+  bool createSampler(const SoTextureData & texture, VkSampler & sampler);
+  bool allocateTextureDescriptorSet(VkImageView view, VkSampler sampler,
+                                    VkDescriptorSet & set);
+  VkDescriptorSet resolveTextureSet(const SoRenderCommand & command);
+
   // --- Render recording ---------------------------------------------------
   bool beginCommandBuffer();
   void recordClear(const SoRenderParams & params,
@@ -83,11 +139,18 @@ private:
   void recordDrawCommand(const SoDrawList & drawlist,
                          const SoRenderCommand & command,
                          const SoVulkanRenderTarget & target,
+                         const SoRenderParams & params,
                          VkRenderPass renderPass,
                          bool transparent);
   bool endAndSubmit();
   void applyViewport(const SoRenderParams & params,
                      const SoVulkanRenderTarget & target);
+  void applyScissor(const SoRenderCommand & command,
+                    const SoVulkanRenderTarget & target);
+  bool recordFrame(const SoDrawList & drawlist,
+                   const SoRenderParams & params,
+                   const SoVulkanRenderTarget & target,
+                   VkRenderPass renderPass);
 
   // --- Vulkan resource helpers -------------------------------------------
   bool createBuffer(VkDeviceSize size,
@@ -107,8 +170,29 @@ private:
   VkCommandPool commandPool = VK_NULL_HANDLE;
   VkCommandBuffer commandBuffer = VK_NULL_HANDLE;
 
+  // Command buffer being recorded by the current render()/renderExternal()
+  // call.  This is the backend's own buffer in render(), or the caller's
+  // buffer in renderExternal().
+  VkCommandBuffer activeCommandBuffer = VK_NULL_HANDLE;
+
   VkDescriptorSetLayout descriptorSetLayout = VK_NULL_HANDLE;
+  VkDescriptorPool descriptorPool = VK_NULL_HANDLE;
   VkPipelineLayout pipelineLayout = VK_NULL_HANDLE;
+
+  // Per-draw lighting/material uniform buffer (set 0, binding 0).  Persistent
+  // host-visible mapping: recordDrawCommand memcpy()s each command's state
+  // and the single descriptor set is rebound per draw.
+  VkBuffer lightingBuffer = VK_NULL_HANDLE;
+  VkDeviceMemory lightingMemory = VK_NULL_HANDLE;
+  void * lightingMapped = nullptr;
+
+  // Texture binding (set 0, binding 1).  A 1x1 white fallback texture is
+  // bound whenever a command carries no embedded SoTextureData.
+  VkImage whiteImage = VK_NULL_HANDLE;
+  VkDeviceMemory whiteImageMemory = VK_NULL_HANDLE;
+  VkImageView whiteImageView = VK_NULL_HANDLE;
+  VkSampler whiteSampler = VK_NULL_HANDLE;
+  VkDescriptorSet whiteDescriptorSet = VK_NULL_HANDLE;
 
   VkShaderModule vertexModule = VK_NULL_HANDLE;
   VkShaderModule fragmentModule = VK_NULL_HANDLE;
@@ -121,14 +205,122 @@ private:
   VkImageView renderPassDepthView = VK_NULL_HANDLE;
   VkExtent2D renderPassExtent {0, 0};
 
-  // Pipeline cache: keyed by (pipelineKey, transparent).  In the unlit
-  // milestone all opaque commands share one pipeline and all transparent
-  // commands share another, but the keying is retained for the upcoming
-  // per-material/lighting pipeline specialization.
-  std::unordered_map<uint64_t, VkPipeline> pipelineCache;
+  // Pipeline cache: keyed by the retained state that affects the created
+  // pipeline.  Vulkan pipelines are immutable, so every topology/fill/depth/
+  // blend/sample-count combination gets its own entry.
+  struct PipelineKey {
+    VkRenderPass renderPass = VK_NULL_HANDLE;
+    uint8_t topology = 0;
+    uint8_t fillMode = 0;
+    uint8_t cullMode = 0;
+    bool depthTestEnable = false;
+    bool depthWriteEnable = false;
+    uint8_t depthFunction = 0;
+    bool blendEnable = false;
+    uint8_t blendSrcRGB = 0;
+    uint8_t blendDstRGB = 0;
+    uint8_t blendSrcAlpha = 0;
+    uint8_t blendDstAlpha = 0;
+    uint8_t blendEquationRGB = 0;
+    uint8_t blendEquationAlpha = 0;
+    bool stencilEnable = false;
+    uint8_t stencilFunction = 0;
+    uint8_t stencilReference = 0;
+    uint8_t stencilCompareMask = 0xFF;
+    uint8_t stencilWriteMask = 0xFF;
+    uint8_t stencilFailOp = 0;
+    uint8_t stencilZFailOp = 0;
+    uint8_t stencilZPassOp = 0;
+    uint32_t sampleCount = 1;
+
+    bool operator==(const PipelineKey & other) const
+    {
+      return renderPass == other.renderPass && topology == other.topology &&
+        fillMode == other.fillMode && cullMode == other.cullMode &&
+        depthTestEnable == other.depthTestEnable &&
+        depthWriteEnable == other.depthWriteEnable &&
+        depthFunction == other.depthFunction &&
+        blendEnable == other.blendEnable &&
+        (!blendEnable ||
+         (blendSrcRGB == other.blendSrcRGB &&
+          blendDstRGB == other.blendDstRGB &&
+          blendSrcAlpha == other.blendSrcAlpha &&
+          blendDstAlpha == other.blendDstAlpha &&
+          blendEquationRGB == other.blendEquationRGB &&
+          blendEquationAlpha == other.blendEquationAlpha)) &&
+        stencilEnable == other.stencilEnable &&
+        (!stencilEnable ||
+         (stencilFunction == other.stencilFunction &&
+          stencilReference == other.stencilReference &&
+          stencilCompareMask == other.stencilCompareMask &&
+          stencilWriteMask == other.stencilWriteMask &&
+          stencilFailOp == other.stencilFailOp &&
+          stencilZFailOp == other.stencilZFailOp &&
+          stencilZPassOp == other.stencilZPassOp)) &&
+        sampleCount == other.sampleCount;
+    }
+  };
+
+  struct PipelineKeyHash
+  {
+    size_t operator()(const PipelineKey & key) const
+    {
+      size_t hash = std::hash<uintptr_t>()(
+        reinterpret_cast<uintptr_t>(key.renderPass));
+      hash ^= std::hash<uint32_t>()(key.topology) + 0x9e3779b9 + (hash << 6) +
+        (hash >> 2);
+      hash ^= std::hash<uint32_t>()(key.fillMode) + 0x9e3779b9 + (hash << 6) +
+        (hash >> 2);
+      hash ^= std::hash<uint32_t>()(key.cullMode) + 0x9e3779b9 + (hash << 6) +
+        (hash >> 2);
+      hash ^= std::hash<uint32_t>()(key.depthTestEnable) + 0x9e3779b9 +
+        (hash << 6) + (hash >> 2);
+      hash ^= std::hash<uint32_t>()(key.depthWriteEnable) + 0x9e3779b9 +
+        (hash << 6) + (hash >> 2);
+      hash ^= std::hash<uint32_t>()(key.depthFunction) + 0x9e3779b9 +
+        (hash << 6) + (hash >> 2);
+      hash ^= std::hash<uint32_t>()(key.blendEnable) + 0x9e3779b9 +
+        (hash << 6) + (hash >> 2);
+      hash ^= std::hash<uint32_t>()(key.blendSrcRGB) + 0x9e3779b9 +
+        (hash << 6) + (hash >> 2);
+      hash ^= std::hash<uint32_t>()(key.blendDstRGB) + 0x9e3779b9 +
+        (hash << 6) + (hash >> 2);
+      hash ^= std::hash<uint32_t>()(key.blendSrcAlpha) + 0x9e3779b9 +
+        (hash << 6) + (hash >> 2);
+      hash ^= std::hash<uint32_t>()(key.blendDstAlpha) + 0x9e3779b9 +
+        (hash << 6) + (hash >> 2);
+      hash ^= std::hash<uint32_t>()(key.blendEquationRGB) + 0x9e3779b9 +
+        (hash << 6) + (hash >> 2);
+      hash ^= std::hash<uint32_t>()(key.blendEquationAlpha) + 0x9e3779b9 +
+        (hash << 6) + (hash >> 2);
+      hash ^= std::hash<uint32_t>()(key.stencilEnable) + 0x9e3779b9 +
+        (hash << 6) + (hash >> 2);
+      hash ^= std::hash<uint32_t>()(key.stencilFunction) + 0x9e3779b9 +
+        (hash << 6) + (hash >> 2);
+      hash ^= std::hash<uint32_t>()(key.stencilReference) + 0x9e3779b9 +
+        (hash << 6) + (hash >> 2);
+      hash ^= std::hash<uint32_t>()(key.stencilCompareMask) + 0x9e3779b9 +
+        (hash << 6) + (hash >> 2);
+      hash ^= std::hash<uint32_t>()(key.stencilWriteMask) + 0x9e3779b9 +
+        (hash << 6) + (hash >> 2);
+      hash ^= std::hash<uint32_t>()(key.stencilFailOp) + 0x9e3779b9 +
+        (hash << 6) + (hash >> 2);
+      hash ^= std::hash<uint32_t>()(key.stencilZFailOp) + 0x9e3779b9 +
+        (hash << 6) + (hash >> 2);
+      hash ^= std::hash<uint32_t>()(key.stencilZPassOp) + 0x9e3779b9 +
+        (hash << 6) + (hash >> 2);
+      hash ^= std::hash<uint32_t>()(key.sampleCount) + 0x9e3779b9 +
+        (hash << 6) + (hash >> 2);
+      return hash;
+    }
+  };
+
+  std::unordered_map<PipelineKey, VkPipeline, PipelineKeyHash> pipelineCache;
 
   std::vector<VulkanCachedCommand> gpuCache;
   std::unordered_map<const SoRenderCommand *, size_t> commandToCache;
+  std::vector<VulkanCachedTexture> textureCache;
+  std::unordered_map<const SoRenderCommand *, size_t> commandToTexture;
   uint32_t cacheGeneration = 0;
   size_t cachedCommandCount = 0;
   bool haveCacheGeneration = false;
