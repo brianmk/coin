@@ -58,6 +58,7 @@
 #define SO_ASPECT_VISTAVISION   2.301
 
 class SoPath;
+class SoIRRenderAction;
 
 class SoCameraP;
 
@@ -115,6 +116,7 @@ public:
 
   void doAction(SoAction * action) override;
   void callback(SoCallbackAction * action) override;
+  void IRRender(SoIRRenderAction * action) override;
 #if COIN_HAVE_LEGACY_GL_RENDERER
   void GLRender(SoGLRenderAction * action) override;
 #endif

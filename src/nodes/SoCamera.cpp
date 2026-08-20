@@ -132,6 +132,7 @@
 #include <Inventor/actions/SoHandleEventAction.h>
 #include <Inventor/actions/SoRayPickAction.h>
 #include <Inventor/actions/SoAudioRenderAction.h>
+#include <Inventor/actions/SoIRRenderAction.h>
 #include <Inventor/elements/SoFocalDistanceElement.h>
 #if COIN_BUILD_LEGACY_GL_RENDERER
 #include <Inventor/elements/SoGLProjectionMatrixElement.h>
@@ -845,6 +846,17 @@ SoCamera::jitter(int numpasses, int curpass, const SbViewportRegion & vpreg,
 {
   const int vpsize[2] = { vpreg.getViewportSizePixels()[0], vpreg.getViewportSizePixels()[1] };
   coin_viewvolume_jitter(numpasses, curpass, vpsize, (float*) jitteramount.getValue());
+}
+
+// Documented in superclass. Overridden to set up the viewing and
+// projection matrices.
+void
+SoCamera::IRRender(SoIRRenderAction * action)
+{
+  // Camera nodes must set the view volume and view/projection matrices
+  // for the IR render action exactly as they do for GLRenderAction,
+  // otherwise the retained draw list is built with identity transforms.
+  this->doAction(action);
 }
 
 // Documented in superclass. Overridden to set up the viewing and

@@ -113,6 +113,12 @@ void main()
     // Coin/OpenGL uses a bottom-left origin; Vulkan uses top-left.  Flip Y so
     // the two pipelines produce identical output for the same viewport.
     clip.y = -clip.y;
+    // Coin's projection matrices are OpenGL-style: clip/NDC depth is in
+    // [-1, 1].  Vulkan's depth range is [0, 1] and clips Z/w against it,
+    // so remap the depth component.  W must stay untouched so the remap
+    // survives perspective division: z_ndc = 0.5*(z_clip/w + 1)
+    // => z_clip' = 0.5*(z_clip + w).
+    clip.z = 0.5 * clip.z + 0.5 * clip.w;
     gl_Position = clip;
 
     v_color = pc.u_flags.x > 0.5 ? a_color : vec4(pc.u_color.rgb, 1.0);

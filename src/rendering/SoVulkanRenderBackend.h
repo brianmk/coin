@@ -90,6 +90,18 @@ public:
                         VkCommandBuffer commandBuffer,
                         VkRenderPass renderPass);
 
+  /*!
+    \brief Record only the overlay pass (e.g. the navigation cube) into a
+    caller-owned command buffer/render pass.
+
+    Used in ray-tracing mode where the scene is traced by the RT backend but
+    screen-space overlays are still rasterized on top.
+  */
+  SbBool renderExternalOverlay(const SoDrawList & drawlist,
+                               const SoRenderParams & params,
+                               VkCommandBuffer commandBuffer,
+                               VkRenderPass renderPass);
+
 private:
   // --- Initialization helpers -------------------------------------------
   bool createCommandPool();
@@ -101,16 +113,27 @@ private:
                         VkRenderPass & renderPass);
   bool createShaders(VkShaderModule & vertexModule,
                      VkShaderModule & fragmentModule);
+  bool createBackgroundResources();
+  bool createBackgroundPipeline(const SoVulkanRenderTarget & target,
+                                VkRenderPass renderPass,
+                                VkPipeline & pipeline);
+  void recordBackground(const SoRenderParams & params,
+                        const SoVulkanRenderTarget & target,
+                        VkRenderPass renderPass);
   bool getOrCreatePipeline(const SoRenderCommand & command,
                            const SoVulkanRenderTarget & target,
                            VkRenderPass renderPass,
                            VkPipeline & pipeline,
-                           bool transparent);
+                           bool transparent,
+                           int fillModeOverride = -1,
+                           bool overlayPass = false);
 
   // --- Per-draw lighting ------------------------------------------------
   void updateLightingUniforms(const SoDrawList & drawlist,
                               const SoRenderCommand & command,
-                              const SoRenderParams & params);
+                              const SoRenderParams & params,
+                              VkDeviceSize uboOffset,
+                              bool unlit = false);
 
   // --- Geometry cache ---------------------------------------------------
   void invalidateCache();
@@ -130,6 +153,7 @@ private:
   bool createSampler(const SoTextureData & texture, VkSampler & sampler);
   bool allocateTextureDescriptorSet(VkImageView view, VkSampler sampler,
                                     VkDescriptorSet & set);
+  bool ensureDescriptorPoolSpace();
   VkDescriptorSet resolveTextureSet(const SoRenderCommand & command);
 
   // --- Render recording ---------------------------------------------------
@@ -141,12 +165,19 @@ private:
                          const SoVulkanRenderTarget & target,
                          const SoRenderParams & params,
                          VkRenderPass renderPass,
-                         bool transparent);
+                         bool transparent,
+                         int fillModeOverride = -1,
+                         const float * uniformColorOverride = nullptr,
+                         bool overlayPass = false);
   bool endAndSubmit();
   void applyViewport(const SoRenderParams & params,
                      const SoVulkanRenderTarget & target);
+  void applyCommandViewport(const SoRenderCommand & command,
+                            const SoVulkanRenderTarget & target);
   void applyScissor(const SoRenderCommand & command,
                     const SoVulkanRenderTarget & target);
+  void recordOverlayDepthClear(const SoRenderCommand & command,
+                               const SoVulkanRenderTarget & target);
   bool recordFrame(const SoDrawList & drawlist,
                    const SoRenderParams & params,
                    const SoVulkanRenderTarget & target,
@@ -177,14 +208,26 @@ private:
 
   VkDescriptorSetLayout descriptorSetLayout = VK_NULL_HANDLE;
   VkDescriptorPool descriptorPool = VK_NULL_HANDLE;
+  // Live descriptor sets allocated from descriptorPool (white fallback set
+  // plus one per cached texture).  The pool is fixed-size, so it is reset
+  // and sets are re-allocated when this nears the pool capacity.
+  uint32_t descriptorSetCount = 0;
   VkPipelineLayout pipelineLayout = VK_NULL_HANDLE;
 
-  // Per-draw lighting/material uniform buffer (set 0, binding 0).  Persistent
-  // host-visible mapping: recordDrawCommand memcpy()s each command's state
-  // and the single descriptor set is rebound per draw.
+  // Per-draw lighting/material uniform buffer (set 0, binding 0, dynamic
+  // offset).  One large ring buffer holds two frames' worth of per-command
+  // slots; every draw binds its own slot through the descriptor's dynamic
+  // offset.  The GPU executes asynchronously, so a single shared buffer
+  // rewritten per command would make every draw read the last command's
+  // matrices; distinct slots per command and alternating halves per frame
+  // keep each draw's uniform data stable until its frame completes.
   VkBuffer lightingBuffer = VK_NULL_HANDLE;
   VkDeviceMemory lightingMemory = VK_NULL_HANDLE;
   void * lightingMapped = nullptr;
+  VkDeviceSize uboSlotStride = 0;
+  uint32_t uboSlotsPerFrame = 0;
+  uint32_t uboFrameIndex = 0;
+  uint32_t uboCmdIndex = 0;
 
   // Texture binding (set 0, binding 1).  A 1x1 white fallback texture is
   // bound whenever a command carries no embedded SoTextureData.
@@ -196,6 +239,11 @@ private:
 
   VkShaderModule vertexModule = VK_NULL_HANDLE;
   VkShaderModule fragmentModule = VK_NULL_HANDLE;
+
+  // Background gradient resources (no descriptor sets; push constants only).
+  VkShaderModule backgroundVertexModule = VK_NULL_HANDLE;
+  VkShaderModule backgroundFragmentModule = VK_NULL_HANDLE;
+  VkPipelineLayout backgroundPipelineLayout = VK_NULL_HANDLE;
 
   // Render pass is owned per target identity (image + extent).
   VkRenderPass renderPass = VK_NULL_HANDLE;
@@ -216,6 +264,9 @@ private:
     bool depthTestEnable = false;
     bool depthWriteEnable = false;
     uint8_t depthFunction = 0;
+    bool depthBiasEnable = false;
+    float depthBiasConstantFactor = 0.0f;
+    float depthBiasSlopeFactor = 0.0f;
     bool blendEnable = false;
     uint8_t blendSrcRGB = 0;
     uint8_t blendDstRGB = 0;
@@ -240,6 +291,10 @@ private:
         depthTestEnable == other.depthTestEnable &&
         depthWriteEnable == other.depthWriteEnable &&
         depthFunction == other.depthFunction &&
+        depthBiasEnable == other.depthBiasEnable &&
+        (!depthBiasEnable ||
+         (depthBiasConstantFactor == other.depthBiasConstantFactor &&
+          depthBiasSlopeFactor == other.depthBiasSlopeFactor)) &&
         blendEnable == other.blendEnable &&
         (!blendEnable ||
          (blendSrcRGB == other.blendSrcRGB &&
@@ -279,6 +334,12 @@ private:
         (hash << 6) + (hash >> 2);
       hash ^= std::hash<uint32_t>()(key.depthFunction) + 0x9e3779b9 +
         (hash << 6) + (hash >> 2);
+      hash ^= std::hash<uint32_t>()(key.depthBiasEnable) + 0x9e3779b9 +
+        (hash << 6) + (hash >> 2);
+      hash ^= std::hash<float>()(key.depthBiasConstantFactor) + 0x9e3779b9 +
+        (hash << 6) + (hash >> 2);
+      hash ^= std::hash<float>()(key.depthBiasSlopeFactor) + 0x9e3779b9 +
+        (hash << 6) + (hash >> 2);
       hash ^= std::hash<uint32_t>()(key.blendEnable) + 0x9e3779b9 +
         (hash << 6) + (hash >> 2);
       hash ^= std::hash<uint32_t>()(key.blendSrcRGB) + 0x9e3779b9 +
@@ -316,6 +377,31 @@ private:
   };
 
   std::unordered_map<PipelineKey, VkPipeline, PipelineKeyHash> pipelineCache;
+
+  // Background pipeline cache: keyed on the render pass and sample count only
+  // (the gradient pipeline has no retained per-command state).
+  struct BackgroundPipelineKey {
+    VkRenderPass renderPass = VK_NULL_HANDLE;
+    uint32_t sampleCount = 1;
+    bool operator==(const BackgroundPipelineKey & other) const
+    {
+      return renderPass == other.renderPass &&
+             sampleCount == other.sampleCount;
+    }
+  };
+  struct BackgroundPipelineKeyHash
+  {
+    size_t operator()(const BackgroundPipelineKey & key) const
+    {
+      size_t hash = std::hash<uintptr_t>()(
+        reinterpret_cast<uintptr_t>(key.renderPass));
+      hash ^= std::hash<uint32_t>()(key.sampleCount) + 0x9e3779b9 +
+        (hash << 6) + (hash >> 2);
+      return hash;
+    }
+  };
+  std::unordered_map<BackgroundPipelineKey, VkPipeline,
+                     BackgroundPipelineKeyHash> backgroundPipelineCache;
 
   std::vector<VulkanCachedCommand> gpuCache;
   std::unordered_map<const SoRenderCommand *, size_t> commandToCache;

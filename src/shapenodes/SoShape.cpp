@@ -51,6 +51,7 @@ class SoVBO;
 #include <Inventor/elements/SoVertexAttributeElement.h>
 
 #include <cstring>
+#include <cstdio>
 #include <cstdlib>
 #include <vector>
 
@@ -304,6 +305,21 @@ private:
       command.modelMatrix = SoModelMatrixElement::get(state);
       command.viewMatrix = SoViewingMatrixElement::get(state);
       command.projMatrix = SoProjectionMatrixElement::get(state);
+      if (getenv("FC_VULKAN_CLIP_DEBUG")) {
+        static int mmLog = 0;
+        if (mmLog++ < 6) {
+          SbBool isId = FALSE;
+          const SbMatrix & el = SoModelMatrixElement::get(state, isId);
+          SbMatrix mm = command.modelMatrix;
+          fprintf(stderr, "[SHAPE] cmd rec pass=%d verts=%u model00=%.3f m11=%.3f m22=%.3f "
+                          "trans=(%.3f,%.3f,%.3f) isIdentity=%d el00=%.3f eltrans=(%.3f,%.3f,%.3f)\n",
+                  static_cast<int>(command.pass),
+                  static_cast<unsigned>(command.geometry.vertexCount),
+                  mm[0][0], mm[1][1], mm[2][2],
+                  mm[3][0], mm[3][1], mm[3][2],
+                  isId ? 1 : 0, el[0][0], el[3][0], el[3][1], el[3][2]);
+        }
+      }
       SoRenderIR::fillMaterialFromState(
         state, command.material, std::max(batch.materialIndex, 0));
       command.material.vertexColorAlphaIncludesOpacity =
@@ -319,6 +335,18 @@ private:
             break;
           }
         }
+      }
+      // On-top overlays (selection/preselection highlights) are opaque but
+      // carry blend + always-depth + no-depth-write state so they render on
+      // top of the base geometry.  Classifying them by material opacity
+      // alone keeps them in the opaque pass, where their different pipeline
+      // key can sort them before the base surface and let the base overwrite
+      // them.  Force them into the transparent (drawn-last) pass so the
+      // highlight always overdraws the object.
+      if (!transparent && command.state.blend.enabled
+          && !command.state.depth.writeEnabled
+          && command.state.depth.func == SO_DEPTH_ALWAYS) {
+        transparent = true;
       }
       command.pass = transparent ? SO_RENDERPASS_TRANSPARENT
                                  : SO_RENDERPASS_OPAQUE;

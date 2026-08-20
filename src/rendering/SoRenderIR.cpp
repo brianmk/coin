@@ -403,6 +403,7 @@ renderpass_name(SoRenderPassType pass)
   switch (pass) {
   case SO_RENDERPASS_OPAQUE: return "opaque";
   case SO_RENDERPASS_TRANSPARENT: return "transparent";
+  case SO_RENDERPASS_OVERLAY: return "overlay";
   default: return "unknown";
   }
 }
@@ -429,10 +430,11 @@ SoIRDumpSummary(const SoDrawList & drawlist)
   }
 
   SoDebugError::postInfo("SoDrawList",
-                         "commands=%d opaque=%d transparent=%d minVerts=%u maxVerts=%u",
+                         "commands=%d opaque=%d transparent=%d overlay=%d minVerts=%u maxVerts=%u",
                          num,
                          counts[SO_RENDERPASS_OPAQUE],
                          counts[SO_RENDERPASS_TRANSPARENT],
+                         counts[SO_RENDERPASS_OVERLAY],
                          minVerts == UINT32_MAX ? 0 : minVerts,
                          maxVerts);
 }

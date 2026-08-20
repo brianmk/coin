@@ -11,6 +11,11 @@
 #   STAGE              One of: vert, tesc, tese, geom, frag, comp, mesh, task,
 #                      rgen, rint, rahit, rchit, rmiss, rcall.
 #   VARIABLE_NAME      C identifier for the embedded SPIR-V array.
+#
+# Optional variables:
+#   TARGET_ENV         Vulkan target environment (default vulkan1.0).  Ray
+#                      tracing shaders (GL_EXT_ray_tracing) require SPIR-V
+#                      1.4+, so the RT entries pass vulkan1.2.
 
 if(NOT DEFINED GLSLANG_VALIDATOR)
   message(FATAL_ERROR "GLSLANG_VALIDATOR is not defined")
@@ -24,13 +29,16 @@ endif()
 if(NOT DEFINED VARIABLE_NAME)
   message(FATAL_ERROR "VARIABLE_NAME is not defined")
 endif()
+if(NOT DEFINED TARGET_ENV)
+  set(TARGET_ENV vulkan1.0)
+endif()
 
 set(_tmp_output "${OUTPUT_FILE}.tmp")
 
 # -V selects Vulkan SPIR-V output; -o ending in .h makes glslangValidator emit
 # a C header of the form `const uint32_t <name>[] = { ... };`.
 execute_process(
-  COMMAND "${GLSLANG_VALIDATOR}" -V -S "${STAGE}" --target-env vulkan1.0
+  COMMAND "${GLSLANG_VALIDATOR}" -V -S "${STAGE}" --target-env "${TARGET_ENV}"
           --variable-name "${VARIABLE_NAME}" -o "${_tmp_output}" "${INPUT_FILE}"
   RESULT_VARIABLE _result
   OUTPUT_VARIABLE _stdout

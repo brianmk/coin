@@ -34,6 +34,21 @@ struct SoRenderParams {
   uint32_t         clearStencil = 0;
   uint32_t         flags = 0;
 
+  // Background gradient (vertical, screen-space).  When backgroundGradient
+  // is set the backend fills the viewport with a top-to-bottom gradient
+  // between backgroundTopColor and backgroundBottomColor before drawing
+  // geometry, instead of a flat clearColor.
+  SbBool           backgroundGradient = FALSE;
+  SbColor4f        backgroundTopColor = SbColor4f(0.0f, 0.0f, 0.0f, 1.0f);
+  SbColor4f        backgroundBottomColor = SbColor4f(0.0f, 0.0f, 0.0f, 1.0f);
+
+  // Vulkan-only display overlays (shaded-with-edges / show-vertices).
+  // Present here so the Vulkan manager can forward them to its backend; the
+  // OpenGL backend ignores these fields entirely.
+  SbBool           wireframeOverlay = FALSE;
+  SbBool           pointsOverlay = FALSE;
+  SbColor4f        edgeColor = SbColor4f(0.05f, 0.05f, 0.05f, 1.0f);
+
   /*!
     \brief Backend-defined render destination for this frame.
 

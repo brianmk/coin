@@ -56,6 +56,9 @@ public:
 
   static void initClass(void);
 
+  /*!\brief Traverse a node via its doAction() entry point. */
+  static void callDoAction(SoAction * action, SoNode * node);
+
   SoIRRenderAction(const SbViewportRegion & vp);
   virtual ~SoIRRenderAction();
 

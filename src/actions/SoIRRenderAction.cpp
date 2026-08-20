@@ -54,6 +54,13 @@
 #include <Inventor/nodes/SoCamera.h>
 #include <Inventor/nodes/SoNode.h>
 #include <Inventor/nodes/SoShape.h>
+#include <Inventor/nodes/SoTransform.h>
+#include <Inventor/nodes/SoTransformSeparator.h>
+#include <Inventor/nodes/SoTranslation.h>
+#include <Inventor/nodes/SoRotation.h>
+#include <Inventor/nodes/SoScale.h>
+#include <Inventor/nodes/SoMatrixTransform.h>
+#include <Inventor/nodes/SoTransformation.h>
 #include <Inventor/lists/SoPathList.h>
 
 #include "actions/SoSubActionP.h"
@@ -82,6 +89,18 @@ SoIRRenderAction::initClass(void)
     SoCacheElement::initClass();
   }
   SO_ACTION_ADD_METHOD_INTERNAL(SoNode, SoNode::IRRenderS);
+
+  // Transformation and camera nodes must run their doAction()
+  // implementations so model/view/projection matrices are set up while
+  // building the retained draw list.
+  SO_ACTION_ADD_METHOD_INTERNAL(SoCamera, SoIRRenderAction::callDoAction);
+  SO_ACTION_ADD_METHOD_INTERNAL(SoTransformSeparator, SoIRRenderAction::callDoAction);
+  SO_ACTION_ADD_METHOD_INTERNAL(SoTransform, SoIRRenderAction::callDoAction);
+  SO_ACTION_ADD_METHOD_INTERNAL(SoTranslation, SoIRRenderAction::callDoAction);
+  SO_ACTION_ADD_METHOD_INTERNAL(SoRotation, SoIRRenderAction::callDoAction);
+  SO_ACTION_ADD_METHOD_INTERNAL(SoScale, SoIRRenderAction::callDoAction);
+  SO_ACTION_ADD_METHOD_INTERNAL(SoMatrixTransform, SoIRRenderAction::callDoAction);
+  SO_ACTION_ADD_METHOD_INTERNAL(SoTransformation, SoIRRenderAction::callDoAction);
 
   SO_ENABLE(SoIRRenderAction, SoViewportRegionElement);
   SO_ENABLE(SoIRRenderAction, SoViewVolumeElement);
@@ -152,6 +171,31 @@ SoIRRenderAction::setViewportRegion(const SbViewportRegion & vp)
 }
 
 void
+SoIRRenderAction::callDoAction(SoAction * action, SoNode * node)
+{
+  node->doAction(action);
+  if (getenv("FC_VULKAN_CLIP_DEBUG")) {
+    static int cdaCount = 0;
+    if (cdaCount++ < 40) {
+      SoState * st = action->getState();
+      SbBool isId = FALSE;
+      const SbMatrix & mm = SoModelMatrixElement::get(st, isId);
+      fprintf(stderr, "[IR] doAction %s -> model00=%.3f m11=%.3f m22=%.3f "
+                      "trans=(%.3f,%.3f,%.3f) isId=%d",
+              node->getTypeId().getName().getString(),
+              mm[0][0], mm[1][1], mm[2][2],
+              mm[3][0], mm[3][1], mm[3][2], isId ? 1 : 0);
+      if (node->getTypeId().isDerivedFrom(SoScale::getClassTypeId())) {
+        const SoScale * s = static_cast<const SoScale*>(node);
+        SbVec3f sf = s->scaleFactor.getValue();
+        fprintf(stderr, " scaleFactor=(%.3f,%.3f,%.3f)", sf[0], sf[1], sf[2]);
+      }
+      fprintf(stderr, "\n");
+    }
+  }
+}
+
+void
 SoIRRenderAction::beginFrame()
 {
   this->drawlist.clear();
@@ -183,6 +227,18 @@ void
 SoIRRenderAction::beginTraversal(SoNode * node)
 {
   SoViewportRegionElement::set(this->state, this->vpRegion);
+  if (getenv("FC_VULKAN_CLIP_DEBUG")) {
+    static bool btLogged = false;
+    if (!btLogged) {
+      btLogged = true;
+      SbBool isId = FALSE;
+      const SbMatrix & mm = SoModelMatrixElement::get(this->state, isId);
+      fprintf(stderr, "[IR] beginTraversal model00=%.3f m11=%.3f m22=%.3f "
+                      "trans=(%.3f,%.3f,%.3f) isIdentity=%d\n",
+              mm[0][0], mm[1][1], mm[2][2],
+              mm[3][0], mm[3][1], mm[3][2], isId ? 1 : 0);
+    }
+  }
   inherited::beginTraversal(node);
 }
 

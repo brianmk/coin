@@ -406,6 +406,10 @@ struct SoRenderState {
 enum SoRenderPassType : uint8_t {
   SO_RENDERPASS_OPAQUE = 0,
   SO_RENDERPASS_TRANSPARENT,
+  //! Screen-space overlay geometry drawn after both previous passes with a
+  //! per-rect viewport and its own depth clear (e.g. the navigation cube).
+  //! Overlay commands carry their own view/projection matrices.
+  SO_RENDERPASS_OVERLAY,
   SO_RENDERPASS_COUNT
 };
 

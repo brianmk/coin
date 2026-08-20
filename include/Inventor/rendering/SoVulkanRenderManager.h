@@ -15,6 +15,7 @@ class SoCamera;
 class SoNode;
 class SoIRRenderAction;
 class SoVulkanRenderBackend;
+class SoRTXRenderBackend;
 
 struct SoVulkanDeviceContext;
 
@@ -39,14 +40,75 @@ public:
   void setSceneGraph(SoNode * root);
   SoNode * getSceneGraph(void) const;
 
+  /*!
+    \brief Set an optional screen-space overlay scene graph.
+
+    The overlay scene is traversed after the main scene every frame (its
+    commands are recorded into the same draw list) and drawn last in the
+    overlay render pass, each command using its own view/projection matrices
+    and viewport/scissor region.  Used for the navigation cube: the overlay
+    node renders itself into a viewport corner without affecting the main
+    scene's bounding box or camera.
+  */
+  void setOverlaySceneGraph(SoNode * root);
+  SoNode * getOverlaySceneGraph(void) const;
+
   void setCamera(SoCamera * camera);
   SoCamera * getCamera(void) const;
 
   void setViewportRegion(const SbViewportRegion & region);
   const SbViewportRegion & getViewportRegion(void) const;
 
+  /*!
+    \brief Strategy for automatically adjusting the camera clipping planes.
+
+    Mirrors SoRenderManager::AutoClippingStrategy.  With anything other than
+    NO_AUTO_CLIPPING, render()/renderExternal() re-compute the camera's
+    nearDistance/farDistance every frame from the scene bounding box so that
+    navigation (zoom, orbit) never pushes geometry outside the view volume.
+    Defaults to NO_AUTO_CLIPPING to match SoRenderManager; embedding
+    applications that used the legacy GL auto-clipping should enable
+    VARIABLE_NEAR_PLANE.
+  */
+  enum AutoClippingStrategy {
+    NO_AUTO_CLIPPING,
+    FIXED_NEAR_PLANE,
+    VARIABLE_NEAR_PLANE
+  };
+  void setAutoClipping(AutoClippingStrategy strategy);
+  AutoClippingStrategy getAutoClipping(void) const;
+
+  //! Fraction of the depth range kept for the near plane (see SoRenderManager).
+  void setNearPlaneValue(float value);
+  float getNearPlaneValue(void) const;
+
   void setBackgroundColor(const SbColor4f & color);
   const SbColor4f & getBackgroundColor(void) const;
+
+  /*!
+    \brief Configure a vertical screen-space background gradient.
+
+    When \a enabled is TRUE, render()/renderExternal() fills the viewport
+    with a top-to-bottom gradient between \a topColor and \a bottomColor
+    before drawing geometry (instead of the flat clear color).
+  */
+  void setBackgroundGradient(SbBool enabled,
+                             const SbColor4f & topColor,
+                             const SbColor4f & bottomColor);
+
+  /*!
+    \brief Configure Vulkan-only display overlays.
+
+    These toggle the wireframe/point edge overlays and their color.  They are
+    deliberately not part of the shared retained render state, so the OpenGL
+    backend never consults them.
+  */
+  void setWireframeOverlay(SbBool enabled);
+  void setPointsOverlay(SbBool enabled);
+  void setEdgeColor(const SbColor4f & color);
+  SbBool getWireframeOverlay(void) const;
+  SbBool getPointsOverlay(void) const;
+  const SbColor4f & getEdgeColor(void) const;
 
   void setClearEnabled(SbBool clearwindow, SbBool clearzbuffer);
   void getClearEnabled(SbBool & clearwindow, SbBool & clearzbuffer) const;
@@ -95,7 +157,52 @@ public:
                         VkCommandBuffer commandBuffer,
                         VkRenderPass renderPass);
 
+  /*!
+    \brief Select the ray-tracing backend for the next render() calls.
+
+    Ray tracing requires a Vulkan 1.2+ device with VK_KHR_acceleration_structure
+    and VK_KHR_ray_tracing_pipeline enabled (the embedding application is
+    responsible for enabling them on the QVulkanWindow device).  When the RT
+    backend cannot initialize, this method logs a warning and keeps the raster
+    backend; getRayTracingActive() reports the effective state.  Call after
+    initialize(); the setting applies to subsequent render()/renderExternal().
+  */
+  void setRayTracing(SbBool enabled);
+
+  //! True when the ray-tracing backend is active (initialized and enabled).
+  SbBool getRayTracingActive(void) const;
+
+  /*!
+    \brief Enable/disable path tracing on the ray-tracing backend.
+
+    Path tracing runs a multi-bounce path tracer with shadow rays,
+    progressive per-pixel accumulation and an edge-stopping denoise pass.
+    A no-op when the ray-tracing backend is not active.
+  */
+  void setPathTracingEnabled(SbBool enabled);
+
+  //! True when path tracing is enabled.
+  SbBool getPathTracingEnabled(void) const;
+
+  /*!
+    \brief Start flag for progressive path-tracing refinement.
+
+    TRUE starts (or restarts) the progressive accumulation; any camera move
+    or scene change drops back to a single-sample preview until the flag is
+    raised again.  FALSE cancels accumulation.
+  */
+  void setPathTracingStart(SbBool start);
+
+  //! True while progressive path-tracing accumulation is running.
+  SbBool getPathTracingActive(void) const;
+
+  //! Samples accumulated in the current progressive run (0 when idle).
+  uint32_t getPathTracingSampleCount(void) const;
+
   SoVulkanRenderBackend * getBackend(void) const;
+
+  //! The RT backend, or NULL when ray tracing is unavailable.
+  SoRTXRenderBackend * getRayTracingBackend(void) const;
 
 private:
   class SoVulkanRenderManagerP * pimpl;

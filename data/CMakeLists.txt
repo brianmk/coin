@@ -102,6 +102,15 @@ if(COIN_BUILD_VULKAN_RENDERER)
     set(_variable_name "coin_${_logical_name}_spirv")
     set(_target_name "coin_regenerate_vulkan_spirv_${_logical_name}")
 
+    # Ray tracing stages need SPIR-V 1.4+ (GL_EXT_ray_tracing); the visual
+    # stages keep the vulkan1.0 default.
+    set(_target_env vulkan1.0)
+    if("${_stage}" STREQUAL "rgen" OR "${_stage}" STREQUAL "rmiss" OR
+       "${_stage}" STREQUAL "rchit" OR "${_stage}" STREQUAL "rahit" OR
+       "${_stage}" STREQUAL "rint")
+      set(_target_env vulkan1.2)
+    endif()
+
     add_custom_command(
       OUTPUT "${_output_file}"
       COMMAND "${CMAKE_COMMAND}"
@@ -110,6 +119,7 @@ if(COIN_BUILD_VULKAN_RENDERER)
         "-DOUTPUT_FILE=${_output_file}"
         "-DSTAGE=${_stage}"
         "-DVARIABLE_NAME=${_variable_name}"
+        "-DTARGET_ENV=${_target_env}"
         -P "${CMAKE_CURRENT_SOURCE_DIR}/GenerateVulkanSpirvHeader.cmake"
       DEPENDS
         "${_input_file}"
@@ -131,10 +141,61 @@ if(COIN_BUILD_VULKAN_RENDERER)
       data/shaders/vulkan/visual/Vertex.glsl vert)
     coin_embed_vulkan_spirv(vulkan_visual_fragment
       data/shaders/vulkan/visual/Fragment.glsl frag)
+    coin_embed_vulkan_spirv(vulkan_background_vertex
+      data/shaders/vulkan/visual/BackgroundVertex.glsl vert)
+    coin_embed_vulkan_spirv(vulkan_background_fragment
+      data/shaders/vulkan/visual/BackgroundFragment.glsl frag)
+
+    # Ray-tracing backend shaders.  The helper emits into
+    # src/rendering/vulkan/visual/; the RT headers live in
+    # src/rendering/vulkan/rt/, so copy the generated header after each
+    # stage.  The .spv.h files are committed like the visual ones; this is
+    # only the offline regeneration path.
+    coin_embed_vulkan_spirv(vulkan_rt_pathtrace
+      data/shaders/vulkan/rt/PathTrace.glsl comp)
+    coin_embed_vulkan_spirv(vulkan_rt_raygen
+      data/shaders/vulkan/rt/Raygen.glsl rgen)
+    coin_embed_vulkan_spirv(vulkan_rt_closesthit
+      data/shaders/vulkan/rt/ClosestHit.glsl rchit)
+    coin_embed_vulkan_spirv(vulkan_rt_miss
+      data/shaders/vulkan/rt/Miss.glsl rmiss)
+    coin_embed_vulkan_spirv(vulkan_rt_shadowmiss
+      data/shaders/vulkan/rt/ShadowMiss.glsl rmiss)
+    coin_embed_vulkan_spirv(vulkan_rt_shadowclosesthit
+      data/shaders/vulkan/rt/ShadowClosestHit.glsl rchit)
+    coin_embed_vulkan_spirv(vulkan_rt_presentvertex
+      data/shaders/vulkan/rt/PresentVertex.glsl vert)
+    coin_embed_vulkan_spirv(vulkan_rt_presentfragment
+      data/shaders/vulkan/rt/PresentFragment.glsl frag)
 
     add_custom_target(coin_regenerate_vulkan_spirv
       DEPENDS ${COIN_VULKAN_SPIRV_REGENERATE_TARGETS}
       COMMENT "Regenerating all committed Vulkan SPIR-V headers")
+
+    # The embed macro writes to src/rendering/vulkan/visual/; move the RT
+    # outputs into src/rendering/vulkan/rt/ where the backend includes them.
+    set(COIN_RT_SPIRV_OUTPUT_DIR "${PROJECT_SOURCE_DIR}/src/rendering/vulkan/rt")
+    set(COIN_RT_SPIRV_FILES
+      PathTrace.spv.h
+      Raygen.spv.h
+      ClosestHit.spv.h
+      Miss.spv.h
+      ShadowMiss.spv.h
+      ShadowClosestHit.spv.h
+      PresentVertex.spv.h
+      PresentFragment.spv.h)
+    set(COIN_RT_SPIRV_COPY_COMMANDS)
+    foreach(_rt_spv ${COIN_RT_SPIRV_FILES})
+      list(APPEND COIN_RT_SPIRV_COPY_COMMANDS
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different
+          "${PROJECT_SOURCE_DIR}/src/rendering/vulkan/visual/${_rt_spv}"
+          "${COIN_RT_SPIRV_OUTPUT_DIR}/")
+    endforeach()
+    add_custom_command(TARGET coin_regenerate_vulkan_spirv POST_BUILD
+      COMMAND ${CMAKE_COMMAND} -E make_directory
+              "${COIN_RT_SPIRV_OUTPUT_DIR}"
+      ${COIN_RT_SPIRV_COPY_COMMANDS}
+      COMMENT "Copying regenerated RT SPIR-V headers into vulkan/rt/")
   endif()
 endif()
 

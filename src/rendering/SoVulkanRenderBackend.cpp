@@ -3,16 +3,24 @@
 #include "rendering/SoVulkanRenderBackend.h"
 
 #include <Inventor/C/glue/gl.h>
+#include <Inventor/elements/SoDrawStyleElement.h>
 #include <Inventor/errors/SoDebugError.h>
 
 #include <algorithm>
+#include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <mutex>
 
 #include "vulkan/visual/Fragment.spv.h"
 #include "vulkan/visual/Vertex.spv.h"
+#include "vulkan/visual/BackgroundVertex.spv.h"
+#include "vulkan/visual/BackgroundFragment.spv.h"
 
 namespace {
+
+int s_debugFrame = 0;
+int s_dumpCmdCount = 0;
 
 // Fixed interleaved vertex layout shared by every retained command.
 //
@@ -39,6 +47,15 @@ struct alignas(16) VulkanPushConstants {
                         // z = alphaTestReference
   float texBlend[4];    // texture blend color
 };
+
+// Push-constant block for the background gradient pass (BackgroundFragment.glsl).
+struct alignas(16) VulkanBackgroundPush {
+  float topColor[4];       // offset 0
+  float bottomColor[4];    // offset 16
+  float viewport[4];       // offset 32: x = width, y = height
+};
+static_assert(sizeof(VulkanBackgroundPush) == 48,
+              "VulkanBackgroundPush must match BackgroundPush layout");
 
 // std140 mirror of the VisualBlock uniform in Vertex.glsl.  The layout must
 // match the shader byte-for-byte; the C++ side uses plain float arrays with
@@ -319,6 +336,12 @@ SoVulkanRenderBackend::initialize(const SoRenderBackendInitParams & params)
     return FALSE;
   }
 
+  if (!this->createBackgroundResources()) {
+    this->emitError("failed to create Vulkan background resources");
+    this->shutdown();
+    return FALSE;
+  }
+
   this->setInitialized(TRUE);
   this->emitLog("initialized");
   return TRUE;
@@ -351,7 +374,7 @@ SoVulkanRenderBackend::createDescriptorSetLayout()
 {
   VkDescriptorSetLayoutBinding bindings[2] {};
   bindings[0].binding = 0;
-  bindings[0].descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
+  bindings[0].descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC;
   bindings[0].descriptorCount = 1;
   bindings[0].stageFlags = VK_SHADER_STAGE_VERTEX_BIT;
   bindings[0].pImmutableSamplers = nullptr;
@@ -374,14 +397,14 @@ bool
 SoVulkanRenderBackend::createDescriptorPool()
 {
   VkDescriptorPoolSize poolSizes[2] {};
-  poolSizes[0].type = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
+  poolSizes[0].type = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC;
   poolSizes[0].descriptorCount = 1024;
   poolSizes[1].type = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
   poolSizes[1].descriptorCount = 1024;
 
   VkDescriptorPoolCreateInfo ci {};
   ci.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
-  ci.flags = 0;
+  ci.flags = VK_DESCRIPTOR_POOL_CREATE_FREE_DESCRIPTOR_SET_BIT;
   ci.maxSets = 1024;
   ci.poolSizeCount = 2;
   ci.pPoolSizes = poolSizes;
@@ -402,11 +425,12 @@ SoVulkanRenderBackend::allocateTextureDescriptorSet(VkImageView view,
   if (vkAllocateDescriptorSets(this->device, &ai, &set) != VK_SUCCESS) {
     return false;
   }
+  ++this->descriptorSetCount;
 
   VkDescriptorBufferInfo bufferInfo {};
   bufferInfo.buffer = this->lightingBuffer;
   bufferInfo.offset = 0;
-  bufferInfo.range = sizeof(VulkanVisualUbo);
+  bufferInfo.range = this->uboSlotStride;
 
   VkDescriptorImageInfo imageInfo {};
   imageInfo.sampler = sampler;
@@ -419,7 +443,7 @@ SoVulkanRenderBackend::allocateTextureDescriptorSet(VkImageView view,
   writes[0].dstBinding = 0;
   writes[0].dstArrayElement = 0;
   writes[0].descriptorCount = 1;
-  writes[0].descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
+  writes[0].descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC;
   writes[0].pBufferInfo = &bufferInfo;
 
   writes[1].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
@@ -437,14 +461,27 @@ SoVulkanRenderBackend::allocateTextureDescriptorSet(VkImageView view,
 bool
 SoVulkanRenderBackend::createLightingUniformBuffer()
 {
-  if (!this->createBuffer(sizeof(VulkanVisualUbo),
-                          VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT,
+  // Per-command slots in a ring buffer sized for two frames in flight.
+  // Each draw binds its slot with a dynamic offset, so the GPU reads the
+  // uniform block that was recorded for that specific draw instead of a
+  // shared buffer that later commands overwrite.
+  VkPhysicalDeviceProperties deviceProps;
+  vkGetPhysicalDeviceProperties(this->physicalDevice, &deviceProps);
+  const VkDeviceSize alignment = std::max<VkDeviceSize>(
+    1, deviceProps.limits.minUniformBufferOffsetAlignment);
+  this->uboSlotStride =
+    (sizeof(VulkanVisualUbo) + alignment - 1) / alignment * alignment;
+  this->uboSlotsPerFrame = 4096;
+  const VkDeviceSize totalBytes =
+    2 * static_cast<VkDeviceSize>(this->uboSlotsPerFrame) *
+    this->uboSlotStride;
+  if (!this->createBuffer(totalBytes, VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT,
                           this->lightingBuffer, this->lightingMemory,
                           nullptr)) {
     return false;
   }
-  if (vkMapMemory(this->device, this->lightingMemory, 0, sizeof(VulkanVisualUbo),
-                  0, &this->lightingMapped) != VK_SUCCESS) {
+  if (vkMapMemory(this->device, this->lightingMemory, 0, totalBytes, 0,
+                  &this->lightingMapped) != VK_SUCCESS) {
     this->emitError("createLightingUniformBuffer: vkMapMemory failed");
     return false;
   }
@@ -634,6 +671,249 @@ SoVulkanRenderBackend::createShaders(VkShaderModule & vertex,
 }
 
 bool
+SoVulkanRenderBackend::createBackgroundResources()
+{
+  if (getenv("FC_VULKAN_BREADCRUMBS")) {
+    fprintf(stderr, "[VK-TRACE] SoVulkanRenderBackend::createBackgroundResources enter\n");
+  }
+  auto load = [this](const uint32_t * code, size_t count,
+                     VkShaderModule & module) {
+    VkShaderModuleCreateInfo ci {};
+    ci.sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO;
+    ci.codeSize = count * sizeof(uint32_t);
+    ci.pCode = code;
+    return vkCreateShaderModule(this->device, &ci, this->allocator,
+                                &module) == VK_SUCCESS;
+  };
+
+  if (!load(coin_vulkan_background_vertex_spirv,
+            coin_vulkan_background_vertex_spirv_count,
+            this->backgroundVertexModule)) {
+    return false;
+  }
+  if (!load(coin_vulkan_background_fragment_spirv,
+            coin_vulkan_background_fragment_spirv_count,
+            this->backgroundFragmentModule)) {
+    vkDestroyShaderModule(this->device, this->backgroundVertexModule,
+                          this->allocator);
+    this->backgroundVertexModule = VK_NULL_HANDLE;
+    return false;
+  }
+
+  // Push-constant-only layout: the gradient shader has no descriptor sets.
+  constexpr VkPushConstantRange range {
+    VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
+    0,
+    sizeof(VulkanBackgroundPush)
+  };
+  VkPipelineLayoutCreateInfo li {};
+  li.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
+  li.setLayoutCount = 0;
+  li.pSetLayouts = nullptr;
+  li.pushConstantRangeCount = 1;
+  li.pPushConstantRanges = &range;
+  return vkCreatePipelineLayout(this->device, &li, this->allocator,
+                                &this->backgroundPipelineLayout) == VK_SUCCESS;
+}
+
+bool
+SoVulkanRenderBackend::createBackgroundPipeline(
+  const SoVulkanRenderTarget & target,
+  VkRenderPass renderPass,
+  VkPipeline & pipeline)
+{
+  BackgroundPipelineKey key;
+  key.renderPass = renderPass;
+  key.sampleCount = target.sampleCount;
+  const auto found = this->backgroundPipelineCache.find(key);
+  if (found != this->backgroundPipelineCache.end()) {
+    pipeline = found->second;
+    return pipeline != VK_NULL_HANDLE;
+  }
+
+  VkPipelineShaderStageCreateInfo stages[2] {};
+  stages[0].sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+  stages[0].stage = VK_SHADER_STAGE_VERTEX_BIT;
+  stages[0].module = this->backgroundVertexModule;
+  stages[0].pName = "main";
+  stages[1].sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+  stages[1].stage = VK_SHADER_STAGE_FRAGMENT_BIT;
+  stages[1].module = this->backgroundFragmentModule;
+  stages[1].pName = "main";
+
+  // Fullscreen triangle: no vertex inputs.
+  VkPipelineVertexInputStateCreateInfo vertexInput {};
+  vertexInput.sType =
+    VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO;
+  vertexInput.vertexBindingDescriptionCount = 0;
+  vertexInput.vertexAttributeDescriptionCount = 0;
+
+  VkPipelineInputAssemblyStateCreateInfo inputAssembly {};
+  inputAssembly.sType =
+    VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO;
+  inputAssembly.topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
+  inputAssembly.primitiveRestartEnable = VK_FALSE;
+
+  VkPipelineViewportStateCreateInfo viewportState {};
+  viewportState.sType =
+    VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO;
+  viewportState.viewportCount = 1;
+  viewportState.scissorCount = 1;
+
+  VkPipelineRasterizationStateCreateInfo rasterization {};
+  rasterization.sType =
+    VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO;
+  rasterization.depthClampEnable = VK_FALSE;
+  rasterization.rasterizerDiscardEnable = VK_FALSE;
+  rasterization.polygonMode = VK_POLYGON_MODE_FILL;
+  rasterization.cullMode = VK_CULL_MODE_NONE;
+  rasterization.frontFace = VK_FRONT_FACE_COUNTER_CLOCKWISE;
+  rasterization.lineWidth = 1.0f;
+
+  VkPipelineMultisampleStateCreateInfo multisample {};
+  multisample.sType =
+    VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO;
+  multisample.rasterizationSamples = target.sampleCount;
+
+  // The gradient fills the whole viewport and writes no depth so geometry
+  // drawn afterwards is unaffected.
+  VkPipelineDepthStencilStateCreateInfo depthStencil {};
+  depthStencil.sType =
+    VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO;
+  depthStencil.depthTestEnable = VK_FALSE;
+  depthStencil.depthWriteEnable = VK_FALSE;
+  depthStencil.depthCompareOp = VK_COMPARE_OP_ALWAYS;
+  depthStencil.depthBoundsTestEnable = VK_FALSE;
+  depthStencil.stencilTestEnable = VK_FALSE;
+
+  VkPipelineColorBlendAttachmentState blendAttachment {};
+  blendAttachment.colorWriteMask =
+    VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT |
+    VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT;
+  blendAttachment.blendEnable = VK_FALSE;
+
+  VkPipelineColorBlendStateCreateInfo colorBlend {};
+  colorBlend.sType =
+    VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO;
+  colorBlend.logicOpEnable = VK_FALSE;
+  colorBlend.attachmentCount = 1;
+  colorBlend.pAttachments = &blendAttachment;
+
+  const VkDynamicState dynamicStates[] = {
+    VK_DYNAMIC_STATE_VIEWPORT,
+    VK_DYNAMIC_STATE_SCISSOR,
+  };
+  VkPipelineDynamicStateCreateInfo dynamicState {};
+  dynamicState.sType =
+    VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO;
+  dynamicState.dynamicStateCount = 2;
+  dynamicState.pDynamicStates = dynamicStates;
+
+  VkGraphicsPipelineCreateInfo ci {};
+  ci.sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO;
+  ci.stageCount = 2;
+  ci.pStages = stages;
+  ci.pVertexInputState = &vertexInput;
+  ci.pInputAssemblyState = &inputAssembly;
+  ci.pViewportState = &viewportState;
+  ci.pRasterizationState = &rasterization;
+  ci.pMultisampleState = &multisample;
+  ci.pDepthStencilState = &depthStencil;
+  ci.pColorBlendState = &colorBlend;
+  ci.pDynamicState = &dynamicState;
+  ci.layout = this->backgroundPipelineLayout;
+  ci.renderPass = renderPass;
+  ci.subpass = 0;
+
+  VkPipeline created = VK_NULL_HANDLE;
+  const VkResult result =
+    vkCreateGraphicsPipelines(this->device, VK_NULL_HANDLE, 1, &ci,
+                              this->allocator, &created);
+  if (result != VK_SUCCESS) {
+    this->emitError("failed to create Vulkan background pipeline");
+    this->backgroundPipelineCache[key] = VK_NULL_HANDLE;
+    pipeline = VK_NULL_HANDLE;
+    return false;
+  }
+  this->backgroundPipelineCache[key] = created;
+  pipeline = created;
+  return true;
+}
+
+void
+SoVulkanRenderBackend::recordBackground(const SoRenderParams & params,
+                                        const SoVulkanRenderTarget & target,
+                                        VkRenderPass renderPass)
+{
+  if (!params.backgroundGradient) {
+    return;
+  }
+
+  VkPipeline pipeline = VK_NULL_HANDLE;
+  if (!this->createBackgroundPipeline(target, renderPass, pipeline) ||
+      pipeline == VK_NULL_HANDLE) {
+    return;
+  }
+
+  // The gradient covers exactly the viewport region (same Y-flip math as
+  // applyViewport()); geometry drawn afterwards restores its own viewport.
+  const SbVec2s & origin = params.viewport.getViewportOriginPixels();
+  const SbVec2s & size = params.viewport.getViewportSizePixels();
+  const int32_t x0 = std::max(0, static_cast<int32_t>(origin[0]));
+  const int32_t y0 = std::max(
+    0, static_cast<int32_t>(target.extent.height) -
+         static_cast<int32_t>(origin[1]) -
+         static_cast<int32_t>(size[1]));
+  const int32_t x1 = std::min(static_cast<int32_t>(target.extent.width),
+                              static_cast<int32_t>(origin[0]) +
+                                static_cast<int32_t>(size[0]));
+  const int32_t y1 = std::min(
+    static_cast<int32_t>(target.extent.height),
+    static_cast<int32_t>(target.extent.height) -
+      static_cast<int32_t>(origin[1]));
+  const int32_t w = std::max(0, x1 - x0);
+  const int32_t h = std::max(0, y1 - y0);
+  if (w == 0 || h == 0) return;
+
+  VkViewport viewport {};
+  viewport.x = static_cast<float>(x0);
+  viewport.y = static_cast<float>(y0);
+  viewport.width = static_cast<float>(w);
+  viewport.height = static_cast<float>(h);
+  viewport.minDepth = 0.0f;
+  viewport.maxDepth = 1.0f;
+  vkCmdSetViewport(this->activeCommandBuffer, 0, 1, &viewport);
+
+  VkRect2D scissor {};
+  scissor.offset = {x0, y0};
+  scissor.extent = {static_cast<uint32_t>(w), static_cast<uint32_t>(h)};
+  vkCmdSetScissor(this->activeCommandBuffer, 0, 1, &scissor);
+
+  vkCmdBindPipeline(this->activeCommandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS,
+                    pipeline);
+
+  VulkanBackgroundPush push {};
+  push.topColor[0] = params.backgroundTopColor[0];
+  push.topColor[1] = params.backgroundTopColor[1];
+  push.topColor[2] = params.backgroundTopColor[2];
+  push.topColor[3] = params.backgroundTopColor[3];
+  push.bottomColor[0] = params.backgroundBottomColor[0];
+  push.bottomColor[1] = params.backgroundBottomColor[1];
+  push.bottomColor[2] = params.backgroundBottomColor[2];
+  push.bottomColor[3] = params.backgroundBottomColor[3];
+  push.viewport[0] = static_cast<float>(w);
+  push.viewport[1] = static_cast<float>(h);
+  push.viewport[2] = 0.0f;
+  push.viewport[3] = 0.0f;
+  vkCmdPushConstants(this->activeCommandBuffer, this->backgroundPipelineLayout,
+                     VK_SHADER_STAGE_VERTEX_BIT |
+                       VK_SHADER_STAGE_FRAGMENT_BIT,
+                     0, sizeof(push), &push);
+
+  vkCmdDraw(this->activeCommandBuffer, 3, 1, 0, 0);
+}
+
+bool
 SoVulkanRenderBackend::createRenderPass(const SoVulkanRenderTarget & target,
                                         VkRenderPass & pass)
 {
@@ -696,7 +976,9 @@ SoVulkanRenderBackend::getOrCreatePipeline(const SoRenderCommand & command,
                                            const SoVulkanRenderTarget & target,
                                            VkRenderPass pass,
                                            VkPipeline & pipeline,
-                                           const bool transparent)
+                                           const bool transparent,
+                                           const int fillModeOverride,
+                                           const bool overlayPass)
 {
   // Pipelines are immutable in Vulkan.  Key the cache on every retained
   // state value that changes the created pipeline so commands of different
@@ -706,14 +988,41 @@ SoVulkanRenderBackend::getOrCreatePipeline(const SoRenderCommand & command,
   // not need to participate in the key yet.
   const bool blending = transparent || command.state.blend.enabled ||
                         command.material.diffuse[3] < 0.999f;
+  const bool overlay = fillModeOverride >= 0;
+  // SoPolygonOffsetElement contributes an explicit depth bias captured into
+  // the raster state.  Selection/overlay faces use it to pull themselves in
+  // front of the coplanar base geometry (GL glPolygonOffset semantics).
+  // Respect it in the key so selection overlays stop z-fighting with the
+  // geometry underneath them.
+  const bool polygonOffset =
+    command.state.raster.polygonOffsetFactor != 0.0f ||
+    command.state.raster.polygonOffsetUnits != 0.0f;
+  const bool depthBias = overlay || polygonOffset;
+  const float depthBiasConstant = polygonOffset
+    ? command.state.raster.polygonOffsetUnits
+    : (overlay ? -0.5f : 0.0f);
+  const float depthBiasSlope = polygonOffset
+    ? command.state.raster.polygonOffsetFactor
+    : (overlay ? -0.5f : 0.0f);
   PipelineKey key;
   key.renderPass = pass;
   key.topology = command.geometry.topology;
-  key.fillMode = command.state.raster.fillMode;
-  key.cullMode = command.state.raster.cullMode;
-  key.depthTestEnable = command.state.depth.enabled;
-  key.depthWriteEnable = !transparent && command.state.depth.writeEnabled;
-  key.depthFunction = command.state.depth.func;
+  key.fillMode = overlay ? static_cast<uint8_t>(fillModeOverride)
+                          : command.state.raster.fillMode;
+  key.cullMode = overlay ? 0 : command.state.raster.cullMode;
+  key.depthTestEnable = command.state.depth.enabled || overlay;
+  // Overlay-pass geometry (e.g. the navigation cube) draws last into its own
+  // viewport and keeps depth writes so it can self-occlude correctly; the
+  // wireframe/point redraw overlays deliberately disable depth writes.
+  key.depthWriteEnable = overlayPass
+    ? command.state.depth.writeEnabled
+    : (!transparent && !overlay && command.state.depth.writeEnabled);
+  key.depthFunction = overlayPass ? static_cast<uint8_t>(command.state.depth.func)
+                                  : (overlay ? static_cast<uint8_t>(SO_DEPTH_LEQUAL)
+                                             : command.state.depth.func);
+  key.depthBiasEnable = depthBias;
+  key.depthBiasConstantFactor = depthBiasConstant;
+  key.depthBiasSlopeFactor = depthBiasSlope;
   key.blendEnable = blending;
   key.sampleCount = target.sampleCount;
   if (blending) {
@@ -800,18 +1109,34 @@ SoVulkanRenderBackend::getOrCreatePipeline(const SoRenderCommand & command,
     VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO;
   rasterization.depthClampEnable = VK_FALSE;
   rasterization.rasterizerDiscardEnable = VK_FALSE;
-  const uint8_t fillMode = command.state.raster.fillMode;
+  const uint8_t fillMode = fillModeOverride >= 0
+                             ? static_cast<uint8_t>(fillModeOverride)
+                             : command.state.raster.fillMode;
+  // The overlay fill mode passed in by recordFrame() uses SoDrawStyleElement
+  // style values, and the retained IR stores the same encoding (see
+  // SoRenderIR::fillRenderStateFromState): FILLED=0, LINES=1, POINTS=2.
   rasterization.polygonMode =
-    fillMode == 1 ? VK_POLYGON_MODE_LINE
-                  : (fillMode == 2 ? VK_POLYGON_MODE_POINT
-                                   : VK_POLYGON_MODE_FILL);
+    fillMode == SoDrawStyleElement::LINES ? VK_POLYGON_MODE_LINE
+    : fillMode == SoDrawStyleElement::POINTS ? VK_POLYGON_MODE_POINT
+    : VK_POLYGON_MODE_FILL;
   // The vertex shader flips Y to match Coin's bottom-left origin; compensate
-  // the winding so back-face culling matches the GL pipeline.
-  rasterization.cullMode =
-    command.state.raster.cullMode ? VK_CULL_MODE_BACK_BIT
-                                  : VK_CULL_MODE_NONE;
+  // the winding so back-face culling matches the GL pipeline.  Note this
+  // compensation is only correct for faces whose screen-vertical axis is Y
+  // (the side faces of a box): the pole faces (top/bottom when viewed from
+  // directly above/below) have their screen-vertical axis along Z, which the
+  // Y-flip does not reverse, so with CLOCKWISE front faces they get culled and
+  // the whole solid vanishes exactly at the top/bottom view.  The depth buffer
+  // already hides back faces for closed solids, so culling is only an
+  // optimization here; disable it to keep pole faces visible.
+  rasterization.cullMode = VK_CULL_MODE_NONE;
   rasterization.frontFace = VK_FRONT_FACE_CLOCKWISE;
   rasterization.lineWidth = 1.0f;
+  // Depth bias: wireframe/point overlays pull toward the camera so they pass
+  // the depth test against coplanar filled geometry; selection/overlay faces
+  // carry an explicit SoPolygonOffsetElement captured into the raster state.
+  rasterization.depthBiasEnable = depthBias ? VK_TRUE : VK_FALSE;
+  rasterization.depthBiasConstantFactor = depthBiasConstant;
+  rasterization.depthBiasSlopeFactor = depthBiasSlope;
 
   VkPipelineMultisampleStateCreateInfo multisample {};
   multisample.sType =
@@ -822,10 +1147,13 @@ SoVulkanRenderBackend::getOrCreatePipeline(const SoRenderCommand & command,
   depthStencil.sType =
     VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO;
   depthStencil.depthTestEnable =
-    command.state.depth.enabled ? VK_TRUE : VK_FALSE;
+    (command.state.depth.enabled || overlay) ? VK_TRUE : VK_FALSE;
   depthStencil.depthWriteEnable =
-    (!transparent && command.state.depth.writeEnabled) ? VK_TRUE : VK_FALSE;
-  depthStencil.depthCompareOp = depthFunctionToVk(command.state.depth.func);
+    (!transparent && !overlay && command.state.depth.writeEnabled)
+      ? VK_TRUE : VK_FALSE;
+  depthStencil.depthCompareOp = overlay
+    ? VK_COMPARE_OP_LESS_OR_EQUAL
+    : depthFunctionToVk(command.state.depth.func);
   depthStencil.depthBoundsTestEnable = VK_FALSE;
   depthStencil.stencilTestEnable = stencil.enabled ? VK_TRUE : VK_FALSE;
   VkStencilOpState stencilState {};
@@ -1147,6 +1475,16 @@ SoVulkanRenderBackend::updateGeometryCache(const SoDrawList & drawlist)
   this->haveCacheGeneration = true;
   this->cachedCommandCount = static_cast<size_t>(drawlist.getNumCommands());
 
+  // Make sure the descriptor pool can hold one set per distinct texture in
+  // this frame before any allocation happens.  This runs before
+  // beginCommandBuffer() on both render paths, so a wholesale pool reset
+  // cannot invalidate sets referenced by already-recorded draws.
+  if (!this->ensureDescriptorPoolSpace()) {
+    this->emitError("updateGeometryCache: descriptor pool exhausted");
+    this->invalidateCache();
+    return;
+  }
+
   for (int i = 0; i < drawlist.getNumCommands(); ++i) {
     const SoRenderCommand & command = drawlist.getCommand(i);
     const SoGeometryDesc & geometry = command.geometry;
@@ -1213,6 +1551,12 @@ SoVulkanRenderBackend::updateGeometryCache(const SoDrawList & drawlist)
 void
 SoVulkanRenderBackend::destroyTextureEntry(VulkanCachedTexture & entry)
 {
+  if (entry.descriptorSet != VK_NULL_HANDLE) {
+    vkFreeDescriptorSets(this->device, this->descriptorPool, 1,
+                         &entry.descriptorSet);
+    if (this->descriptorSetCount > 0) --this->descriptorSetCount;
+    entry.descriptorSet = VK_NULL_HANDLE;
+  }
   if (entry.sampler != VK_NULL_HANDLE) {
     vkDestroySampler(this->device, entry.sampler, this->allocator);
     entry.sampler = VK_NULL_HANDLE;
@@ -1283,10 +1627,34 @@ bool
 SoVulkanRenderBackend::uploadTexture(VulkanCachedTexture & entry,
                                      const SoTextureData & texture)
 {
-  const VkFormat format = textureFormatToVk(texture.numComponents);
+  // VK_FORMAT_R8G8B8_UNORM is not guaranteed to be sampleable, so expand
+  // 3-component (RGB) textures to 4-component RGBA on the host.  Other
+  // component counts map directly.
+  const int components =
+    (texture.numComponents == 3) ? 4 : texture.numComponents;
+  if (components < 1 || components > 4) {
+    this->emitError("uploadTexture: unsupported component count");
+    return false;
+  }
+  const VkFormat format = (texture.numComponents == 3)
+    ? VK_FORMAT_R8G8B8A8_UNORM : textureFormatToVk(texture.numComponents);
   const VkDeviceSize byteSize =
-    static_cast<VkDeviceSize>(texture.width) * texture.height *
-    texture.numComponents;
+    static_cast<VkDeviceSize>(texture.width) * texture.height * components;
+
+  std::vector<unsigned char> converted;
+  const unsigned char * uploadPixels = texture.pixels;
+  if (texture.numComponents == 3) {
+    const size_t pixelCount =
+      static_cast<size_t>(texture.width) * texture.height;
+    converted.resize(pixelCount * 4);
+    for (size_t i = 0; i < pixelCount; ++i) {
+      converted[i * 4 + 0] = texture.pixels[i * 3 + 0];
+      converted[i * 4 + 1] = texture.pixels[i * 3 + 1];
+      converted[i * 4 + 2] = texture.pixels[i * 3 + 2];
+      converted[i * 4 + 3] = 255;
+    }
+    uploadPixels = converted.data();
+  }
 
   VkImageCreateInfo ci {};
   ci.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
@@ -1339,7 +1707,7 @@ SoVulkanRenderBackend::uploadTexture(VulkanCachedTexture & entry,
   VkBuffer staging = VK_NULL_HANDLE;
   VkDeviceMemory stagingMemory = VK_NULL_HANDLE;
   if (!this->createBuffer(byteSize, VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
-                          staging, stagingMemory, texture.pixels)) {
+                          staging, stagingMemory, uploadPixels)) {
     this->emitError("uploadTexture: staging buffer creation failed");
     this->destroyTextureEntry(entry);
     return false;
@@ -1405,12 +1773,19 @@ SoVulkanRenderBackend::uploadTexture(VulkanCachedTexture & entry,
   submit.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
   submit.commandBufferCount = 1;
   submit.pCommandBuffers = &uploadBuffer;
-  vkQueueSubmit(this->queue, 1, &submit, VK_NULL_HANDLE);
+  const VkResult submitResult =
+    vkQueueSubmit(this->queue, 1, &submit, VK_NULL_HANDLE);
   vkQueueWaitIdle(this->queue);
   vkFreeCommandBuffers(this->device, this->commandPool, 1, &uploadBuffer);
 
   vkDestroyBuffer(this->device, staging, this->allocator);
   vkFreeMemory(this->device, stagingMemory, this->allocator);
+
+  if (submitResult != VK_SUCCESS) {
+    this->emitError("uploadTexture: vkQueueSubmit failed");
+    this->destroyTextureEntry(entry);
+    return false;
+  }
 
   entry.view = createImageView(this->device, entry.image, format,
                                VK_IMAGE_ASPECT_COLOR_BIT, this->allocator);
@@ -1421,6 +1796,56 @@ SoVulkanRenderBackend::uploadTexture(VulkanCachedTexture & entry,
     this->emitError("uploadTexture: view/sampler/descriptor creation failed");
     this->destroyTextureEntry(entry);
     return false;
+  }
+  return true;
+}
+
+bool
+SoVulkanRenderBackend::ensureDescriptorPoolSpace()
+{
+  // The pool is sized for 1024 sets.  Textures accumulate per unique command
+  // until the cache is invalidated (scene change, backend re-init), so the
+  // pool can be exhausted by long-lived scenes with many distinct textures.
+  // Vulkan requires freeing every set before resetting a pool, so instead
+  // invalidate the pool wholesale: reset it and re-allocate the white set
+  // plus every cached texture's set (they are only referenced by descriptors
+  // written into those sets; the images/views/samplers are unaffected).
+  //
+  // The reset is only valid while no recorded command buffer references the
+  // sets.  updateGeometryCache() runs before beginCommandBuffer() on both
+  // the render() and renderExternal() paths, so the guard below can never
+  // fire today, but it keeps this helper safe if a future caller records
+  // draws first (resetting the pool would otherwise invalidate sets that
+  // already-recorded draws still reference, which is undefined behavior).
+  if (this->activeCommandBuffer != VK_NULL_HANDLE) {
+    return true;
+  }
+  if (this->descriptorSetCount < 1000) {
+    return true;
+  }
+
+  vkResetDescriptorPool(this->device, this->descriptorPool, 0);
+  this->descriptorSetCount = 0;
+  this->whiteDescriptorSet = VK_NULL_HANDLE;
+
+  if (!this->allocateTextureDescriptorSet(this->whiteImageView,
+                                          this->whiteSampler,
+                                          this->whiteDescriptorSet)) {
+    this->emitError(
+      "ensureDescriptorPoolSpace: failed to re-allocate white descriptor set");
+    return false;
+  }
+  for (VulkanCachedTexture & entry : this->textureCache) {
+    if (entry.descriptorSet == VK_NULL_HANDLE) continue;
+    entry.descriptorSet = VK_NULL_HANDLE;
+    if (!this->allocateTextureDescriptorSet(entry.view, entry.sampler,
+                                            entry.descriptorSet)) {
+      // The entry keeps its image/view/sampler; a null descriptor set makes
+      // resolveTextureSet() fall back to the white texture for this command.
+      this->emitError(
+        "ensureDescriptorPoolSpace: failed to re-allocate texture descriptor "
+        "set; falling back to the white texture for this command");
+    }
   }
   return true;
 }
@@ -1445,18 +1870,94 @@ SoVulkanRenderBackend::applyViewport(const SoRenderParams & params,
   const SbVec2s & origin = params.viewport.getViewportOriginPixels();
   const SbVec2s & size = params.viewport.getViewportSizePixels();
 
+  if (getenv("FC_VULKAN_MATRIX_DUMP") && s_debugFrame > 0
+      && (s_debugFrame % 100 == 0)) {
+    fprintf(stderr,
+            "[VPRT] frame=%d origin=(%d,%d) size=(%d,%d) target=(%u,%u)\n",
+            s_debugFrame, origin[0], origin[1], size[0], size[1],
+            target.extent.width, target.extent.height);
+  }
+
+  // Coin/OpenGL viewport origins are bottom-left; Vulkan's are top-left.
+  // The vertex shader flips Y in clip space, so the viewport rectangle must
+  // be re-anchored to the top edge for the two to cancel out (and for
+  // non-fullscreen viewports to land in the correct sub-region).
   VkViewport viewport {};
   viewport.x = static_cast<float>(origin[0]);
-  viewport.y = static_cast<float>(origin[1]);
+  viewport.y = static_cast<float>(static_cast<int32_t>(target.extent.height) -
+                                 static_cast<int32_t>(origin[1]) -
+                                 static_cast<int32_t>(size[1]));
   viewport.width = static_cast<float>(size[0]);
   viewport.height = static_cast<float>(size[1]);
   viewport.minDepth = 0.0f;
   viewport.maxDepth = 1.0f;
   vkCmdSetViewport(this->activeCommandBuffer, 0, 1, &viewport);
 
+  // Clamp the clear region to the target so an off-screen viewport (origin
+  // outside the target, or a size exceeding the extent) never generates a
+  // clear outside the render area.
+  const int32_t x0 = std::max(0, static_cast<int32_t>(origin[0]));
+  const int32_t y0 = std::max(
+    0, static_cast<int32_t>(target.extent.height) -
+         static_cast<int32_t>(origin[1]) -
+         static_cast<int32_t>(size[1]));
+  const int32_t x1 = std::min(static_cast<int32_t>(target.extent.width),
+                              static_cast<int32_t>(origin[0]) +
+                                static_cast<int32_t>(size[0]));
+  const int32_t y1 = std::min(
+    static_cast<int32_t>(target.extent.height),
+    static_cast<int32_t>(target.extent.height) -
+      static_cast<int32_t>(origin[1]));
   VkRect2D scissor {};
-  scissor.offset = {0, 0};
-  scissor.extent = target.extent;
+  scissor.offset = {x0, y0};
+  scissor.extent = {static_cast<uint32_t>(std::max(0, x1 - x0)),
+                    static_cast<uint32_t>(std::max(0, y1 - y0))};
+  vkCmdSetScissor(this->activeCommandBuffer, 0, 1, &scissor);
+}
+
+// Apply a per-command viewport (recorded by the IR producer from
+// SoViewportRegionElement).  Draws that carry their own viewport render
+// into that sub-region; commands without one keep the frame viewport set
+// by applyViewport().  Same Y-flip math as applyViewport().
+void
+SoVulkanRenderBackend::applyCommandViewport(const SoRenderCommand & command,
+                                            const SoVulkanRenderTarget & target)
+{
+  const SoRasterState & raster = command.state.raster;
+  if (!raster.viewportEnabled || raster.viewportWidth <= 0 ||
+      raster.viewportHeight <= 0) {
+    return;
+  }
+  VkViewport viewport {};
+  viewport.x = static_cast<float>(raster.viewportX);
+  viewport.y = static_cast<float>(static_cast<int32_t>(target.extent.height) -
+                                 static_cast<int32_t>(raster.viewportY) -
+                                 static_cast<int32_t>(raster.viewportHeight));
+  viewport.width = static_cast<float>(raster.viewportWidth);
+  viewport.height = static_cast<float>(raster.viewportHeight);
+  viewport.minDepth = 0.0f;
+  viewport.maxDepth = 1.0f;
+  vkCmdSetViewport(this->activeCommandBuffer, 0, 1, &viewport);
+
+  // The per-command viewport also bounds the draw region; mirror the
+  // scissor clamp used by applyViewport().
+  const int32_t x0 = std::max(0, static_cast<int32_t>(raster.viewportX));
+  const int32_t y0 = std::max(
+    0, static_cast<int32_t>(target.extent.height) -
+         static_cast<int32_t>(raster.viewportY) -
+         static_cast<int32_t>(raster.viewportHeight));
+  const int32_t x1 =
+    std::min(static_cast<int32_t>(target.extent.width),
+             static_cast<int32_t>(raster.viewportX) +
+               static_cast<int32_t>(raster.viewportWidth));
+  const int32_t y1 = std::min(
+    static_cast<int32_t>(target.extent.height),
+    static_cast<int32_t>(target.extent.height) -
+      static_cast<int32_t>(raster.viewportY));
+  VkRect2D scissor {};
+  scissor.offset = {x0, y0};
+  scissor.extent = {static_cast<uint32_t>(std::max(0, x1 - x0)),
+                    static_cast<uint32_t>(std::max(0, y1 - y0))};
   vkCmdSetScissor(this->activeCommandBuffer, 0, 1, &scissor);
 }
 
@@ -1468,8 +1969,13 @@ SoVulkanRenderBackend::applyScissor(const SoRenderCommand & command,
   const SoRasterState & raster = command.state.raster;
   if (raster.scissorEnabled && raster.scissorWidth > 0 &&
       raster.scissorHeight > 0) {
-    scissor.offset = {static_cast<int32_t>(raster.scissorX),
-                      static_cast<int32_t>(raster.scissorY)};
+    // Coin/OpenGL scissors are anchored at the bottom-left; Vulkan's are
+    // top-left.  Mirror the viewport math: flip the Y offset around the
+    // target height so the region lands where the producer intends.
+    const int32_t flippedY = static_cast<int32_t>(target.extent.height) -
+      static_cast<int32_t>(raster.scissorY) -
+      static_cast<int32_t>(raster.scissorHeight);
+    scissor.offset = {static_cast<int32_t>(raster.scissorX), flippedY};
     scissor.extent = {static_cast<uint32_t>(raster.scissorWidth),
                       static_cast<uint32_t>(raster.scissorHeight)};
   }
@@ -1522,9 +2028,29 @@ SoVulkanRenderBackend::recordClear(const SoRenderParams & params,
 
   if (attachmentCount == 0) return;
 
+  // Clear only the requested viewport region (Y-flipped into Vulkan
+  // coordinates like applyViewport()).  Clearing the whole target would
+  // overwrite other viewports or the backing image outside the viewport.
+  const SbVec2s & origin = params.viewport.getViewportOriginPixels();
+  const SbVec2s & size = params.viewport.getViewportSizePixels();
+  const int32_t x0 = std::max(0, static_cast<int32_t>(origin[0]));
+  const int32_t y0 = std::max(
+    0, static_cast<int32_t>(target.extent.height) -
+         static_cast<int32_t>(origin[1]) -
+         static_cast<int32_t>(size[1]));
+  const int32_t x1 = std::min(static_cast<int32_t>(target.extent.width),
+                              static_cast<int32_t>(origin[0]) +
+                                static_cast<int32_t>(size[0]));
+  const int32_t y1 = std::min(
+    static_cast<int32_t>(target.extent.height),
+    static_cast<int32_t>(target.extent.height) -
+      static_cast<int32_t>(origin[1]));
+  if (x1 <= x0 || y1 <= y0) return;
+
   VkClearRect rect {};
-  rect.rect.offset = {0, 0};
-  rect.rect.extent = target.extent;
+  rect.rect.offset = {x0, y0};
+  rect.rect.extent = {static_cast<uint32_t>(x1 - x0),
+                      static_cast<uint32_t>(y1 - y0)};
   rect.baseArrayLayer = 0;
   rect.layerCount = 1;
   vkCmdClearAttachments(this->activeCommandBuffer, attachmentCount, attachments, 1,
@@ -1532,17 +2058,81 @@ SoVulkanRenderBackend::recordClear(const SoRenderParams & params,
 }
 
 void
+SoVulkanRenderBackend::recordOverlayDepthClear(const SoRenderCommand & command,
+                                               const SoVulkanRenderTarget & target)
+{
+  const bool hasDepth = target.depthImageView != VK_NULL_HANDLE &&
+                        target.depthFormat != VK_FORMAT_UNDEFINED;
+  if (!hasDepth) {
+    return;
+  }
+
+  // The overlay rect is stored in Coin/OpenGL (bottom-left) coordinates by
+  // the producer; mirror the Y-flip applied by applyScissor().
+  const SoRasterState & raster = command.state.raster;
+  const int32_t x0 = std::max(0, static_cast<int32_t>(raster.scissorX));
+  const int32_t y0 = std::max(
+    0, static_cast<int32_t>(target.extent.height) -
+         static_cast<int32_t>(raster.scissorY) -
+         static_cast<int32_t>(raster.scissorHeight));
+  const int32_t x1 = std::min(static_cast<int32_t>(target.extent.width),
+                              static_cast<int32_t>(raster.scissorX) +
+                                static_cast<int32_t>(raster.scissorWidth));
+  const int32_t y1 = std::min(
+    static_cast<int32_t>(target.extent.height),
+    static_cast<int32_t>(target.extent.height) -
+      static_cast<int32_t>(raster.scissorY));
+  if (x1 <= x0 || y1 <= y0) {
+    return;
+  }
+
+  VkClearAttachment attachment {};
+  attachment.aspectMask = VK_IMAGE_ASPECT_DEPTH_BIT;
+  attachment.colorAttachment = 0;
+  attachment.clearValue.depthStencil.depth = 1.0f;
+  attachment.clearValue.depthStencil.stencil = 0;
+
+  VkClearRect rect {};
+  rect.rect.offset = {x0, y0};
+  rect.rect.extent = {static_cast<uint32_t>(x1 - x0),
+                      static_cast<uint32_t>(y1 - y0)};
+  rect.baseArrayLayer = 0;
+  rect.layerCount = 1;
+  vkCmdClearAttachments(this->activeCommandBuffer, 1, &attachment, 1, &rect);
+}
+
+void
 SoVulkanRenderBackend::updateLightingUniforms(const SoDrawList & drawlist,
                                               const SoRenderCommand & command,
-                                              const SoRenderParams & params)
+                                              const SoRenderParams & params,
+                                              const VkDeviceSize uboOffset,
+                                              const bool unlit)
 {
   VulkanVisualUbo ubo {};
 
   SbMat m;
-  params.viewMatrix.getValue(m);
+  if (command.state.raster.scissorEnabled
+      && command.pass == SO_RENDERPASS_OVERLAY) {
+    command.viewMatrix.getValue(m);
+  }
+  else {
+    params.viewMatrix.getValue(m);
+  }
   std::memcpy(ubo.view, &m[0][0], sizeof(float) * 16);
   command.modelMatrix.getValue(m);
   std::memcpy(ubo.model, &m[0][0], sizeof(float) * 16);
+  if (getenv("FC_VULKAN_CLIP_DEBUG")) {
+    static int uboLog = 0;
+    if (uboLog++ < 6) {
+      fprintf(stderr, "[UBO] cmd pass=%d verts=%u model00=%.3f m11=%.3f m22=%.3f "
+                      "trans=(%.3f,%.3f,%.3f) view33=%.3f\n",
+              static_cast<int>(command.pass),
+              static_cast<unsigned>(command.geometry.vertexCount),
+              ubo.model[0], ubo.model[5], ubo.model[10],
+              ubo.model[12], ubo.model[13], ubo.model[14],
+              ubo.view[15]);
+    }
+  }
 
   const SoMaterialData & material = command.material;
   ubo.emissive[0] = material.emissive[0];
@@ -1559,8 +2149,9 @@ SoVulkanRenderBackend::updateLightingUniforms(const SoDrawList & drawlist,
   ubo.materialSpecular[3] = 1.0f;
   ubo.materialParams[0] = material.shininess;
   ubo.materialParams[1] = material.twoSidedLighting ? 1.0f : 0.0f;
-  ubo.materialParams[3] =
-    material.shadingModel == SO_SHADING_LEGACY_GOURAUD ? 1.0f : 0.0f;
+  ubo.materialParams[3] = unlit
+    ? 0.0f
+    : (material.shadingModel == SO_SHADING_LEGACY_GOURAUD ? 1.0f : 0.0f);
 
   const SoLightingData * lighting = drawlist.getLighting(command.lightingHandle);
   static const SoLightingData emptyLighting;
@@ -1633,8 +2224,27 @@ SoVulkanRenderBackend::updateLightingUniforms(const SoDrawList & drawlist,
     spot[3] = 1.0f;
   }
 
-  if (this->lightingMapped) {
-    std::memcpy(this->lightingMapped, &ubo, sizeof(ubo));
+  if (this->lightingMapped && this->uboSlotStride > 0) {
+    std::memcpy(static_cast<char *>(this->lightingMapped) + uboOffset,
+                &ubo, sizeof(ubo));
+  }
+
+  if (getenv("FC_VULKAN_MATRIX_DUMP") && s_debugFrame > 0
+      && (s_debugFrame % 100 == 0) && s_dumpCmdCount <= 4) {
+    fprintf(stderr,
+            "[LGT] frame=%d cmd#%d ambient=(%.2f,%.2f,%.2f) lights=%d\n",
+            s_debugFrame, s_dumpCmdCount - 1, lighting->ambient[0],
+            lighting->ambient[1], lighting->ambient[2], count);
+    for (int i = 0; i < count && i < 3; ++i) {
+      const SoLightData & light = lighting->lights[static_cast<size_t>(i)];
+      fprintf(stderr,
+              "[LGT]   light%d type=%.0f dir=(%.3f,%.3f,%.3f) "
+              "pos=(%.3f,%.3f,%.3f) color=(%.2f,%.2f,%.2f)\n",
+              i, static_cast<float>(light.type),
+              light.direction[0], light.direction[1], light.direction[2],
+              light.position[0], light.position[1], light.position[2],
+              light.color[0], light.color[1], light.color[2]);
+    }
   }
 }
 
@@ -1644,29 +2254,80 @@ SoVulkanRenderBackend::recordDrawCommand(const SoDrawList & drawlist,
                                          const SoVulkanRenderTarget & target,
                                          const SoRenderParams & params,
                                          VkRenderPass pass,
-                                         const bool transparent)
+                                         const bool transparent,
+                                         const int fillModeOverride,
+                                         const float * uniformColorOverride,
+                                         const bool overlayPass)
 {
-  if (!command.geometry.positions || command.geometry.vertexCount == 0) return;
+  if (!command.geometry.positions || command.geometry.vertexCount == 0) {
+    if (getenv("FC_VULKAN_BACKEND_DEBUG")) {
+      fprintf(stderr, "[VKBE] cmd %p pass=%d skip: no positions/verts\n",
+              (const void*)&command, static_cast<int>(command.pass));
+    }
+    return;
+  }
   const auto found = this->commandToCache.find(&command);
-  if (found == this->commandToCache.end()) return;
+  if (found == this->commandToCache.end()) {
+    if (getenv("FC_VULKAN_BACKEND_DEBUG")) {
+      fprintf(stderr, "[VKBE] cmd %p pass=%d skip: no gpu cache entry\n",
+              (const void*)&command, static_cast<int>(command.pass));
+    }
+    return;
+  }
   const VulkanCachedCommand & entry = this->gpuCache[found->second];
-  if (entry.vertexBuffer == VK_NULL_HANDLE) return;
+  if (entry.vertexBuffer == VK_NULL_HANDLE) {
+    if (getenv("FC_VULKAN_BACKEND_DEBUG")) {
+      fprintf(stderr, "[VKBE] cmd %p pass=%d skip: vertexBuffer null\n",
+              (const void*)&command, static_cast<int>(command.pass));
+    }
+    return;
+  }
 
   VkPipeline pipeline = VK_NULL_HANDLE;
-  if (!this->getOrCreatePipeline(command, target, pass, pipeline, transparent) ||
+  if (!this->getOrCreatePipeline(command, target, pass, pipeline, transparent,
+                                 fillModeOverride, overlayPass) ||
       pipeline == VK_NULL_HANDLE) {
+    if (getenv("FC_VULKAN_BACKEND_DEBUG")) {
+      fprintf(stderr, "[VKBE] cmd %p pass=%d skip: pipeline creation failed "
+                      "(transparent=%d fillOverride=%d overlay=%d)\n",
+              (const void*)&command, static_cast<int>(command.pass),
+              transparent ? 1 : 0, fillModeOverride, overlayPass ? 1 : 0);
+    }
     return;
+  }
+  if (getenv("FC_VULKAN_BACKEND_DEBUG")) {
+    static int drawn = 0;
+    static int logged = 0;
+    drawn++;
+    if (logged++ < 24) {
+      fprintf(stderr,
+              "[VKBE] draw %d cmd=%p pass=%d verts=%u idx=%u topo=%d "
+              "overlay=%d transparent=%d\n",
+              drawn, (const void*)&command, static_cast<int>(command.pass),
+              command.geometry.vertexCount, command.geometry.indexCount,
+              static_cast<int>(command.geometry.topology),
+              overlayPass ? 1 : 0, transparent ? 1 : 0);
+    }
   }
   vkCmdBindPipeline(this->activeCommandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS,
                     pipeline);
+  // Commands carrying their own viewport (SoViewportRegionElement) render
+  // into that sub-region; otherwise the frame viewport from applyViewport()
+  // stays active.
+  this->applyCommandViewport(command, target);
   this->applyScissor(command, target);
+
+  const uint32_t slotIndex = this->uboCmdIndex++;
+  const uint32_t uboOffset =
+    ((this->uboFrameIndex & 1u) * this->uboSlotsPerFrame + slotIndex) *
+    this->uboSlotStride;
 
   VkDescriptorSet textureSet = this->resolveTextureSet(command);
   if (textureSet != VK_NULL_HANDLE) {
     vkCmdBindDescriptorSets(this->activeCommandBuffer,
                             VK_PIPELINE_BIND_POINT_GRAPHICS,
-                            this->pipelineLayout, 0, 1, &textureSet, 0,
-                            nullptr);
+                            this->pipelineLayout, 0, 1, &textureSet, 1,
+                            &uboOffset);
   }
 
   VkDeviceSize offset = 0;
@@ -1680,24 +2341,33 @@ SoVulkanRenderBackend::recordDrawCommand(const SoDrawList & drawlist,
                          VK_INDEX_TYPE_UINT32);
   }
 
-  this->updateLightingUniforms(drawlist, command, params);
+  this->updateLightingUniforms(drawlist, command, params, uboOffset,
+                               uniformColorOverride != nullptr);
 
   VulkanPushConstants push {};
   SbMat projValue;
-  params.projMatrix.getValue(projValue);
+  // Overlay-pass geometry carries its own camera (view/projection) matrices;
+  // regular geometry shares the frame camera in params.
+  if (overlayPass) {
+    command.projMatrix.getValue(projValue);
+  }
+  else {
+    params.projMatrix.getValue(projValue);
+  }
   std::memcpy(push.proj, &projValue[0][0], sizeof(float) * 16);
   const SbVec4f & color = command.material.diffuse;
-  push.color[0] = color[0];
-  push.color[1] = color[1];
-  push.color[2] = color[2];
-  push.color[3] = color[3];
-  push.flags[0] = entry.colorKey ? 1.0f : 0.0f;
+  const bool useOverrideColor = uniformColorOverride != nullptr;
+  push.color[0] = useOverrideColor ? uniformColorOverride[0] : color[0];
+  push.color[1] = useOverrideColor ? uniformColorOverride[1] : color[1];
+  push.color[2] = useOverrideColor ? uniformColorOverride[2] : color[2];
+  push.color[3] = useOverrideColor ? uniformColorOverride[3] : color[3];
+  push.flags[0] = (entry.colorKey && !useOverrideColor) ? 1.0f : 0.0f;
   push.flags[1] =
     command.material.vertexColorAlphaIncludesOpacity ? 1.0f : 0.0f;
   const bool textured = command.material.texture.pixels &&
                         command.material.texture.width > 0 &&
                         command.material.texture.height > 0;
-  push.flags[2] = textured ? 1.0f : 0.0f;
+  push.flags[2] = (textured && !useOverrideColor) ? 1.0f : 0.0f;
   push.flags[3] = command.material.textureAlphaIncludesOpacity
                     ? 1.0f : 0.0f;
   push.texParams[0] =
@@ -1717,6 +2387,54 @@ SoVulkanRenderBackend::recordDrawCommand(const SoDrawList & drawlist,
                      VK_SHADER_STAGE_VERTEX_BIT |
                        VK_SHADER_STAGE_FRAGMENT_BIT,
                      0, sizeof(push), &push);
+
+  if (getenv("FC_VULKAN_MATRIX_DUMP") && s_debugFrame > 0
+      && (s_debugFrame % 100 == 0) && s_dumpCmdCount < 12) {
+    s_dumpCmdCount++;
+    SbMat mm;
+    command.modelMatrix.getValue(mm);
+    SbMat vm;
+    if (command.state.raster.scissorEnabled
+        && command.pass == SO_RENDERPASS_OVERLAY) {
+      command.viewMatrix.getValue(vm);
+    }
+    else {
+      params.viewMatrix.getValue(vm);
+    }
+    fprintf(stderr,
+            "[MATX] frame=%d cmd#%d pass=%d verts=%u overlay=%d "
+            "scissor=%d model=\n"
+            "  [%.4f %.4f %.4f %.4f]\n"
+            "  [%.4f %.4f %.4f %.4f]\n"
+            "  [%.4f %.4f %.4f %.4f]\n"
+            "  [%.4f %.4f %.4f %.4f]\n",
+            s_debugFrame, s_dumpCmdCount - 1, static_cast<int>(command.pass),
+            command.geometry.vertexCount, overlayPass ? 1 : 0,
+            command.state.raster.scissorEnabled ? 1 : 0,
+            mm[0][0], mm[0][1], mm[0][2], mm[0][3],
+            mm[1][0], mm[1][1], mm[1][2], mm[1][3],
+            mm[2][0], mm[2][1], mm[2][2], mm[2][3],
+            mm[3][0], mm[3][1], mm[3][2], mm[3][3]);
+    fprintf(stderr,
+            "[MATX]   view=\n"
+            "  [%.4f %.4f %.4f %.4f]\n"
+            "  [%.4f %.4f %.4f %.4f]\n"
+            "  [%.4f %.4f %.4f %.4f]\n"
+            "  [%.4f %.4f %.4f %.4f]\n"
+            "[MATX]   proj=\n"
+            "  [%.4f %.4f %.4f %.4f]\n"
+            "  [%.4f %.4f %.4f %.4f]\n"
+            "  [%.4f %.4f %.4f %.4f]\n"
+            "  [%.4f %.4f %.4f %.4f]\n",
+            vm[0][0], vm[0][1], vm[0][2], vm[0][3],
+            vm[1][0], vm[1][1], vm[1][2], vm[1][3],
+            vm[2][0], vm[2][1], vm[2][2], vm[2][3],
+            vm[3][0], vm[3][1], vm[3][2], vm[3][3],
+            projValue[0][0], projValue[0][1], projValue[0][2], projValue[0][3],
+            projValue[1][0], projValue[1][1], projValue[1][2], projValue[1][3],
+            projValue[2][0], projValue[2][1], projValue[2][2], projValue[2][3],
+            projValue[3][0], projValue[3][1], projValue[3][2], projValue[3][3]);
+  }
 
   if (indexed) {
     vkCmdDrawIndexed(this->activeCommandBuffer, command.geometry.indexCount, 1, 0,
@@ -1769,6 +2487,13 @@ SoVulkanRenderBackend::shutdown()
   }
   this->pipelineCache.clear();
 
+  for (auto & entry : this->backgroundPipelineCache) {
+    if (entry.second != VK_NULL_HANDLE) {
+      vkDestroyPipeline(this->device, entry.second, this->allocator);
+    }
+  }
+  this->backgroundPipelineCache.clear();
+
   if (this->renderPass != VK_NULL_HANDLE) {
     vkDestroyRenderPass(this->device, this->renderPass, this->allocator);
     this->renderPass = VK_NULL_HANDLE;
@@ -1781,9 +2506,25 @@ SoVulkanRenderBackend::shutdown()
     vkDestroyShaderModule(this->device, this->vertexModule, this->allocator);
     this->vertexModule = VK_NULL_HANDLE;
   }
+  if (this->backgroundFragmentModule != VK_NULL_HANDLE) {
+    vkDestroyShaderModule(this->device, this->backgroundFragmentModule, this->allocator);
+    this->backgroundFragmentModule = VK_NULL_HANDLE;
+  }
+  if (this->backgroundVertexModule != VK_NULL_HANDLE) {
+    vkDestroyShaderModule(this->device, this->backgroundVertexModule, this->allocator);
+    this->backgroundVertexModule = VK_NULL_HANDLE;
+  }
+  if (this->backgroundPipelineLayout != VK_NULL_HANDLE) {
+    vkDestroyPipelineLayout(this->device, this->backgroundPipelineLayout, this->allocator);
+    this->backgroundPipelineLayout = VK_NULL_HANDLE;
+  }
   if (this->pipelineLayout != VK_NULL_HANDLE) {
     vkDestroyPipelineLayout(this->device, this->pipelineLayout, this->allocator);
     this->pipelineLayout = VK_NULL_HANDLE;
+  }
+  if (this->lightingMapped != nullptr) {
+    vkUnmapMemory(this->device, this->lightingMemory);
+    this->lightingMapped = nullptr;
   }
   if (this->lightingBuffer != VK_NULL_HANDLE) {
     vkDestroyBuffer(this->device, this->lightingBuffer, this->allocator);
@@ -1793,7 +2534,6 @@ SoVulkanRenderBackend::shutdown()
     vkFreeMemory(this->device, this->lightingMemory, this->allocator);
     this->lightingMemory = VK_NULL_HANDLE;
   }
-  this->lightingMapped = nullptr;
   if (this->whiteSampler != VK_NULL_HANDLE) {
     vkDestroySampler(this->device, this->whiteSampler, this->allocator);
     this->whiteSampler = VK_NULL_HANDLE;
@@ -1877,6 +2617,24 @@ SoVulkanRenderBackend::render(const SoDrawList & drawlist,
     this->renderPassExtent.height != target->extent.height;
   if (targetChanged) {
     if (this->renderPass != VK_NULL_HANDLE) {
+      // Pipelines are keyed on the render pass handle (see PipelineKey).
+      // The old pass is destroyed below, so any cached pipelines referencing
+      // it would be both stale for the new pass and unsafe to keep (the
+      // handle may be recycled by the driver).  Drop both caches while the
+      // old pass is still alive; they rebuild lazily on the next frame.
+      for (auto & entry : this->pipelineCache) {
+        if (entry.second != VK_NULL_HANDLE) {
+          vkDestroyPipeline(this->device, entry.second, this->allocator);
+        }
+      }
+      this->pipelineCache.clear();
+      for (auto & entry : this->backgroundPipelineCache) {
+        if (entry.second != VK_NULL_HANDLE) {
+          vkDestroyPipeline(this->device, entry.second, this->allocator);
+        }
+      }
+      this->backgroundPipelineCache.clear();
+
       vkDestroyRenderPass(this->device, this->renderPass, this->allocator);
       this->renderPass = VK_NULL_HANDLE;
     }
@@ -1988,14 +2746,121 @@ SoVulkanRenderBackend::renderExternal(const SoDrawList & drawlist,
   return recorded ? TRUE : FALSE;
 }
 
+SbBool
+SoVulkanRenderBackend::renderExternalOverlay(const SoDrawList & drawlist,
+                                             const SoRenderParams & params,
+                                             VkCommandBuffer commandBuffer,
+                                             VkRenderPass renderPass)
+{
+  if (!this->isInitialized()) {
+    this->emitError(
+      "renderExternalOverlay called before backend initialization");
+    return FALSE;
+  }
+  if (!params.renderTarget) {
+    this->emitError(
+      "renderExternalOverlay called without a SoVulkanRenderTarget in "
+      "SoRenderParams::renderTarget");
+    return FALSE;
+  }
+  if (commandBuffer == VK_NULL_HANDLE || renderPass == VK_NULL_HANDLE) {
+    this->emitError(
+      "renderExternalOverlay called without a command buffer and render "
+      "pass");
+    return FALSE;
+  }
+
+  const auto * target =
+    static_cast<const SoVulkanRenderTarget *>(params.renderTarget);
+  if (target->colorImageView == VK_NULL_HANDLE ||
+      target->colorImage == VK_NULL_HANDLE || target->extent.width == 0 ||
+      target->extent.height == 0) {
+    this->emitError("invalid Vulkan render target");
+    return FALSE;
+  }
+
+  this->updateGeometryCache(drawlist);
+
+  this->activeCommandBuffer = commandBuffer;
+
+  // Draw every screen-space overlay command into its own scissored
+  // viewport; the overlay rect's depth is cleared once per rect so the
+  // overlay self-occludes independently of the (already recorded) scene.
+  const std::vector<int> & order = drawlist.getSortedOrder();
+  int lastClearX = -1, lastClearY = -1, lastClearW = -1, lastClearH = -1;
+  for (int i = 0; i < drawlist.getNumCommands(); ++i) {
+    const int index =
+      i < static_cast<int>(order.size()) ? order[i] : i;
+    const SoRenderCommand & command = drawlist.getCommand(index);
+    if (command.pass != SO_RENDERPASS_OVERLAY) continue;
+    const SoRasterState & raster = command.state.raster;
+    if (!raster.scissorEnabled || raster.scissorWidth <= 0 ||
+        raster.scissorHeight <= 0) {
+      continue;
+    }
+    if (raster.scissorX != lastClearX || raster.scissorY != lastClearY ||
+        raster.scissorWidth != lastClearW ||
+        raster.scissorHeight != lastClearH) {
+      this->recordOverlayDepthClear(command, *target);
+      lastClearX = raster.scissorX;
+      lastClearY = raster.scissorY;
+      lastClearW = raster.scissorWidth;
+      lastClearH = raster.scissorHeight;
+    }
+    this->recordDrawCommand(drawlist, command, *target, params, renderPass,
+                            false, -1, nullptr, true);
+  }
+
+  this->activeCommandBuffer = VK_NULL_HANDLE;
+  return TRUE;
+}
+
 bool
 SoVulkanRenderBackend::recordFrame(const SoDrawList & drawlist,
                                    const SoRenderParams & params,
                                    const SoVulkanRenderTarget & target,
                                    VkRenderPass renderPass)
 {
+  if (getenv("FC_VULKAN_MATRIX_DUMP")) {
+    s_debugFrame++;
+    s_dumpCmdCount = 0;
+  }
+  this->uboFrameIndex++;
+  this->uboCmdIndex = 0;
   this->applyViewport(params, target);
   this->recordClear(params, target);
+  this->recordBackground(params, target, renderPass);
+  // The background pass overrides the viewport/scissor for its own draw;
+  // restore the viewport from params before recording geometry so draws
+  // land in the requested region.
+  this->applyViewport(params, target);
+
+  // Vulkan-only display options.  The render params carry the values from
+  // the GUI/preferences when wired; environment variables act as a
+  // diagnostic fallback for the command line.
+  const bool wireframeOverlay =
+    params.wireframeOverlay || getenv("FC_VULKAN_WIREFRAME") != nullptr;
+  const bool pointsOverlay =
+    params.pointsOverlay || getenv("FC_VULKAN_POINTS") != nullptr;
+  float overlayColor[4] = {
+    params.edgeColor[0], params.edgeColor[1], params.edgeColor[2],
+    params.edgeColor[3]
+  };
+  if (getenv("FC_VULKAN_EDGE_COLOR")) {
+    const char * hex = getenv("FC_VULKAN_EDGE_COLOR");
+    unsigned int value = 0;
+    if (sscanf(hex, "%x", &value) == 1) {
+      overlayColor[0] = ((value >> 16) & 0xff) / 255.0f;
+      overlayColor[1] = ((value >> 8) & 0xff) / 255.0f;
+      overlayColor[2] = (value & 0xff) / 255.0f;
+    }
+  }
+  // No overlay when neither is requested; otherwise re-draw opaque geometry
+  // in the requested draw style (SoDrawStyleElement encoding: LINES=1,
+  // POINTS=2) using a uniform edge color.
+  const int overlayFillMode = wireframeOverlay
+    ? SoDrawStyleElement::LINES
+    : (pointsOverlay ? SoDrawStyleElement::POINTS : -1);
 
   // Opaque then transparent, honoring the draw-list sort order.
   const std::vector<int> & order = drawlist.getSortedOrder();
@@ -2009,6 +2874,48 @@ SoVulkanRenderBackend::recordFrame(const SoDrawList & drawlist,
       if (isTransparent != transparent) continue;
       this->recordDrawCommand(drawlist, command, target, params, renderPass,
                               transparent);
+    }
+
+    // Wireframe/point overlay: re-draw opaque geometry in the requested fill
+    // mode using a uniform edge color (no vertex colors, no texture, unlit).
+    if (!transparent && overlayFillMode >= 0) {
+      for (int i = 0; i < drawlist.getNumCommands(); ++i) {
+        const int index =
+          i < static_cast<int>(order.size()) ? order[i] : i;
+        const SoRenderCommand & command = drawlist.getCommand(index);
+        if (command.pass == SO_RENDERPASS_TRANSPARENT) continue;
+        this->recordDrawCommand(drawlist, command, target, params, renderPass,
+                                false, overlayFillMode, overlayColor);
+      }
+    }
+  }
+
+  // Screen-space overlay geometry (navigation cube): drawn after both passes
+  // into its own viewport, with the overlay rect's depth cleared first so the
+  // overlay self-occludes independently of the main scene.
+  {
+    int lastClearX = -1, lastClearY = -1, lastClearW = -1, lastClearH = -1;
+    for (int i = 0; i < drawlist.getNumCommands(); ++i) {
+      const int index =
+        i < static_cast<int>(order.size()) ? order[i] : i;
+      const SoRenderCommand & command = drawlist.getCommand(index);
+      if (command.pass != SO_RENDERPASS_OVERLAY) continue;
+      const SoRasterState & raster = command.state.raster;
+      if (!raster.scissorEnabled || raster.scissorWidth <= 0 ||
+          raster.scissorHeight <= 0) {
+        continue;
+      }
+      if (raster.scissorX != lastClearX || raster.scissorY != lastClearY ||
+          raster.scissorWidth != lastClearW ||
+          raster.scissorHeight != lastClearH) {
+        this->recordOverlayDepthClear(command, target);
+        lastClearX = raster.scissorX;
+        lastClearY = raster.scissorY;
+        lastClearW = raster.scissorWidth;
+        lastClearH = raster.scissorHeight;
+      }
+      this->recordDrawCommand(drawlist, command, target, params, renderPass,
+                              false, -1, nullptr, true);
     }
   }
   return true;
