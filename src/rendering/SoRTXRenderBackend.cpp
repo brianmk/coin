@@ -19,6 +19,17 @@
 
 namespace {
 
+// Environment flags are enabled by presence, but honor the conventional
+// "VAR=0"/"false"/"off" opt-out values.
+bool
+envFlagEnabled(const char * name)
+{
+  const char * value = getenv(name);
+  if (value == nullptr) return false;
+  return std::strcmp(value, "0") != 0 && std::strcmp(value, "false") != 0 &&
+         std::strcmp(value, "off") != 0;
+}
+
 // std430 mirror of the RTMaterial struct in PathTrace.glsl.  One record per
 // draw command, indexed by the instance custom index (the command index).
 // C++ packs the float arrays without padding, which matches std430: 5 vec4
@@ -289,7 +300,13 @@ SoRTXRenderBackend::initialize(const SoRenderBackendInitParams & params)
   // Dispatch mode: the SBT pipeline is opt-in (FC_VULKAN_RT_SBT=1); the
   // default ray-query compute path avoids a hang in NVIDIA driver 610.x
   // where triangle hit-group execution stalls the GPU.
-  this->useSbtPipeline = getenv("FC_VULKAN_RT_SBT") != nullptr;
+  this->useSbtPipeline = envFlagEnabled("FC_VULKAN_RT_SBT");
+
+  // All entry points are resolved from here on.  Mark the backend
+  // initialized before creating resources so that a failure in any
+  // create*() below runs the full (null-tolerant) shutdown() cleanup
+  // instead of leaking every handle created so far.
+  this->setInitialized(TRUE);
 
   // Query the pipeline properties needed for the SBT record layout, plus the
   // acceleration-structure properties for the scratch buffer alignment
@@ -665,9 +682,18 @@ SoRTXRenderBackend::createStorageImage(uint32_t width, uint32_t height)
     return true;
   }
   if (this->storageImage != VK_NULL_HANDLE) {
-    vkDestroyImageView(this->device, this->storageImageView, this->allocator);
-    vkDestroyImage(this->device, this->storageImage, this->allocator);
-    vkFreeMemory(this->device, this->storageImageMemory, this->allocator);
+    // The previous frame's submission may still sample this image; release
+    // it after the next frame boundary instead of destroying it now.
+    VkDevice device = this->device;
+    const VkAllocationCallbacks * allocator = this->allocator;
+    const VkImage image = this->storageImage;
+    const VkImageView view = this->storageImageView;
+    const VkDeviceMemory memory = this->storageImageMemory;
+    this->deferDestroy([device, allocator, image, view, memory]() {
+      vkDestroyImageView(device, view, allocator);
+      vkDestroyImage(device, image, allocator);
+      vkFreeMemory(device, memory, allocator);
+    });
     this->storageImage = VK_NULL_HANDLE;
     this->storageImageView = VK_NULL_HANDLE;
     this->storageImageMemory = VK_NULL_HANDLE;
@@ -701,6 +727,10 @@ SoRTXRenderBackend::createStorageImage(uint32_t width, uint32_t height)
                                       VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
   if (vkAllocateMemory(this->device, &ai, this->allocator,
                        &this->storageImageMemory) != VK_SUCCESS) {
+    vkDestroyImage(this->device, this->storageImage, this->allocator);
+    this->storageImage = VK_NULL_HANDLE;
+    this->storageWidth = 0;
+    this->storageHeight = 0;
     return false;
   }
   vkBindImageMemory(this->device, this->storageImage, this->storageImageMemory,
@@ -716,6 +746,12 @@ SoRTXRenderBackend::createStorageImage(uint32_t width, uint32_t height)
   vci.subresourceRange.levelCount = 1;
   if (vkCreateImageView(this->device, &vci, this->allocator,
                         &this->storageImageView) != VK_SUCCESS) {
+    vkDestroyImage(this->device, this->storageImage, this->allocator);
+    vkFreeMemory(this->device, this->storageImageMemory, this->allocator);
+    this->storageImage = VK_NULL_HANDLE;
+    this->storageImageMemory = VK_NULL_HANDLE;
+    this->storageWidth = 0;
+    this->storageHeight = 0;
     return false;
   }
 
@@ -848,29 +884,31 @@ SoRTXRenderBackend::createPathTracingBuffers(uint32_t width, uint32_t height)
       this->ptBufferWidth == width && this->ptBufferHeight == height) {
     return true;
   }
-  // Release the old buffers; new ones are sized to the current viewport.
+  // Release the old buffers (deferred: the previous frame's submission may
+  // still be executing); new ones are sized to the current viewport.
   if (this->accumBuffer != VK_NULL_HANDLE) {
-    vkDestroyBuffer(this->device, this->accumBuffer, this->allocator);
+    VkDevice device = this->device;
+    const VkAllocationCallbacks * allocator = this->allocator;
+    const VkBuffer accum = this->accumBuffer;
+    const VkDeviceMemory accumMem = this->accumMemory;
+    const VkBuffer normal = this->normalBuffer;
+    const VkDeviceMemory normalMem = this->normalMemory;
+    const VkBuffer position = this->positionBuffer;
+    const VkDeviceMemory positionMem = this->positionMemory;
+    this->deferDestroy([device, allocator, accum, accumMem, normal,
+                        normalMem, position, positionMem]() {
+      vkDestroyBuffer(device, accum, allocator);
+      vkFreeMemory(device, accumMem, allocator);
+      vkDestroyBuffer(device, normal, allocator);
+      vkFreeMemory(device, normalMem, allocator);
+      vkDestroyBuffer(device, position, allocator);
+      vkFreeMemory(device, positionMem, allocator);
+    });
     this->accumBuffer = VK_NULL_HANDLE;
-  }
-  if (this->accumMemory != VK_NULL_HANDLE) {
-    vkFreeMemory(this->device, this->accumMemory, this->allocator);
     this->accumMemory = VK_NULL_HANDLE;
-  }
-  if (this->normalBuffer != VK_NULL_HANDLE) {
-    vkDestroyBuffer(this->device, this->normalBuffer, this->allocator);
     this->normalBuffer = VK_NULL_HANDLE;
-  }
-  if (this->normalMemory != VK_NULL_HANDLE) {
-    vkFreeMemory(this->device, this->normalMemory, this->allocator);
     this->normalMemory = VK_NULL_HANDLE;
-  }
-  if (this->positionBuffer != VK_NULL_HANDLE) {
-    vkDestroyBuffer(this->device, this->positionBuffer, this->allocator);
     this->positionBuffer = VK_NULL_HANDLE;
-  }
-  if (this->positionMemory != VK_NULL_HANDLE) {
-    vkFreeMemory(this->device, this->positionMemory, this->allocator);
     this->positionMemory = VK_NULL_HANDLE;
   }
   this->ptBufferWidth = width;
@@ -1166,7 +1204,7 @@ SoRTXRenderBackend::createPipelines()
   VkPushConstantRange presentPush {};
   presentPush.stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
   presentPush.offset = 0;
-  presentPush.size = 4 * sizeof(float);
+  presentPush.size = 8 * sizeof(float);
   layoutCI.pPushConstantRanges = &presentPush;
   layoutCI.pushConstantRangeCount = 1;
   if (vkCreatePipelineLayout(this->device, &layoutCI, this->allocator,
@@ -1312,7 +1350,13 @@ SoRTXRenderBackend::createPresentPipeline(VkRenderPass renderPass,
     return true;
   }
   if (this->presentPipeline != VK_NULL_HANDLE) {
-    vkDestroyPipeline(this->device, this->presentPipeline, this->allocator);
+    // Defer: a pending frame may still bind this pipeline.
+    VkDevice device = this->device;
+    const VkAllocationCallbacks * allocator = this->allocator;
+    const VkPipeline pipeline = this->presentPipeline;
+    this->deferDestroy([device, allocator, pipeline]() {
+      vkDestroyPipeline(device, pipeline, allocator);
+    });
     this->presentPipeline = VK_NULL_HANDLE;
   }
 
@@ -1403,6 +1447,7 @@ SoRTXRenderBackend::getOrCreateCache(const SoRenderCommand * command)
   }
   const size_t index = this->geometryCache.size();
   this->geometryCache.emplace_back();
+  this->geometryCache.back().commandKey = command;
   this->commandToCache[command] = index;
   return this->geometryCache.back();
 }
@@ -1443,6 +1488,53 @@ SoRTXRenderBackend::destroyCacheEntry(RTXCachedGeometry & entry)
 }
 
 void
+SoRTXRenderBackend::deferDestroyCacheEntry(RTXCachedGeometry & entry)
+{
+  if (entry.blas == VK_NULL_HANDLE && entry.vertexBuffer == VK_NULL_HANDLE &&
+      entry.indexBuffer == VK_NULL_HANDLE) {
+    entry = RTXCachedGeometry();
+    return;
+  }
+  VkDevice device = this->device;
+  const VkAllocationCallbacks * allocator = this->allocator;
+  const PFN_vkDestroyAccelerationStructureKHR vkDestroyAS =
+    this->vkDestroyAccelerationStructureKHR;
+  const VkAccelerationStructureKHR blas = entry.blas;
+  const VkBuffer blasBuffer = entry.blasBuffer;
+  const VkDeviceMemory blasMemory = entry.blasMemory;
+  const VkBuffer vertexBuffer = entry.vertexBuffer;
+  const VkDeviceMemory vertexMemory = entry.vertexMemory;
+  const VkBuffer indexBuffer = entry.indexBuffer;
+  const VkDeviceMemory indexMemory = entry.indexMemory;
+  this->deferDestroy([device, allocator, vkDestroyAS, blas, blasBuffer,
+                      blasMemory, vertexBuffer, vertexMemory, indexBuffer,
+                      indexMemory]() {
+    if (blas != VK_NULL_HANDLE) {
+      vkDestroyAS(device, blas, allocator);
+    }
+    if (blasBuffer != VK_NULL_HANDLE) {
+      vkDestroyBuffer(device, blasBuffer, allocator);
+    }
+    if (blasMemory != VK_NULL_HANDLE) {
+      vkFreeMemory(device, blasMemory, allocator);
+    }
+    if (indexBuffer != VK_NULL_HANDLE) {
+      vkDestroyBuffer(device, indexBuffer, allocator);
+    }
+    if (indexMemory != VK_NULL_HANDLE) {
+      vkFreeMemory(device, indexMemory, allocator);
+    }
+    if (vertexBuffer != VK_NULL_HANDLE) {
+      vkDestroyBuffer(device, vertexBuffer, allocator);
+    }
+    if (vertexMemory != VK_NULL_HANDLE) {
+      vkFreeMemory(device, vertexMemory, allocator);
+    }
+  });
+  entry = RTXCachedGeometry();
+}
+
+void
 SoRTXRenderBackend::freePendingStagingDestroys()
 {
   for (const auto & entry : this->pendingStagingDestroys) {
@@ -1454,6 +1546,23 @@ SoRTXRenderBackend::freePendingStagingDestroys()
     }
   }
   this->pendingStagingDestroys.clear();
+}
+
+void
+SoRTXRenderBackend::flushPendingDestroys()
+{
+  const int batch = this->pendingDestroyIndex;
+  this->pendingDestroyIndex = batch ^ 1;
+  for (const auto & fn : this->pendingDestroys[batch]) {
+    if (fn) fn();
+  }
+  this->pendingDestroys[batch].clear();
+}
+
+void
+SoRTXRenderBackend::deferDestroy(std::function<void()> && fn)
+{
+  this->pendingDestroys[this->pendingDestroyIndex].push_back(std::move(fn));
 }
 
 void
@@ -1476,6 +1585,7 @@ SoRTXRenderBackend::updateGeometryCache(const SoDrawList & drawlist)
   // vertex/index data: entries whose content is unchanged keep their BLAS;
   // only genuinely new geometry triggers a rebuild.
   this->cacheChanged = false;
+  const uint32_t frame = ++this->cacheFrame;
 
   for (int i = 0; i < drawlist.getNumCommands(); ++i) {
     const SoRenderCommand & command = drawlist.getCommand(i);
@@ -1493,19 +1603,51 @@ SoRTXRenderBackend::updateGeometryCache(const SoDrawList & drawlist)
     const uint64_t hash = hashGeometry(geometry, vertexStride, indexed);
     const bool matches = entry.blas != VK_NULL_HANDLE &&
       entry.contentHash == hash;
-    if (matches) continue;
+    if (!matches) {
+      // Buffers/AS are rebuilt in recordAccelerationStructures (they need a
+      // command buffer); only release old resources and record the new
+      // identity here.  Destruction is deferred: a pending frame may still
+      // reference the old BLAS.
+      this->cacheChanged = true;
+      this->deferDestroyCacheEntry(entry);
+      entry.posKey = geometry.positions;
+      entry.idxKey = geometry.indices;
+      entry.vertexCount = geometry.vertexCount;
+      entry.indexCount = geometry.indexCount;
+      entry.vertexStride = vertexStride;
+      entry.contentHash = hash;
+    }
+    entry.commandKey = &command;
+    entry.cacheGeneration = frame;
+  }
 
-    // Buffers/AS are rebuilt in recordAccelerationStructures (they need a
-    // command buffer); only release old resources and record the new
-    // identity here.
-    this->cacheChanged = true;
-    this->destroyCacheEntry(entry);
-    entry.posKey = geometry.positions;
-    entry.idxKey = geometry.indices;
-    entry.vertexCount = geometry.vertexCount;
-    entry.indexCount = geometry.indexCount;
-    entry.vertexStride = vertexStride;
-    entry.contentHash = hash;
+  // Evict entries whose command disappeared from the draw list this frame
+  // (their generation stamp is stale).  Command pointers live in a
+  // per-frame arena, so the stamp -- not pointer identity -- decides
+  // liveness; survivors rebuild the pointer map from their stored
+  // commandKey.
+  bool anyStale = false;
+  for (RTXCachedGeometry & entry : this->geometryCache) {
+    if (entry.cacheGeneration != frame) {
+      this->deferDestroyCacheEntry(entry);
+      anyStale = true;
+    }
+  }
+  if (anyStale) {
+    size_t write = 0;
+    for (size_t idx = 0; idx < this->geometryCache.size(); ++idx) {
+      if (this->geometryCache[idx].cacheGeneration == frame) {
+        if (write != idx) {
+          this->geometryCache[write] = std::move(this->geometryCache[idx]);
+        }
+        ++write;
+      }
+    }
+    this->geometryCache.resize(write);
+    this->commandToCache.clear();
+    for (size_t idx = 0; idx < this->geometryCache.size(); ++idx) {
+      this->commandToCache[this->geometryCache[idx].commandKey] = idx;
+    }
   }
 }
 
@@ -1561,7 +1703,14 @@ SoRTXRenderBackend::buildBlas(RTXCachedGeometry & entry,
     return false;
   }
   void * mapped = nullptr;
-  vkMapMemory(this->device, stagingMemory, 0, vertexBytes, 0, &mapped);
+  if (vkMapMemory(this->device, stagingMemory, 0, vertexBytes, 0, &mapped) !=
+        VK_SUCCESS ||
+      mapped == nullptr) {
+    this->emitError("buildBlas: vkMapMemory (vertex staging) failed");
+    vkDestroyBuffer(this->device, staging, this->allocator);
+    vkFreeMemory(this->device, stagingMemory, this->allocator);
+    return false;
+  }
   std::memcpy(mapped, positions.data(), static_cast<size_t>(vertexBytes));
   vkUnmapMemory(this->device, stagingMemory);
 
@@ -1589,7 +1738,16 @@ SoRTXRenderBackend::buildBlas(RTXCachedGeometry & entry,
       return false;
     }
     void * imapped = nullptr;
-    vkMapMemory(this->device, indexStagingMemory, 0, indexBytes, 0, &imapped);
+    if (vkMapMemory(this->device, indexStagingMemory, 0, indexBytes, 0,
+                    &imapped) != VK_SUCCESS ||
+        imapped == nullptr) {
+      this->emitError("buildBlas: vkMapMemory (index staging) failed");
+      vkDestroyBuffer(this->device, staging, this->allocator);
+      vkFreeMemory(this->device, stagingMemory, this->allocator);
+      vkDestroyBuffer(this->device, indexStaging, this->allocator);
+      vkFreeMemory(this->device, indexStagingMemory, this->allocator);
+      return false;
+    }
     std::memcpy(imapped, geometry.indices, static_cast<size_t>(indexBytes));
     vkUnmapMemory(this->device, indexStagingMemory);
   }
@@ -1759,8 +1917,15 @@ SoRTXRenderBackend::buildTlas(const SoDrawList & drawlist, VkCommandBuffer cmd)
     if (this->instanceBuffer == VK_NULL_HANDLE ||
         this->instanceBufferCapacity < instances.size()) {
       if (this->instanceBuffer != VK_NULL_HANDLE) {
-        vkDestroyBuffer(this->device, this->instanceBuffer, this->allocator);
-        vkFreeMemory(this->device, this->instanceMemory, this->allocator);
+        // Defer: a pending frame may still read the old instance buffer.
+        VkDevice device = this->device;
+        const VkAllocationCallbacks * allocator = this->allocator;
+        const VkBuffer buffer = this->instanceBuffer;
+        const VkDeviceMemory memory = this->instanceMemory;
+        this->deferDestroy([device, allocator, buffer, memory]() {
+          vkDestroyBuffer(device, buffer, allocator);
+          vkFreeMemory(device, memory, allocator);
+        });
         this->instanceBuffer = VK_NULL_HANDLE;
         this->instanceMemory = VK_NULL_HANDLE;
       }
@@ -1876,13 +2041,20 @@ SoRTXRenderBackend::updateMaterials(const SoDrawList & drawlist)
   if (this->materialBuffer == VK_NULL_HANDLE ||
       bytes > this->materialBufferBytes) {
     if (this->materialBuffer != VK_NULL_HANDLE) {
-      vkUnmapMemory(this->device, this->materialMemory);
-      vkDestroyBuffer(this->device, this->materialBuffer, this->allocator);
-      vkFreeMemory(this->device, this->materialMemory, this->allocator);
+      // Defer: a pending frame may still read the old material buffer.
+      VkDevice device = this->device;
+      const VkAllocationCallbacks * allocator = this->allocator;
+      const VkBuffer buffer = this->materialBuffer;
+      const VkDeviceMemory memory = this->materialMemory;
+      void * mapped = this->materialMapped;
+      this->deferDestroy([device, allocator, buffer, memory, mapped]() {
+        vkUnmapMemory(device, memory);
+        vkDestroyBuffer(device, buffer, allocator);
+        vkFreeMemory(device, memory, allocator);
+      });
       this->materialBuffer = VK_NULL_HANDLE;
       this->materialMemory = VK_NULL_HANDLE;
       this->materialMapped = nullptr;
-      this->materialBufferBytes = 0;
     }
     if (!this->createHostVisibleBuffer(
           bytes, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
@@ -1944,7 +2116,7 @@ SoRTXRenderBackend::updateMaterials(const SoDrawList & drawlist)
     // 0 and every shading path above falls back to the legacy model.
     out.pbr[0] = material.metalness;
     out.pbr[1] = material.roughness;
-    out.pbr[2] = getenv("FC_VULKAN_RT_PBR") != nullptr ? 1.0f : 0.0f;
+    out.pbr[2] = envFlagEnabled("FC_VULKAN_RT_PBR") ? 1.0f : 0.0f;
     out.pbr[3] = 0.0f;
     const char * metalEnv = getenv("FC_VULKAN_RT_METAL");
     if (metalEnv) {
@@ -2127,11 +2299,17 @@ SoRTXRenderBackend::updatePathTracingState(const SoDrawList & drawlist,
         if (d > maxViewDelta) { maxViewDelta = d; maxIdx = i; }
       }
       if (viewChanged && debugFrame < 40) {
-        fprintf(stderr,
-                "[PTDBG] f=%u view[%d] %.6f -> %.6f (t: %.3f,%.3f,%.3f)\n",
-                debugFrame - 1, maxIdx, this->lastViewMatrix[maxIdx],
-                viewMatrix[maxIdx], viewMatrix[12], viewMatrix[13],
-                viewMatrix[14]);
+        if (maxIdx >= 0) {
+          fprintf(stderr,
+                  "[PTDBG] f=%u view[%d] %.6f -> %.6f (t: %.3f,%.3f,%.3f)\n",
+                  debugFrame - 1, maxIdx, this->lastViewMatrix[maxIdx],
+                  viewMatrix[maxIdx], viewMatrix[12], viewMatrix[13],
+                  viewMatrix[14]);
+        }
+        else {
+          fprintf(stderr, "[PTDBG] f=%u view unchanged (viewport resize)\n",
+                  debugFrame - 1);
+        }
       }
       fprintf(stderr,
               "[PTDBG] f=%u latch=%d accum=%d frameIndex=%u "
@@ -2279,9 +2457,7 @@ SoRTXRenderBackend::recordAccelerationStructures(
     frame.cameraPos[2] = frame.viewInverse[14];
     frame.cameraPos[3] = 1.0f;
 
-    const SbVec2s & vpOrigin = params.viewport.getViewportOriginPixels();
     const SbVec2s & vpSize = params.viewport.getViewportSizePixels();
-    (void)vpOrigin;
     frame.viewport[0] = static_cast<float>(vpSize[0]);
     frame.viewport[1] = static_cast<float>(vpSize[1]);
     // Orthographic flag: Coin's ortho projection is affine (proj[3][3] == 1)
@@ -2302,7 +2478,7 @@ SoRTXRenderBackend::recordAccelerationStructures(
     frame.state[0] = static_cast<float>(this->ptFrameIndex);
     // 3.0 = debug constant fill (FC_VULKAN_RT_DEBUG_FILL); consumed by the
     // ray-query compute tracer (u_state.y > 2.5).
-    frame.state[1] = getenv("FC_VULKAN_RT_DEBUG_FILL") != nullptr
+    frame.state[1] = envFlagEnabled("FC_VULKAN_RT_DEBUG_FILL")
       ? 3.0f : (this->ptEnabled ? 1.0f : 0.0f);
     frame.state[2] = this->ptAccumulating ? 1.0f : 0.0f;
     frame.state[3] = static_cast<float>(this->ptMaxBounces);
@@ -2337,7 +2513,7 @@ SoRTXRenderBackend::recordAccelerationStructures(
     raygenPush.frameIndex = this->ptFrameIndex;
     raygenPush.flags = (this->ptEnabled ? 1u : 0u) |
       (this->ptAccumulating ? 2u : 0u) |
-      (getenv("FC_VULKAN_RT_DEBUG_FILL") != nullptr ? 4u : 0u);
+      (envFlagEnabled("FC_VULKAN_RT_DEBUG_FILL") ? 4u : 0u);
     raygenPush.maxBounces = this->ptMaxBounces;
     vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_RAY_TRACING_KHR,
                       this->rtPipeline);
@@ -2428,13 +2604,19 @@ SoRTXRenderBackend::recordTraceAndPresent(const SoRenderParams & params,
   scissor.extent = target.extent;
   vkCmdSetScissor(cmd, 0, 1, &scissor);
 
-  // Present push constant: width, height, denoiseOn (path tracing), and the
-  // progressive frame index for diagnostics.
-  const float presentPush[4] = {
-    static_cast<float>(target.extent.width),
-    static_cast<float>(target.extent.height),
+  // Present push constant: viewport size, denoiseOn (path tracing), the
+  // progressive frame index for diagnostics, and the viewport origin so the
+  // fragment shader indexes the accumulation buffers relative to the
+  // viewport (not the framebuffer) when rendering into a sub-rect.
+  const float presentPush[8] = {
+    static_cast<float>(size[0]),
+    static_cast<float>(size[1]),
     this->ptEnabled ? 1.0f : 0.0f,
-    static_cast<float>(this->ptFrameIndex)};
+    static_cast<float>(this->ptFrameIndex),
+    static_cast<float>(origin[0]),
+    static_cast<float>(origin[1]),
+    0.0f,
+    0.0f};
   vkCmdPushConstants(cmd, this->presentPipelineLayout,
                      VK_SHADER_STAGE_FRAGMENT_BIT, 0,
                      sizeof(presentPush), presentPush);
@@ -2451,6 +2633,10 @@ SoRTXRenderBackend::shutdown()
   if (!this->isInitialized()) return;
 
   vkQueueWaitIdle(this->queue);
+
+  // The queue is idle: drain both deferred-destruction batches.
+  this->flushPendingDestroys();
+  this->flushPendingDestroys();
 
   this->invalidateCache();
   this->freePendingStagingDestroys();
@@ -2638,6 +2824,18 @@ SoRTXRenderBackend::shutdown()
                                  this->allocator);
     this->presentSetLayout = VK_NULL_HANDLE;
   }
+  if (this->offscreenFramebuffer != VK_NULL_HANDLE) {
+    vkDestroyFramebuffer(this->device, this->offscreenFramebuffer,
+                         this->allocator);
+    this->offscreenFramebuffer = VK_NULL_HANDLE;
+  }
+  if (this->offscreenRenderPass != VK_NULL_HANDLE) {
+    vkDestroyRenderPass(this->device, this->offscreenRenderPass,
+                        this->allocator);
+    this->offscreenRenderPass = VK_NULL_HANDLE;
+  }
+  this->offscreenColorImage = VK_NULL_HANDLE;
+  this->offscreenColorView = VK_NULL_HANDLE;
   this->rtDescriptorSets[0] = VK_NULL_HANDLE;
   this->rtDescriptorSets[1] = VK_NULL_HANDLE;
   this->presentDescriptorSets[0] = VK_NULL_HANDLE;
@@ -2668,6 +2866,7 @@ SoRTXRenderBackend::render(const SoDrawList & drawlist,
     return FALSE;
   }
   this->debugValidateDrawList(drawlist);
+  this->flushPendingDestroys();
 
   const auto * target =
     static_cast<const SoVulkanRenderTarget *>(params.renderTarget);
@@ -2682,52 +2881,84 @@ SoRTXRenderBackend::render(const SoDrawList & drawlist,
   // The attachment is the swapchain/MSAA color image, so the render pass
   // and the present pipeline must both use the target's sample count
   // (VUID-VkFramebufferCreateInfo-renderPass-04553 and
-  // VUID-VkGraphicsPipelineCreateInfo-renderPass-06082).
-  VkAttachmentDescription attachment {};
-  attachment.format = target->colorFormat;
-  attachment.samples = target->sampleCount;
-  attachment.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
-  attachment.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
-  attachment.stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
-  attachment.stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
-  attachment.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
-  attachment.finalLayout = target->colorLayout;
+  // VUID-VkGraphicsPipelineCreateInfo-renderPass-06082).  Both are cached
+  // per target identity so this path does not recreate them every frame.
+  const bool targetChanged =
+    this->offscreenRenderPass == VK_NULL_HANDLE ||
+    this->offscreenColorImage != target->colorImage ||
+    this->offscreenColorView != target->colorImageView ||
+    this->offscreenColorFormat != target->colorFormat ||
+    this->offscreenSampleCount != target->sampleCount ||
+    this->offscreenExtent.width != target->extent.width ||
+    this->offscreenExtent.height != target->extent.height;
+  if (targetChanged) {
+    if (this->offscreenFramebuffer != VK_NULL_HANDLE) {
+      vkDestroyFramebuffer(this->device, this->offscreenFramebuffer,
+                           this->allocator);
+      this->offscreenFramebuffer = VK_NULL_HANDLE;
+    }
+    if (this->offscreenRenderPass != VK_NULL_HANDLE) {
+      // The previous render() completed (it waits idle before returning),
+      // so the old pass cannot be referenced by anything still pending.
+      vkDestroyRenderPass(this->device, this->offscreenRenderPass,
+                          this->allocator);
+      this->offscreenRenderPass = VK_NULL_HANDLE;
+    }
 
-  VkAttachmentReference colorRef {};
-  colorRef.attachment = 0;
-  colorRef.layout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
-  VkSubpassDescription subpass {};
-  subpass.pipelineBindPoint = VK_PIPELINE_BIND_POINT_GRAPHICS;
-  subpass.colorAttachmentCount = 1;
-  subpass.pColorAttachments = &colorRef;
-  VkRenderPassCreateInfo rpCI {};
-  rpCI.sType = VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO;
-  rpCI.attachmentCount = 1;
-  rpCI.pAttachments = &attachment;
-  rpCI.subpassCount = 1;
-  rpCI.pSubpasses = &subpass;
-  VkRenderPass renderPass = VK_NULL_HANDLE;
-  if (vkCreateRenderPass(this->device, &rpCI, this->allocator, &renderPass) !=
-      VK_SUCCESS) {
-    this->emitError("failed to create RT render pass");
-    return FALSE;
-  }
+    VkAttachmentDescription attachment {};
+    attachment.format = target->colorFormat;
+    attachment.samples = target->sampleCount;
+    attachment.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
+    attachment.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
+    attachment.stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
+    attachment.stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
+    attachment.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+    attachment.finalLayout = target->colorLayout;
 
-  VkFramebuffer framebuffer = VK_NULL_HANDLE;
-  VkFramebufferCreateInfo fci {};
-  fci.sType = VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO;
-  fci.renderPass = renderPass;
-  fci.attachmentCount = 1;
-  fci.pAttachments = &target->colorImageView;
-  fci.width = target->extent.width;
-  fci.height = target->extent.height;
-  fci.layers = 1;
-  if (vkCreateFramebuffer(this->device, &fci, this->allocator, &framebuffer) !=
-      VK_SUCCESS) {
-    vkDestroyRenderPass(this->device, renderPass, this->allocator);
-    this->emitError("failed to create RT framebuffer");
-    return FALSE;
+    VkAttachmentReference colorRef {};
+    colorRef.attachment = 0;
+    colorRef.layout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+    VkSubpassDescription subpass {};
+    subpass.pipelineBindPoint = VK_PIPELINE_BIND_POINT_GRAPHICS;
+    subpass.colorAttachmentCount = 1;
+    subpass.pColorAttachments = &colorRef;
+    VkRenderPassCreateInfo rpCI {};
+    rpCI.sType = VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO;
+    rpCI.attachmentCount = 1;
+    rpCI.pAttachments = &attachment;
+    rpCI.subpassCount = 1;
+    rpCI.pSubpasses = &subpass;
+    if (vkCreateRenderPass(this->device, &rpCI, this->allocator,
+                           &this->offscreenRenderPass) != VK_SUCCESS) {
+      this->emitError("failed to create RT render pass");
+      return FALSE;
+    }
+
+    VkFramebufferCreateInfo fci {};
+    fci.sType = VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO;
+    fci.renderPass = this->offscreenRenderPass;
+    fci.attachmentCount = 1;
+    fci.pAttachments = &target->colorImageView;
+    fci.width = target->extent.width;
+    fci.height = target->extent.height;
+    fci.layers = 1;
+    if (vkCreateFramebuffer(this->device, &fci, this->allocator,
+                            &this->offscreenFramebuffer) != VK_SUCCESS) {
+      vkDestroyRenderPass(this->device, this->offscreenRenderPass,
+                          this->allocator);
+      this->offscreenRenderPass = VK_NULL_HANDLE;
+      this->emitError("failed to create RT framebuffer");
+      return FALSE;
+    }
+
+    this->offscreenColorImage = target->colorImage;
+    this->offscreenColorView = target->colorImageView;
+    this->offscreenColorFormat = target->colorFormat;
+    this->offscreenSampleCount = target->sampleCount;
+    this->offscreenExtent = target->extent;
   }
+  const VkRenderPass renderPass = this->offscreenRenderPass;
+  const VkFramebuffer framebuffer = this->offscreenFramebuffer;
 
   // One-shot command buffer from a temporary pool.  The AS phase (BLAS/TLAS
   // builds and buffer copies) is not allowed inside a render pass, so it is
@@ -2737,8 +2968,6 @@ SoRTXRenderBackend::render(const SoDrawList & drawlist,
   VkCommandBuffer cmd =
     this->beginTransientCommandBuffer(pool);
   if (cmd == VK_NULL_HANDLE) {
-    vkDestroyRenderPass(this->device, renderPass, this->allocator);
-    vkDestroyFramebuffer(this->device, framebuffer, this->allocator);
     this->emitError("failed to allocate RT command buffer");
     return FALSE;
   }
@@ -2791,8 +3020,7 @@ SoRTXRenderBackend::render(const SoDrawList & drawlist,
 
   vkFreeCommandBuffers(this->device, pool, 1, &cmd);
   vkDestroyCommandPool(this->device, pool, this->allocator);
-  vkDestroyFramebuffer(this->device, framebuffer, this->allocator);
-  vkDestroyRenderPass(this->device, renderPass, this->allocator);
+  // The cached render pass and framebuffer stay alive for reuse.
 
   if (!asOk || !traceOk || !submitted) {
     this->emitError("render: RT frame failed");
@@ -2822,6 +3050,7 @@ SoRTXRenderBackend::renderExternal(const SoDrawList & drawlist,
     return FALSE;
   }
   this->debugValidateDrawList(drawlist);
+  this->flushPendingDestroys();
 
   const auto * target =
     static_cast<const SoVulkanRenderTarget *>(params.renderTarget);

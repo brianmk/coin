@@ -497,8 +497,13 @@ SoRayPickAction::computeWorldSpaceRay(void)
     const SbViewportRegion & vp = SoViewportRegionElement::get(this->state);
     SbVec2s vpsize = vp.getViewportSizePixels();
     const double pixels = (vpsize[1] > 0) ? double(vpsize[1]) : 1.0;
-    PRIVATE(this)->rayradiusstart = (double(vv.getHeight()) / pixels) *
-                                    double(PRIVATE(this)->radiusinpixels);
+    // Clamp to a floor so an empty scene (no camera view volume yet) does
+    // not collapse the radius back to zero and reintroduce the original
+    // never-intersect-lines-or-points failure.
+    const double viewHeight =
+      SbMax(double(vv.getHeight()), double(FLT_EPSILON));
+    PRIVATE(this)->rayradiusstart =
+      (viewHeight / pixels) * double(PRIVATE(this)->radiusinpixels);
     PRIVATE(this)->rayradiusdelta = 0.0;
   }
   else {

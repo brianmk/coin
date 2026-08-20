@@ -52,6 +52,7 @@ struct RTMaterial {
     vec4  lightAttenuation[8];
     vec4  lightSpot[8];
     vec4  triangleData;    // x = triangle-normal pool offset
+    vec4  pbr;             // x = metalness, y = roughness, z = usePbr
 };
 
 layout(set = 0, binding = 3, std430) buffer Materials {
@@ -116,9 +117,9 @@ vec3 sampleCosine(vec2 u)
 // Next-event-estimation direct lighting with shadow rays.  Matches the
 // raster Gouraud convention: the producer's light data is used verbatim
 // against eye-space normals, so the direct term looks like the raster
-// viewport.  Shadow rays are cast in world space along the light direction
-// (the producer pre-transforms light data by the light's node matrix, i.e.
-// world space for scene-root lights).
+// viewport.  The producer stores lights in eye space (the light's node
+// matrix is ModelMatrix * ViewingMatrix), so the shadow ray direction is
+// converted back to world space before the TLAS trace.
 vec3 coin_rtx_directLighting(vec3 worldPos, vec3 worldN, RTMaterial mat)
 {
     vec3 eyePos = (frame.u_view * vec4(worldPos, 1.0)).xyz;
@@ -156,11 +157,15 @@ vec3 coin_rtx_directLighting(vec3 worldPos, vec3 worldN, RTMaterial mat)
         float NdotL = dot(N, normalize(L));
         if (NdotL <= 0.0) continue;
 
-        // Shadow ray: the shadow pair writes only payload.occluded.
+        // Shadow ray: the shadow pair writes only payload.occluded.  The
+        // TLAS is world space, so convert the eye-space direction L back to
+        // world space before tracing.
         payload.occluded = 0u;
+        vec3 worldL = normalize((frame.u_viewInverse *
+                                 vec4(normalize(L), 0.0)).xyz);
         traceRayEXT(tlas, gl_RayFlagsOpaqueEXT, 0xFF, SBT_HIT_SHADOW, 0,
                     SBT_MISS_SHADOW, worldPos + worldN * 0.001, 0.001,
-                    normalize(L), distToLight - 0.001, 0);
+                    worldL, distToLight - 0.001, 0);
         if (payload.occluded != 0u) continue;
 
         vec3 H = normalize(normalize(L) + V);

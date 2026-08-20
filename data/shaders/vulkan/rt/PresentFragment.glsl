@@ -24,18 +24,21 @@ layout(set = 0, binding = 4, std430) readonly buffer PositionBuffer { vec4 posit
 
 layout(push_constant) uniform PresentPush {
     vec4 u_present; // x = width, y = height, z = denoiseOn, w = frameIndex
+    vec4 u_origin;  // x = viewport origin x, y = viewport origin y (pixels)
 } pc;
 
 layout(location = 0) out vec4 fragColor;
 
 void main()
 {
+    vec2 viewportCoord = gl_FragCoord.xy - pc.u_origin.xy;
     if (pc.u_present.z < 0.5) {
-        fragColor = texture(u_rtImage, gl_FragCoord.xy / textureSize(u_rtImage, 0));
+        fragColor =
+          texture(u_rtImage, viewportCoord / textureSize(u_rtImage, 0));
         return;
     }
 
-    ivec2 px = ivec2(gl_FragCoord.xy);
+    ivec2 px = ivec2(viewportCoord);
     const int width = int(max(pc.u_present.x, 1.0));
     const int height = int(max(pc.u_present.y, 1.0));
     const int idx = px.y * width + px.x;

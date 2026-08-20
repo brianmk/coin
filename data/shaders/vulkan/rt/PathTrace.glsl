@@ -277,9 +277,9 @@ vec3 coin_rtx_gouraud(vec3 eyePos, vec3 eyeNormal, vec3 baseColor,
 // Next-event-estimation direct lighting with shadow rays.  Matches the
 // raster Gouraud convention: the producer's light data is used verbatim
 // against eye-space normals (no view-space conversion), so the direct term
-// looks like the raster viewport.  Shadow rays are cast in world space
-// along the light direction (the producer pre-transforms light data by the
-// light's node matrix, i.e. world space for scene-root lights).
+// looks like the raster viewport.  The producer stores lights in eye space
+// (the light's node matrix is ModelMatrix * ViewingMatrix), so shadow ray
+// directions are converted back to world space before the ray query.
 vec3 coin_rtx_directLighting(vec3 worldPos, vec3 worldN, vec3 rayDir,
                              RTMaterial mat)
 {
@@ -319,9 +319,12 @@ vec3 coin_rtx_directLighting(vec3 worldPos, vec3 worldN, vec3 rayDir,
         float NdotL = dot(N, normalize(L));
         if (NdotL <= 0.0) continue;
 
-        // Shadow ray: the producer's direction is world space for
-        // scene-root lights, so use it directly as the world ray direction.
-        if (traceShadow(worldPos + worldN * 0.001, normalize(L),
+        // Shadow ray: the light data is in eye space (see above), so
+        // convert the direction back to world space for the shadow query
+        // against the world-space TLAS.
+        vec3 worldL = normalize((frame.u_viewInverse *
+                                 vec4(normalize(L), 0.0)).xyz);
+        if (traceShadow(worldPos + worldN * 0.001, worldL,
                         distToLight - 0.001)) {
             continue;
         }

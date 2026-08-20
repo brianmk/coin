@@ -9,6 +9,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <functional>
 #include <unordered_map>
 #include <vector>
 
@@ -40,6 +41,9 @@ struct RTXCachedGeometry {
   uint32_t vertexStride = 0;
   uint32_t cacheGeneration = 0;
   uint64_t contentHash = 0;
+  // Command that last touched this entry (per-frame arena pointer; used
+  // only as an identity key for map rebuilds after cache eviction).
+  const SoRenderCommand * commandKey = nullptr;
   // Offset of this command's triangle normals in the normal pool
   // (UINT32_MAX = not uploaded yet).
   uint32_t normalPoolOffset = 0xFFFFFFFFu;
@@ -216,6 +220,16 @@ private:
   VkSampleCountFlagBits presentSampleCount =
     VK_SAMPLE_COUNT_1_BIT; //!< cache key for present pipeline
 
+  // Cached offscreen render pass + framebuffer (render()), keyed on the
+  // target identity so they are not recreated every frame.
+  VkRenderPass offscreenRenderPass = VK_NULL_HANDLE;
+  VkFramebuffer offscreenFramebuffer = VK_NULL_HANDLE;
+  VkImage offscreenColorImage = VK_NULL_HANDLE;
+  VkImageView offscreenColorView = VK_NULL_HANDLE;
+  VkFormat offscreenColorFormat = VK_FORMAT_UNDEFINED;
+  VkSampleCountFlagBits offscreenSampleCount = VK_SAMPLE_COUNT_1_BIT;
+  VkExtent2D offscreenExtent = {};
+
   VkShaderModule pathTraceModule = VK_NULL_HANDLE; //!< ray-query compute tracer
   VkShaderModule raygenModule = VK_NULL_HANDLE;
   VkShaderModule missModule = VK_NULL_HANDLE;
@@ -337,11 +351,25 @@ private:
   //! identity changed and a BLAS rebuild is pending this frame.
   bool cacheChanged = false;
 
+  // Monotonic frame counter used to stamp visited cache entries; entries
+  // not stamped by the end of updateGeometryCache() are evicted.
+  uint32_t cacheFrame = 0;
+  void deferDestroyCacheEntry(RTXCachedGeometry & entry);
+
   // Staging buffers destroyed by buildBlas() are released only after the
   // owning command buffer finished executing (destroying a bound buffer
   // while the command buffer is recording or pending invalidates it).
   std::vector<std::pair<VkBuffer, VkDeviceMemory>> pendingStagingDestroys;
   void freePendingStagingDestroys();
+
+  // Resources replaced during a frame (resized storage image, grown
+  // instance/material buffers, recreated present pipeline, ...) are
+  // destroyed two frames later, once the caller's pending submissions that
+  // may still reference them have certainly completed.
+  std::vector<std::function<void()>> pendingDestroys[2];
+  int pendingDestroyIndex = 0;
+  void flushPendingDestroys();
+  void deferDestroy(std::function<void()> && fn);
 };
 
 #endif // COIN_SORTXRENDERBACKEND_H

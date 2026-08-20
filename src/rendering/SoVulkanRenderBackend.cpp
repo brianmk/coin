@@ -7,6 +7,7 @@
 #include <Inventor/errors/SoDebugError.h>
 
 #include <algorithm>
+#include <cassert>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -21,6 +22,17 @@ namespace {
 
 int s_debugFrame = 0;
 int s_dumpCmdCount = 0;
+
+// Environment flags are enabled by presence, but honor the conventional
+// "VAR=0"/"false"/"off" opt-out values.
+bool
+envFlagEnabled(const char * name)
+{
+  const char * value = getenv(name);
+  if (value == nullptr) return false;
+  return std::strcmp(value, "0") != 0 && std::strcmp(value, "false") != 0 &&
+         std::strcmp(value, "off") != 0;
+}
 
 // Fixed interleaved vertex layout shared by every retained command.
 //
@@ -294,6 +306,11 @@ SoVulkanRenderBackend::initialize(const SoRenderBackendInitParams & params)
   this->queueFamilyIndex = deviceContext->graphicsQueueFamilyIndex;
   this->allocator = deviceContext->allocator;
 
+  // Mark initialized before creating resources so that a failure in any
+  // create*() below runs the full (null-tolerant) shutdown() cleanup
+  // instead of leaking every handle created so far.
+  this->setInitialized(TRUE);
+
   if (!this->createCommandPool()) {
     this->emitError("failed to create Vulkan command pool");
     this->shutdown();
@@ -342,7 +359,6 @@ SoVulkanRenderBackend::initialize(const SoRenderBackendInitParams & params)
     return FALSE;
   }
 
-  this->setInitialized(TRUE);
   this->emitLog("initialized");
   return TRUE;
 }
@@ -483,9 +499,156 @@ SoVulkanRenderBackend::createLightingUniformBuffer()
   if (vkMapMemory(this->device, this->lightingMemory, 0, totalBytes, 0,
                   &this->lightingMapped) != VK_SUCCESS) {
     this->emitError("createLightingUniformBuffer: vkMapMemory failed");
+    vkDestroyBuffer(this->device, this->lightingBuffer, this->allocator);
+    vkFreeMemory(this->device, this->lightingMemory, this->allocator);
+    this->lightingBuffer = VK_NULL_HANDLE;
+    this->lightingMemory = VK_NULL_HANDLE;
     return false;
   }
   return true;
+}
+
+bool
+SoVulkanRenderBackend::growLightingUbo(const uint32_t minSlots)
+{
+  uint32_t slots = 4096;
+  while (slots < minSlots) slots <<= 1;
+  if (slots <= this->uboSlotsPerFrame) return true;
+
+  VkBuffer newBuffer = VK_NULL_HANDLE;
+  VkDeviceMemory newMemory = VK_NULL_HANDLE;
+  void * newMapped = nullptr;
+  const VkDeviceSize totalBytes =
+    2 * static_cast<VkDeviceSize>(slots) * this->uboSlotStride;
+  if (!this->createBuffer(totalBytes, VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT,
+                          newBuffer, newMemory, nullptr)) {
+    this->emitError("growLightingUbo: failed to allocate larger UBO");
+    return false;
+  }
+  if (vkMapMemory(this->device, newMemory, 0, totalBytes, 0, &newMapped) !=
+      VK_SUCCESS) {
+    this->emitError("growLightingUbo: vkMapMemory failed");
+    vkDestroyBuffer(this->device, newBuffer, this->allocator);
+    vkFreeMemory(this->device, newMemory, this->allocator);
+    return false;
+  }
+
+  VkBuffer oldBuffer = this->lightingBuffer;
+  VkDeviceMemory oldMemory = this->lightingMemory;
+  void * oldMapped = this->lightingMapped;
+  this->lightingBuffer = newBuffer;
+  this->lightingMemory = newMemory;
+  this->lightingMapped = newMapped;
+  this->uboSlotsPerFrame = slots;
+
+  // The old buffer may still be referenced by a pending frame; destroy it
+  // only after the next frame boundary (flushPendingDestroys()).
+  VkDevice device = this->device;
+  const VkAllocationCallbacks * allocator = this->allocator;
+  this->deferDestroy([device, allocator, oldBuffer, oldMemory, oldMapped]() {
+    vkUnmapMemory(device, oldMemory);
+    vkDestroyBuffer(device, oldBuffer, allocator);
+    vkFreeMemory(device, oldMemory, allocator);
+  });
+  return true;
+}
+
+void
+SoVulkanRenderBackend::flushPendingDestroys()
+{
+  const int batch = this->pendingDestroyIndex;
+  this->pendingDestroyIndex = batch ^ 1;
+  for (const auto & fn : this->pendingDestroys[batch]) {
+    if (fn) fn();
+  }
+  this->pendingDestroys[batch].clear();
+}
+
+void
+SoVulkanRenderBackend::deferDestroy(std::function<void()> && fn)
+{
+  this->pendingDestroys[this->pendingDestroyIndex].push_back(std::move(fn));
+}
+
+void
+SoVulkanRenderBackend::deferDestroyCacheEntry(VulkanCachedCommand & entry)
+{
+  if (entry.vertexBuffer == VK_NULL_HANDLE &&
+      entry.indexBuffer == VK_NULL_HANDLE) {
+    entry = VulkanCachedCommand();
+    return;
+  }
+  VkDevice device = this->device;
+  const VkAllocationCallbacks * allocator = this->allocator;
+  const VkBuffer vertexBuffer = entry.vertexBuffer;
+  const VkDeviceMemory vertexMemory = entry.vertexMemory;
+  const VkBuffer indexBuffer = entry.indexBuffer;
+  const VkDeviceMemory indexMemory = entry.indexMemory;
+  this->deferDestroy(
+    [device, allocator, vertexBuffer, vertexMemory, indexBuffer,
+     indexMemory]() {
+      if (indexBuffer != VK_NULL_HANDLE) {
+        vkDestroyBuffer(device, indexBuffer, allocator);
+      }
+      if (indexMemory != VK_NULL_HANDLE) {
+        vkFreeMemory(device, indexMemory, allocator);
+      }
+      if (vertexBuffer != VK_NULL_HANDLE) {
+        vkDestroyBuffer(device, vertexBuffer, allocator);
+      }
+      if (vertexMemory != VK_NULL_HANDLE) {
+        vkFreeMemory(device, vertexMemory, allocator);
+      }
+    });
+  entry = VulkanCachedCommand();
+}
+
+void
+SoVulkanRenderBackend::deferDestroyTextureEntry(VulkanCachedTexture & entry)
+{
+  // The pool slot is reclaimed logically now (descriptorSetCount drives the
+  // fixed-size pool accounting) but the set itself is only returned to the
+  // pool after the next frame boundary: a pending frame may still reference
+  // it, and vkFreeDescriptorSets on an in-use set is a spec violation.
+  // When the pool is reset wholesale in the meantime (descriptorPoolEpoch
+  // changes), the deferred free is skipped -- the reset already reclaimed
+  // every set in the pool.
+  if (entry.descriptorSet != VK_NULL_HANDLE) {
+    VkDevice device = this->device;
+    VkDescriptorPool pool = this->descriptorPool;
+    const VkDescriptorSet set = entry.descriptorSet;
+    const uint32_t epoch = this->descriptorPoolEpoch;
+    this->deferDestroy([device, pool, set, epoch, this]() {
+      if (epoch != this->descriptorPoolEpoch) return;
+      vkFreeDescriptorSets(device, pool, 1, &set);
+    });
+    if (this->descriptorSetCount > 0) --this->descriptorSetCount;
+  }
+  if (entry.image == VK_NULL_HANDLE) {
+    entry = VulkanCachedTexture();
+    return;
+  }
+  VkDevice device = this->device;
+  const VkAllocationCallbacks * allocator = this->allocator;
+  const VkImage image = entry.image;
+  const VkDeviceMemory memory = entry.memory;
+  const VkImageView view = entry.view;
+  const VkSampler sampler = entry.sampler;
+  this->deferDestroy([device, allocator, image, memory, view, sampler]() {
+    if (view != VK_NULL_HANDLE) {
+      vkDestroyImageView(device, view, allocator);
+    }
+    if (sampler != VK_NULL_HANDLE) {
+      vkDestroySampler(device, sampler, allocator);
+    }
+    if (image != VK_NULL_HANDLE) {
+      vkDestroyImage(device, image, allocator);
+    }
+    if (memory != VK_NULL_HANDLE) {
+      vkFreeMemory(device, memory, allocator);
+    }
+  });
+  entry = VulkanCachedTexture();
 }
 
 bool
@@ -552,7 +715,13 @@ SoVulkanRenderBackend::createWhiteTexture()
   allocInfo.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
   allocInfo.commandBufferCount = 1;
   VkCommandBuffer uploadBuffer = VK_NULL_HANDLE;
-  vkAllocateCommandBuffers(this->device, &allocInfo, &uploadBuffer);
+  if (vkAllocateCommandBuffers(this->device, &allocInfo, &uploadBuffer) !=
+      VK_SUCCESS) {
+    this->emitError("createWhiteTexture: failed to allocate upload buffer");
+    vkDestroyBuffer(this->device, staging, this->allocator);
+    vkFreeMemory(this->device, stagingMemory, this->allocator);
+    return false;
+  }
   VkCommandBufferBeginInfo bi {};
   bi.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
   bi.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
@@ -596,8 +765,14 @@ SoVulkanRenderBackend::createWhiteTexture()
   submit.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
   submit.commandBufferCount = 1;
   submit.pCommandBuffers = &uploadBuffer;
-  vkQueueSubmit(this->queue, 1, &submit, VK_NULL_HANDLE);
-  vkQueueWaitIdle(this->queue);
+  const VkResult submitResult =
+    vkQueueSubmit(this->queue, 1, &submit, VK_NULL_HANDLE);
+  if (submitResult == VK_SUCCESS) {
+    vkQueueWaitIdle(this->queue);
+  }
+  else {
+    this->emitError("createWhiteTexture: vkQueueSubmit failed");
+  }
   vkFreeCommandBuffers(this->device, this->commandPool, 1, &uploadBuffer);
   vkDestroyBuffer(this->device, staging, this->allocator);
   vkFreeMemory(this->device, stagingMemory, this->allocator);
@@ -1256,6 +1431,7 @@ SoVulkanRenderBackend::getOrCreateCache(const SoRenderCommand * command)
   }
   const size_t index = this->gpuCache.size();
   this->gpuCache.emplace_back();
+  this->gpuCache.back().commandKey = command;
   this->commandToCache[command] = index;
   return this->gpuCache.back();
 }
@@ -1457,23 +1633,16 @@ SoVulkanRenderBackend::invalidateCache()
   this->gpuCache.clear();
   this->commandToCache.clear();
   this->invalidateTextureCache();
-  this->cachedCommandCount = 0;
-  this->haveCacheGeneration = false;
 }
 
 void
 SoVulkanRenderBackend::updateGeometryCache(const SoDrawList & drawlist)
 {
+  // One frame boundary has passed since the previous flush, so resources
+  // replaced two frames ago can be destroyed safely now.
+  this->flushPendingDestroys();
+
   const uint32_t generation = drawlist.getGeneration();
-  if ((this->haveCacheGeneration && this->cacheGeneration != generation) ||
-      (this->haveCacheGeneration &&
-       this->cachedCommandCount !=
-         static_cast<size_t>(drawlist.getNumCommands()))) {
-    this->invalidateCache();
-  }
-  this->cacheGeneration = generation;
-  this->haveCacheGeneration = true;
-  this->cachedCommandCount = static_cast<size_t>(drawlist.getNumCommands());
 
   // Make sure the descriptor pool can hold one set per distinct texture in
   // this frame before any allocation happens.  This runs before
@@ -1496,8 +1665,11 @@ SoVulkanRenderBackend::updateGeometryCache(const SoDrawList & drawlist)
     VulkanCachedCommand & entry = this->getOrCreateCache(&command);
     const uint32_t vertexStride = geometry.vertexStride
       ? geometry.vertexStride : sizeof(float) * 3;
+    // The draw-list generation changes every frame (clear() bumps it), so
+    // it is only a visit stamp for cache eviction below -- never a signal
+    // to re-upload.  Re-uploads are driven purely by the producer-owned
+    // content keys.
     const bool geometryMatches = entry.vertexBuffer != VK_NULL_HANDLE &&
-      entry.cacheGeneration == generation &&
       entry.posKey == geometry.positions &&
       entry.normalKey == geometry.normals &&
       entry.colorKey == geometry.colors &&
@@ -1509,16 +1681,16 @@ SoVulkanRenderBackend::updateGeometryCache(const SoDrawList & drawlist)
       entry.vertexStride == vertexStride &&
       entry.texcoordStride == geometry.texcoordStride;
     if (!geometryMatches) {
-      this->destroyCacheEntry(entry);
+      this->deferDestroyCacheEntry(entry);
       this->uploadGeometry(entry, command);
-      entry.cacheGeneration = generation;
     }
+    entry.commandKey = &command;
+    entry.cacheGeneration = generation;
 
     const SoTextureData & texture = command.material.texture;
     if (texture.pixels && texture.width > 0 && texture.height > 0) {
       VulkanCachedTexture & texEntry = this->getOrCreateTexture(&command);
       const bool textureMatches = texEntry.image != VK_NULL_HANDLE &&
-        texEntry.cacheGeneration == generation &&
         texEntry.pixelsKey == texture.pixels &&
         texEntry.width == texture.width &&
         texEntry.height == texture.height &&
@@ -1529,7 +1701,7 @@ SoVulkanRenderBackend::updateGeometryCache(const SoDrawList & drawlist)
         texEntry.wrapT == texture.wrapT &&
         texEntry.model == texture.model;
       if (!textureMatches) {
-        this->destroyTextureEntry(texEntry);
+        this->deferDestroyTextureEntry(texEntry);
         this->uploadTexture(texEntry, texture);
         texEntry.pixelsKey = texture.pixels;
         texEntry.width = texture.width;
@@ -1540,10 +1712,51 @@ SoVulkanRenderBackend::updateGeometryCache(const SoDrawList & drawlist)
         texEntry.wrapS = texture.wrapS;
         texEntry.wrapT = texture.wrapT;
         texEntry.model = texture.model;
-        texEntry.cacheGeneration = generation;
       }
+      texEntry.commandKey = &command;
+      texEntry.cacheGeneration = generation;
     }
   }
+
+  // Evict entries that were not visited this frame: their command has
+  // disappeared from the draw list (or its pointer is no longer part of
+  // this frame's arena).  Entries surviving eviction keep their index
+  // identity, so rebuild the pointer maps from the stored commandKey.
+  // Destruction is deferred: a pending frame may still reference the
+  // evicted buffers/images.
+  const auto evictStale = [&](auto & cache, auto destroyEntry,
+                              auto & indexMap) {
+    bool anyStale = false;
+    for (size_t idx = 0; idx < cache.size(); ++idx) {
+      if (cache[idx].cacheGeneration != generation) {
+        destroyEntry(cache[idx]);
+        anyStale = true;
+      }
+    }
+    if (!anyStale) return;
+    size_t write = 0;
+    for (size_t idx = 0; idx < cache.size(); ++idx) {
+      if (cache[idx].cacheGeneration == generation) {
+        if (write != idx) cache[write] = std::move(cache[idx]);
+        ++write;
+      }
+    }
+    cache.resize(write);
+    indexMap.clear();
+    for (size_t idx = 0; idx < cache.size(); ++idx) {
+      indexMap[cache[idx].commandKey] = idx;
+    }
+  };
+  evictStale(this->gpuCache,
+             [this](VulkanCachedCommand & entry) {
+               this->deferDestroyCacheEntry(entry);
+             },
+             this->commandToCache);
+  evictStale(this->textureCache,
+             [this](VulkanCachedTexture & entry) {
+               this->deferDestroyTextureEntry(entry);
+             },
+             this->commandToTexture);
 }
 
 // --- Texture cache --------------------------------------------------------
@@ -1595,6 +1808,7 @@ SoVulkanRenderBackend::getOrCreateTexture(const SoRenderCommand * command)
   }
   const size_t index = this->textureCache.size();
   this->textureCache.emplace_back();
+  this->textureCache.back().commandKey = command;
   this->commandToTexture[command] = index;
   return this->textureCache.back();
 }
@@ -1721,7 +1935,13 @@ SoVulkanRenderBackend::uploadTexture(VulkanCachedTexture & entry,
   allocInfo.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
   allocInfo.commandBufferCount = 1;
   VkCommandBuffer uploadBuffer = VK_NULL_HANDLE;
-  vkAllocateCommandBuffers(this->device, &allocInfo, &uploadBuffer);
+  if (vkAllocateCommandBuffers(this->device, &allocInfo, &uploadBuffer) !=
+      VK_SUCCESS) {
+    this->emitError("uploadTexture: failed to allocate upload buffer");
+    vkDestroyBuffer(this->device, staging, this->allocator);
+    vkFreeMemory(this->device, stagingMemory, this->allocator);
+    return false;
+  }
 
   VkCommandBufferBeginInfo bi {};
   bi.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
@@ -1827,6 +2047,9 @@ SoVulkanRenderBackend::ensureDescriptorPoolSpace()
   vkResetDescriptorPool(this->device, this->descriptorPool, 0);
   this->descriptorSetCount = 0;
   this->whiteDescriptorSet = VK_NULL_HANDLE;
+  // Any pending deferred descriptor-set frees now reference reclaimed pool
+  // slots; bump the epoch so they skip the free.
+  ++this->descriptorPoolEpoch;
 
   if (!this->allocateTextureDescriptorSet(this->whiteImageView,
                                           this->whiteSampler,
@@ -2318,6 +2541,8 @@ SoVulkanRenderBackend::recordDrawCommand(const SoDrawList & drawlist,
   this->applyScissor(command, target);
 
   const uint32_t slotIndex = this->uboCmdIndex++;
+  assert(slotIndex < this->uboSlotsPerFrame &&
+         "lighting UBO slot overflow: buffer too small for draw list");
   const uint32_t uboOffset =
     ((this->uboFrameIndex & 1u) * this->uboSlotsPerFrame + slotIndex) *
     this->uboSlotStride;
@@ -2478,6 +2703,11 @@ SoVulkanRenderBackend::shutdown()
 
   vkQueueWaitIdle(this->queue);
 
+  // Drain both deferred-destruction batches: the queue is idle, so every
+  // replaced resource is safe to release now.
+  this->flushPendingDestroys();
+  this->flushPendingDestroys();
+
   this->invalidateCache();
 
   for (auto & entry : this->pipelineCache) {
@@ -2581,8 +2811,9 @@ SoVulkanRenderBackend::shutdown()
 }
 
 SbBool
-SoVulkanRenderBackend::render(const SoDrawList & drawlist,
-                              const SoRenderParams & params)
+SoVulkanRenderBackend::renderInternal(const SoDrawList & drawlist,
+                                      const SoRenderParams & params,
+                                      const bool overlaysOnly)
 {
   if (!this->isInitialized()) {
     this->emitError("render called before backend initialization");
@@ -2604,6 +2835,17 @@ SoVulkanRenderBackend::render(const SoDrawList & drawlist,
       target->extent.height == 0) {
     this->emitError("invalid Vulkan render target");
     return FALSE;
+  }
+
+  if (overlaysOnly) {
+    bool hasOverlay = false;
+    for (int i = 0; i < drawlist.getNumCommands(); ++i) {
+      if (drawlist.getCommand(i).pass == SO_RENDERPASS_OVERLAY) {
+        hasOverlay = true;
+        break;
+      }
+    }
+    if (!hasOverlay) return TRUE;
   }
 
   // (Re)create the render pass when the destination changes identity.
@@ -2691,7 +2933,12 @@ SoVulkanRenderBackend::render(const SoDrawList & drawlist,
   vkCmdBeginRenderPass(this->commandBuffer, &rpbi, VK_SUBPASS_CONTENTS_INLINE);
 
   this->activeCommandBuffer = this->commandBuffer;
-  this->recordFrame(drawlist, params, *target, this->renderPass);
+  if (overlaysOnly) {
+    this->recordOverlayBlock(drawlist, params, *target, this->renderPass);
+  }
+  else {
+    this->recordFrame(drawlist, params, *target, this->renderPass);
+  }
   this->activeCommandBuffer = VK_NULL_HANDLE;
 
   vkCmdEndRenderPass(this->commandBuffer);
@@ -2703,6 +2950,20 @@ SoVulkanRenderBackend::render(const SoDrawList & drawlist,
     return FALSE;
   }
   return TRUE;
+}
+
+SbBool
+SoVulkanRenderBackend::render(const SoDrawList & drawlist,
+                              const SoRenderParams & params)
+{
+  return this->renderInternal(drawlist, params, false);
+}
+
+SbBool
+SoVulkanRenderBackend::renderOverlaysOnly(const SoDrawList & drawlist,
+                                          const SoRenderParams & params)
+{
+  return this->renderInternal(drawlist, params, true);
 }
 
 SbBool
@@ -2782,35 +3043,7 @@ SoVulkanRenderBackend::renderExternalOverlay(const SoDrawList & drawlist,
   this->updateGeometryCache(drawlist);
 
   this->activeCommandBuffer = commandBuffer;
-
-  // Draw every screen-space overlay command into its own scissored
-  // viewport; the overlay rect's depth is cleared once per rect so the
-  // overlay self-occludes independently of the (already recorded) scene.
-  const std::vector<int> & order = drawlist.getSortedOrder();
-  int lastClearX = -1, lastClearY = -1, lastClearW = -1, lastClearH = -1;
-  for (int i = 0; i < drawlist.getNumCommands(); ++i) {
-    const int index =
-      i < static_cast<int>(order.size()) ? order[i] : i;
-    const SoRenderCommand & command = drawlist.getCommand(index);
-    if (command.pass != SO_RENDERPASS_OVERLAY) continue;
-    const SoRasterState & raster = command.state.raster;
-    if (!raster.scissorEnabled || raster.scissorWidth <= 0 ||
-        raster.scissorHeight <= 0) {
-      continue;
-    }
-    if (raster.scissorX != lastClearX || raster.scissorY != lastClearY ||
-        raster.scissorWidth != lastClearW ||
-        raster.scissorHeight != lastClearH) {
-      this->recordOverlayDepthClear(command, *target);
-      lastClearX = raster.scissorX;
-      lastClearY = raster.scissorY;
-      lastClearW = raster.scissorWidth;
-      lastClearH = raster.scissorHeight;
-    }
-    this->recordDrawCommand(drawlist, command, *target, params, renderPass,
-                            false, -1, nullptr, true);
-  }
-
+  this->recordOverlayBlock(drawlist, params, *target, renderPass);
   this->activeCommandBuffer = VK_NULL_HANDLE;
   return TRUE;
 }
@@ -2824,6 +3057,16 @@ SoVulkanRenderBackend::recordFrame(const SoDrawList & drawlist,
   if (getenv("FC_VULKAN_MATRIX_DUMP")) {
     s_debugFrame++;
     s_dumpCmdCount = 0;
+  }
+  // Grow the per-draw lighting ring buffer when this frame records more
+  // commands than it has slots, so slotIndex can never overflow the
+  // allocation (VUID-vkCmdBindDescriptorSets-pDynamicOffsets-01972).
+  if (static_cast<uint32_t>(drawlist.getNumCommands()) >
+      this->uboSlotsPerFrame) {
+    if (!this->growLightingUbo(
+          static_cast<uint32_t>(drawlist.getNumCommands()))) {
+      return FALSE;
+    }
   }
   this->uboFrameIndex++;
   this->uboCmdIndex = 0;
@@ -2839,9 +3082,9 @@ SoVulkanRenderBackend::recordFrame(const SoDrawList & drawlist,
   // the GUI/preferences when wired; environment variables act as a
   // diagnostic fallback for the command line.
   const bool wireframeOverlay =
-    params.wireframeOverlay || getenv("FC_VULKAN_WIREFRAME") != nullptr;
+    params.wireframeOverlay || envFlagEnabled("FC_VULKAN_WIREFRAME");
   const bool pointsOverlay =
-    params.pointsOverlay || getenv("FC_VULKAN_POINTS") != nullptr;
+    params.pointsOverlay || envFlagEnabled("FC_VULKAN_POINTS");
   float overlayColor[4] = {
     params.edgeColor[0], params.edgeColor[1], params.edgeColor[2],
     params.edgeColor[3]
@@ -2862,7 +3105,11 @@ SoVulkanRenderBackend::recordFrame(const SoDrawList & drawlist,
     ? SoDrawStyleElement::LINES
     : (pointsOverlay ? SoDrawStyleElement::POINTS : -1);
 
-  // Opaque then transparent, honoring the draw-list sort order.
+  // Opaque then transparent, honoring the draw-list sort order.  Overlay
+  // commands (SO_RENDERPASS_OVERLAY) are handled exclusively by the
+  // dedicated overlay block below: they carry their own view/projection
+  // matrices and viewport, so recording them here with the main camera
+  // matrices would draw garbage into the scene depth buffer.
   const std::vector<int> & order = drawlist.getSortedOrder();
   for (int passIndex = 0; passIndex < 2; ++passIndex) {
     const bool transparent = passIndex == 1;
@@ -2870,6 +3117,7 @@ SoVulkanRenderBackend::recordFrame(const SoDrawList & drawlist,
       const int index =
         i < static_cast<int>(order.size()) ? order[i] : i;
       const SoRenderCommand & command = drawlist.getCommand(index);
+      if (command.pass == SO_RENDERPASS_OVERLAY) continue;
       const bool isTransparent = command.pass == SO_RENDERPASS_TRANSPARENT;
       if (isTransparent != transparent) continue;
       this->recordDrawCommand(drawlist, command, target, params, renderPass,
@@ -2883,6 +3131,7 @@ SoVulkanRenderBackend::recordFrame(const SoDrawList & drawlist,
         const int index =
           i < static_cast<int>(order.size()) ? order[i] : i;
         const SoRenderCommand & command = drawlist.getCommand(index);
+        if (command.pass == SO_RENDERPASS_OVERLAY) continue;
         if (command.pass == SO_RENDERPASS_TRANSPARENT) continue;
         this->recordDrawCommand(drawlist, command, target, params, renderPass,
                                 false, overlayFillMode, overlayColor);
@@ -2893,30 +3142,39 @@ SoVulkanRenderBackend::recordFrame(const SoDrawList & drawlist,
   // Screen-space overlay geometry (navigation cube): drawn after both passes
   // into its own viewport, with the overlay rect's depth cleared first so the
   // overlay self-occludes independently of the main scene.
-  {
-    int lastClearX = -1, lastClearY = -1, lastClearW = -1, lastClearH = -1;
-    for (int i = 0; i < drawlist.getNumCommands(); ++i) {
-      const int index =
-        i < static_cast<int>(order.size()) ? order[i] : i;
-      const SoRenderCommand & command = drawlist.getCommand(index);
-      if (command.pass != SO_RENDERPASS_OVERLAY) continue;
-      const SoRasterState & raster = command.state.raster;
-      if (!raster.scissorEnabled || raster.scissorWidth <= 0 ||
-          raster.scissorHeight <= 0) {
-        continue;
-      }
-      if (raster.scissorX != lastClearX || raster.scissorY != lastClearY ||
-          raster.scissorWidth != lastClearW ||
-          raster.scissorHeight != lastClearH) {
-        this->recordOverlayDepthClear(command, target);
-        lastClearX = raster.scissorX;
-        lastClearY = raster.scissorY;
-        lastClearW = raster.scissorWidth;
-        lastClearH = raster.scissorHeight;
-      }
-      this->recordDrawCommand(drawlist, command, target, params, renderPass,
-                              false, -1, nullptr, true);
-    }
-  }
+  this->recordOverlayBlock(drawlist, params, target, renderPass);
+
   return true;
+}
+
+void
+SoVulkanRenderBackend::recordOverlayBlock(const SoDrawList & drawlist,
+                                          const SoRenderParams & params,
+                                          const SoVulkanRenderTarget & target,
+                                          VkRenderPass renderPass)
+{
+  const std::vector<int> & order = drawlist.getSortedOrder();
+  int lastClearX = -1, lastClearY = -1, lastClearW = -1, lastClearH = -1;
+  for (int i = 0; i < drawlist.getNumCommands(); ++i) {
+    const int index =
+      i < static_cast<int>(order.size()) ? order[i] : i;
+    const SoRenderCommand & command = drawlist.getCommand(index);
+    if (command.pass != SO_RENDERPASS_OVERLAY) continue;
+    const SoRasterState & raster = command.state.raster;
+    if (!raster.scissorEnabled || raster.scissorWidth <= 0 ||
+        raster.scissorHeight <= 0) {
+      continue;
+    }
+    if (raster.scissorX != lastClearX || raster.scissorY != lastClearY ||
+        raster.scissorWidth != lastClearW ||
+        raster.scissorHeight != lastClearH) {
+      this->recordOverlayDepthClear(command, target);
+      lastClearX = raster.scissorX;
+      lastClearY = raster.scissorY;
+      lastClearW = raster.scissorWidth;
+      lastClearH = raster.scissorHeight;
+    }
+    this->recordDrawCommand(drawlist, command, target, params, renderPass,
+                            false, -1, nullptr, true);
+  }
 }

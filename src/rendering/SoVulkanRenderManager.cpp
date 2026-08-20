@@ -410,6 +410,14 @@ SoVulkanRenderManager::render(SbBool clearwindow, SbBool clearzbuffer)
                                 drawlist->getNumCommands());
       return FALSE;
     }
+    // The traced scene has no screen-space overlays (navigation cube);
+    // composite them on top with the raster backend.
+    if (!this->pimpl->backend.renderOverlaysOnly(*drawlist, params)) {
+      SoDebugError::postWarning("SoVulkanRenderManager::render",
+                                "overlay render failed (%d draw commands)",
+                                drawlist->getNumCommands());
+      return FALSE;
+    }
     return TRUE;
   }
   if (!this->pimpl->backend.render(*drawlist, params)) {

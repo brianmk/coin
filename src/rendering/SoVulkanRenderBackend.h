@@ -30,6 +30,10 @@ struct VulkanCachedCommand {
   uint32_t vertexCount = 0;
   uint32_t indexCount = 0;
 
+  // Command that last touched this entry (per-frame arena pointer; used
+  // only as an identity key for map rebuilds after cache eviction).
+  const SoRenderCommand * commandKey = nullptr;
+
   // Identity keys mirroring the producer-owned storage of the last upload.
   const float * posKey = nullptr;
   const float * normalKey = nullptr;
@@ -49,6 +53,10 @@ struct VulkanCachedTexture {
   VkImageView view = VK_NULL_HANDLE;
   VkSampler sampler = VK_NULL_HANDLE;
   VkDescriptorSet descriptorSet = VK_NULL_HANDLE;
+
+  // Command that last touched this entry (per-frame arena pointer; used
+  // only as an identity key for map rebuilds after cache eviction).
+  const SoRenderCommand * commandKey = nullptr;
 
   // Identity of the last upload.
   const unsigned char * pixelsKey = nullptr;
@@ -101,6 +109,19 @@ public:
                                const SoRenderParams & params,
                                VkCommandBuffer commandBuffer,
                                VkRenderPass renderPass);
+
+  /*!
+    \brief Composite only the overlay pass (e.g. the navigation cube) into
+    the render target.
+
+    Offscreen counterpart of renderExternalOverlay(): runs a complete
+    one-shot render into params.renderTarget without touching anything but
+    SO_RENDERPASS_OVERLAY commands, so it can be layered on top of a
+    previously rendered (e.g. ray-traced) frame.  Returns TRUE with no work
+    if the draw list contains no overlay commands.
+  */
+  SbBool renderOverlaysOnly(const SoDrawList & drawlist,
+                            const SoRenderParams & params);
 
 private:
   // --- Initialization helpers -------------------------------------------
@@ -178,6 +199,13 @@ private:
                     const SoVulkanRenderTarget & target);
   void recordOverlayDepthClear(const SoRenderCommand & command,
                                const SoVulkanRenderTarget & target);
+  void recordOverlayBlock(const SoDrawList & drawlist,
+                          const SoRenderParams & params,
+                          const SoVulkanRenderTarget & target,
+                          VkRenderPass renderPass);
+  SbBool renderInternal(const SoDrawList & drawlist,
+                        const SoRenderParams & params,
+                        bool overlaysOnly);
   bool recordFrame(const SoDrawList & drawlist,
                    const SoRenderParams & params,
                    const SoVulkanRenderTarget & target,
@@ -189,6 +217,11 @@ private:
                     VkBuffer & buffer,
                     VkDeviceMemory & memory,
                     const void * data);
+  bool growLightingUbo(uint32_t minSlots);
+  void flushPendingDestroys();
+  void deferDestroy(std::function<void()> && fn);
+  void deferDestroyCacheEntry(VulkanCachedCommand & entry);
+  void deferDestroyTextureEntry(VulkanCachedTexture & entry);
 
   // --- Owned device ------------------------------------------------------
   VkInstance instance = VK_NULL_HANDLE;
@@ -212,6 +245,10 @@ private:
   // plus one per cached texture).  The pool is fixed-size, so it is reset
   // and sets are re-allocated when this nears the pool capacity.
   uint32_t descriptorSetCount = 0;
+  // Bumped on every wholesale pool reset; deferred descriptor-set frees
+  // captured before the reset are skipped afterwards (their slots were
+  // already reclaimed by the reset).
+  uint32_t descriptorPoolEpoch = 0;
   VkPipelineLayout pipelineLayout = VK_NULL_HANDLE;
 
   // Per-draw lighting/material uniform buffer (set 0, binding 0, dynamic
@@ -228,6 +265,12 @@ private:
   uint32_t uboSlotsPerFrame = 0;
   uint32_t uboFrameIndex = 0;
   uint32_t uboCmdIndex = 0;
+
+  // Resources replaced during recording are destroyed two frames later,
+  // after the submissions that still reference them have certainly
+  // completed (the caller may keep up to two frames in flight).
+  std::vector<std::function<void()>> pendingDestroys[2];
+  int pendingDestroyIndex = 0;
 
   // Texture binding (set 0, binding 1).  A 1x1 white fallback texture is
   // bound whenever a command carries no embedded SoTextureData.
@@ -407,9 +450,6 @@ private:
   std::unordered_map<const SoRenderCommand *, size_t> commandToCache;
   std::vector<VulkanCachedTexture> textureCache;
   std::unordered_map<const SoRenderCommand *, size_t> commandToTexture;
-  uint32_t cacheGeneration = 0;
-  size_t cachedCommandCount = 0;
-  bool haveCacheGeneration = false;
 
   uint32_t currentFrame = 0;
 };
