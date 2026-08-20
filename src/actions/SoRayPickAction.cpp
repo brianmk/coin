@@ -489,14 +489,17 @@ void
 SoRayPickAction::computeWorldSpaceRay(void)
 {
   if (PRIVATE(this)->isFlagSet(SoRayPickActionP::WS_RAY_SET)) {
-    // set the ray radius to some very small value, since
-    // the user set the ray manually using setRay().
-    //
-    // FIXME: Wouldn't it be a nice new feature to be able to
-    // set the radius of the ray in setRay()? pederb, 2001-01-05
+    // A manually set ray still uses the camera's view volume to relate the
+    // pick radius (specified in screen pixels) to world units, otherwise a
+    // world-space ray would end up with a radius that is effectively zero
+    // and would never intersect lines or points.
     const SbViewVolume & vv = SoViewVolumeElement::get(this->state);
-    PRIVATE(this)->rayradiusstart = SbMin(vv.getWidth(), vv.getHeight()) * FLT_EPSILON;
-    PRIVATE(this)->rayradiusdelta = 0.0f;
+    const SbViewportRegion & vp = SoViewportRegionElement::get(this->state);
+    SbVec2s vpsize = vp.getViewportSizePixels();
+    const double pixels = (vpsize[1] > 0) ? double(vpsize[1]) : 1.0;
+    PRIVATE(this)->rayradiusstart = (double(vv.getHeight()) / pixels) *
+                                    double(PRIVATE(this)->radiusinpixels);
+    PRIVATE(this)->rayradiusdelta = 0.0;
   }
   else {
     const SbViewVolume & vv = SoViewVolumeElement::get(this->state);
