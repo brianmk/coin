@@ -218,6 +218,7 @@ private:
                     VkDeviceMemory & memory,
                     const void * data);
   bool growLightingUbo(uint32_t minSlots);
+  bool prepareLightingSlots(uint32_t neededDraws);
   void flushPendingDestroys();
   void deferDestroy(std::function<void()> && fn);
   void deferDestroyCacheEntry(VulkanCachedCommand & entry);

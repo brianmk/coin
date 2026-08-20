@@ -119,6 +119,10 @@ void main()
     // survives perspective division: z_ndc = 0.5*(z_clip/w + 1)
     // => z_clip' = 0.5*(z_clip + w).
     clip.z = 0.5 * clip.z + 0.5 * clip.w;
+    // Vulkan has no implicit point size: the point-list overlay pipeline
+    // (FC_VULKAN_POINTS) requires an explicit write, other topologies
+    // ignore it.
+    gl_PointSize = 1.0;
     gl_Position = clip;
 
     v_color = pc.u_flags.x > 0.5 ? a_color : vec4(pc.u_color.rgb, 1.0);

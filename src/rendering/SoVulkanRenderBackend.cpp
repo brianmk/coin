@@ -23,6 +23,43 @@ namespace {
 int s_debugFrame = 0;
 int s_dumpCmdCount = 0;
 
+// Number of per-draw lighting UBO slots a frame will consume.  A command is
+// recorded once in its own pass, again when the wireframe/point overlay
+// redraw is active (opaque commands only), and overlay commands are recorded
+// a second time in the overlay block.  recordDrawCommand() bails out before
+// claiming a slot for skipped commands, so this worst case is a safe upper
+// bound.
+uint32_t
+countDrawCommands(const SoDrawList & drawlist, const int overlayFillMode)
+{
+  uint32_t draws = 0;
+  const int num = drawlist.getNumCommands();
+  for (int i = 0; i < num; ++i) {
+    const SoRenderCommand & command = drawlist.getCommand(i);
+    if (command.pass == SO_RENDERPASS_OVERLAY) continue;
+    ++draws;
+    if (overlayFillMode >= 0 &&
+        command.pass != SO_RENDERPASS_TRANSPARENT) {
+      ++draws;
+    }
+  }
+  for (int i = 0; i < num; ++i) {
+    if (drawlist.getCommand(i).pass == SO_RENDERPASS_OVERLAY) ++draws;
+  }
+  return draws;
+}
+
+uint32_t
+countOverlayCommands(const SoDrawList & drawlist)
+{
+  uint32_t draws = 0;
+  const int num = drawlist.getNumCommands();
+  for (int i = 0; i < num; ++i) {
+    if (drawlist.getCommand(i).pass == SO_RENDERPASS_OVERLAY) ++draws;
+  }
+  return draws;
+}
+
 // Environment flags are enabled by presence, but honor the conventional
 // "VAR=0"/"false"/"off" opt-out values.
 bool
@@ -550,6 +587,20 @@ SoVulkanRenderBackend::growLightingUbo(const uint32_t minSlots)
     vkDestroyBuffer(device, oldBuffer, allocator);
     vkFreeMemory(device, oldMemory, allocator);
   });
+  return true;
+}
+
+bool
+SoVulkanRenderBackend::prepareLightingSlots(const uint32_t neededDraws)
+{
+  if (neededDraws > this->uboSlotsPerFrame) {
+    if (!this->growLightingUbo(neededDraws)) return false;
+  }
+  // The slot index is per-frame; advance the ring half before recording so
+  // every render (including overlay-only renders that skip recordFrame())
+  // starts from slot zero of its own half.
+  this->uboFrameIndex++;
+  this->uboCmdIndex = 0;
   return true;
 }
 
@@ -2893,6 +2944,15 @@ SoVulkanRenderBackend::renderInternal(const SoDrawList & drawlist,
 
   this->updateGeometryCache(drawlist);
 
+  // Overlay-only renders skip recordFrame(), so reset the ring cursor here;
+  // without it the slot index would keep climbing across frames and
+  // eventually overflow the lighting UBO.
+  if (overlaysOnly &&
+      !this->prepareLightingSlots(countOverlayCommands(drawlist))) {
+    this->emitError("failed to reserve lighting UBO slots");
+    return FALSE;
+  }
+
   if (!this->beginCommandBuffer()) {
     this->emitError("failed to begin Vulkan command buffer");
     return FALSE;
@@ -3042,6 +3102,14 @@ SoVulkanRenderBackend::renderExternalOverlay(const SoDrawList & drawlist,
 
   this->updateGeometryCache(drawlist);
 
+  // This path never goes through recordFrame(), so reserve the slots it will
+  // consume; otherwise the cursor keeps climbing across frames and
+  // eventually overflows the lighting UBO.
+  if (!this->prepareLightingSlots(countOverlayCommands(drawlist))) {
+    this->emitError("failed to reserve lighting UBO slots");
+    return FALSE;
+  }
+
   this->activeCommandBuffer = commandBuffer;
   this->recordOverlayBlock(drawlist, params, *target, renderPass);
   this->activeCommandBuffer = VK_NULL_HANDLE;
@@ -3058,18 +3126,6 @@ SoVulkanRenderBackend::recordFrame(const SoDrawList & drawlist,
     s_debugFrame++;
     s_dumpCmdCount = 0;
   }
-  // Grow the per-draw lighting ring buffer when this frame records more
-  // commands than it has slots, so slotIndex can never overflow the
-  // allocation (VUID-vkCmdBindDescriptorSets-pDynamicOffsets-01972).
-  if (static_cast<uint32_t>(drawlist.getNumCommands()) >
-      this->uboSlotsPerFrame) {
-    if (!this->growLightingUbo(
-          static_cast<uint32_t>(drawlist.getNumCommands()))) {
-      return FALSE;
-    }
-  }
-  this->uboFrameIndex++;
-  this->uboCmdIndex = 0;
   this->applyViewport(params, target);
   this->recordClear(params, target);
   this->recordBackground(params, target, renderPass);
@@ -3104,6 +3160,14 @@ SoVulkanRenderBackend::recordFrame(const SoDrawList & drawlist,
   const int overlayFillMode = wireframeOverlay
     ? SoDrawStyleElement::LINES
     : (pointsOverlay ? SoDrawStyleElement::POINTS : -1);
+
+  // Reserve per-draw lighting slots for the worst case (main pass plus
+  // overlay redraws) before recording, so slotIndex can never overflow the
+  // ring allocation (VUID-vkCmdBindDescriptorSets-pDynamicOffsets-01972).
+  if (!this->prepareLightingSlots(countDrawCommands(drawlist,
+                                                    overlayFillMode))) {
+    return FALSE;
+  }
 
   // Opaque then transparent, honoring the draw-list sort order.  Overlay
   // commands (SO_RENDERPASS_OVERLAY) are handled exclusively by the
