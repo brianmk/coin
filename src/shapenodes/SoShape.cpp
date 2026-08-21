@@ -743,6 +743,64 @@ SoShape::IRRender(SoIRRenderAction * action)
   if (!action) return;
 
   SoState * state = action->getState();
+
+  const SoShapeStyleElement * shapestyle = SoShapeStyleElement::get(state);
+  const unsigned int shapestyleflags = shapestyle->getFlags();
+  if (shapestyleflags & SoShapeStyleElement::INVISIBLE) return;
+
+  // Draw style BOUNDS: record the shape's local bounding box as a solid
+  // cube instead of the shape's primitives, mirroring GLRenderBoundingBox().
+  if (shapestyleflags & SoShapeStyleElement::BBOXCMPLX) {
+    SbBox3f box;
+    SbVec3f center;
+    this->getBBox(action, box, center);
+    if (box.isEmpty()) return;
+
+    const SbVec3f min = box.getMin();
+    const SbVec3f max = box.getMax();
+    const SbVec3f c[8] = {
+      SbVec3f(min[0], min[1], min[2]),
+      SbVec3f(max[0], min[1], min[2]),
+      SbVec3f(max[0], max[1], min[2]),
+      SbVec3f(min[0], max[1], min[2]),
+      SbVec3f(min[0], min[1], max[2]),
+      SbVec3f(max[0], min[1], max[2]),
+      SbVec3f(max[0], max[1], max[2]),
+      SbVec3f(min[0], max[1], max[2])
+    };
+    static const int faces[6][4] = {
+      {4, 5, 6, 7},  // +Z
+      {0, 3, 2, 1},  // -Z
+      {5, 1, 2, 6},  // +X
+      {0, 4, 7, 3},  // -X
+      {7, 6, 2, 3},  // +Y
+      {0, 1, 5, 4}   // -Y
+    };
+    static const SbVec3f normals[6] = {
+      SbVec3f(0.0f, 0.0f, 1.0f),
+      SbVec3f(0.0f, 0.0f, -1.0f),
+      SbVec3f(1.0f, 0.0f, 0.0f),
+      SbVec3f(-1.0f, 0.0f, 0.0f),
+      SbVec3f(0.0f, 1.0f, 0.0f),
+      SbVec3f(0.0f, -1.0f, 0.0f)
+    };
+
+    SoIRPrimitiveAssembler assembler(action, this);
+    action->pushPrimitiveCollector(&assembler);
+    for (int f = 0; f < 6; ++f) {
+      SoPrimitiveVertex v[4];
+      for (int i = 0; i < 4; ++i) {
+        v[i].setPoint(c[faces[f][i]]);
+        v[i].setNormal(normals[f]);
+      }
+      assembler.onTriangle(&v[0], &v[1], &v[2]);
+      assembler.onTriangle(&v[0], &v[2], &v[3]);
+    }
+    action->popPrimitiveCollector(&assembler);
+    assembler.finalize();
+    return;
+  }
+
   SoVertexProperty * vertexProperty =
     this->isOfType(SoVertexShape::getClassTypeId())
       ? (SoVertexProperty *) static_cast<SoVertexShape *>(this)->vertexProperty.getValue()
