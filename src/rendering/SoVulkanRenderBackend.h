@@ -44,6 +44,10 @@ struct VulkanCachedCommand {
   uint32_t texcoordStride = 0;
   uint32_t normalCount = 0;
   uint32_t cacheGeneration = 0;
+  // Content hash of the uploaded streams: pointer identity alone cannot
+  // detect in-place edits (the per-frame arena hands out the same pointers
+  // for unchanged layouts), which would otherwise serve stale geometry.
+  uint64_t contentHash = 0;
 };
 
 /*! \brief Cached GPU texture for one retained command's SoTextureData. */
@@ -72,6 +76,9 @@ struct VulkanCachedTexture {
   SoTextureWrap wrapT = SO_TEXTURE_WRAP_CLAMP_TO_EDGE;
   SoTextureModel model = SO_TEXTURE_MODEL_MODULATE;
   uint32_t cacheGeneration = 0;
+  // Content hash of the uploaded pixels (sampled): pixel-pointer identity
+  // alone cannot detect in-place edits, which would serve stale textures.
+  uint64_t contentHash = 0;
 };
 
 /*! \brief Minimal Vulkan executor for retained DrawList IR. */
@@ -174,7 +181,7 @@ private:
 
   // --- Geometry cache ---------------------------------------------------
   void invalidateCache();
-  void updateGeometryCache(const SoDrawList & drawlist);
+  void updateGeometryCache(const SoDrawList & drawlist, bool overlaysOnly = false);
   VulkanCachedCommand & getOrCreateCache(const SoRenderCommand * command);
   void uploadGeometry(VulkanCachedCommand & entry,
                       const SoRenderCommand & command);
@@ -185,8 +192,30 @@ private:
   void invalidateTextureCache();
   void destroyTextureEntry(VulkanCachedTexture & entry);
   VulkanCachedTexture & getOrCreateTexture(const SoRenderCommand * command);
-  bool uploadTexture(VulkanCachedTexture & entry,
-                     const SoTextureData & texture);
+
+  // One texture waiting for its GPU-side upload (staging copy).  The host
+  // side (image, memory, staging buffer) is prepared up front; the copies
+  // for all pending uploads are recorded into a single transient command
+  // buffer and submitted once per frame.  The cache index (not a pointer)
+  // identifies the entry: the vector may reallocate while uploads are
+  // still being prepared.
+  struct PendingTextureUpload {
+    size_t index = 0;
+    const SoTextureData * texture = nullptr;
+    VkBuffer staging = VK_NULL_HANDLE;
+    VkDeviceMemory stagingMemory = VK_NULL_HANDLE;
+  };
+  bool prepareTextureUpload(VulkanCachedTexture & entry,
+                            const SoTextureData & texture,
+                            VkBuffer & staging,
+                            VkDeviceMemory & stagingMemory);
+  void recordTextureUpload(VkCommandBuffer commandBuffer,
+                           const VulkanCachedTexture & entry,
+                           const SoTextureData & texture,
+                           VkBuffer staging);
+  bool finalizeTexture(VulkanCachedTexture & entry,
+                       const SoTextureData & texture);
+  bool flushTextureUploads(std::vector<PendingTextureUpload> & pending);
   bool createSampler(const SoTextureData & texture, VkSampler & sampler);
   bool allocateTextureDescriptorSet(VkImageView view, VkSampler sampler,
                                     VkDescriptorSet & set);
@@ -318,6 +347,9 @@ private:
   VkImage renderPassDepthImage = VK_NULL_HANDLE;
   VkImageView renderPassDepthView = VK_NULL_HANDLE;
   VkExtent2D renderPassExtent {0, 0};
+  // Framebuffer cached beside the render pass (same target identity);
+  // recreated only when the target changes instead of every frame.
+  VkFramebuffer renderPassFramebuffer = VK_NULL_HANDLE;
 
   // Pipeline cache: keyed by the retained state that affects the created
   // pipeline.  Vulkan pipelines are immutable, so every topology/fill/depth/

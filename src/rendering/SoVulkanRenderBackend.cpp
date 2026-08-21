@@ -60,15 +60,129 @@ countOverlayCommands(const SoDrawList & drawlist)
   return draws;
 }
 
+// FNV-1a mixing step.
+inline void
+mix64(uint64_t & hash, uint64_t value)
+{
+  hash ^= value;
+  hash *= 1099511628211ULL;
+}
+
+// FNV-1a over a float stream, sampling up to sampleCount elements spread
+// uniformly across the buffer (the first and last elements are always
+// included).  The producer's per-frame arena hands out the same pointers
+// for unchanged layouts, so pointer identity alone cannot detect in-place
+// content edits; the hash closes that hole at a fraction of the cost of a
+// full scan.
+uint64_t
+hashFloats(const float * values, size_t count, size_t sampleCount)
+{
+  uint64_t hash = 1469598103934665603ULL;
+  if (!values || count == 0) return hash;
+  mix64(hash, static_cast<uint64_t>(count));
+  if (count <= sampleCount) {
+    for (size_t i = 0; i < count; ++i) {
+      uint32_t bits = 0;
+      std::memcpy(&bits, &values[i], sizeof(bits));
+      mix64(hash, static_cast<uint64_t>(bits));
+    }
+    return hash;
+  }
+  for (size_t s = 0; s < sampleCount; ++s) {
+    const size_t i = s * (count - 1) / (sampleCount - 1);
+    uint32_t bits = 0;
+    std::memcpy(&bits, &values[i], sizeof(bits));
+    mix64(hash, static_cast<uint64_t>(bits));
+  }
+  return hash;
+}
+
+uint64_t
+hashUint32(const uint32_t * values, size_t count, size_t sampleCount)
+{
+  uint64_t hash = 1469598103934665603ULL;
+  if (!values || count == 0) return hash;
+  mix64(hash, static_cast<uint64_t>(count));
+  if (count <= sampleCount) {
+    for (size_t i = 0; i < count; ++i) {
+      mix64(hash, static_cast<uint64_t>(values[i]));
+    }
+    return hash;
+  }
+  for (size_t s = 0; s < sampleCount; ++s) {
+    const size_t i = s * (count - 1) / (sampleCount - 1);
+    mix64(hash, static_cast<uint64_t>(values[i]));
+  }
+  return hash;
+}
+
+uint64_t
+hashGeometryContent(const SoGeometryDesc & geometry)
+{
+  uint64_t hash = 1469598103934665603ULL;
+  const uint32_t vertexStride =
+    geometry.vertexStride ? geometry.vertexStride : sizeof(float) * 3;
+  const size_t posCount =
+    static_cast<size_t>(geometry.vertexCount) * vertexStride / sizeof(float);
+  hash ^= hashFloats(geometry.positions, posCount, 1024);
+  hash ^= hashUint32(geometry.indices, geometry.indexCount, 512);
+  hash = hash * 1099511628211ULL ^
+    static_cast<uint64_t>(geometry.vertexCount);
+  hash = hash * 1099511628211ULL ^
+    static_cast<uint64_t>(geometry.indexCount);
+  hash = hash * 1099511628211ULL ^
+    static_cast<uint64_t>(geometry.normalCount);
+  hash = hash * 1099511628211ULL ^
+    static_cast<uint64_t>(vertexStride);
+  hash = hash * 1099511628211ULL ^
+    static_cast<uint64_t>(geometry.texcoordStride);
+  return hash;
+}
+
+uint64_t
+hashTextureContent(const SoTextureData & texture)
+{
+  uint64_t hash = 1469598103934665603ULL;
+  if (texture.pixels) {
+    const size_t count =
+      static_cast<size_t>(texture.width) * texture.height *
+      static_cast<size_t>(texture.numComponents);
+    const size_t sampleCount = std::min<size_t>(4096, count);
+    if (sampleCount > 0) {
+      if (count <= sampleCount) {
+        for (size_t i = 0; i < count; ++i) {
+          mix64(hash, static_cast<uint64_t>(texture.pixels[i]));
+        }
+      }
+      else {
+        for (size_t s = 0; s < sampleCount; ++s) {
+          const size_t i = s * (count - 1) / (sampleCount - 1);
+          mix64(hash, static_cast<uint64_t>(texture.pixels[i]));
+        }
+      }
+    }
+  }
+  mix64(hash, static_cast<uint64_t>(texture.width));
+  mix64(hash, static_cast<uint64_t>(texture.height));
+  mix64(hash, static_cast<uint64_t>(texture.numComponents));
+  return hash;
+}
+
 // Environment flags are enabled by presence, but honor the conventional
-// "VAR=0"/"false"/"off" opt-out values.
+// "VAR=0"/"false"/"off" opt-out values.  Results are cached on first use:
+// these are diagnostic switches, and the call sites sit in per-frame hot
+// paths where a getenv() per call is pure overhead.
 bool
 envFlagEnabled(const char * name)
 {
+  static std::unordered_map<std::string, bool> cache;
+  const auto found = cache.find(name);
+  if (found != cache.end()) return found->second;
   const char * value = getenv(name);
-  if (value == nullptr) return false;
-  return std::strcmp(value, "0") != 0 && std::strcmp(value, "false") != 0 &&
-         std::strcmp(value, "off") != 0;
+  const bool enabled = value != nullptr && std::strcmp(value, "0") != 0 &&
+    std::strcmp(value, "false") != 0 && std::strcmp(value, "off") != 0;
+  cache[name] = enabled;
+  return enabled;
 }
 
 // Fixed interleaved vertex layout shared by every retained command.
@@ -1729,6 +1843,7 @@ SoVulkanRenderBackend::uploadGeometry(VulkanCachedCommand & entry,
   entry.vertexStride = posStride;
   entry.texcoordStride = geometry.texcoordStride;
   entry.normalCount = geometry.normalCount;
+  entry.contentHash = hashGeometryContent(geometry);
 }
 
 void
@@ -1765,7 +1880,8 @@ SoVulkanRenderBackend::invalidateCache()
 }
 
 void
-SoVulkanRenderBackend::updateGeometryCache(const SoDrawList & drawlist)
+SoVulkanRenderBackend::updateGeometryCache(const SoDrawList & drawlist,
+                                           const bool overlaysOnly)
 {
   // The frame boundary was handled by beginFrame() at the entry point.
 
@@ -1781,8 +1897,16 @@ SoVulkanRenderBackend::updateGeometryCache(const SoDrawList & drawlist)
     // failures fall back to the white texture per command.
   }
 
+  std::vector<PendingTextureUpload> pendingUploads;
+
   for (int i = 0; i < drawlist.getNumCommands(); ++i) {
     const SoRenderCommand & command = drawlist.getCommand(i);
+    // Overlay-only renders (ray-tracing compositing) only ever draw
+    // SO_RENDERPASS_OVERLAY commands; uploading the whole scene's geometry
+    // and textures here would waste the frame entirely.
+    if (overlaysOnly && command.pass != SO_RENDERPASS_OVERLAY) {
+      continue;
+    }
     const SoGeometryDesc & geometry = command.geometry;
     if (!geometry.positions || geometry.vertexCount == 0 ||
         geometry.vertexCount > MAX_VERTEX_COUNT) {
@@ -1806,7 +1930,8 @@ SoVulkanRenderBackend::updateGeometryCache(const SoDrawList & drawlist)
       entry.indexCount == geometry.indexCount &&
       entry.normalCount == geometry.normalCount &&
       entry.vertexStride == vertexStride &&
-      entry.texcoordStride == geometry.texcoordStride;
+      entry.texcoordStride == geometry.texcoordStride &&
+      entry.contentHash == hashGeometryContent(geometry);
     if (!geometryMatches) {
       this->deferDestroyCacheEntry(entry);
       this->uploadGeometry(entry, command);
@@ -1826,26 +1951,29 @@ SoVulkanRenderBackend::updateGeometryCache(const SoDrawList & drawlist)
         texEntry.magFilter == texture.magFilter &&
         texEntry.wrapS == texture.wrapS &&
         texEntry.wrapT == texture.wrapT &&
-        texEntry.model == texture.model;
+        texEntry.model == texture.model &&
+        texEntry.contentHash == hashTextureContent(texture);
       if (!textureMatches) {
         this->deferDestroyTextureEntry(texEntry);
-        if (this->uploadTexture(texEntry, texture)) {
-          texEntry.pixelsKey = texture.pixels;
-          texEntry.width = texture.width;
-          texEntry.height = texture.height;
-          texEntry.numComponents = texture.numComponents;
-          texEntry.minFilter = texture.minFilter;
-          texEntry.magFilter = texture.magFilter;
-          texEntry.wrapS = texture.wrapS;
-          texEntry.wrapT = texture.wrapT;
-          texEntry.model = texture.model;
+        PendingTextureUpload upload;
+        upload.index = this->commandToTexture[&command];
+        upload.texture = &texture;
+        if (this->prepareTextureUpload(texEntry, texture, upload.staging,
+                                       upload.stagingMemory)) {
+          pendingUploads.push_back(upload);
         }
-        // On failure the entry was reset by uploadTexture(); leaving the
-        // content keys unstamped makes the next frame retry the upload.
+        // On failure the entry was reset by prepareTextureUpload(); leaving
+        // the content keys unstamped makes the next frame retry the upload.
       }
       texEntry.commandKey = &command;
       texEntry.cacheGeneration = generation;
     }
+  }
+
+  // Submit every pending texture copy in one queue submission; the flush
+  // also stamps the content identity of each finalized entry.
+  if (!this->flushTextureUploads(pendingUploads)) {
+    this->emitError("updateGeometryCache: texture upload failed");
   }
 
   // Evict entries that were not visited this frame: their command has
@@ -1854,39 +1982,44 @@ SoVulkanRenderBackend::updateGeometryCache(const SoDrawList & drawlist)
   // identity, so rebuild the pointer maps from the stored commandKey.
   // Destruction is deferred: a pending frame may still reference the
   // evicted buffers/images.
-  const auto evictStale = [&](auto & cache, auto destroyEntry,
-                              auto & indexMap) {
-    bool anyStale = false;
-    for (size_t idx = 0; idx < cache.size(); ++idx) {
-      if (cache[idx].cacheGeneration != generation) {
-        destroyEntry(cache[idx]);
-        anyStale = true;
+  // Overlay-only renders skip the sweep: their traversal deliberately
+  // visits only overlay commands, so a sweep here would evict the entire
+  // scene cache and force a full re-upload on the next full render.
+  if (!overlaysOnly) {
+    const auto evictStale = [&](auto & cache, auto destroyEntry,
+                                auto & indexMap) {
+      bool anyStale = false;
+      for (size_t idx = 0; idx < cache.size(); ++idx) {
+        if (cache[idx].cacheGeneration != generation) {
+          destroyEntry(cache[idx]);
+          anyStale = true;
+        }
       }
-    }
-    if (!anyStale) return;
-    size_t write = 0;
-    for (size_t idx = 0; idx < cache.size(); ++idx) {
-      if (cache[idx].cacheGeneration == generation) {
-        if (write != idx) cache[write] = std::move(cache[idx]);
-        ++write;
+      if (!anyStale) return;
+      size_t write = 0;
+      for (size_t idx = 0; idx < cache.size(); ++idx) {
+        if (cache[idx].cacheGeneration == generation) {
+          if (write != idx) cache[write] = std::move(cache[idx]);
+          ++write;
+        }
       }
-    }
-    cache.resize(write);
-    indexMap.clear();
-    for (size_t idx = 0; idx < cache.size(); ++idx) {
-      indexMap[cache[idx].commandKey] = idx;
-    }
-  };
-  evictStale(this->gpuCache,
-             [this](VulkanCachedCommand & entry) {
-               this->deferDestroyCacheEntry(entry);
-             },
-             this->commandToCache);
-  evictStale(this->textureCache,
-             [this](VulkanCachedTexture & entry) {
-               this->deferDestroyTextureEntry(entry);
-             },
-             this->commandToTexture);
+      cache.resize(write);
+      indexMap.clear();
+      for (size_t idx = 0; idx < cache.size(); ++idx) {
+        indexMap[cache[idx].commandKey] = idx;
+      }
+    };
+    evictStale(this->gpuCache,
+               [this](VulkanCachedCommand & entry) {
+                 this->deferDestroyCacheEntry(entry);
+               },
+               this->commandToCache);
+    evictStale(this->textureCache,
+               [this](VulkanCachedTexture & entry) {
+                 this->deferDestroyTextureEntry(entry);
+               },
+               this->commandToTexture);
+  }
 }
 
 // --- Texture cache --------------------------------------------------------
@@ -1970,8 +2103,10 @@ SoVulkanRenderBackend::createSampler(const SoTextureData & texture,
 }
 
 bool
-SoVulkanRenderBackend::uploadTexture(VulkanCachedTexture & entry,
-                                     const SoTextureData & texture)
+SoVulkanRenderBackend::prepareTextureUpload(VulkanCachedTexture & entry,
+                                            const SoTextureData & texture,
+                                            VkBuffer & staging,
+                                            VkDeviceMemory & stagingMemory)
 {
   // VK_FORMAT_R8G8B8_UNORM is not guaranteed to be sampleable, so expand
   // 3-component (RGB) textures to 4-component RGBA on the host.  Other
@@ -1979,7 +2114,7 @@ SoVulkanRenderBackend::uploadTexture(VulkanCachedTexture & entry,
   const int components =
     (texture.numComponents == 3) ? 4 : texture.numComponents;
   if (components < 1 || components > 4) {
-    this->emitError("uploadTexture: unsupported component count");
+    this->emitError("prepareTextureUpload: unsupported component count");
     return false;
   }
   const VkFormat format = (texture.numComponents == 3)
@@ -2017,6 +2152,7 @@ SoVulkanRenderBackend::uploadTexture(VulkanCachedTexture & entry,
   ci.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
   if (vkCreateImage(this->device, &ci, this->allocator, &entry.image) !=
       VK_SUCCESS) {
+    this->emitError("prepareTextureUpload: vkCreateImage failed");
     return false;
   }
 
@@ -2039,51 +2175,34 @@ SoVulkanRenderBackend::uploadTexture(VulkanCachedTexture & entry,
     }
   }
   if (!found) {
-    this->emitError("uploadTexture: no device-local memory type");
+    this->emitError("prepareTextureUpload: no device-local memory type");
     this->destroyTextureEntry(entry);
     return false;
   }
   if (vkAllocateMemory(this->device, &ai, this->allocator, &entry.memory) !=
       VK_SUCCESS) {
+    this->emitError("prepareTextureUpload: vkAllocateMemory failed");
     this->destroyTextureEntry(entry);
     return false;
   }
   vkBindImageMemory(this->device, entry.image, entry.memory, 0);
 
-  VkBuffer staging = VK_NULL_HANDLE;
-  VkDeviceMemory stagingMemory = VK_NULL_HANDLE;
   if (!this->createBuffer(byteSize, VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
                           staging, stagingMemory, uploadPixels)) {
-    this->emitError("uploadTexture: staging buffer creation failed");
+    this->emitError("prepareTextureUpload: staging buffer creation failed");
     this->destroyTextureEntry(entry);
     return false;
   }
+  return true;
+}
 
-  // Upload via a temporary command buffer so the copy is retired before the
-  // texture is sampled in the render command buffer.
-  VkCommandBufferAllocateInfo allocInfo {};
-  allocInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
-  allocInfo.commandPool = this->commandPool;
-  allocInfo.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
-  allocInfo.commandBufferCount = 1;
-  VkCommandBuffer uploadBuffer = VK_NULL_HANDLE;
-  if (vkAllocateCommandBuffers(this->device, &allocInfo, &uploadBuffer) !=
-      VK_SUCCESS) {
-    this->emitError("uploadTexture: failed to allocate upload buffer");
-    vkDestroyBuffer(this->device, staging, this->allocator);
-    vkFreeMemory(this->device, stagingMemory, this->allocator);
-    // The image and its memory were created above; releasing them keeps the
-    // entry consistent so the caller's retry (or eviction) path starts
-    // clean instead of treating a half-initialized entry as valid.
-    this->destroyTextureEntry(entry);
-    return false;
-  }
-
-  VkCommandBufferBeginInfo bi {};
-  bi.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
-  bi.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
-  vkBeginCommandBuffer(uploadBuffer, &bi);
-
+void
+SoVulkanRenderBackend::recordTextureUpload(
+  VkCommandBuffer commandBuffer,
+  const VulkanCachedTexture & entry,
+  const SoTextureData & texture,
+  VkBuffer staging)
+{
   VkImageMemoryBarrier barrier {};
   barrier.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
   barrier.oldLayout = VK_IMAGE_LAYOUT_UNDEFINED;
@@ -2098,7 +2217,7 @@ SoVulkanRenderBackend::uploadTexture(VulkanCachedTexture & entry,
   barrier.subresourceRange.layerCount = 1;
   barrier.srcAccessMask = 0;
   barrier.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
-  vkCmdPipelineBarrier(uploadBuffer, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
+  vkCmdPipelineBarrier(commandBuffer, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
                        VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, nullptr, 0,
                        nullptr, 1, &barrier);
 
@@ -2113,48 +2232,140 @@ SoVulkanRenderBackend::uploadTexture(VulkanCachedTexture & entry,
   region.imageOffset = {0, 0, 0};
   region.imageExtent = {static_cast<uint32_t>(texture.width),
                         static_cast<uint32_t>(texture.height), 1};
-  vkCmdCopyBufferToImage(uploadBuffer, staging, entry.image,
+  vkCmdCopyBufferToImage(commandBuffer, staging, entry.image,
                          VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &region);
 
   barrier.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
   barrier.newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
   barrier.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
   barrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
-  vkCmdPipelineBarrier(uploadBuffer, VK_PIPELINE_STAGE_TRANSFER_BIT,
+  vkCmdPipelineBarrier(commandBuffer, VK_PIPELINE_STAGE_TRANSFER_BIT,
                        VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, 0, 0, nullptr,
                        0, nullptr, 1, &barrier);
+}
 
-  vkEndCommandBuffer(uploadBuffer);
-  VkSubmitInfo submit {};
-  submit.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
-  submit.commandBufferCount = 1;
-  submit.pCommandBuffers = &uploadBuffer;
-  const VkResult submitResult =
-    vkQueueSubmit(this->queue, 1, &submit, VK_NULL_HANDLE);
-  vkQueueWaitIdle(this->queue);
-  vkFreeCommandBuffers(this->device, this->commandPool, 1, &uploadBuffer);
-
-  vkDestroyBuffer(this->device, staging, this->allocator);
-  vkFreeMemory(this->device, stagingMemory, this->allocator);
-
-  if (submitResult != VK_SUCCESS) {
-    this->emitError("uploadTexture: vkQueueSubmit failed");
-    this->destroyTextureEntry(entry);
-    return false;
-  }
-
+bool
+SoVulkanRenderBackend::finalizeTexture(VulkanCachedTexture & entry,
+                                       const SoTextureData & texture)
+{
+  // The image format matches what prepareTextureUpload() created (RGB
+  // textures are expanded to RGBA there).
+  const VkFormat format = (texture.numComponents == 3)
+    ? VK_FORMAT_R8G8B8A8_UNORM : textureFormatToVk(texture.numComponents);
   entry.view = createImageView(this->device, entry.image, format,
                                VK_IMAGE_ASPECT_COLOR_BIT, this->allocator);
   if (entry.view == VK_NULL_HANDLE ||
       !this->createSampler(texture, entry.sampler) ||
       !this->allocateTextureDescriptorSet(entry.view, entry.sampler,
                                           entry.descriptorSet)) {
-    this->emitError("uploadTexture: view/sampler/descriptor creation failed");
+    this->emitError("finalizeTexture: view/sampler/descriptor creation failed");
     this->destroyTextureEntry(entry);
     return false;
   }
   entry.descriptorPool = this->descriptorPool;
   return true;
+}
+
+bool
+SoVulkanRenderBackend::flushTextureUploads(
+  std::vector<PendingTextureUpload> & pending)
+{
+  if (pending.empty()) return true;
+
+  // All pending copies go into one transient command buffer: one queue
+  // submit (and one wait) per frame instead of per texture.
+  VkCommandBufferAllocateInfo allocInfo {};
+  allocInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
+  allocInfo.commandPool = this->commandPool;
+  allocInfo.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+  allocInfo.commandBufferCount = 1;
+  VkCommandBuffer uploadBuffer = VK_NULL_HANDLE;
+  if (vkAllocateCommandBuffers(this->device, &allocInfo, &uploadBuffer) !=
+      VK_SUCCESS) {
+    this->emitError(
+      "flushTextureUploads: failed to allocate upload command buffer");
+    goto fail;
+  }
+
+  {
+    VkCommandBufferBeginInfo bi {};
+    bi.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
+    bi.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+    if (vkBeginCommandBuffer(uploadBuffer, &bi) != VK_SUCCESS) {
+      this->emitError("flushTextureUploads: failed to begin upload buffer");
+      vkFreeCommandBuffers(this->device, this->commandPool, 1, &uploadBuffer);
+      goto fail;
+    }
+  }
+
+  for (const PendingTextureUpload & upload : pending) {
+    this->recordTextureUpload(uploadBuffer, this->textureCache[upload.index],
+                              *upload.texture, upload.staging);
+  }
+
+  if (vkEndCommandBuffer(uploadBuffer) != VK_SUCCESS) {
+    this->emitError("flushTextureUploads: failed to end upload buffer");
+    vkFreeCommandBuffers(this->device, this->commandPool, 1, &uploadBuffer);
+    goto fail;
+  }
+
+  {
+    VkSubmitInfo submit {};
+    submit.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
+    submit.commandBufferCount = 1;
+    submit.pCommandBuffers = &uploadBuffer;
+    const VkResult submitResult =
+      vkQueueSubmit(this->queue, 1, &submit, VK_NULL_HANDLE);
+    // The wait also retires any in-flight frames submitted by an external
+    // caller, which keeps ring-buffer reuse in renderExternal() safe even
+    // when the caller pipelines more frames than maxFramesInFlight.
+    vkQueueWaitIdle(this->queue);
+    vkFreeCommandBuffers(this->device, this->commandPool, 1, &uploadBuffer);
+    if (submitResult != VK_SUCCESS) {
+      this->emitError("flushTextureUploads: vkQueueSubmit failed");
+      goto fail;
+    }
+  }
+
+  // Staging buffers are no longer referenced by the completed submission.
+  for (const PendingTextureUpload & upload : pending) {
+    vkDestroyBuffer(this->device, upload.staging, this->allocator);
+    vkFreeMemory(this->device, upload.stagingMemory, this->allocator);
+  }
+
+  // Host-side completion (views/samplers/descriptor sets) and content
+  // identity stamping.  A failure resets the entry and leaves the content
+  // keys unstamped, so the next frame retries the upload.
+  for (const PendingTextureUpload & upload : pending) {
+    VulkanCachedTexture & texEntry = this->textureCache[upload.index];
+    if (this->finalizeTexture(texEntry, *upload.texture)) {
+      const SoTextureData & texture = *upload.texture;
+      texEntry.pixelsKey = texture.pixels;
+      texEntry.width = texture.width;
+      texEntry.height = texture.height;
+      texEntry.numComponents = texture.numComponents;
+      texEntry.minFilter = texture.minFilter;
+      texEntry.magFilter = texture.magFilter;
+      texEntry.wrapS = texture.wrapS;
+      texEntry.wrapT = texture.wrapT;
+      texEntry.model = texture.model;
+      texEntry.contentHash = hashTextureContent(texture);
+    }
+  }
+  pending.clear();
+  return true;
+
+fail:
+  for (const PendingTextureUpload & upload : pending) {
+    if (upload.staging != VK_NULL_HANDLE) {
+      vkDestroyBuffer(this->device, upload.staging, this->allocator);
+      vkFreeMemory(this->device, upload.stagingMemory, this->allocator);
+    }
+    // Reset the half-initialized entry so the next frame retries cleanly.
+    this->destroyTextureEntry(this->textureCache[upload.index]);
+  }
+  pending.clear();
+  return false;
 }
 
 bool
@@ -2195,7 +2406,7 @@ SoVulkanRenderBackend::applyViewport(const SoRenderParams & params,
   const SbVec2s & origin = params.viewport.getViewportOriginPixels();
   const SbVec2s & size = params.viewport.getViewportSizePixels();
 
-  if (getenv("FC_VULKAN_MATRIX_DUMP") && s_debugFrame > 0
+  if (envFlagEnabled("FC_VULKAN_MATRIX_DUMP") && s_debugFrame > 0
       && (s_debugFrame % 100 == 0)) {
     fprintf(stderr,
             "[VPRT] frame=%d origin=(%d,%d) size=(%d,%d) target=(%u,%u)\n",
@@ -2446,7 +2657,7 @@ SoVulkanRenderBackend::updateLightingUniforms(const SoDrawList & drawlist,
   std::memcpy(ubo.view, &m[0][0], sizeof(float) * 16);
   command.modelMatrix.getValue(m);
   std::memcpy(ubo.model, &m[0][0], sizeof(float) * 16);
-  if (getenv("FC_VULKAN_CLIP_DEBUG")) {
+  if (envFlagEnabled("FC_VULKAN_CLIP_DEBUG")) {
     static int uboLog = 0;
     if (uboLog++ < 6) {
       fprintf(stderr, "[UBO] cmd pass=%d verts=%u model00=%.3f m11=%.3f m22=%.3f "
@@ -2554,7 +2765,7 @@ SoVulkanRenderBackend::updateLightingUniforms(const SoDrawList & drawlist,
                 &ubo, sizeof(ubo));
   }
 
-  if (getenv("FC_VULKAN_MATRIX_DUMP") && s_debugFrame > 0
+  if (envFlagEnabled("FC_VULKAN_MATRIX_DUMP") && s_debugFrame > 0
       && (s_debugFrame % 100 == 0) && s_dumpCmdCount <= 4) {
     fprintf(stderr,
             "[LGT] frame=%d cmd#%d ambient=(%.2f,%.2f,%.2f) lights=%d\n",
@@ -2585,7 +2796,7 @@ SoVulkanRenderBackend::recordDrawCommand(const SoDrawList & drawlist,
                                          const bool overlayPass)
 {
   if (!command.geometry.positions || command.geometry.vertexCount == 0) {
-    if (getenv("FC_VULKAN_BACKEND_DEBUG")) {
+    if (envFlagEnabled("FC_VULKAN_BACKEND_DEBUG")) {
       fprintf(stderr, "[VKBE] cmd %p pass=%d skip: no positions/verts\n",
               (const void*)&command, static_cast<int>(command.pass));
     }
@@ -2593,7 +2804,7 @@ SoVulkanRenderBackend::recordDrawCommand(const SoDrawList & drawlist,
   }
   const auto found = this->commandToCache.find(&command);
   if (found == this->commandToCache.end()) {
-    if (getenv("FC_VULKAN_BACKEND_DEBUG")) {
+    if (envFlagEnabled("FC_VULKAN_BACKEND_DEBUG")) {
       fprintf(stderr, "[VKBE] cmd %p pass=%d skip: no gpu cache entry\n",
               (const void*)&command, static_cast<int>(command.pass));
     }
@@ -2601,7 +2812,7 @@ SoVulkanRenderBackend::recordDrawCommand(const SoDrawList & drawlist,
   }
   const VulkanCachedCommand & entry = this->gpuCache[found->second];
   if (entry.vertexBuffer == VK_NULL_HANDLE) {
-    if (getenv("FC_VULKAN_BACKEND_DEBUG")) {
+    if (envFlagEnabled("FC_VULKAN_BACKEND_DEBUG")) {
       fprintf(stderr, "[VKBE] cmd %p pass=%d skip: vertexBuffer null\n",
               (const void*)&command, static_cast<int>(command.pass));
     }
@@ -2612,7 +2823,7 @@ SoVulkanRenderBackend::recordDrawCommand(const SoDrawList & drawlist,
   if (!this->getOrCreatePipeline(command, target, pass, pipeline, transparent,
                                  fillModeOverride, overlayPass) ||
       pipeline == VK_NULL_HANDLE) {
-    if (getenv("FC_VULKAN_BACKEND_DEBUG")) {
+    if (envFlagEnabled("FC_VULKAN_BACKEND_DEBUG")) {
       fprintf(stderr, "[VKBE] cmd %p pass=%d skip: pipeline creation failed "
                       "(transparent=%d fillOverride=%d overlay=%d)\n",
               (const void*)&command, static_cast<int>(command.pass),
@@ -2620,7 +2831,7 @@ SoVulkanRenderBackend::recordDrawCommand(const SoDrawList & drawlist,
     }
     return;
   }
-  if (getenv("FC_VULKAN_BACKEND_DEBUG")) {
+  if (envFlagEnabled("FC_VULKAN_BACKEND_DEBUG")) {
     static int drawn = 0;
     static int logged = 0;
     drawn++;
@@ -2728,7 +2939,7 @@ SoVulkanRenderBackend::recordDrawCommand(const SoDrawList & drawlist,
                        VK_SHADER_STAGE_FRAGMENT_BIT,
                      0, sizeof(push), &push);
 
-  if (getenv("FC_VULKAN_MATRIX_DUMP") && s_debugFrame > 0
+  if (envFlagEnabled("FC_VULKAN_MATRIX_DUMP") && s_debugFrame > 0
       && (s_debugFrame % 100 == 0) && s_dumpCmdCount < 12) {
     s_dumpCmdCount++;
     SbMat mm;
@@ -2840,6 +3051,11 @@ SoVulkanRenderBackend::shutdown()
   if (this->renderPass != VK_NULL_HANDLE) {
     vkDestroyRenderPass(this->device, this->renderPass, this->allocator);
     this->renderPass = VK_NULL_HANDLE;
+  }
+  if (this->renderPassFramebuffer != VK_NULL_HANDLE) {
+    vkDestroyFramebuffer(this->device, this->renderPassFramebuffer,
+                         this->allocator);
+    this->renderPassFramebuffer = VK_NULL_HANDLE;
   }
   if (this->fragmentModule != VK_NULL_HANDLE) {
     vkDestroyShaderModule(this->device, this->fragmentModule, this->allocator);
@@ -3000,6 +3216,11 @@ SoVulkanRenderBackend::renderInternal(const SoDrawList & drawlist,
 
       vkDestroyRenderPass(this->device, this->renderPass, this->allocator);
       this->renderPass = VK_NULL_HANDLE;
+      if (this->renderPassFramebuffer != VK_NULL_HANDLE) {
+        vkDestroyFramebuffer(this->device, this->renderPassFramebuffer,
+                             this->allocator);
+        this->renderPassFramebuffer = VK_NULL_HANDLE;
+      }
     }
     if (!this->createRenderPass(*target, this->renderPass)) {
       this->emitError("failed to create Vulkan render pass");
@@ -3012,7 +3233,7 @@ SoVulkanRenderBackend::renderInternal(const SoDrawList & drawlist,
     this->renderPassExtent = target->extent;
   }
 
-  this->updateGeometryCache(drawlist);
+  this->updateGeometryCache(drawlist, overlaysOnly);
 
   // Overlay-only renders skip recordFrame(), so reserve the ring slots here;
   // beginFrame() above already advanced the frame cursor.
@@ -3027,32 +3248,36 @@ SoVulkanRenderBackend::renderInternal(const SoDrawList & drawlist,
     return FALSE;
   }
 
-  VkFramebuffer framebuffer = VK_NULL_HANDLE;
-  VkFramebufferCreateInfo fci {};
-  fci.sType = VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO;
-  fci.renderPass = this->renderPass;
-  fci.attachmentCount =
-    (target->depthImageView != VK_NULL_HANDLE &&
-     target->depthFormat != VK_FORMAT_UNDEFINED)
-      ? 2u : 1u;
-  const VkImageView attachments[] = {
-    target->colorImageView,
-    target->depthImageView,
-  };
-  fci.pAttachments = attachments;
-  fci.width = target->extent.width;
-  fci.height = target->extent.height;
-  fci.layers = 1;
-  if (vkCreateFramebuffer(this->device, &fci, this->allocator, &framebuffer) !=
-      VK_SUCCESS) {
-    this->emitError("failed to create Vulkan framebuffer");
-    // The one-shot command buffer was begun above and never submitted; an
-    // implicit reset only happens on submission, so reset it explicitly or
-    // every later beginCommandBuffer() will fail.
-    vkEndCommandBuffer(this->commandBuffer);
-    vkResetCommandBuffer(this->commandBuffer, 0);
-    return FALSE;
+  // The framebuffer is cached beside the render pass and only recreated
+  // when the target identity changes (see targetChanged above).
+  if (this->renderPassFramebuffer == VK_NULL_HANDLE) {
+    VkFramebufferCreateInfo fci {};
+    fci.sType = VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO;
+    fci.renderPass = this->renderPass;
+    fci.attachmentCount =
+      (target->depthImageView != VK_NULL_HANDLE &&
+       target->depthFormat != VK_FORMAT_UNDEFINED)
+        ? 2u : 1u;
+    const VkImageView attachments[] = {
+      target->colorImageView,
+      target->depthImageView,
+    };
+    fci.pAttachments = attachments;
+    fci.width = target->extent.width;
+    fci.height = target->extent.height;
+    fci.layers = 1;
+    if (vkCreateFramebuffer(this->device, &fci, this->allocator,
+                            &this->renderPassFramebuffer) != VK_SUCCESS) {
+      this->emitError("failed to create Vulkan framebuffer");
+      // The one-shot command buffer was begun above and never submitted; an
+      // implicit reset only happens on submission, so reset it explicitly or
+      // every later beginCommandBuffer() will fail.
+      vkEndCommandBuffer(this->commandBuffer);
+      vkResetCommandBuffer(this->commandBuffer, 0);
+      return FALSE;
+    }
   }
+  const VkFramebuffer framebuffer = this->renderPassFramebuffer;
 
   VkRenderPassBeginInfo rpbi {};
   rpbi.sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO;
@@ -3081,7 +3306,6 @@ SoVulkanRenderBackend::renderInternal(const SoDrawList & drawlist,
   // buffer cannot be reused, and a partial frame is preferable to a dead
   // backend.
   const bool submitted = this->endAndSubmit();
-  vkDestroyFramebuffer(this->device, framebuffer, this->allocator);
   if (!submitted) {
     this->emitError("failed to submit Vulkan command buffer");
     return FALSE;
@@ -3183,7 +3407,7 @@ SoVulkanRenderBackend::renderExternalOverlay(const SoDrawList & drawlist,
   }
 
   this->beginFrame();
-  this->updateGeometryCache(drawlist);
+  this->updateGeometryCache(drawlist, true);
 
   // This path never goes through recordFrame(), so reserve the slots it will
   // consume; otherwise the cursor keeps climbing across frames and
@@ -3205,7 +3429,7 @@ SoVulkanRenderBackend::recordFrame(const SoDrawList & drawlist,
                                    const SoVulkanRenderTarget & target,
                                    VkRenderPass renderPass)
 {
-  if (getenv("FC_VULKAN_MATRIX_DUMP")) {
+  if (envFlagEnabled("FC_VULKAN_MATRIX_DUMP")) {
     s_debugFrame++;
     s_dumpCmdCount = 0;
   }

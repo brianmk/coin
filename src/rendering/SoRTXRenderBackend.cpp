@@ -140,10 +140,21 @@ hashGeometry(const SoGeometryDesc & geometry, uint32_t vertexStride,
 
   if (indexed) {
     const size_t count = geometry.indexCount;
+    // Hash every index for scenes up to a practical threshold (covers
+    // typical CAD parts in full); beyond that fall back to uniform
+    // sampling so the per-frame cost stays bounded.  Either way the first
+    // and last indices are always included.
     const size_t samples = 256;
-    const size_t step = count > samples ? count / samples : 1;
-    for (size_t i = 0; i < count; i += step) {
-      mix(geometry.indices[i]);
+    if (count <= 65536) {
+      for (size_t i = 0; i < count; ++i) {
+        mix(geometry.indices[i]);
+      }
+    }
+    else {
+      const size_t step = count / samples;
+      for (size_t i = 0; i < count; i += step) {
+        mix(geometry.indices[i]);
+      }
     }
     mix(geometry.indices[count - 1]);
   }
