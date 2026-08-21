@@ -66,6 +66,23 @@ public:
     SoVulkanRenderManager::NO_AUTO_CLIPPING;
   float nearplanevalue = 0.6f;
 
+  // Near/far planes computed by setClippingPlanes(), consumed by
+  // prepareRenderParams().  Deliberately NOT written back into
+  // SoCamera::nearDistance/farDistance: the camera node is shared with the
+  // hidden GL viewer (FreeCAD), whose SoRenderManager concurrently writes
+  // the same fields with its own GL-side values.  Reading those fields back
+  // to build the projection matrix races with the GL manager and
+  // intermittently renders with the wrong near plane -- the front face of
+  // the object clips away and the interior shows through while rotating.
+  // Keeping the Vulkan planes private to this manager makes the two
+  // renderers independent and gives CAD-grade zoom behavior on both axes
+  // (near plane hugs the closest geometry, far plane grows with distance).
+  float computedNear = 1.0f;
+  float computedFar = 10.0f;
+  // Camera back-off along the view direction applied by the zoom wall (see
+  // setClippingPlanes()); 0.0f when the camera is clear of the surface.
+  float cameraShiftZ = 0.0f;
+
   SoIRRenderAction irAction;
   SoVulkanRenderBackend backend;
   SoRTXRenderBackend rtxBackend;
@@ -507,8 +524,42 @@ SoVulkanRenderManagerP::setClippingPlanes(void)
   // least std::numeric_limits<float>::epsilon() (same as SoRenderManagerP).
   float clippingOffset = SbMin(1.0f, SbMax(std::numeric_limits<float>::epsilon(),
                                            0.01f * boxDiagonal));
-  float nearval = -box.getMax()[2] - clippingOffset;
-  float farval = -box.getMin()[2] + clippingOffset;
+  float zmin = box.getMin()[2];
+  float zmax = box.getMax()[2];
+
+  // Vector-graphics zoom wall: a CAD camera must never clip into a solid.
+  // Once the nearest scene boundary comes within delta of the camera (or
+  // crosses behind it), back the *effective* camera out along the view
+  // direction so the nearest surface stays delta in front.  Zooming in then
+  // scales features continuously -- the near plane keeps hugging the
+  // surface -- until the wall is reached, where the view pins instead of
+  // showing the interior of the solid.  The shift is applied to the box
+  // here and to the view matrix in prepareRenderParams(); the shared camera
+  // node itself is never touched (the hidden GL viewer owns it).
+  //
+  // delta scales with the scene: 0.001 * clippingOffset yields 0.1% of the
+  // 1% diagonal offset, i.e. ~100000x magnification before the wall on a
+  // typical part -- deep enough for any practical CAD inspection while the
+  // near plane (delta, times the 0.1% slack below) stays strictly in front
+  // of the surface.
+  float shiftZ = 0.0f;
+  // Only engage the wall when geometry actually spans the view direction:
+  // zmin < 0 means something is in front of the camera.  With the whole
+  // scene behind the camera (looking away), backing out would flip the
+  // view around -- leave the planes alone instead.
+  if (!box.isEmpty() && zmin < 0.0f) {
+    const float delta = clippingOffset * 0.001f;
+    shiftZ = zmax + delta;
+    if (shiftZ < 0.0f) {
+      shiftZ = 0.0f;
+    }
+    zmin -= shiftZ;
+    zmax -= shiftZ;
+  }
+  this->cameraShiftZ = shiftZ;
+
+  float nearval = -zmax - clippingOffset;
+  float farval = -zmin + clippingOffset;
 
   if (!this->camera->isOfType(SoOrthographicCamera::getClassTypeId())
       && farval <= 0.0f) {
@@ -549,9 +600,9 @@ SoVulkanRenderManagerP::setClippingPlanes(void)
       float x0, y0, z0, x1, y1, z1;
       box.getBounds(x0, y0, z0, x1, y1, z1);
       fprintf(stderr, "[CLIP] pos=(%.3f,%.3f,%.3f) quat=(%.3f,%.3f,%.3f,%.3f) "
-                      "boxz=[%.3f,%.3f] empty=%d nearval=%.6f farval=%.6f closest=%.6f\n",
+                      "boxz=[%.3f,%.3f] empty=%d nearval=%.6f farval=%.6f closest=%.6f shiftZ=%.6f\n",
               p[0], p[1], p[2], q0, q1, q2, q3,
-              z0, z1, empty ? 1 : 0, nearval, farval, -box.getMax()[2]);
+              z0, z1, empty ? 1 : 0, nearval, farval, -zmax, this->cameraShiftZ);
     }
   }
 
@@ -582,7 +633,13 @@ SoVulkanRenderManagerP::setClippingPlanes(void)
   // surfaces, clipping them during close-up rotation.  Only clamp while the
   // camera is outside the bounding box (closest > 0) so the near plane always
   // stays in front of the camera.
-  const float closest = -box.getMax()[2];
+  //
+  // closest is the distance to the nearest boundary of the *shifted* box
+  // (-zmax): with the zoom wall active it is delta, keeping the near plane
+  // in front of the pinned surface.  Reading the unshifted box here made the
+  // near plane fall behind the surface (camera inside -> closest < 0 ->
+  // near plane = clippingOffset >> delta) and cut into the solid.
+  const float closest = -zmax;
   if (closest > 0.0f) {
     if (nearval > closest) {
       nearval = closest;
@@ -624,20 +681,10 @@ SoVulkanRenderManagerP::setClippingPlanes(void)
   const float newfar = farval >= 0 ? farval * (1.0f + SLACK)
                                    : farval * (1.0f - SLACK);
 
-  const float neareps = nearval * SLACK * SLACK;
-  const float fareps = farval * SLACK * SLACK;
-
-  const float oldnear = this->camera->nearDistance.getValue();
-  const float oldfar = this->camera->farDistance.getValue();
-
-  // Check that the values have changed before setting the fields to avoid
-  // continuous redraws on static scenes.  Use an epsilon value when comparing.
-  if (SbAbs(oldnear - newnear) > SbAbs(neareps)) {
-    this->camera->nearDistance = newnear;
-  }
-  if (SbAbs(oldfar - newfar) > SbAbs(fareps)) {
-    this->camera->farDistance = newfar;
-  }
+  // Store the planes privately; see the computedNear/computedFar comment in
+  // the pimpl declaration for why the camera fields must stay untouched.
+  this->computedNear = newnear;
+  this->computedFar = newfar;
 }
 
 SbBool
@@ -745,8 +792,42 @@ SoVulkanRenderManagerP::prepareRenderParams(SbBool clearwindow,
   // view-volume/projection computed here matches what the traversal would
   // install when the scene graph contains the same camera node.
   if (this->camera) {
-    const SbViewVolume vv = this->camera->getViewVolume(
-      this->viewportRegion.getViewportAspectRatio());
+    // Build the view volume with the near/far planes this manager computed
+    // (setClippingPlanes()), NOT with SoCamera::nearDistance/farDistance.
+    // The camera fields are shared with FreeCAD's hidden GL viewer, whose
+    // own render manager rewrites them concurrently; harvesting the volume
+    // from the fields races with that writer and intermittently projects
+    // with a near plane behind the front surface (visible clipping / seeing
+    // into the object while navigating).  When auto-clipping is off the
+    // fields are authoritative and are used as-is.
+    float nearplane = this->camera->nearDistance.getValue();
+    float farplane = this->camera->farDistance.getValue();
+    if (this->autoClipping != SoVulkanRenderManager::NO_AUTO_CLIPPING) {
+      nearplane = this->computedNear;
+      farplane = this->computedFar;
+    }
+
+    SbViewVolume vv;
+    if (this->camera->isOfType(SoPerspectiveCamera::getClassTypeId())) {
+      const auto * pc =
+        static_cast<const SoPerspectiveCamera *>(this->camera);
+      vv.perspective(pc->heightAngle.getValue(),
+                     this->viewportRegion.getViewportAspectRatio(),
+                     nearplane, farplane);
+    }
+    else if (this->camera->isOfType(SoOrthographicCamera::getClassTypeId())) {
+      const auto * oc = static_cast<const SoOrthographicCamera *>(this->camera);
+      const float halfheight = oc->height.getValue() * 0.5f;
+      const float halfwidth =
+        halfheight * this->viewportRegion.getViewportAspectRatio();
+      vv.ortho(-halfwidth, halfwidth, -halfheight, halfheight,
+               nearplane, farplane);
+    }
+    else {
+      vv = this->camera->getViewVolume(
+        this->viewportRegion.getViewportAspectRatio());
+    }
+
     if (vv.getDepth() == 0.0f || vv.getWidth() == 0.0f
         || vv.getHeight() == 0.0f) {
       // Empty scenes: SoCamera::doAction() installs identity matrices.
@@ -754,6 +835,20 @@ SoVulkanRenderManagerP::prepareRenderParams(SbBool clearwindow,
       params.projMatrix.makeIdentity();
     }
     else {
+      vv.rotateCamera(this->camera->orientation.getValue());
+      if (this->cameraShiftZ > 0.0f
+          && this->autoClipping != SoVulkanRenderManager::NO_AUTO_CLIPPING) {
+        // Zoom wall: render from the backed-off camera position (see
+        // setClippingPlanes()); the camera node itself is left alone.
+        SbVec3f forward;
+        this->camera->orientation.getValue().multVec(
+          SbVec3f(0.0f, 0.0f, -1.0f), forward);
+        vv.translateCamera(this->camera->position.getValue()
+                           - forward * this->cameraShiftZ);
+      }
+      else {
+        vv.translateCamera(this->camera->position.getValue());
+      }
       vv.getMatrices(params.viewMatrix, params.projMatrix);
     }
   }
@@ -921,26 +1016,32 @@ SoVulkanRenderManagerP::prepareRenderParams(SbBool clearwindow,
     if (++frames == 10 || frames == 50 || frames % 25 == 0) {
       SbMatrix m = params.projMatrix;
       SbMatrix v = params.viewMatrix;
-      // OpenGL-style perspective: col2=(0,0,-(f+n)/(f-n),-1), col3=(0,0,-2fn/(f-n),0)
+      // OpenGL-style perspective: col2=(0,0,a,-1), col3=(0,0,b,0) with
+      // a=-(f+n)/(f-n), b=-2fn/(f-n)  ->  n=b/(a-1), f=b/(a+1).
+      // Depth-range form (ortho): m22=-2/(f-n), m32=-(f+n)/(f-n)
+      // ->  n=(m32+1)/m22, f=(m32-1)/m22.
       float nearf = -1.0f, farf = -1.0f;
-      if (m[2][3] != 0.0f && m[3][3] == 0.0f) {
-        float a = m[2][2];
-        float b = m[2][3];
+      if (m[2][3] == -1.0f && m[3][3] == 0.0f) {
+        const float a = m[2][2];
+        const float b = m[3][2];
         nearf = b / (a - 1.0f);
         farf = b / (a + 1.0f);
       }
       else {
-        // ortho: m[2][2]=-2/(f-n), m[3][2]=-(f+n)/(f-n)
-        float npl = (m[2][2] != 0.0f) ? (2.0f / m[2][2]) : 0.0f;
-        float sn = -m[3][2];
-        farf = (sn - 1.0f) * npl * 0.5f;
-        nearf = farf - npl;
+        const float m22 = m[2][2];
+        const float m32 = m[3][2];
+        if (m22 != 0.0f) {
+          nearf = (m32 + 1.0f) / m22;
+          farf = (m32 - 1.0f) / m22;
+        }
       }
       fprintf(stderr,
-              "[CLIP] cmd0 cam-near=%.4f cam-far=%.4f focal=%.4f pos=(%.2f,%.2f,%.2f) "
+              "[CLIP] cmd0 cam-near=%.4f cam-far=%.4f use-near=%.4f use-far=%.4f "
+              "focal=%.4f pos=(%.2f,%.2f,%.2f) "
               "ncd=%.4f fcd=%.4f cmds=%d m00=%.3f m11=%.3f m22=%.4f m32=%.4f m23=%.4f\n",
               this->camera ? this->camera->nearDistance.getValue() : -1.0f,
               this->camera ? this->camera->farDistance.getValue() : -1.0f,
+              this->computedNear, this->computedFar,
               this->camera ? this->camera->focalDistance.getValue() : -1.0f,
               this->camera ? this->camera->position.getValue()[0] : 0.0f,
               this->camera ? this->camera->position.getValue()[1] : 0.0f,
