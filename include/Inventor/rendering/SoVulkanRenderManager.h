@@ -53,6 +53,18 @@ public:
   void setOverlaySceneGraph(SoNode * root);
   SoNode * getOverlaySceneGraph(void) const;
 
+  /*!
+    \brief Set an optional decoration scene graph (axis cross overlay).
+
+    Traversed after the overlay scene graph every frame (commands recorded
+    into the same draw list, drawn in the overlay pass after the overlay
+    scene's commands).  Like the overlay scene, its nodes carry their own
+    view/projection matrices and viewport/scissor regions (screen-space
+    decorations such as the axis cross).
+  */
+  void setDecorationSceneGraph(SoNode * root);
+  SoNode * getDecorationSceneGraph(void) const;
+
   void setCamera(SoCamera * camera);
   SoCamera * getCamera(void) const;
 

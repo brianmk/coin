@@ -45,10 +45,14 @@ public:
     if (this->overlayScene) {
       this->overlayScene->unref();
     }
+    if (this->decorationScene) {
+      this->decorationScene->unref();
+    }
   }
 
   SoNode * scene = nullptr;
   SoNode * overlayScene = nullptr;
+  SoNode * decorationScene = nullptr;
   SoCamera * camera = nullptr;
   SbViewportRegion viewportRegion;
   SbColor4f backgroundColor = SbColor4f(0.0f, 0.0f, 0.0f, 1.0f);
@@ -160,6 +164,28 @@ SoNode *
 SoVulkanRenderManager::getOverlaySceneGraph(void) const
 {
   return this->pimpl->overlayScene;
+}
+
+void
+SoVulkanRenderManager::setDecorationSceneGraph(SoNode * root)
+{
+  SoNode *& stored = this->pimpl->decorationScene;
+  if (stored == root) {
+    return;
+  }
+  if (stored) {
+    stored->unref();
+  }
+  stored = root;
+  if (stored) {
+    stored->ref();
+  }
+}
+
+SoNode *
+SoVulkanRenderManager::getDecorationSceneGraph(void) const
+{
+  return this->pimpl->decorationScene;
 }
 
 void
@@ -752,7 +778,8 @@ SoVulkanRenderManagerP::prepareRenderParams(SbBool clearwindow,
   // (blank/wrong view, invisible geometry, and a camera that appears not to
   // follow navigation).  The overlay scene is traversed last so its commands
   // record after the main scene and render in the overlay pass.
-  if (this->scene || this->camera || this->overlayScene) {
+  if (this->scene || this->camera || this->overlayScene
+      || this->decorationScene) {
     SoSeparator * root = new SoSeparator;
     root->ref();
     if (this->camera) {
@@ -763,6 +790,12 @@ SoVulkanRenderManagerP::prepareRenderParams(SbBool clearwindow,
     }
     if (this->overlayScene) {
       root->addChild(this->overlayScene);
+    }
+    // Decorations (axis cross) record after the overlay scene so their
+    // overlay-pass commands draw on top of the navigation cube, matching
+    // GL's foreground/decoration render order.
+    if (this->decorationScene) {
+      root->addChild(this->decorationScene);
     }
     action.apply(root);
     root->unref();
