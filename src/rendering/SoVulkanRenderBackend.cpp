@@ -3530,6 +3530,21 @@ SoVulkanRenderBackend::recordFrame(const SoDrawList & drawlist,
     }
   }
 
+  // On-top annotations: commands recorded with the depth test disabled are
+  // drawn after both passes in insertion order.  This mirrors GL's delayed
+  // annotations pass (glClear(GL_DEPTH_BUFFER_BIT) + re-render on top),
+  // which clarify selection uses to show a highlighted shape through
+  // occluding geometry: the base shape and its highlight are recorded with
+  // the depth test off during traversal and deferred here so later-drawn
+  // occluders cannot paint over them.
+  for (int i = 0; i < drawlist.getNumCommands(); ++i) {
+    const SoRenderCommand & command = drawlist.getCommand(i);
+    if (command.pass == SO_RENDERPASS_OVERLAY) continue;
+    if (command.state.depth.enabled) continue;
+    this->recordDrawCommand(drawlist, command, target, params, renderPass,
+                            false);
+  }
+
   // Screen-space overlay geometry (navigation cube): drawn after both passes
   // into its own viewport, with the overlay rect's depth cleared first so the
   // overlay self-occludes independently of the main scene.
