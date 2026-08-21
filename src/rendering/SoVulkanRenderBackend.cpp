@@ -209,6 +209,8 @@ struct alignas(16) VulkanPushConstants {
   float texParams[4];   // x = textureModel, y = alphaTestFunction,
                         // z = alphaTestReference
   float texBlend[4];    // texture blend color
+  float pointSize;      // gl_PointSize (point primitives and polygon mode)
+  float pad[3];
 };
 
 // Push-constant block for the background gradient pass (BackgroundFragment.glsl).
@@ -561,7 +563,10 @@ SoVulkanRenderBackend::createDescriptorSetLayout()
   bindings[0].binding = 0;
   bindings[0].descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC;
   bindings[0].descriptorCount = 1;
-  bindings[0].stageFlags = VK_SHADER_STAGE_VERTEX_BIT;
+  // Lighting is evaluated per fragment (Phong), so the view/model/lighting
+  // UBO must be visible to both stages.
+  bindings[0].stageFlags =
+    VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT;
   bindings[0].pImmutableSamplers = nullptr;
 
   bindings[1].binding = 1;
@@ -1428,6 +1433,7 @@ SoVulkanRenderBackend::getOrCreatePipeline(const SoRenderCommand & command,
   key.fillMode = overlay ? static_cast<uint8_t>(fillModeOverride)
                           : command.state.raster.fillMode;
   key.cullMode = overlay ? 0 : command.state.raster.cullMode;
+  key.ccwFrontFace = command.state.raster.ccwFrontFace;
   key.depthTestEnable = command.state.depth.enabled || overlay;
   // Overlay-pass geometry (e.g. the navigation cube) draws last into its own
   // viewport and keeps depth writes so it can self-occlude correctly; the
@@ -1537,17 +1543,18 @@ SoVulkanRenderBackend::getOrCreatePipeline(const SoRenderCommand & command,
     fillMode == SoDrawStyleElement::LINES ? VK_POLYGON_MODE_LINE
     : fillMode == SoDrawStyleElement::POINTS ? VK_POLYGON_MODE_POINT
     : VK_POLYGON_MODE_FILL;
-  // The vertex shader flips Y to match Coin's bottom-left origin; compensate
-  // the winding so back-face culling matches the GL pipeline.  Note this
-  // compensation is only correct for faces whose screen-vertical axis is Y
-  // (the side faces of a box): the pole faces (top/bottom when viewed from
-  // directly above/below) have their screen-vertical axis along Z, which the
-  // Y-flip does not reverse, so with CLOCKWISE front faces they get culled and
-  // the whole solid vanishes exactly at the top/bottom view.  The depth buffer
-  // already hides back faces for closed solids, so culling is only an
-  // optimization here; disable it to keep pole faces visible.
-  rasterization.cullMode = VK_CULL_MODE_NONE;
-  rasterization.frontFace = VK_FRONT_FACE_CLOCKWISE;
+  // The vertex shader flips Y to match Coin's bottom-left origin; that
+  // reflection reverses screen winding, so the Vulkan front face is the
+  // inverse of the GL vertex ordering captured in the IR.  Back-face
+  // culling matches GL: only shapes declaring an explicit winding plus
+  // SOLID shape type cull (ccwFrontFace/cullMode above).  FreeCAD BRep
+  // tessellations declare COUNTERCLOCKWISE/SOLID, so closed parts cull
+  // back faces here exactly like the GL pipeline does.
+  rasterization.cullMode =
+    key.cullMode ? VK_CULL_MODE_BACK_BIT : VK_CULL_MODE_NONE;
+  rasterization.frontFace = key.ccwFrontFace
+    ? VK_FRONT_FACE_CLOCKWISE
+    : VK_FRONT_FACE_COUNTER_CLOCKWISE;
   rasterization.lineWidth = 1.0f;
   // Depth bias: wireframe/point overlays pull toward the camera so they pass
   // the depth test against coplanar filled geometry; selection/overlay faces
@@ -2471,8 +2478,14 @@ SoVulkanRenderBackend::applyCommandViewport(const SoRenderCommand & command,
                                  static_cast<int32_t>(raster.viewportHeight));
   viewport.width = static_cast<float>(raster.viewportWidth);
   viewport.height = static_cast<float>(raster.viewportHeight);
-  viewport.minDepth = 0.0f;
-  viewport.maxDepth = 1.0f;
+  // Depth range from the retained SoDepthBufferElement state; GL applies
+  // glDepthRange() per command and restores (0,1) after each draw.  The
+  // viewport is dynamic state here, so each command gets its own range and
+  // nothing needs restoring.  Clamp to the legal [0,1] window.
+  viewport.minDepth =
+    std::clamp(command.state.depth.range[0], 0.0f, 1.0f);
+  viewport.maxDepth =
+    std::clamp(command.state.depth.range[1], 0.0f, 1.0f);
   vkCmdSetViewport(this->activeCommandBuffer, 0, 1, &viewport);
 
   // The per-command viewport also bounds the draw region; mirror the
@@ -2933,6 +2946,13 @@ SoVulkanRenderBackend::recordDrawCommand(const SoDrawList & drawlist,
   push.texBlend[1] = blendColor[1];
   push.texBlend[2] = blendColor[2];
   push.texBlend[3] = blendColor[3];
+  // Point size from the retained state (SoDrawStyle::pointSize via
+  // SoPointSizeElement); GL multiplies by the device pixel ratio because
+  // its viewport is in device pixels -- Vulkan viewports are too, so the
+  // same value applies directly.  Applies to point primitives and to
+  // VK_POLYGON_MODE_POINT (the wireframe/points overlay).
+  push.pointSize = std::max(1.0f, command.state.raster.pointSize);
+  push.pad[0] = push.pad[1] = push.pad[2] = 0.0f;
 
   vkCmdPushConstants(this->activeCommandBuffer, this->pipelineLayout,
                      VK_SHADER_STAGE_VERTEX_BIT |

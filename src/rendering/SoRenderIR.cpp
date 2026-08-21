@@ -652,15 +652,18 @@ fillRenderStateFromState(SoState * state, SoRenderState & rs)
   // Native GL_POINTS are square unless point smoothing is enabled. Keep the
   // primitive shape explicit in the IR so backends do not choose independently.
 
-  // Backface culling from SoShapeHintsElement:
-  // vertexOrdering == COUNTERCLOCKWISE + shapeType == SOLID → cull back faces
+  // Backface culling from SoShapeHintsElement.  GL culls back faces for any
+  // declared solid with an explicit winding -- both CLOCKWISE and
+  // COUNTERCLOCKWISE (SoGLLazyElement), not just CCW.
   {
     SoShapeHintsElement::VertexOrdering vo;
     SoShapeHintsElement::ShapeType st;
     SoShapeHintsElement::FaceType ft;
     SoShapeHintsElement::get(mutableState, vo, st, ft);
-    rs.raster.cullMode = (vo == SoShapeHintsElement::COUNTERCLOCKWISE
+    rs.raster.cullMode = (vo != SoShapeHintsElement::UNKNOWN_ORDERING
                        && st == SoShapeHintsElement::SOLID) ? 1 : 0;
+    rs.raster.ccwFrontFace =
+      (vo == SoShapeHintsElement::CLOCKWISE) ? 0 : 1;
   }
   rs.raster.scissorEnabled = FALSE;
   rs.raster.lineWidth = SoLineWidthElement::get(mutableState);

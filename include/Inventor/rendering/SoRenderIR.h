@@ -367,6 +367,11 @@ struct SoRasterState {
   uint8_t fillMode = 0;         // 0=filled, 1=lines (wireframe), 2=points
   SoPointShape pointShape = SO_POINT_SHAPE_SQUARE;
   uint8_t cullMode = 0;
+  // GL front face follows the declared vertex ordering (SoShapeHintsElement,
+  // glFrontFace): 1 = counterclockwise (the default), 0 = clockwise.  The
+  // Vulkan backend must invert this on screen because its pipeline Y-flips
+  // clip coordinates (a reflection reverses winding).
+  uint8_t ccwFrontFace = 1;
   SbBool  scissorEnabled = FALSE;
   SbBool  viewportEnabled = FALSE;
   int     viewportX = 0;

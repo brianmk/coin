@@ -22,6 +22,7 @@ layout(push_constant) uniform PushConstants {
     vec4  u_flags;        // offset 80, 16 bytes
     vec4  u_texParams;    // offset 96, 16 bytes
     vec4  u_texBlend;     // offset 112, 16 bytes
+    float u_pointSize;    // offset 128, 16 bytes (pad[3])
 } pc;
 
 layout(set = 0, binding = 0, std140) uniform VisualBlock {
@@ -46,61 +47,15 @@ layout(location = 1) in vec3 a_normal;
 layout(location = 2) in vec4 a_color;
 layout(location = 3) in vec2 a_texcoord;
 
+// Lighting is evaluated per fragment (see Fragment.glsl): Gouraud shading
+// hardens the light gradient into linear bands between vertices, which on
+// coarse CAD tessellations (FreeCAD's default angular deflection) reads as a
+// sharp, faceted gradient and a hard-edged specular highlight.  Interpolated
+// eye-space position/normal give a smooth gradient and a soft highlight.
 layout(location = 0) out vec4 v_color;
-layout(location = 1) out vec3 v_litColor;
-layout(location = 2) out vec2 v_texcoord;
-
-const int COIN_MAX_LIGHTS = 8;
-
-vec3 coin_vulkan_gouraud(vec3 eyePos, vec3 eyeNormal, vec3 baseColor)
-{
-    vec3 N = normalize(eyeNormal);
-    vec3 V = normalize(-eyePos);
-    if (visual.u_materialParams.y > 0.5 && dot(N, V) < 0.0) {
-        N = -N;
-    }
-    vec3 litColor = visual.u_ambientLight.rgb * visual.u_materialAmbient.rgb;
-
-    for (int i = 0; i < COIN_MAX_LIGHTS; ++i) {
-        if (i >= int(visual.u_materialParams.z)) break;
-
-        vec3 L = visual.u_lightDirection[i].xyz;
-        float attenuation = 1.0;
-        float spotFactor = 1.0;
-        if (visual.u_lightType[i].x > 0.5) {
-            vec3 lightVector = visual.u_lightPosition[i].xyz - eyePos;
-            float distanceToLight = length(lightVector);
-            if (distanceToLight <= 0.0001) continue;
-            L = lightVector / distanceToLight;
-            vec3 att = visual.u_lightAttenuation[i].xyz;
-            attenuation = 1.0 / max(att.z + att.y * distanceToLight +
-                                    att.x * distanceToLight * distanceToLight,
-                                    0.0001);
-            if (visual.u_lightType[i].x > 1.5) {
-                vec3 coneDir = normalize(visual.u_lightDirection[i].xyz);
-                vec3 fromLight =
-                    normalize(eyePos - visual.u_lightPosition[i].xyz);
-                float spotCos = dot(coneDir, fromLight);
-                if (spotCos < visual.u_lightSpotParams[i].x) continue;
-                spotFactor = pow(max(spotCos, 0.0),
-                                 visual.u_lightSpotParams[i].y);
-            }
-        }
-
-        vec3 Ln = normalize(L);
-        float NdotL = max(dot(N, Ln), 0.0);
-        if (NdotL <= 0.0) continue;
-        vec3 H = normalize(Ln + V);
-        float NdotH = max(dot(N, H), 0.0);
-        float shininess = max(visual.u_materialParams.x * 128.0, 0.0);
-        float specularFactor = shininess > 0.0 ? pow(NdotH, shininess) : 0.0;
-        vec3 diffuse = baseColor * NdotL;
-        vec3 specular = visual.u_materialSpecular.rgb * specularFactor;
-        litColor += visual.u_lightColor[i].rgb * attenuation * spotFactor *
-                    (diffuse + specular);
-    }
-    return clamp(litColor + visual.u_emissiveColor.rgb, 0.0, 1.0);
-}
+layout(location = 1) out vec3 v_eyePos;
+layout(location = 2) out vec3 v_eyeNormal;
+layout(location = 3) out vec2 v_texcoord;
 
 void main()
 {
@@ -119,19 +74,15 @@ void main()
     // survives perspective division: z_ndc = 0.5*(z_clip/w + 1)
     // => z_clip' = 0.5*(z_clip + w).
     clip.z = 0.5 * clip.z + 0.5 * clip.w;
-    // Vulkan has no implicit point size: the point-list overlay pipeline
-    // (FC_VULKAN_POINTS) requires an explicit write, other topologies
-    // ignore it.
-    gl_PointSize = 1.0;
+    // Vulkan has no implicit point size: carry the retained
+    // SoDrawStyle/SoPointSizeElement value in the push constants.  Applies
+    // to point primitives and to the point-list overlay pipeline
+    // (FC_VULKAN_POINTS); other topologies ignore the write.
+    gl_PointSize = pc.u_pointSize;
     gl_Position = clip;
 
     v_color = pc.u_flags.x > 0.5 ? a_color : vec4(pc.u_color.rgb, 1.0);
+    v_eyePos = eyePos.xyz;
+    v_eyeNormal = eyeNormal;
     v_texcoord = a_texcoord;
-
-    if (visual.u_materialParams.w < 0.5) {
-        v_litColor = v_color.rgb;
-    }
-    else {
-        v_litColor = coin_vulkan_gouraud(eyePos.xyz, eyeNormal, v_color.rgb);
-    }
 }

@@ -359,6 +359,7 @@ private:
     uint8_t topology = 0;
     uint8_t fillMode = 0;
     uint8_t cullMode = 0;
+    uint8_t ccwFrontFace = 1;
     bool depthTestEnable = false;
     bool depthWriteEnable = false;
     uint8_t depthFunction = 0;
@@ -386,6 +387,7 @@ private:
     {
       return renderPass == other.renderPass && topology == other.topology &&
         fillMode == other.fillMode && cullMode == other.cullMode &&
+        ccwFrontFace == other.ccwFrontFace &&
         depthTestEnable == other.depthTestEnable &&
         depthWriteEnable == other.depthWriteEnable &&
         depthFunction == other.depthFunction &&
@@ -426,6 +428,8 @@ private:
         (hash >> 2);
       hash ^= std::hash<uint32_t>()(key.cullMode) + 0x9e3779b9 + (hash << 6) +
         (hash >> 2);
+      hash ^= std::hash<uint32_t>()(key.ccwFrontFace) + 0x9e3779b9 +
+        (hash << 6) + (hash >> 2);
       hash ^= std::hash<uint32_t>()(key.depthTestEnable) + 0x9e3779b9 +
         (hash << 6) + (hash >> 2);
       hash ^= std::hash<uint32_t>()(key.depthWriteEnable) + 0x9e3779b9 +
