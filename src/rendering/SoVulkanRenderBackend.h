@@ -30,6 +30,13 @@ struct VulkanCachedCommand {
   uint32_t vertexCount = 0;
   uint32_t indexCount = 0;
 
+  // CPU-expanded wide-line quads (per-frame content; line width > 1 or a
+  // stipple pattern).  Host-visible scratch, sized on demand.
+  VkBuffer wideLineBuffer = VK_NULL_HANDLE;
+  VkDeviceMemory wideLineMemory = VK_NULL_HANDLE;
+  VkDeviceSize wideLineBufferSize = 0;
+  uint32_t wideLineVertexCount = 0;
+
   // Command that last touched this entry (per-frame arena pointer; used
   // only as an identity key for map rebuilds after cache eviction).
   const SoRenderCommand * commandKey = nullptr;
@@ -157,6 +164,7 @@ private:
                         VkRenderPass & renderPass);
   bool createShaders(VkShaderModule & vertexModule,
                      VkShaderModule & fragmentModule);
+  bool createWideLineShaders();
   bool createBackgroundResources();
   bool createBackgroundPipeline(const SoVulkanRenderTarget & target,
                                 VkRenderPass renderPass,
@@ -235,6 +243,11 @@ private:
                          int fillModeOverride = -1,
                          const float * uniformColorOverride = nullptr,
                          bool overlayPass = false);
+  bool expandWideLines(VulkanCachedCommand & entry,
+                       const SoRenderCommand & command,
+                       const SoRenderParams & params,
+                       const SbMat & proj,
+                       float lineWidth);
   bool endAndSubmit();
   void applyViewport(const SoRenderParams & params,
                      const SoVulkanRenderTarget & target);
@@ -335,6 +348,10 @@ private:
   VkShaderModule vertexModule = VK_NULL_HANDLE;
   VkShaderModule fragmentModule = VK_NULL_HANDLE;
 
+  // Wide-line (line width > 1 and/or stippled line pattern) pipeline shaders.
+  VkShaderModule wideLineVertexModule = VK_NULL_HANDLE;
+  VkShaderModule wideLineFragmentModule = VK_NULL_HANDLE;
+
   // Background gradient resources (no descriptor sets; push constants only).
   VkShaderModule backgroundVertexModule = VK_NULL_HANDLE;
   VkShaderModule backgroundFragmentModule = VK_NULL_HANDLE;
@@ -382,6 +399,7 @@ private:
     uint8_t stencilZFailOp = 0;
     uint8_t stencilZPassOp = 0;
     uint32_t sampleCount = 1;
+    bool wideLine = false;
 
     bool operator==(const PipelineKey & other) const
     {
@@ -412,7 +430,7 @@ private:
           stencilFailOp == other.stencilFailOp &&
           stencilZFailOp == other.stencilZFailOp &&
           stencilZPassOp == other.stencilZPassOp)) &&
-        sampleCount == other.sampleCount;
+        sampleCount == other.sampleCount && wideLine == other.wideLine;
     }
   };
 
@@ -473,6 +491,8 @@ private:
       hash ^= std::hash<uint32_t>()(key.stencilZPassOp) + 0x9e3779b9 +
         (hash << 6) + (hash >> 2);
       hash ^= std::hash<uint32_t>()(key.sampleCount) + 0x9e3779b9 +
+        (hash << 6) + (hash >> 2);
+      hash ^= std::hash<uint32_t>()(key.wideLine) + 0x9e3779b9 +
         (hash << 6) + (hash >> 2);
       return hash;
     }

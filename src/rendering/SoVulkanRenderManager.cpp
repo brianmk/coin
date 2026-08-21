@@ -336,15 +336,21 @@ SoVulkanRenderManager::initialize(SoVulkanDeviceContext * context)
   }
   this->pimpl->backendInitialized = TRUE;
 
-  // Ray tracing is best-effort: the raster backend is always available and
-  // remains the fallback when the device lacks the RT extensions/features.
-  if (this->pimpl->rtxBackend.initialize(params)) {
-    this->pimpl->rtxBackendInitialized = TRUE;
-  }
-  else {
-    SoDebugError::postWarning(
-      "SoVulkanRenderManager::initialize",
-      "ray-tracing backend unavailable; raster Vulkan backend will be used");
+  // Ray tracing is best-effort and only attempted when it was requested
+  // (setRayTracing(TRUE)).  A device created without the KHR extensions
+  // (ray tracing disabled) can never resolve the RT entry points, so
+  // probing it anyway just emits a misleading error every time the window
+  // re-initializes.  When it IS requested but unavailable, fall back to
+  // the raster backend with a warning.
+  if (this->pimpl->rayTracing) {
+    if (this->pimpl->rtxBackend.initialize(params)) {
+      this->pimpl->rtxBackendInitialized = TRUE;
+    }
+    else {
+      SoDebugError::postWarning(
+        "SoVulkanRenderManager::initialize",
+        "ray-tracing backend unavailable; raster Vulkan backend will be used");
+    }
   }
   return TRUE;
 }
@@ -366,7 +372,11 @@ void
 SoVulkanRenderManager::setRayTracing(SbBool enabled)
 {
   this->pimpl->rayTracing = enabled;
-  if (enabled && !this->pimpl->rtxBackendInitialized) {
+  // Called before initialize() the flag is a request honored by
+  // initialize().  Called after an initialize() that could not bring up
+  // the RTX backend, ray tracing cannot work: fall back to raster.
+  if (enabled && this->pimpl->backendInitialized
+      && !this->pimpl->rtxBackendInitialized) {
     SoDebugError::postWarning("SoVulkanRenderManager::setRayTracing",
                               "ray-tracing backend is not initialized; "
                               "keeping the raster backend");

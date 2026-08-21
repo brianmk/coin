@@ -16,6 +16,10 @@ layout(push_constant) uniform PushConstants {
     vec4  u_texParams;    // offset 96, 16 bytes
     vec4  u_texBlend;     // offset 112, 16 bytes
     float u_pointSize;    // offset 128, 16 bytes (pad[3])
+    vec4  u_lineParams;   // offset 144, 16 bytes: x = stipple factor,
+                        // y = round points
+                          //   y = round points, z = line primitive,
+                          //   w = point primitive
 } pc;
 
 layout(set = 0, binding = 0, std140) uniform VisualBlock {
@@ -114,6 +118,15 @@ bool coin_vulkan_alpha_test_pass(float alpha, int function, float reference)
 
 void main()
 {
+    // Round point glyphs (SO_POINT_SHAPE_ROUND): discard the fragment outside
+    // the circle inscribed in the point square, mirroring the GL point shader.
+    if (pc.u_lineParams.y > 0.5) {
+        vec2 pointCoord = gl_PointCoord * 2.0 - 1.0;
+        if (dot(pointCoord, pointCoord) > 1.0) {
+            discard;
+        }
+    }
+
     // Mirror the retained GL visual program: vertex alpha already carries the
     // material transparency for PER_FACE vertex colors (flagged on the
     // command); otherwise the uniform material opacity multiplies the vertex

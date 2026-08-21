@@ -23,6 +23,10 @@ layout(push_constant) uniform PushConstants {
     vec4  u_texParams;    // offset 96, 16 bytes
     vec4  u_texBlend;     // offset 112, 16 bytes
     float u_pointSize;    // offset 128, 16 bytes (pad[3])
+    vec4  u_lineParams;   // offset 144, 16 bytes: x = stipple factor,
+                        // y = round points
+                          //   y = round points, z = line primitive,
+                          //   w = point primitive
 } pc;
 
 layout(set = 0, binding = 0, std140) uniform VisualBlock {

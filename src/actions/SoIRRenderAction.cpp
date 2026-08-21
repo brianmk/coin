@@ -49,6 +49,7 @@
 #include <Inventor/elements/SoDecimationPercentageElement.h>
 #include <Inventor/elements/SoDecimationTypeElement.h>
 #include <Inventor/elements/SoTextureOverrideElement.h>
+#include <Inventor/elements/SoDevicePixelRatioElement.h>
 #include <Inventor/elements/SoPointSizeElement.h>
 #include <Inventor/nodes/SoShaderProgram.h>
 #include <Inventor/nodes/SoCamera.h>
@@ -150,6 +151,10 @@ SoIRRenderAction::initClass(void)
   SO_ENABLE(SoIRRenderAction, SoDecimationPercentageElement);
   SO_ENABLE(SoIRRenderAction, SoDecimationTypeElement);
   SO_ENABLE(SoIRRenderAction, SoTextureOverrideElement);
+  // Needed by SoShapeScale::updateScale() (FreeCAD's screen-constant-size
+  // datum planes/axes): the element must be enabled or updateScale() bails
+  // out and the shapes keep their raw world-unit scale.
+  SO_ENABLE(SoIRRenderAction, SoDevicePixelRatioElement);
 }
 
 SoIRRenderAction::SoIRRenderAction(const SbViewportRegion & vp)
@@ -227,6 +232,11 @@ void
 SoIRRenderAction::beginTraversal(SoNode * node)
 {
   SoViewportRegionElement::set(this->state, this->vpRegion);
+  // The IR viewport region is built from the swapchain extent in DEVICE
+  // pixels, so the device pixel ratio here is 1.0 (the GL side uses a
+  // logical-pixel viewport multiplied by dpr instead).  SoShapeScale and
+  // friends rely on this element being set.
+  SoDevicePixelRatioElement::set(this->state, this->vpRegion.getPixelsPerPoint());
   if (getenv("FC_VULKAN_CLIP_DEBUG")) {
     static bool btLogged = false;
     if (!btLogged) {

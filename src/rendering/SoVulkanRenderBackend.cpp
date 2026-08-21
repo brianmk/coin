@@ -15,12 +15,15 @@
 
 #include "vulkan/visual/Fragment.spv.h"
 #include "vulkan/visual/Vertex.spv.h"
+#include "vulkan/visual/WideLineFragment.spv.h"
+#include "vulkan/visual/WideLineVertex.spv.h"
 #include "vulkan/visual/BackgroundVertex.spv.h"
 #include "vulkan/visual/BackgroundFragment.spv.h"
 
 namespace {
 
 int s_debugFrame = 0;
+static uint32_t s_debugPushCount = 0;
 int s_dumpCmdCount = 0;
 
 // Number of per-draw lighting UBO slots a frame will consume.  A command is
@@ -210,8 +213,16 @@ struct alignas(16) VulkanPushConstants {
                         // z = alphaTestReference
   float texBlend[4];    // texture blend color
   float pointSize;      // gl_PointSize (point primitives and polygon mode)
-  float pad[3];
+  float pointSizePad[3];// std140: pointSize occupies a full vec4 slot
+  float lineParams[4];  // x = stipple factor (px/bit, glLineStipple factor),
+                        // y = stipple pattern bits (wide-line) / round
+                        //     points (visual), z = line primitive,
+                        // w = point primitive
 };
+static_assert(offsetof(VulkanPushConstants, lineParams) == 144,
+              "lineParams must land at shader offset 144");
+static_assert(sizeof(VulkanPushConstants) == 160,
+              "push-constant block must be 160 bytes");
 
 // Push-constant block for the background gradient pass (BackgroundFragment.glsl).
 struct alignas(16) VulkanBackgroundPush {
@@ -520,6 +531,12 @@ SoVulkanRenderBackend::initialize(const SoRenderBackendInitParams & params)
 
   if (!this->createShaders(this->vertexModule, this->fragmentModule)) {
     this->emitError("failed to create Vulkan shader modules");
+    this->shutdown();
+    return FALSE;
+  }
+
+  if (!this->createWideLineShaders()) {
+    this->emitError("failed to create Vulkan wide-line shader modules");
     this->shutdown();
     return FALSE;
   }
@@ -1048,6 +1065,17 @@ SoVulkanRenderBackend::createWhiteTexture()
 bool
 SoVulkanRenderBackend::createPipelineLayout()
 {
+  // The visual push-constant block carries the projection matrix, colors,
+  // texture state, point size, and line params.  Verify the device can hold
+  // it (desktop GPUs advertise 256 bytes; some embedded parts only 128).
+  VkPhysicalDeviceProperties deviceProps {};
+  vkGetPhysicalDeviceProperties(this->physicalDevice, &deviceProps);
+  if (deviceProps.limits.maxPushConstantsSize < sizeof(VulkanPushConstants)) {
+    this->emitError(
+      "device push-constant limit too small for the visual pipeline");
+    return false;
+  }
+
   constexpr VkPushConstantRange range {
     VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
     0,
@@ -1088,6 +1116,35 @@ SoVulkanRenderBackend::createShaders(VkShaderModule & vertex,
             coin_vulkan_visual_fragment_spirv_count, fragment)) {
     vkDestroyShaderModule(this->device, vertex, this->allocator);
     vertex = VK_NULL_HANDLE;
+    return false;
+  }
+  return true;
+}
+
+bool
+SoVulkanRenderBackend::createWideLineShaders()
+{
+  auto load = [this](const uint32_t * code, size_t count,
+                     VkShaderModule & module) {
+    VkShaderModuleCreateInfo ci {};
+    ci.sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO;
+    ci.codeSize = count * sizeof(uint32_t);
+    ci.pCode = code;
+    return vkCreateShaderModule(this->device, &ci, this->allocator,
+                                &module) == VK_SUCCESS;
+  };
+
+  if (!load(coin_vulkan_wide_line_vertex_spirv,
+            coin_vulkan_wide_line_vertex_spirv_count,
+            this->wideLineVertexModule)) {
+    return false;
+  }
+  if (!load(coin_vulkan_wide_line_fragment_spirv,
+            coin_vulkan_wide_line_fragment_spirv_count,
+            this->wideLineFragmentModule)) {
+    vkDestroyShaderModule(this->device, this->wideLineVertexModule,
+                          this->allocator);
+    this->wideLineVertexModule = VK_NULL_HANDLE;
     return false;
   }
   return true;
@@ -1428,6 +1485,19 @@ SoVulkanRenderBackend::getOrCreatePipeline(const SoRenderCommand & command,
     ? command.state.raster.polygonOffsetFactor
     : (overlay ? -0.5f : 0.0f);
   PipelineKey key;
+  // Wide-line rendering (line width > 1 and/or a stipple pattern) expands
+  // segments into quads on the CPU and draws them with the wide-line
+  // pipeline as triangle lists, mirroring the GL wide-line geometry shader.
+  // The overlay wireframe redraw stays on the plain line path.
+  const bool lineTopology = command.geometry.topology == SO_TOPOLOGY_LINES ||
+    command.geometry.topology == SO_TOPOLOGY_LINE_STRIP;
+  const bool patternedLine =
+    command.state.raster.linePattern != 0xFFFF &&
+    command.state.raster.linePattern != 0;
+  const bool useWideLine =
+    lineTopology && fillModeOverride < 0 &&
+    (command.state.raster.lineWidth > 1.0f || patternedLine);
+  key.wideLine = useWideLine;
   key.renderPass = pass;
   key.topology = command.geometry.topology;
   key.fillMode = overlay ? static_cast<uint8_t>(fillModeOverride)
@@ -1478,16 +1548,18 @@ SoVulkanRenderBackend::getOrCreatePipeline(const SoRenderCommand & command,
   VkPipelineShaderStageCreateInfo stages[2] {};
   stages[0].sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
   stages[0].stage = VK_SHADER_STAGE_VERTEX_BIT;
-  stages[0].module = this->vertexModule;
+  stages[0].module = key.wideLine ? this->wideLineVertexModule
+                                  : this->vertexModule;
   stages[0].pName = "main";
   stages[1].sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
   stages[1].stage = VK_SHADER_STAGE_FRAGMENT_BIT;
-  stages[1].module = this->fragmentModule;
+  stages[1].module = key.wideLine ? this->wideLineFragmentModule
+                                  : this->fragmentModule;
   stages[1].pName = "main";
 
   VkVertexInputBindingDescription binding {};
   binding.binding = 0;
-  binding.stride = VULKAN_VERTEX_STRIDE;
+  binding.stride = key.wideLine ? 36u : VULKAN_VERTEX_STRIDE;
   binding.inputRate = VK_VERTEX_INPUT_RATE_VERTEX;
 
   VkVertexInputAttributeDescription attributes[4] {};
@@ -1508,18 +1580,37 @@ SoVulkanRenderBackend::getOrCreatePipeline(const SoRenderCommand & command,
   attributes[3].format = VK_FORMAT_R32G32_SFLOAT;
   attributes[3].offset = 40;
 
+  // Wide-line layout: clip-space position (0), color (16), polyline
+  // distance (32).
+  VkVertexInputAttributeDescription wideLineAttributes[3] {};
+  wideLineAttributes[0].location = 0;
+  wideLineAttributes[0].binding = 0;
+  wideLineAttributes[0].format = VK_FORMAT_R32G32B32A32_SFLOAT;
+  wideLineAttributes[0].offset = 0;
+  wideLineAttributes[1].location = 2;
+  wideLineAttributes[1].binding = 0;
+  wideLineAttributes[1].format = VK_FORMAT_R32G32B32A32_SFLOAT;
+  wideLineAttributes[1].offset = 16;
+  wideLineAttributes[2].location = 4;
+  wideLineAttributes[2].binding = 0;
+  wideLineAttributes[2].format = VK_FORMAT_R32_SFLOAT;
+  wideLineAttributes[2].offset = 32;
+
   VkPipelineVertexInputStateCreateInfo vertexInput {};
   vertexInput.sType =
     VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO;
   vertexInput.vertexBindingDescriptionCount = 1;
   vertexInput.pVertexBindingDescriptions = &binding;
-  vertexInput.vertexAttributeDescriptionCount = 4;
-  vertexInput.pVertexAttributeDescriptions = attributes;
+  vertexInput.vertexAttributeDescriptionCount = key.wideLine ? 3u : 4u;
+  vertexInput.pVertexAttributeDescriptions =
+    key.wideLine ? wideLineAttributes : attributes;
 
   VkPipelineInputAssemblyStateCreateInfo inputAssembly {};
   inputAssembly.sType =
     VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO;
-  inputAssembly.topology = topologyToVk(command.geometry.topology);
+  inputAssembly.topology = key.wideLine
+    ? VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST
+    : topologyToVk(command.geometry.topology);
   inputAssembly.primitiveRestartEnable = VK_FALSE;
 
   VkPipelineViewportStateCreateInfo viewportState {};
@@ -1551,7 +1642,8 @@ SoVulkanRenderBackend::getOrCreatePipeline(const SoRenderCommand & command,
   // tessellations declare COUNTERCLOCKWISE/SOLID, so closed parts cull
   // back faces here exactly like the GL pipeline does.
   rasterization.cullMode =
-    key.cullMode ? VK_CULL_MODE_BACK_BIT : VK_CULL_MODE_NONE;
+    key.wideLine || !key.cullMode ? VK_CULL_MODE_NONE
+                                  : VK_CULL_MODE_BACK_BIT;
   rasterization.frontFace = key.ccwFrontFace
     ? VK_FRONT_FACE_CLOCKWISE
     : VK_FRONT_FACE_COUNTER_CLOCKWISE;
@@ -1871,6 +1963,14 @@ SoVulkanRenderBackend::destroyCacheEntry(VulkanCachedCommand & entry)
   if (entry.vertexMemory) {
     vkFreeMemory(this->device, entry.vertexMemory, this->allocator);
     entry.vertexMemory = VK_NULL_HANDLE;
+  }
+  if (entry.wideLineBuffer) {
+    vkDestroyBuffer(this->device, entry.wideLineBuffer, this->allocator);
+    entry.wideLineBuffer = VK_NULL_HANDLE;
+  }
+  if (entry.wideLineMemory) {
+    vkFreeMemory(this->device, entry.wideLineMemory, this->allocator);
+    entry.wideLineMemory = VK_NULL_HANDLE;
   }
   entry = VulkanCachedCommand();
 }
@@ -2684,6 +2784,23 @@ SoVulkanRenderBackend::updateLightingUniforms(const SoDrawList & drawlist,
   }
 
   const SoMaterialData & material = command.material;
+  if (envFlagEnabled("FC_VULKAN_BACKEND_DEBUG") &&
+      (command.geometry.topology == SO_TOPOLOGY_LINES ||
+       command.geometry.topology == SO_TOPOLOGY_LINE_STRIP ||
+       command.geometry.topology == SO_TOPOLOGY_POINTS)) {
+    fprintf(stderr,
+            "[UBO] cmd=%p pass=%d topo=%d diffuse=(%.2f,%.2f,%.2f,%.2f) "
+            "emissive=(%.2f,%.2f,%.2f) ambient=(%.2f,%.2f,%.2f) "
+            "specular=(%.2f,%.2f,%.2f) shading=%d unlit=%d\n",
+            (const void*)&command, static_cast<int>(command.pass),
+            static_cast<int>(command.geometry.topology),
+            material.diffuse[0], material.diffuse[1], material.diffuse[2],
+            material.diffuse[3],
+            material.emissive[0], material.emissive[1], material.emissive[2],
+            material.ambient[0], material.ambient[1], material.ambient[2],
+            material.specular[0], material.specular[1], material.specular[2],
+            static_cast<int>(material.shadingModel), unlit ? 1 : 0);
+  }
   ubo.emissive[0] = material.emissive[0];
   ubo.emissive[1] = material.emissive[1];
   ubo.emissive[2] = material.emissive[2];
@@ -2797,6 +2914,239 @@ SoVulkanRenderBackend::updateLightingUniforms(const SoDrawList & drawlist,
   }
 }
 
+bool
+SoVulkanRenderBackend::expandWideLines(VulkanCachedCommand & entry,
+                                       const SoRenderCommand & command,
+                                       const SoRenderParams & params,
+                                       const SbMat & proj,
+                                       const float lineWidth)
+{
+  const SoGeometryDesc & geometry = command.geometry;
+  const uint32_t vertexCount = geometry.vertexCount;
+  if (!vertexCount) return false;
+
+  const uint32_t posStride = geometry.vertexStride
+    ? geometry.vertexStride : sizeof(float) * 3;
+  const uint32_t posStrideFloats = posStride / sizeof(float);
+  const uint32_t count = geometry.indexCount && geometry.indices
+    ? geometry.indexCount : vertexCount;
+  const bool strip = geometry.topology == SO_TOPOLOGY_LINE_STRIP;
+  const uint32_t segmentCount =
+    strip ? (count > 1 ? count - 1 : 0) : count / 2;
+  if (!segmentCount) return false;
+
+  // MVP: clip = P * V * M * pos.  Regular geometry shares the frame view
+  // matrix in params (wide lines never render in the overlay pass).
+  SbMat model;
+  command.modelMatrix.getValue(model);
+  auto multiplyMat = [](const SbMat & a, const SbMat & b, SbMat & out) {
+    for (int r = 0; r < 4; ++r) {
+      for (int c = 0; c < 4; ++c) {
+        out[r][c] = a[r][0] * b[0][c] + a[r][1] * b[1][c] +
+          a[r][2] * b[2][c] + a[r][3] * b[3][c];
+      }
+    }
+  };
+  SbMat mv;
+  multiplyMat(params.viewMatrix.getValue(), model, mv);
+  SbMat mvp;
+  multiplyMat(proj, mv, mvp);
+  const SbVec2s viewportSize = params.viewport.getViewportSizePixels();
+  const float vpWidth = static_cast<float>(viewportSize[0] > 0
+    ? viewportSize[0] : 1);
+  const float vpHeight = static_cast<float>(viewportSize[1] > 0
+    ? viewportSize[1] : 1);
+
+  // Transform a position to clip space with the same Y-flip and depth remap
+  // as the visual vertex shader, so the wide-line vertex shader can pass the
+  // quad corners through unchanged.
+  auto transformPoint = [&mvp](const float * p, float out[4]) {
+    const float x = p[0];
+    const float y = p[1];
+    const float z = p[2];
+    const float cx = mvp[0][0] * x + mvp[0][1] * y + mvp[0][2] * z +
+      mvp[0][3];
+    const float cy = mvp[1][0] * x + mvp[1][1] * y + mvp[1][2] * z +
+      mvp[1][3];
+    const float cz = mvp[2][0] * x + mvp[2][1] * y + mvp[2][2] * z +
+      mvp[2][3];
+    const float cw = mvp[3][0] * x + mvp[3][1] * y + mvp[3][2] * z +
+      mvp[3][3];
+    out[0] = cx;
+    out[1] = -cy;
+    out[2] = 0.5f * cz + 0.5f * cw;
+    out[3] = cw;
+  };
+
+  // Per-vertex clip-space cache plus accumulated polyline distance in
+  // WINDOW PIXELS.  Classic GL applies the stipple pattern in screen space
+  // (glLineStipple: each bit covers linePatternScaleFactor pixels), so the
+  // fragment discard below must operate on pixel distances, not object
+  // units -- an object-unit period changes size when zooming.
+  std::vector<float> clipCache(static_cast<size_t>(vertexCount) * 4, 0.0f);
+  std::vector<float> distances(vertexCount, 0.0f);
+  for (uint32_t i = 0; i < count; ++i) {
+    const uint32_t actual = geometry.indices ? geometry.indices[i] : i;
+    float * clip = clipCache.data() + static_cast<size_t>(actual) * 4;
+    transformPoint(geometry.positions
+                   + static_cast<size_t>(actual) * posStrideFloats, clip);
+  }
+  if (strip) {
+    for (uint32_t i = 1; i < count; ++i) {
+      const uint32_t previous = geometry.indices
+        ? geometry.indices[i - 1] : i - 1;
+      const uint32_t current = geometry.indices ? geometry.indices[i] : i;
+      const float * c0 = clipCache.data() + static_cast<size_t>(previous) * 4;
+      const float * c1 = clipCache.data() + static_cast<size_t>(current) * 4;
+      if (c0[3] <= 0.0f || c1[3] <= 0.0f) {
+        distances[current] = distances[previous];
+        continue;
+      }
+      const float dx = (c1[0] / c1[3] - c0[0] / c0[3]) * 0.5f * vpWidth;
+      const float dy = (c1[1] / c1[3] - c0[1] / c0[3]) * 0.5f * vpHeight;
+      distances[current] = distances[previous] +
+        std::sqrt(dx * dx + dy * dy);
+    }
+  }
+  else {
+    for (uint32_t i = 0; i + 1 < count; i += 2) {
+      const uint32_t first = geometry.indices ? geometry.indices[i] : i;
+      const uint32_t second = geometry.indices
+        ? geometry.indices[i + 1] : i + 1;
+      const float * c0 = clipCache.data() + static_cast<size_t>(first) * 4;
+      const float * c1 = clipCache.data() + static_cast<size_t>(second) * 4;
+      if (c0[3] <= 0.0f || c1[3] <= 0.0f) {
+        distances[first] = 0.0f;
+        distances[second] = 0.0f;
+        continue;
+      }
+      const float dx = (c1[0] / c1[3] - c0[0] / c0[3]) * 0.5f * vpWidth;
+      const float dy = (c1[1] / c1[3] - c0[1] / c0[3]) * 0.5f * vpHeight;
+      distances[first] = 0.0f;
+      distances[second] = std::sqrt(dx * dx + dy * dy);
+    }
+  }
+
+  // 6 vertices per segment (two triangles), 9 floats each:
+  // clip position (4) + color (4) + distance in pixels (1).
+  std::vector<float> quads(static_cast<size_t>(segmentCount) * 6 * 9);
+  size_t outIndex = 0;
+  for (uint32_t s = 0; s < segmentCount; ++s) {
+    uint32_t i0;
+    uint32_t i1;
+    if (strip) {
+      i0 = geometry.indices ? geometry.indices[s] : s;
+      i1 = geometry.indices ? geometry.indices[s + 1] : s + 1;
+    }
+    else {
+      i0 = geometry.indices ? geometry.indices[s * 2] : s * 2;
+      i1 = geometry.indices ? geometry.indices[s * 2 + 1] : s * 2 + 1;
+    }
+    const float * col0 = geometry.colors
+      ? geometry.colors + static_cast<size_t>(i0) * 4 : nullptr;
+    const float * col1 = geometry.colors
+      ? geometry.colors + static_cast<size_t>(i1) * 4 : nullptr;
+
+    const float * c0 = clipCache.data() + static_cast<size_t>(i0) * 4;
+    const float * c1 = clipCache.data() + static_cast<size_t>(i1) * 4;
+    if (c0[3] <= 0.0f || c1[3] <= 0.0f) continue;
+
+    const float ndc0x = c0[0] / c0[3];
+    const float ndc0y = c0[1] / c0[3];
+    const float ndc1x = c1[0] / c1[3];
+    const float ndc1y = c1[1] / c1[3];
+    const float dx = ndc1x - ndc0x;
+    const float dy = ndc1y - ndc0y;
+    const float length = std::sqrt(dx * dx + dy * dy);
+    if (length < 1.0e-8f) continue;
+    const float dirx = dx / length;
+    const float diry = dy / length;
+    // Anisotropic NDC offset mirroring the GL geometry shader
+    // (perp * lineWidth / u_vpSize with per-axis division).
+    const float offx = -diry * lineWidth / vpWidth;
+    const float offy = dirx * lineWidth / vpHeight;
+
+    // Quad corners: [0]=p0+off, [1]=p0-off, [2]=p1+off, [3]=p1-off.
+    // Triangles: (0,1,2), (2,1,3) -- same emission order as the GL
+    // geometry shader's triangle strip.
+    float corners[4][4];
+    for (int corner = 0; corner < 4; ++corner) {
+      const int endpoint = corner < 2 ? 0 : 1;
+      const float sign = (corner % 2 == 0) ? 1.0f : -1.0f;
+      const float w = endpoint == 0 ? c0[3] : c1[3];
+      corners[corner][0] = (endpoint == 0 ? c0[0] : c1[0]) + sign * offx * w;
+      corners[corner][1] = (endpoint == 0 ? c0[1] : c1[1]) + sign * offy * w;
+      corners[corner][2] = endpoint == 0 ? c0[2] : c1[2];
+      corners[corner][3] = w;
+    }
+    static const int triOrder[6] = { 0, 1, 2, 2, 1, 3 };
+    for (int t = 0; t < 6; ++t) {
+      const int corner = triOrder[t];
+      const int endpoint = corner < 2 ? 0 : 1;
+      const float * col = endpoint == 0 ? col0 : col1;
+      float * out = quads.data() + outIndex;
+      outIndex += 9;
+      out[0] = corners[corner][0];
+      out[1] = corners[corner][1];
+      out[2] = corners[corner][2];
+      out[3] = corners[corner][3];
+      out[4] = col ? col[0] : 1.0f;
+      out[5] = col ? col[1] : 1.0f;
+      out[6] = col ? col[2] : 1.0f;
+      out[7] = col ? col[3] : 1.0f;
+      out[8] = distances[endpoint == 0 ? i0 : i1];
+    }
+  }
+  quads.resize(outIndex);
+  if (outIndex < 9) return false;
+
+  if (envFlagEnabled("FC_VULKAN_BACKEND_DEBUG")) {
+    static int distLog = 0;
+    if (distLog++ < 3) {
+      fprintf(stderr, "[WLINE] verts=%u segs=%u quads=%zu dists:",
+              vertexCount, segmentCount, quads.size() / 9);
+      for (size_t q = 0; q < quads.size() && q < 60; q += 9) {
+        fprintf(stderr, " %.1f", static_cast<double>(quads[q + 8]));
+      }
+      fprintf(stderr, "\n");
+    }
+  }
+
+  const VkDeviceSize needed =
+    static_cast<VkDeviceSize>(outIndex) * sizeof(float);
+  if (entry.wideLineBufferSize < needed) {
+    if (entry.wideLineBuffer) {
+      vkDestroyBuffer(this->device, entry.wideLineBuffer, this->allocator);
+      entry.wideLineBuffer = VK_NULL_HANDLE;
+    }
+    if (entry.wideLineMemory) {
+      vkFreeMemory(this->device, entry.wideLineMemory, this->allocator);
+      entry.wideLineMemory = VK_NULL_HANDLE;
+    }
+    if (!this->createBuffer(needed, VK_BUFFER_USAGE_VERTEX_BUFFER_BIT,
+                            entry.wideLineBuffer, entry.wideLineMemory,
+                            quads.data())) {
+      this->emitError("expandWideLines: failed to create quad buffer");
+      entry.wideLineBufferSize = 0;
+      return false;
+    }
+    entry.wideLineBufferSize = needed;
+  }
+  else {
+    void * mapped = nullptr;
+    if (vkMapMemory(this->device, entry.wideLineMemory, 0, needed, 0,
+                    &mapped) != VK_SUCCESS) {
+      this->emitError("expandWideLines: vkMapMemory failed");
+      return false;
+    }
+    std::memcpy(mapped, quads.data(), static_cast<size_t>(needed));
+    vkUnmapMemory(this->device, entry.wideLineMemory);
+  }
+
+  entry.wideLineVertexCount = static_cast<uint32_t>(outIndex / 9);
+  return true;
+}
+
 void
 SoVulkanRenderBackend::recordDrawCommand(const SoDrawList & drawlist,
                                          const SoRenderCommand & command,
@@ -2823,13 +3173,57 @@ SoVulkanRenderBackend::recordDrawCommand(const SoDrawList & drawlist,
     }
     return;
   }
-  const VulkanCachedCommand & entry = this->gpuCache[found->second];
+  if (envFlagEnabled("FC_VULKAN_BACKEND_DEBUG") &&
+      (command.geometry.topology == SO_TOPOLOGY_LINES ||
+       command.geometry.topology == SO_TOPOLOGY_LINE_STRIP ||
+       command.geometry.topology == SO_TOPOLOGY_POINTS)) {
+    const VulkanCachedCommand & entryTmp = this->gpuCache[found->second];
+    fprintf(stderr,
+            "[VKBE] line/point cmd=%p pass=%d topo=%d verts=%u "
+            "diffuse=(%.2f,%.2f,%.2f,%.2f) colorKey=%d shading=%d "
+            "lineWidth=%.2f pattern=0x%04x fillMode=%d\n",
+            (const void*)&command, static_cast<int>(command.pass),
+            static_cast<int>(command.geometry.topology),
+            command.geometry.vertexCount,
+            command.material.diffuse[0], command.material.diffuse[1],
+            command.material.diffuse[2], command.material.diffuse[3],
+            entryTmp.colorKey != nullptr ? 1 : 0,
+            static_cast<int>(command.material.shadingModel),
+            command.state.raster.lineWidth,
+            static_cast<unsigned>(command.state.raster.linePattern),
+            static_cast<int>(command.state.raster.fillMode));
+  }
+  VulkanCachedCommand & entry = this->gpuCache[found->second];
   if (entry.vertexBuffer == VK_NULL_HANDLE) {
     if (envFlagEnabled("FC_VULKAN_BACKEND_DEBUG")) {
       fprintf(stderr, "[VKBE] cmd %p pass=%d skip: vertexBuffer null\n",
               (const void*)&command, static_cast<int>(command.pass));
     }
     return;
+  }
+
+  // Wide-line rendering mirrors the GL wide-line path: line width > 1 or a
+  // stipple pattern expands each segment into a quad.  The overlay
+  // wireframe/point redraws keep the plain line path.
+  const bool lineTopology = command.geometry.topology == SO_TOPOLOGY_LINES ||
+    command.geometry.topology == SO_TOPOLOGY_LINE_STRIP;
+  const bool patternedLine =
+    command.state.raster.linePattern != 0xFFFF &&
+    command.state.raster.linePattern != 0;
+  const bool useWideLine =
+    lineTopology && fillModeOverride < 0 &&
+    (command.state.raster.lineWidth > 1.0f || patternedLine);
+  // Line stipple mirrors classic GL (glLineStipple): each pattern bit
+  // covers linePatternScaleFactor PIXELS in screen space.  The fragment
+  // shader tests the bit selected by floor(distance / factor) % 16.
+  float stippleFactor = 0.0f;
+  float stipplePatternBits = 0.0f;
+  if (useWideLine && patternedLine) {
+    stippleFactor = static_cast<float>(std::max(
+      1, static_cast<int>(command.state.raster.linePatternScale)));
+    const uint32_t patternBits =
+      static_cast<uint32_t>(command.state.raster.linePattern & 0xFFFFu);
+    std::memcpy(&stipplePatternBits, &patternBits, sizeof(patternBits));
   }
 
   VkPipeline pipeline = VK_NULL_HANDLE;
@@ -2848,7 +3242,7 @@ SoVulkanRenderBackend::recordDrawCommand(const SoDrawList & drawlist,
     static int drawn = 0;
     static int logged = 0;
     drawn++;
-    if (logged++ < 24) {
+    if (logged++ < 200) {
       fprintf(stderr,
               "[VKBE] draw %d cmd=%p pass=%d verts=%u idx=%u topo=%d "
               "overlay=%d transparent=%d\n",
@@ -2900,7 +3294,7 @@ SoVulkanRenderBackend::recordDrawCommand(const SoDrawList & drawlist,
   const bool indexed =
     entry.indexBuffer != VK_NULL_HANDLE && command.geometry.indexCount &&
     command.geometry.indices;
-  if (indexed) {
+  if (indexed && !useWideLine) {
     vkCmdBindIndexBuffer(this->activeCommandBuffer, entry.indexBuffer, 0,
                          VK_INDEX_TYPE_UINT32);
   }
@@ -2952,12 +3346,57 @@ SoVulkanRenderBackend::recordDrawCommand(const SoDrawList & drawlist,
   // same value applies directly.  Applies to point primitives and to
   // VK_POLYGON_MODE_POINT (the wireframe/points overlay).
   push.pointSize = std::max(1.0f, command.state.raster.pointSize);
-  push.pad[0] = push.pad[1] = push.pad[2] = 0.0f;
+  push.lineParams[0] = push.lineParams[1] = push.lineParams[2] = 0.0f;
+  push.lineParams[3] = 0.0f;
+  push.lineParams[0] = stippleFactor;
+  // Slot y serves two masters: the wide-line shader reads the stipple
+  // pattern bits here, the visual shader reads the round-point flag.  A
+  // draw never reaches both shaders, so the slot is safe to share.
+  push.lineParams[1] = (useWideLine && patternedLine)
+    ? stipplePatternBits
+    : (command.state.raster.pointShape == SO_POINT_SHAPE_ROUND ? 1.0f : 0.0f);
+  // Debug override: no scene-side element sets SO_POINT_SHAPE_ROUND yet;
+  // this exercises the round-glyph discard path for testing.
+  if (envFlagEnabled("FC_VULKAN_ROUND_POINTS") &&
+      command.geometry.topology == SO_TOPOLOGY_POINTS) {
+    push.lineParams[1] = 1.0f;
+  }
+  push.lineParams[2] = useWideLine ? 1.0f : 0.0f;
+  push.lineParams[3] = command.geometry.topology == SO_TOPOLOGY_POINTS
+    ? 1.0f : 0.0f;
 
   vkCmdPushConstants(this->activeCommandBuffer, this->pipelineLayout,
                      VK_SHADER_STAGE_VERTEX_BIT |
                        VK_SHADER_STAGE_FRAGMENT_BIT,
                      0, sizeof(push), &push);
+
+  if (envFlagEnabled("FC_VULKAN_BACKEND_DEBUG") &&
+      (command.geometry.topology == SO_TOPOLOGY_LINES ||
+       command.geometry.topology == SO_TOPOLOGY_LINE_STRIP ||
+       command.geometry.topology == SO_TOPOLOGY_POINTS ||
+       s_debugPushCount++ < 40)) {
+    uint32_t patternRaw = 0;
+    std::memcpy(&patternRaw, &push.lineParams[1], sizeof(patternRaw));
+    fprintf(stderr,
+            "[PUSH] cmd=%p pass=%d topo=%d srcDiffuse=(%.2f,%.2f,%.2f,%.2f) "
+            "override=%d pushColor=(%.2f,%.2f,%.2f,%.2f) flags=(%.0f,%.0f,%.0f,%.0f) "
+            "lineParams=(%.2f,%.2f,%.2f,%.2f) wideLine=%d stippleFactor=%.1f pattern=0x%04x patternRaw=0x%08x "
+            "fillMode=%d fillModeOverride=%d overlayPass=%d transparent=%d vbuf=%p vertexCount=%u\n",
+            (const void*)&command, static_cast<int>(command.pass),
+            static_cast<int>(command.geometry.topology),
+            color[0], color[1], color[2], color[3],
+            useOverrideColor ? 1 : 0,
+            push.color[0], push.color[1], push.color[2], push.color[3],
+            push.flags[0], push.flags[1], push.flags[2], push.flags[3],
+            push.lineParams[0], push.lineParams[1], push.lineParams[2],
+            push.lineParams[3],
+            useWideLine ? 1 : 0, stippleFactor,
+            static_cast<unsigned>(command.state.raster.linePattern), patternRaw,
+            static_cast<int>(command.state.raster.fillMode),
+            fillModeOverride, overlayPass ? 1 : 0, transparent ? 1 : 0,
+            (const void*)entry.vertexBuffer,
+            static_cast<unsigned>(command.geometry.vertexCount));
+  }
 
   if (envFlagEnabled("FC_VULKAN_MATRIX_DUMP") && s_debugFrame > 0
       && (s_debugFrame % 100 == 0) && s_dumpCmdCount < 12) {
@@ -3007,7 +3446,23 @@ SoVulkanRenderBackend::recordDrawCommand(const SoDrawList & drawlist,
             projValue[3][0], projValue[3][1], projValue[3][2], projValue[3][3]);
   }
 
-  if (indexed) {
+  if (useWideLine) {
+    // CPU-side quad expansion in clip space (line width and/or stipple);
+    // the wide-line pipeline draws it as a triangle list.  Binds here so
+    // the projection matrix (projValue) is already resolved.
+    if (!this->expandWideLines(entry, command, params, projValue,
+                               std::max(1.0f, command.state.raster.lineWidth))) {
+      return;
+    }
+    VkDeviceSize wideOffset = 0;
+    vkCmdBindVertexBuffers(this->activeCommandBuffer, 0, 1,
+                           &entry.wideLineBuffer, &wideOffset);
+  }
+
+  if (useWideLine) {
+    vkCmdDraw(this->activeCommandBuffer, entry.wideLineVertexCount, 1, 0, 0);
+  }
+  else if (indexed) {
     vkCmdDrawIndexed(this->activeCommandBuffer, command.geometry.indexCount, 1, 0,
                      0, 0);
   }
@@ -3084,6 +3539,16 @@ SoVulkanRenderBackend::shutdown()
   if (this->vertexModule != VK_NULL_HANDLE) {
     vkDestroyShaderModule(this->device, this->vertexModule, this->allocator);
     this->vertexModule = VK_NULL_HANDLE;
+  }
+  if (this->wideLineFragmentModule != VK_NULL_HANDLE) {
+    vkDestroyShaderModule(this->device, this->wideLineFragmentModule,
+                          this->allocator);
+    this->wideLineFragmentModule = VK_NULL_HANDLE;
+  }
+  if (this->wideLineVertexModule != VK_NULL_HANDLE) {
+    vkDestroyShaderModule(this->device, this->wideLineVertexModule,
+                          this->allocator);
+    this->wideLineVertexModule = VK_NULL_HANDLE;
   }
   if (this->backgroundFragmentModule != VK_NULL_HANDLE) {
     vkDestroyShaderModule(this->device, this->backgroundFragmentModule, this->allocator);
@@ -3487,6 +3952,15 @@ SoVulkanRenderBackend::recordFrame(const SoDrawList & drawlist,
   const int overlayFillMode = wireframeOverlay
     ? SoDrawStyleElement::LINES
     : (pointsOverlay ? SoDrawStyleElement::POINTS : -1);
+  if (envFlagEnabled("FC_VULKAN_BACKEND_DEBUG")) {
+    static int overlayLog = 0;
+    if (overlayLog++ < 3) {
+      fprintf(stderr,
+              "[OVL] wireframe=%d points=%d fillMode=%d edgeColor=(%.2f,%.2f,%.2f,%.2f)\n",
+              wireframeOverlay ? 1 : 0, pointsOverlay ? 1 : 0, overlayFillMode,
+              overlayColor[0], overlayColor[1], overlayColor[2], overlayColor[3]);
+    }
+  }
 
   // Reserve per-draw lighting slots for the worst case (main pass plus
   // overlay redraws) before recording, so slotIndex can never overflow the
