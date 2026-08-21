@@ -3544,12 +3544,14 @@ SoVulkanRenderBackend::recordOverlayBlock(const SoDrawList & drawlist,
                                           const SoVulkanRenderTarget & target,
                                           VkRenderPass renderPass)
 {
-  const std::vector<int> & order = drawlist.getSortedOrder();
+  // Overlays are drawn in recorded (insertion) order, matching GL: the
+  // draw-list sorted order is a painter's algorithm built from the main
+  // scene's camera-space depth, which is meaningless for screen-space
+  // overlay geometry and would shuffle the navigation cube's panels
+  // relative to each other and to other overlays.
   int lastClearX = -1, lastClearY = -1, lastClearW = -1, lastClearH = -1;
   for (int i = 0; i < drawlist.getNumCommands(); ++i) {
-    const int index =
-      i < static_cast<int>(order.size()) ? order[i] : i;
-    const SoRenderCommand & command = drawlist.getCommand(index);
+    const SoRenderCommand & command = drawlist.getCommand(i);
     if (command.pass != SO_RENDERPASS_OVERLAY) continue;
     const SoRasterState & raster = command.state.raster;
     if (!raster.scissorEnabled || raster.scissorWidth <= 0 ||
