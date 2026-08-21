@@ -277,23 +277,29 @@ void main()
 
         vec3 n = normalize(payload.normal.xyz);
         vec3 albedo = mat.diffuse.rgb;
-        const float spec = mat.params.x > 0.0 ? 1.0 : 0.0;
 
         vec3 newDir;
-        if (spec > 0.5) {
-            // Perfect specular reflection.
+        // Legacy specular model: shininess (0..1) is the probability of a
+        // mirror bounce; the rest follows the cosine diffuse lobe.  A binary
+        // threshold here turned the default Coin shininess of 0.2 into a
+        // perfect mirror for every material, whose image swept across
+        // surfaces as the camera/object moved and looked like lighting
+        // attached to the camera.
+        float specProb = clamp(mat.params.x, 0.0, 1.0);
+        vec3 up = abs(n.z) < 0.999 ? vec3(0.0, 0.0, 1.0)
+                                   : vec3(1.0, 0.0, 0.0);
+        vec3 tangent = normalize(cross(up, n));
+        vec3 bitangent = cross(n, tangent);
+        if (hash2(px.x, px.y,
+                  frameIndex + uint(bounce) * 431u + 9u).x < specProb) {
             newDir = reflect(rayDir, n);
-            weight *= mix(albedo, mat.specular.rgb, 0.5);
+            weight *= mix(albedo, mat.specular.rgb, 0.5) / max(specProb, 1e-4);
         }
         else {
-            vec3 up = abs(n.z) < 0.999 ? vec3(0.0, 0.0, 1.0)
-                                       : vec3(1.0, 0.0, 0.0);
-            vec3 tangent = normalize(cross(up, n));
-            vec3 bitangent = cross(n, tangent);
             vec3 s = sampleCosine(hash2(px.x, px.y,
                                         frameIndex + uint(bounce) * 919u + 1u));
             newDir = normalize(tangent * s.x + bitangent * s.y + n * s.z);
-            weight *= albedo;
+            weight *= albedo / max(1.0 - specProb, 1e-4);
         }
 
         rayOrigin = payload.posT.xyz + n * 0.001;

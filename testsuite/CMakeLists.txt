@@ -553,6 +553,19 @@ if(HAVE_EGL)
 		)
 		add_test(NAME VulkanRenderManagerTest COMMAND VulkanRenderManagerTest)
 		set_tests_properties(VulkanRenderManagerTest PROPERTIES SKIP_RETURN_CODE 77)
+
+		add_executable(VulkanLightStabilityTest vulkan/vulkan-light-stability-test.cpp)
+		target_link_libraries(VulkanLightStabilityTest Coin ${COIN_TARGET_LINK_LIBRARIES})
+		target_compile_definitions(VulkanLightStabilityTest PRIVATE COIN_INTERNAL)
+		target_include_directories(VulkanLightStabilityTest PRIVATE
+			${PROJECT_SOURCE_DIR}/src
+			${PROJECT_SOURCE_DIR}/include
+			${PROJECT_BINARY_DIR}/include
+			${PROJECT_SOURCE_DIR}/testsuite
+			${COIN_TARGET_INCLUDE_DIRECTORIES}
+		)
+		add_test(NAME VulkanLightStabilityTest COMMAND VulkanLightStabilityTest)
+		set_tests_properties(VulkanLightStabilityTest PROPERTIES SKIP_RETURN_CODE 77)
 	endif()
 
 	add_executable(EGLBindingTest egl-binding-test.cpp)
