@@ -2975,11 +2975,11 @@ SoRTXRenderBackend::render(const SoDrawList & drawlist,
     VkAttachmentDescription attachment {};
     attachment.format = target->colorFormat;
     attachment.samples = target->sampleCount;
-    attachment.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
+    attachment.loadOp = VK_ATTACHMENT_LOAD_OP_LOAD;
     attachment.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
     attachment.stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
     attachment.stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
-    attachment.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+    attachment.initialLayout = target->colorLayout;
     attachment.finalLayout = target->colorLayout;
 
     VkAttachmentReference colorRef {};
@@ -3045,20 +3045,53 @@ SoRTXRenderBackend::render(const SoDrawList & drawlist,
   bool traceOk = false;
 
   if (asOk) {
-    VkClearValue clear {};
-    clear.color.float32[0] = params.clearColor[0];
-    clear.color.float32[1] = params.clearColor[1];
-    clear.color.float32[2] = params.clearColor[2];
-    clear.color.float32[3] = params.clearColor[3];
     VkRenderPassBeginInfo rpbi {};
     rpbi.sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO;
     rpbi.renderPass = renderPass;
     rpbi.framebuffer = framebuffer;
     rpbi.renderArea.offset = {0, 0};
     rpbi.renderArea.extent = target->extent;
-    rpbi.clearValueCount = 1;
-    rpbi.pClearValues = &clear;
+    rpbi.clearValueCount = 0;
+    rpbi.pClearValues = nullptr;
     vkCmdBeginRenderPass(cmd, &rpbi, VK_SUBPASS_CONTENTS_INLINE);
+
+    // The attachment is loaded, not cleared at pass begin: the clear is
+    // issued below scoped to the requested viewport region (matching the
+    // raster backend's recordClear()).  Clearing the whole attachment here
+    // would overwrite content outside a sub-region viewport.
+    if (params.flags & SO_PARAM_CLEAR_WINDOW) {
+      VkClearAttachment clear {};
+      clear.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+      clear.colorAttachment = 0;
+      clear.clearValue.color.float32[0] = params.clearColor[0];
+      clear.clearValue.color.float32[1] = params.clearColor[1];
+      clear.clearValue.color.float32[2] = params.clearColor[2];
+      clear.clearValue.color.float32[3] = params.clearColor[3];
+
+      const SbVec2s & origin = params.viewport.getViewportOriginPixels();
+      const SbVec2s & size = params.viewport.getViewportSizePixels();
+      const int32_t x0 = std::max(0, static_cast<int32_t>(origin[0]));
+      const int32_t y0 = std::max(
+        0, static_cast<int32_t>(target->extent.height) -
+             static_cast<int32_t>(origin[1]) -
+             static_cast<int32_t>(size[1]));
+      const int32_t x1 = std::min(static_cast<int32_t>(target->extent.width),
+                                  static_cast<int32_t>(origin[0]) +
+                                    static_cast<int32_t>(size[0]));
+      const int32_t y1 = std::min(
+        static_cast<int32_t>(target->extent.height),
+        static_cast<int32_t>(target->extent.height) -
+          static_cast<int32_t>(origin[1]));
+      if (x1 > x0 && y1 > y0) {
+        VkClearRect rect {};
+        rect.rect.offset = {x0, y0};
+        rect.rect.extent = {static_cast<uint32_t>(x1 - x0),
+                            static_cast<uint32_t>(y1 - y0)};
+        rect.baseArrayLayer = 0;
+        rect.layerCount = 1;
+        vkCmdClearAttachments(cmd, 1, &clear, 1, &rect);
+      }
+    }
 
     // Phase 2: trace + present (inside the render pass).
     traceOk =
