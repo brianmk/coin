@@ -305,11 +305,29 @@ createImageView(VkDevice device,
 
 SoVulkanRenderBackend::SoVulkanRenderBackend()
 {
+  this->pendingDestroys.resize(this->maxFramesInFlight);
 }
 
 SoVulkanRenderBackend::~SoVulkanRenderBackend()
 {
   if (this->isInitialized()) this->shutdown();
+}
+
+void
+SoVulkanRenderBackend::setMaxFramesInFlight(const uint32_t count)
+{
+  if (count == 0) return;
+  // Growing the ring is safe; shrinking flushes the batches that would
+  // otherwise be orphaned (their resources are then released early, which
+  // is still correct -- it just reduces the safety margin).
+  const size_t oldSize = this->pendingDestroys.size();
+  for (size_t i = count; i < oldSize; ++i) {
+    for (auto & fn : this->pendingDestroys[i]) {
+      if (fn) fn();
+    }
+  }
+  this->maxFramesInFlight = count;
+  this->pendingDestroys.resize(count);
 }
 
 const char *
@@ -461,8 +479,15 @@ SoVulkanRenderBackend::createDescriptorPool()
   ci.maxSets = 1024;
   ci.poolSizeCount = 2;
   ci.pPoolSizes = poolSizes;
-  return vkCreateDescriptorPool(this->device, &ci, this->allocator,
-                                &this->descriptorPool) == VK_SUCCESS;
+
+  VkDescriptorPool pool = VK_NULL_HANDLE;
+  if (vkCreateDescriptorPool(this->device, &ci, this->allocator, &pool) !=
+      VK_SUCCESS) {
+    return false;
+  }
+  this->descriptorPool = pool;
+  this->descriptorPools.push_back(pool);
+  return true;
 }
 
 bool
@@ -514,7 +539,7 @@ SoVulkanRenderBackend::allocateTextureDescriptorSet(VkImageView view,
 bool
 SoVulkanRenderBackend::createLightingUniformBuffer()
 {
-  // Per-command slots in a ring buffer sized for two frames in flight.
+  // Per-command slots in a ring buffer sized for maxFramesInFlight frames.
   // Each draw binds its slot with a dynamic offset, so the GPU reads the
   // uniform block that was recorded for that specific draw instead of a
   // shared buffer that later commands overwrite.
@@ -526,8 +551,8 @@ SoVulkanRenderBackend::createLightingUniformBuffer()
     (sizeof(VulkanVisualUbo) + alignment - 1) / alignment * alignment;
   this->uboSlotsPerFrame = 4096;
   const VkDeviceSize totalBytes =
-    2 * static_cast<VkDeviceSize>(this->uboSlotsPerFrame) *
-    this->uboSlotStride;
+    static_cast<VkDeviceSize>(this->maxFramesInFlight) *
+    static_cast<VkDeviceSize>(this->uboSlotsPerFrame) * this->uboSlotStride;
   if (!this->createBuffer(totalBytes, VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT,
                           this->lightingBuffer, this->lightingMemory,
                           nullptr)) {
@@ -556,7 +581,8 @@ SoVulkanRenderBackend::growLightingUbo(const uint32_t minSlots)
   VkDeviceMemory newMemory = VK_NULL_HANDLE;
   void * newMapped = nullptr;
   const VkDeviceSize totalBytes =
-    2 * static_cast<VkDeviceSize>(slots) * this->uboSlotStride;
+    static_cast<VkDeviceSize>(this->maxFramesInFlight) *
+    static_cast<VkDeviceSize>(slots) * this->uboSlotStride;
   if (!this->createBuffer(totalBytes, VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT,
                           newBuffer, newMemory, nullptr)) {
     this->emitError("growLightingUbo: failed to allocate larger UBO");
@@ -579,7 +605,7 @@ SoVulkanRenderBackend::growLightingUbo(const uint32_t minSlots)
   this->uboSlotsPerFrame = slots;
 
   // The old buffer may still be referenced by a pending frame; destroy it
-  // only after the next frame boundary (flushPendingDestroys()).
+  // only after the batch ring wraps back around (flushPendingDestroys()).
   VkDevice device = this->device;
   const VkAllocationCallbacks * allocator = this->allocator;
   this->deferDestroy([device, allocator, oldBuffer, oldMemory, oldMapped]() {
@@ -587,6 +613,39 @@ SoVulkanRenderBackend::growLightingUbo(const uint32_t minSlots)
     vkDestroyBuffer(device, oldBuffer, allocator);
     vkFreeMemory(device, oldMemory, allocator);
   });
+
+  // Every descriptor set captured the old buffer handle at allocation time
+  // (binding 0 is the lighting UBO).  Rewrite binding 0 across all live
+  // sets so binds after the swap address the new buffer instead of one that
+  // is about to be destroyed.
+  std::vector<VkWriteDescriptorSet> writes;
+  std::vector<VkDescriptorBufferInfo> bufferInfos;
+  const auto collect = [&](const VkDescriptorSet set) {
+    if (set == VK_NULL_HANDLE) return;
+    VkDescriptorBufferInfo info {};
+    info.buffer = this->lightingBuffer;
+    info.offset = 0;
+    info.range = this->uboSlotStride;
+    bufferInfos.push_back(info);
+    VkWriteDescriptorSet write {};
+    write.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+    write.dstSet = set;
+    write.dstBinding = 0;
+    write.dstArrayElement = 0;
+    write.descriptorCount = 1;
+    write.descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC;
+    write.pBufferInfo = &bufferInfos.back();
+    writes.push_back(write);
+  };
+  collect(this->whiteDescriptorSet);
+  for (const VulkanCachedTexture & tex : this->textureCache) {
+    collect(tex.descriptorSet);
+  }
+  if (!writes.empty()) {
+    vkUpdateDescriptorSets(this->device,
+                           static_cast<uint32_t>(writes.size()), writes.data(),
+                           0, nullptr);
+  }
   return true;
 }
 
@@ -596,29 +655,50 @@ SoVulkanRenderBackend::prepareLightingSlots(const uint32_t neededDraws)
   if (neededDraws > this->uboSlotsPerFrame) {
     if (!this->growLightingUbo(neededDraws)) return false;
   }
-  // The slot index is per-frame; advance the ring half before recording so
-  // every render (including overlay-only renders that skip recordFrame())
-  // starts from slot zero of its own half.
-  this->uboFrameIndex++;
+  // The frame index was advanced by beginFrame(); every render starts from
+  // slot zero of its own ring half.
   this->uboCmdIndex = 0;
   return true;
 }
 
 void
+SoVulkanRenderBackend::beginFrame()
+{
+  // One frame boundary: the batch recorded maxFramesInFlight frames ago is
+  // now certainly unused by any submission (the caller may keep at most
+  // maxFramesInFlight frames in flight).
+  this->uboFrameIndex++;
+  this->flushPendingDestroys();
+}
+
+void
 SoVulkanRenderBackend::flushPendingDestroys()
 {
-  const int batch = this->pendingDestroyIndex;
-  this->pendingDestroyIndex = batch ^ 1;
-  for (const auto & fn : this->pendingDestroys[batch]) {
+  if (this->pendingDestroys.empty()) return;
+  auto & batch =
+    this->pendingDestroys[this->uboFrameIndex % this->pendingDestroys.size()];
+  for (const auto & fn : batch) {
     if (fn) fn();
   }
-  this->pendingDestroys[batch].clear();
+  batch.clear();
+}
+
+void
+SoVulkanRenderBackend::flushAllPendingDestroys()
+{
+  for (auto & batch : this->pendingDestroys) {
+    for (const auto & fn : batch) {
+      if (fn) fn();
+    }
+    batch.clear();
+  }
 }
 
 void
 SoVulkanRenderBackend::deferDestroy(std::function<void()> && fn)
 {
-  this->pendingDestroys[this->pendingDestroyIndex].push_back(std::move(fn));
+  this->pendingDestroys[this->uboFrameIndex % this->pendingDestroys.size()]
+    .push_back(std::move(fn));
 }
 
 void
@@ -657,21 +737,18 @@ SoVulkanRenderBackend::deferDestroyCacheEntry(VulkanCachedCommand & entry)
 void
 SoVulkanRenderBackend::deferDestroyTextureEntry(VulkanCachedTexture & entry)
 {
-  // The pool slot is reclaimed logically now (descriptorSetCount drives the
-  // fixed-size pool accounting) but the set itself is only returned to the
-  // pool after the next frame boundary: a pending frame may still reference
-  // it, and vkFreeDescriptorSets on an in-use set is a spec violation.
-  // When the pool is reset wholesale in the meantime (descriptorPoolEpoch
-  // changes), the deferred free is skipped -- the reset already reclaimed
-  // every set in the pool.
+  // The set is only returned to its pool after the batch ring wraps back
+  // around: a pending frame may still reference it, and vkFreeDescriptorSets
+  // on an in-use set is a spec violation.  Pools are append-only (never
+  // reset), so the pool handle captured here stays valid until shutdown.
   if (entry.descriptorSet != VK_NULL_HANDLE) {
     VkDevice device = this->device;
-    VkDescriptorPool pool = this->descriptorPool;
+    const VkDescriptorPool pool = entry.descriptorPool;
     const VkDescriptorSet set = entry.descriptorSet;
-    const uint32_t epoch = this->descriptorPoolEpoch;
-    this->deferDestroy([device, pool, set, epoch, this]() {
-      if (epoch != this->descriptorPoolEpoch) return;
-      vkFreeDescriptorSets(device, pool, 1, &set);
+    this->deferDestroy([device, pool, set]() {
+      if (pool != VK_NULL_HANDLE) {
+        vkFreeDescriptorSets(device, pool, 1, &set);
+      }
     });
     if (this->descriptorSetCount > 0) --this->descriptorSetCount;
   }
@@ -843,9 +920,10 @@ SoVulkanRenderBackend::createWhiteTexture()
   if (!this->createSampler(fallback, this->whiteSampler)) {
     return false;
   }
-  return this->allocateTextureDescriptorSet(this->whiteImageView,
-                                            this->whiteSampler,
-                                            this->whiteDescriptorSet);
+  const bool allocated = this->allocateTextureDescriptorSet(
+    this->whiteImageView, this->whiteSampler, this->whiteDescriptorSet);
+  this->whiteDescriptorPool = this->descriptorPool;
+  return allocated;
 }
 
 bool
@@ -1689,20 +1767,18 @@ SoVulkanRenderBackend::invalidateCache()
 void
 SoVulkanRenderBackend::updateGeometryCache(const SoDrawList & drawlist)
 {
-  // One frame boundary has passed since the previous flush, so resources
-  // replaced two frames ago can be destroyed safely now.
-  this->flushPendingDestroys();
+  // The frame boundary was handled by beginFrame() at the entry point.
 
   const uint32_t generation = drawlist.getGeneration();
 
   // Make sure the descriptor pool can hold one set per distinct texture in
-  // this frame before any allocation happens.  This runs before
-  // beginCommandBuffer() on both render paths, so a wholesale pool reset
-  // cannot invalidate sets referenced by already-recorded draws.
+  // this frame before any allocation happens.  Pool growth never
+  // invalidates existing sets, so this is safe regardless of recording
+  // state.
   if (!this->ensureDescriptorPoolSpace()) {
-    this->emitError("updateGeometryCache: descriptor pool exhausted");
-    this->invalidateCache();
-    return;
+    this->emitError("updateGeometryCache: failed to grow descriptor pool");
+    // Continue with the current pool: allocateTextureDescriptorSet()
+    // failures fall back to the white texture per command.
   }
 
   for (int i = 0; i < drawlist.getNumCommands(); ++i) {
@@ -1753,16 +1829,19 @@ SoVulkanRenderBackend::updateGeometryCache(const SoDrawList & drawlist)
         texEntry.model == texture.model;
       if (!textureMatches) {
         this->deferDestroyTextureEntry(texEntry);
-        this->uploadTexture(texEntry, texture);
-        texEntry.pixelsKey = texture.pixels;
-        texEntry.width = texture.width;
-        texEntry.height = texture.height;
-        texEntry.numComponents = texture.numComponents;
-        texEntry.minFilter = texture.minFilter;
-        texEntry.magFilter = texture.magFilter;
-        texEntry.wrapS = texture.wrapS;
-        texEntry.wrapT = texture.wrapT;
-        texEntry.model = texture.model;
+        if (this->uploadTexture(texEntry, texture)) {
+          texEntry.pixelsKey = texture.pixels;
+          texEntry.width = texture.width;
+          texEntry.height = texture.height;
+          texEntry.numComponents = texture.numComponents;
+          texEntry.minFilter = texture.minFilter;
+          texEntry.magFilter = texture.magFilter;
+          texEntry.wrapS = texture.wrapS;
+          texEntry.wrapT = texture.wrapT;
+          texEntry.model = texture.model;
+        }
+        // On failure the entry was reset by uploadTexture(); leaving the
+        // content keys unstamped makes the next frame retry the upload.
       }
       texEntry.commandKey = &command;
       texEntry.cacheGeneration = generation;
@@ -1816,8 +1895,10 @@ void
 SoVulkanRenderBackend::destroyTextureEntry(VulkanCachedTexture & entry)
 {
   if (entry.descriptorSet != VK_NULL_HANDLE) {
-    vkFreeDescriptorSets(this->device, this->descriptorPool, 1,
-                         &entry.descriptorSet);
+    if (entry.descriptorPool != VK_NULL_HANDLE) {
+      vkFreeDescriptorSets(this->device, entry.descriptorPool, 1,
+                           &entry.descriptorSet);
+    }
     if (this->descriptorSetCount > 0) --this->descriptorSetCount;
     entry.descriptorSet = VK_NULL_HANDLE;
   }
@@ -1991,6 +2072,10 @@ SoVulkanRenderBackend::uploadTexture(VulkanCachedTexture & entry,
     this->emitError("uploadTexture: failed to allocate upload buffer");
     vkDestroyBuffer(this->device, staging, this->allocator);
     vkFreeMemory(this->device, stagingMemory, this->allocator);
+    // The image and its memory were created above; releasing them keeps the
+    // entry consistent so the caller's retry (or eviction) path starts
+    // clean instead of treating a half-initialized entry as valid.
+    this->destroyTextureEntry(entry);
     return false;
   }
 
@@ -2068,60 +2153,26 @@ SoVulkanRenderBackend::uploadTexture(VulkanCachedTexture & entry,
     this->destroyTextureEntry(entry);
     return false;
   }
+  entry.descriptorPool = this->descriptorPool;
   return true;
 }
 
 bool
 SoVulkanRenderBackend::ensureDescriptorPoolSpace()
 {
-  // The pool is sized for 1024 sets.  Textures accumulate per unique command
-  // until the cache is invalidated (scene change, backend re-init), so the
-  // pool can be exhausted by long-lived scenes with many distinct textures.
-  // Vulkan requires freeing every set before resetting a pool, so instead
-  // invalidate the pool wholesale: reset it and re-allocate the white set
-  // plus every cached texture's set (they are only referenced by descriptors
-  // written into those sets; the images/views/samplers are unaffected).
-  //
-  // The reset is only valid while no recorded command buffer references the
-  // sets.  updateGeometryCache() runs before beginCommandBuffer() on both
-  // the render() and renderExternal() paths, so the guard below can never
-  // fire today, but it keeps this helper safe if a future caller records
-  // draws first (resetting the pool would otherwise invalidate sets that
-  // already-recorded draws still reference, which is undefined behavior).
-  if (this->activeCommandBuffer != VK_NULL_HANDLE) {
-    return true;
-  }
+  // Each pool is sized for 1024 sets.  Textures accumulate per unique
+  // command until the cache is invalidated (scene change, backend re-init),
+  // so long-lived scenes with many distinct textures can exhaust the active
+  // pool.  Resetting a pool wholesale would invalidate every set allocated
+  // from it -- including sets referenced by frames the caller still has in
+  // flight -- so instead a fresh pool is appended and becomes current.
+  // Sets live in whatever pool allocated them and are freed back to that
+  // pool (or destroyed with it at shutdown); never reset.
   if (this->descriptorSetCount < 1000) {
     return true;
   }
-
-  vkResetDescriptorPool(this->device, this->descriptorPool, 0);
   this->descriptorSetCount = 0;
-  this->whiteDescriptorSet = VK_NULL_HANDLE;
-  // Any pending deferred descriptor-set frees now reference reclaimed pool
-  // slots; bump the epoch so they skip the free.
-  ++this->descriptorPoolEpoch;
-
-  if (!this->allocateTextureDescriptorSet(this->whiteImageView,
-                                          this->whiteSampler,
-                                          this->whiteDescriptorSet)) {
-    this->emitError(
-      "ensureDescriptorPoolSpace: failed to re-allocate white descriptor set");
-    return false;
-  }
-  for (VulkanCachedTexture & entry : this->textureCache) {
-    if (entry.descriptorSet == VK_NULL_HANDLE) continue;
-    entry.descriptorSet = VK_NULL_HANDLE;
-    if (!this->allocateTextureDescriptorSet(entry.view, entry.sampler,
-                                            entry.descriptorSet)) {
-      // The entry keeps its image/view/sampler; a null descriptor set makes
-      // resolveTextureSet() fall back to the white texture for this command.
-      this->emitError(
-        "ensureDescriptorPoolSpace: failed to re-allocate texture descriptor "
-        "set; falling back to the white texture for this command");
-    }
-  }
-  return true;
+  return this->createDescriptorPool();
 }
 
 VkDescriptorSet
@@ -2592,18 +2643,31 @@ SoVulkanRenderBackend::recordDrawCommand(const SoDrawList & drawlist,
   this->applyScissor(command, target);
 
   const uint32_t slotIndex = this->uboCmdIndex++;
-  assert(slotIndex < this->uboSlotsPerFrame &&
-         "lighting UBO slot overflow: buffer too small for draw list");
-  const uint32_t uboOffset =
-    ((this->uboFrameIndex & 1u) * this->uboSlotsPerFrame + slotIndex) *
+  // prepareLightingSlots() reserves a worst-case slot count before any
+  // recording, so this can only trip if a future recording path forgets to
+  // pre-count.  Guard at runtime regardless: the mapped UBO write below
+  // would otherwise run past the allocation.
+  if (slotIndex >= this->uboSlotsPerFrame) {
+    static bool reported = false;
+    if (!reported) {
+      reported = true;
+      this->emitError(
+        "lighting UBO slot overflow: buffer too small for draw list");
+    }
+    return;
+  }
+  const VkDeviceSize uboOffset =
+    ((this->uboFrameIndex % this->maxFramesInFlight) *
+       this->uboSlotsPerFrame + slotIndex) *
     this->uboSlotStride;
+  const uint32_t uboDynamicOffset = static_cast<uint32_t>(uboOffset);
 
   VkDescriptorSet textureSet = this->resolveTextureSet(command);
   if (textureSet != VK_NULL_HANDLE) {
     vkCmdBindDescriptorSets(this->activeCommandBuffer,
                             VK_PIPELINE_BIND_POINT_GRAPHICS,
                             this->pipelineLayout, 0, 1, &textureSet, 1,
-                            &uboOffset);
+                            &uboDynamicOffset);
   }
 
   VkDeviceSize offset = 0;
@@ -2754,10 +2818,8 @@ SoVulkanRenderBackend::shutdown()
 
   vkQueueWaitIdle(this->queue);
 
-  // Drain both deferred-destruction batches: the queue is idle, so every
-  // replaced resource is safe to release now.
-  this->flushPendingDestroys();
-  this->flushPendingDestroys();
+  // The queue is idle, so every deferred resource is safe to release now.
+  this->flushAllPendingDestroys();
 
   this->invalidateCache();
 
@@ -2832,10 +2894,14 @@ SoVulkanRenderBackend::shutdown()
     this->whiteImageMemory = VK_NULL_HANDLE;
   }
   this->whiteDescriptorSet = VK_NULL_HANDLE;
-  if (this->descriptorPool != VK_NULL_HANDLE) {
-    vkDestroyDescriptorPool(this->device, this->descriptorPool, this->allocator);
-    this->descriptorPool = VK_NULL_HANDLE;
+  for (VkDescriptorPool pool : this->descriptorPools) {
+    if (pool != VK_NULL_HANDLE) {
+      vkDestroyDescriptorPool(this->device, pool, this->allocator);
+    }
   }
+  this->descriptorPools.clear();
+  this->descriptorPool = VK_NULL_HANDLE;
+  this->descriptorSetCount = 0;
   if (this->descriptorSetLayout != VK_NULL_HANDLE) {
     vkDestroyDescriptorSetLayout(this->device, this->descriptorSetLayout,
                                  this->allocator);
@@ -2899,6 +2965,10 @@ SoVulkanRenderBackend::renderInternal(const SoDrawList & drawlist,
     if (!hasOverlay) return TRUE;
   }
 
+  // One frame boundary: advances the ring cursor and releases resources
+  // deferred maxFramesInFlight frames ago.
+  this->beginFrame();
+
   // (Re)create the render pass when the destination changes identity.
   const bool targetChanged =
     this->renderPass == VK_NULL_HANDLE ||
@@ -2944,9 +3014,8 @@ SoVulkanRenderBackend::renderInternal(const SoDrawList & drawlist,
 
   this->updateGeometryCache(drawlist);
 
-  // Overlay-only renders skip recordFrame(), so reset the ring cursor here;
-  // without it the slot index would keep climbing across frames and
-  // eventually overflow the lighting UBO.
+  // Overlay-only renders skip recordFrame(), so reserve the ring slots here;
+  // beginFrame() above already advanced the frame cursor.
   if (overlaysOnly &&
       !this->prepareLightingSlots(countOverlayCommands(drawlist))) {
     this->emitError("failed to reserve lighting UBO slots");
@@ -2977,7 +3046,11 @@ SoVulkanRenderBackend::renderInternal(const SoDrawList & drawlist,
   if (vkCreateFramebuffer(this->device, &fci, this->allocator, &framebuffer) !=
       VK_SUCCESS) {
     this->emitError("failed to create Vulkan framebuffer");
+    // The one-shot command buffer was begun above and never submitted; an
+    // implicit reset only happens on submission, so reset it explicitly or
+    // every later beginCommandBuffer() will fail.
     vkEndCommandBuffer(this->commandBuffer);
+    vkResetCommandBuffer(this->commandBuffer, 0);
     return FALSE;
   }
 
@@ -2993,20 +3066,28 @@ SoVulkanRenderBackend::renderInternal(const SoDrawList & drawlist,
   vkCmdBeginRenderPass(this->commandBuffer, &rpbi, VK_SUBPASS_CONTENTS_INLINE);
 
   this->activeCommandBuffer = this->commandBuffer;
+  bool recorded = true;
   if (overlaysOnly) {
     this->recordOverlayBlock(drawlist, params, *target, this->renderPass);
   }
   else {
-    this->recordFrame(drawlist, params, *target, this->renderPass);
+    recorded = this->recordFrame(drawlist, params, *target, this->renderPass);
   }
   this->activeCommandBuffer = VK_NULL_HANDLE;
 
   vkCmdEndRenderPass(this->commandBuffer);
 
+  // Submit even when recordFrame() failed: an unsubmitted one-shot command
+  // buffer cannot be reused, and a partial frame is preferable to a dead
+  // backend.
   const bool submitted = this->endAndSubmit();
   vkDestroyFramebuffer(this->device, framebuffer, this->allocator);
   if (!submitted) {
     this->emitError("failed to submit Vulkan command buffer");
+    return FALSE;
+  }
+  if (!recorded) {
+    this->emitError("recordFrame failed; submitted a partial frame");
     return FALSE;
   }
   return TRUE;
@@ -3059,6 +3140,7 @@ SoVulkanRenderBackend::renderExternal(const SoDrawList & drawlist,
     return FALSE;
   }
 
+  this->beginFrame();
   this->updateGeometryCache(drawlist);
 
   this->activeCommandBuffer = commandBuffer;
@@ -3100,6 +3182,7 @@ SoVulkanRenderBackend::renderExternalOverlay(const SoDrawList & drawlist,
     return FALSE;
   }
 
+  this->beginFrame();
   this->updateGeometryCache(drawlist);
 
   // This path never goes through recordFrame(), so reserve the slots it will

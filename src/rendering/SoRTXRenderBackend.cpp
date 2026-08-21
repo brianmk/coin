@@ -715,6 +715,8 @@ SoRTXRenderBackend::createStorageImage(uint32_t width, uint32_t height)
   ci.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
   if (vkCreateImage(this->device, &ci, this->allocator,
                     &this->storageImage) != VK_SUCCESS) {
+    this->storageWidth = 0;
+    this->storageHeight = 0;
     return false;
   }
 
@@ -755,6 +757,20 @@ SoRTXRenderBackend::createStorageImage(uint32_t width, uint32_t height)
     return false;
   }
 
+  // The image/view/sampler identity changed.  The previous sampler (if any)
+  // may still be referenced by an in-flight present pass; release it at the
+  // next frame boundary instead of leaking it.  The image/view/memory were
+  // deferred-destroyed above.
+  if (this->presentSampler != VK_NULL_HANDLE) {
+    VkDevice device = this->device;
+    const VkAllocationCallbacks * allocator = this->allocator;
+    const VkSampler oldSampler = this->presentSampler;
+    this->presentSampler = VK_NULL_HANDLE;
+    this->deferDestroy([device, allocator, oldSampler]() {
+      vkDestroySampler(device, oldSampler, allocator);
+    });
+  }
+
   VkSamplerCreateInfo sci {};
   sci.sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO;
   sci.magFilter = VK_FILTER_NEAREST;
@@ -766,6 +782,17 @@ SoRTXRenderBackend::createStorageImage(uint32_t width, uint32_t height)
   sci.maxLod = 0.0f;
   if (vkCreateSampler(this->device, &sci, this->allocator,
                       &this->presentSampler) != VK_SUCCESS) {
+    // Unwind the image/view/memory created above so a later call retries
+    // from scratch instead of early-outing on the cached dimensions with a
+    // null sampler.
+    vkDestroyImageView(this->device, this->storageImageView, this->allocator);
+    vkDestroyImage(this->device, this->storageImage, this->allocator);
+    vkFreeMemory(this->device, this->storageImageMemory, this->allocator);
+    this->storageImageView = VK_NULL_HANDLE;
+    this->storageImage = VK_NULL_HANDLE;
+    this->storageImageMemory = VK_NULL_HANDLE;
+    this->storageWidth = 0;
+    this->storageHeight = 0;
     return false;
   }
   // The image/view/sampler identity changed: mark the layout transition
@@ -781,13 +808,29 @@ SoRTXRenderBackend::ensureNormalPoolCapacity(VkDeviceSize bytes)
       this->normalPoolCapacity >= bytes) {
     return true;
   }
-  // Grow-only pool: double until the requested size fits.  The old buffer
+  // Grow-only pool: double until the requested size fits.  The new buffer
+  // is created (and mapped) before the old one is released, so a failed
+  // allocation leaves the previous pool intact and usable.  The old buffer
   // is only referenced by acceleration-structure-phase submissions, which
-  // complete before the next pool resize can run, so releasing it here is
-  // safe.
+  // complete before the next pool resize can run (per-frame queue drain),
+  // so releasing it here is safe.
   VkDeviceSize newCapacity = std::max<VkDeviceSize>(64 * 1024, bytes);
   while (newCapacity < this->normalPoolCapacity + bytes) {
     newCapacity *= 2;
+  }
+  VkBuffer newBuffer = VK_NULL_HANDLE;
+  VkDeviceMemory newMemory = VK_NULL_HANDLE;
+  void * newMapped = nullptr;
+  if (!this->createHostVisibleBuffer(
+        newCapacity, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
+        newBuffer, newMemory)) {
+    return false;
+  }
+  if (vkMapMemory(this->device, newMemory, 0, newCapacity, 0,
+                  &newMapped) != VK_SUCCESS) {
+    vkDestroyBuffer(this->device, newBuffer, this->allocator);
+    vkFreeMemory(this->device, newMemory, this->allocator);
+    return false;
   }
   if (this->normalPoolBuffer != VK_NULL_HANDLE) {
     vkDestroyBuffer(this->device, this->normalPoolBuffer, this->allocator);
@@ -797,16 +840,9 @@ SoRTXRenderBackend::ensureNormalPoolCapacity(VkDeviceSize bytes)
     this->normalPoolMapped = nullptr;
   }
   this->normalPoolCapacity = newCapacity;
-  if (!this->createHostVisibleBuffer(
-        newCapacity, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
-        this->normalPoolBuffer, this->normalPoolMemory)) {
-    return false;
-  }
-  if (vkMapMemory(this->device, this->normalPoolMemory, 0, newCapacity, 0,
-                  &this->normalPoolMapped) != VK_SUCCESS) {
-    this->normalPoolMapped = nullptr;
-    return false;
-  }
+  this->normalPoolBuffer = newBuffer;
+  this->normalPoolMemory = newMemory;
+  this->normalPoolMapped = newMapped;
   this->normalPoolUsed = 0;
   // The pool identity changed: refresh the descriptor sets.
   return this->updateDescriptors();
@@ -922,14 +958,34 @@ SoRTXRenderBackend::createPathTracingBuffers(uint32_t width, uint32_t height)
   const VkBufferUsageFlags usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT;
   if (!this->createDeviceLocalBuffer(bytes, accumUsage, this->accumBuffer,
                                      this->accumMemory)) {
+    this->ptBufferWidth = 0;
+    this->ptBufferHeight = 0;
     return false;
   }
   if (!this->createDeviceLocalBuffer(bytes, usage, this->normalBuffer,
                                      this->normalMemory)) {
+    // Unwind the partial success so a retry starts clean (and the handles
+    // do not survive a subsequent early-out with inconsistent widths).
+    vkDestroyBuffer(this->device, this->accumBuffer, this->allocator);
+    vkFreeMemory(this->device, this->accumMemory, this->allocator);
+    this->accumBuffer = VK_NULL_HANDLE;
+    this->accumMemory = VK_NULL_HANDLE;
+    this->ptBufferWidth = 0;
+    this->ptBufferHeight = 0;
     return false;
   }
   if (!this->createDeviceLocalBuffer(bytes, usage, this->positionBuffer,
                                      this->positionMemory)) {
+    vkDestroyBuffer(this->device, this->normalBuffer, this->allocator);
+    vkFreeMemory(this->device, this->normalMemory, this->allocator);
+    vkDestroyBuffer(this->device, this->accumBuffer, this->allocator);
+    vkFreeMemory(this->device, this->accumMemory, this->allocator);
+    this->normalBuffer = VK_NULL_HANDLE;
+    this->normalMemory = VK_NULL_HANDLE;
+    this->accumBuffer = VK_NULL_HANDLE;
+    this->accumMemory = VK_NULL_HANDLE;
+    this->ptBufferWidth = 0;
+    this->ptBufferHeight = 0;
     return false;
   }
   // Fresh buffers: refresh the descriptor sets so the new handles are
@@ -3015,8 +3071,12 @@ SoRTXRenderBackend::render(const SoDrawList & drawlist,
   }
   const bool submitted = submitResult == VK_SUCCESS && waitResult == VK_SUCCESS;
 
-  // Safe now: the submission above completed.
-  this->freePendingStagingDestroys();
+  // Staging buffers are only referenced by the private submission; release
+  // them after it provably completed (or never ran).  The command buffer
+  // and pool are released in either case.
+  if (submitted) {
+    this->freePendingStagingDestroys();
+  }
 
   vkFreeCommandBuffers(this->device, pool, 1, &cmd);
   vkDestroyCommandPool(this->device, pool, this->allocator);
@@ -3085,8 +3145,12 @@ SoRTXRenderBackend::renderExternal(const SoDrawList & drawlist,
     submitted = vkQueueSubmit(this->queue, 1, &si, VK_NULL_HANDLE) ==
       VK_SUCCESS && vkQueueWaitIdle(this->queue) == VK_SUCCESS;
   }
-  // Safe now: the submission above completed.
-  this->freePendingStagingDestroys();
+  // Staging buffers are only referenced by the private submission; release
+  // them after it provably completed (or never ran).  The command buffer
+  // and pool are released in either case.
+  if (submitted) {
+    this->freePendingStagingDestroys();
+  }
   vkFreeCommandBuffers(this->device, pool, 1, &cmd);
   vkDestroyCommandPool(this->device, pool, this->allocator);
 

@@ -122,6 +122,16 @@ public:
   SbBool initialize(SoVulkanDeviceContext * context);
 
   /*!
+    \brief Declare how many recorded frames the caller may keep in flight.
+
+    Forwards to the raster backend (see SoVulkanRenderBackend::
+    setMaxFramesInFlight()); drives deferred-resource destruction and the
+    lighting UBO ring size.  Call once after initialize() and before the
+    first render when the caller submits frames concurrently.
+  */
+  void setMaxFramesInFlight(uint32_t count);
+
+  /*!
     \brief Shut down the owned backend while the Vulkan device/queue are
     still valid.
 

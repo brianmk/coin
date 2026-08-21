@@ -119,8 +119,15 @@ void main()
     const uint normalIndex = uint(mat.triangleData.x) + prim;
     const vec3 objN = normalPoolBuffer.triangleNormals[normalIndex].xyz;
     if (dot(objN, objN) < 1e-12) {
-        // Degenerate triangle: treat the ray as unhit.
-        payload.info.y = 0u;
+        // Degenerate triangle: treat the ray as unhit.  The miss shader did
+        // not run, so every payload field the raygen may read afterwards
+        // must be written here or the previous trace's stale data leaks
+        // into this one (garbage pixels).
+        payload.color = vec4(0.0);
+        payload.normal = vec4(0.0);
+        payload.posT = vec4(0.0);
+        payload.info = uvec4(materialIndex, 0u, 0u, payload.info.w);
+        payload.occluded = 0u;
         return;
     }
 

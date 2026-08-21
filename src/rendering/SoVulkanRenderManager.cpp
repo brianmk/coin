@@ -331,6 +331,12 @@ SoVulkanRenderManager::setRayTracing(SbBool enabled)
   }
 }
 
+void
+SoVulkanRenderManager::setMaxFramesInFlight(uint32_t count)
+{
+  this->pimpl->backend.setMaxFramesInFlight(count);
+}
+
 SbBool
 SoVulkanRenderManager::getRayTracingActive(void) const
 {

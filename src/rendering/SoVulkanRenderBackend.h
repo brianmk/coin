@@ -53,6 +53,9 @@ struct VulkanCachedTexture {
   VkImageView view = VK_NULL_HANDLE;
   VkSampler sampler = VK_NULL_HANDLE;
   VkDescriptorSet descriptorSet = VK_NULL_HANDLE;
+  // Pool the descriptor set was allocated from (pools are append-only, so
+  // the set must be returned to this pool, not the currently active one).
+  VkDescriptorPool descriptorPool = VK_NULL_HANDLE;
 
   // Command that last touched this entry (per-frame arena pointer; used
   // only as an identity key for map rebuilds after cache eviction).
@@ -122,6 +125,19 @@ public:
   */
   SbBool renderOverlaysOnly(const SoDrawList & drawlist,
                             const SoRenderParams & params);
+
+  /*!
+    \brief Declare how many recorded frames the caller may keep in flight.
+
+    Drives the deferred-destruction batch count and the lighting UBO ring
+    size: resources replaced while recording frame N are only released when
+    frame N + \a count begins, by which time every submission that could
+    still reference them has completed.  Callers that submit frames
+    concurrently must set this to their maximum in-flight frame count before
+    the first render call.  Defaults to 3 (QVulkanWindow's default
+    concurrency).
+  */
+  void setMaxFramesInFlight(uint32_t count);
 
 private:
   // --- Initialization helpers -------------------------------------------
@@ -219,7 +235,9 @@ private:
                     const void * data);
   bool growLightingUbo(uint32_t minSlots);
   bool prepareLightingSlots(uint32_t neededDraws);
+  void beginFrame();
   void flushPendingDestroys();
+  void flushAllPendingDestroys();
   void deferDestroy(std::function<void()> && fn);
   void deferDestroyCacheEntry(VulkanCachedCommand & entry);
   void deferDestroyTextureEntry(VulkanCachedTexture & entry);
@@ -241,24 +259,25 @@ private:
   VkCommandBuffer activeCommandBuffer = VK_NULL_HANDLE;
 
   VkDescriptorSetLayout descriptorSetLayout = VK_NULL_HANDLE;
+  // Descriptor pools.  Sets are never reset wholesale while frames may be
+  // in flight: when the active pool nears its capacity a fresh pool is
+  // appended and becomes current, leaving every live set valid.  All pools
+  // (and with them all outstanding sets) are destroyed at shutdown.
+  std::vector<VkDescriptorPool> descriptorPools;
   VkDescriptorPool descriptorPool = VK_NULL_HANDLE;
-  // Live descriptor sets allocated from descriptorPool (white fallback set
-  // plus one per cached texture).  The pool is fixed-size, so it is reset
-  // and sets are re-allocated when this nears the pool capacity.
+  // Sets allocated from the currently active descriptorPool (white fallback
+  // set plus one per cached texture).
   uint32_t descriptorSetCount = 0;
-  // Bumped on every wholesale pool reset; deferred descriptor-set frees
-  // captured before the reset are skipped afterwards (their slots were
-  // already reclaimed by the reset).
-  uint32_t descriptorPoolEpoch = 0;
   VkPipelineLayout pipelineLayout = VK_NULL_HANDLE;
 
   // Per-draw lighting/material uniform buffer (set 0, binding 0, dynamic
-  // offset).  One large ring buffer holds two frames' worth of per-command
-  // slots; every draw binds its own slot through the descriptor's dynamic
-  // offset.  The GPU executes asynchronously, so a single shared buffer
-  // rewritten per command would make every draw read the last command's
-  // matrices; distinct slots per command and alternating halves per frame
-  // keep each draw's uniform data stable until its frame completes.
+  // offset).  One large ring buffer holds maxFramesInFlight frames' worth of
+  // per-command slots; every draw binds its own slot through the descriptor's
+  // dynamic offset.  The GPU executes asynchronously, so a single shared
+  // buffer rewritten per command would make every draw read the last
+  // command's matrices; distinct slots per command and a ring half per
+  // in-flight frame keep each draw's uniform data stable until its frame
+  // completes.
   VkBuffer lightingBuffer = VK_NULL_HANDLE;
   VkDeviceMemory lightingMemory = VK_NULL_HANDLE;
   void * lightingMapped = nullptr;
@@ -267,11 +286,13 @@ private:
   uint32_t uboFrameIndex = 0;
   uint32_t uboCmdIndex = 0;
 
-  // Resources replaced during recording are destroyed two frames later,
-  // after the submissions that still reference them have certainly
-  // completed (the caller may keep up to two frames in flight).
-  std::vector<std::function<void()>> pendingDestroys[2];
-  int pendingDestroyIndex = 0;
+  // Resources replaced during recording are destroyed maxFramesInFlight
+  // frames later, after the submissions that still reference them have
+  // certainly completed.  Batch B holds the destroys deferred during the
+  // frame recording of batch B's frame; it is flushed at the start of the
+  // frame with the same ring index, N frames later.
+  uint32_t maxFramesInFlight = 3;
+  std::vector<std::vector<std::function<void()>>> pendingDestroys;
 
   // Texture binding (set 0, binding 1).  A 1x1 white fallback texture is
   // bound whenever a command carries no embedded SoTextureData.
@@ -280,6 +301,7 @@ private:
   VkImageView whiteImageView = VK_NULL_HANDLE;
   VkSampler whiteSampler = VK_NULL_HANDLE;
   VkDescriptorSet whiteDescriptorSet = VK_NULL_HANDLE;
+  VkDescriptorPool whiteDescriptorPool = VK_NULL_HANDLE;
 
   VkShaderModule vertexModule = VK_NULL_HANDLE;
   VkShaderModule fragmentModule = VK_NULL_HANDLE;
@@ -451,8 +473,6 @@ private:
   std::unordered_map<const SoRenderCommand *, size_t> commandToCache;
   std::vector<VulkanCachedTexture> textureCache;
   std::unordered_map<const SoRenderCommand *, size_t> commandToTexture;
-
-  uint32_t currentFrame = 0;
 };
 
 #endif // COIN_SOVULKANRENDERBACKEND_H
