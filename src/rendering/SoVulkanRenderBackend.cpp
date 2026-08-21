@@ -1326,8 +1326,8 @@ SoVulkanRenderBackend::recordBackground(const SoRenderParams & params,
   push.bottomColor[3] = params.backgroundBottomColor[3];
   push.viewport[0] = static_cast<float>(w);
   push.viewport[1] = static_cast<float>(h);
-  push.viewport[2] = 0.0f;
-  push.viewport[3] = 0.0f;
+  push.viewport[2] = static_cast<float>(x0);
+  push.viewport[3] = static_cast<float>(y0);
   vkCmdPushConstants(this->activeCommandBuffer, this->backgroundPipelineLayout,
                      VK_SHADER_STAGE_VERTEX_BIT |
                        VK_SHADER_STAGE_FRAGMENT_BIT,
