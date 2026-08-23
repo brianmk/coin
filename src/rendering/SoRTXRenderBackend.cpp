@@ -53,8 +53,10 @@ struct alignas(16) RTXFrameBlock {
   float adaptive[4]; // x = minSamples, y = relErrorThreshold (0 = off)
   float prevViewProj[16]; // world -> clip of the previous frame's camera
   float temporal[4];      // x = reproject this frame
+  float nee[4];           // x = emissive-triangle count, y = NEE enabled,
+                          // z = MIS balance enabled
 };
-static_assert(sizeof(RTXFrameBlock) == 4 * 64 + 7 * 16,
+static_assert(sizeof(RTXFrameBlock) == 4 * 64 + 8 * 16,
               "RTXFrameBlock must match FrameBlock std140 layout");
 
 // Push constant block of the raygen shader (RaygenPush in Raygen.glsl).
@@ -550,7 +552,7 @@ SoRTXRenderBackend::createDescriptorSetLayout()
   // rays and writes the image/accum/G-buffers, the miss shader samples the
   // frame UBO, and the closest-hit shader reads materials, the frame UBO
   // and the triangle-normal pool.
-  VkDescriptorSetLayoutBinding bindings[13] {};
+  VkDescriptorSetLayoutBinding bindings[14] {};
   bindings[0].binding = 0;
   bindings[0].descriptorType = VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR;
   bindings[0].descriptorCount = 1;
@@ -610,9 +612,15 @@ SoRTXRenderBackend::createDescriptorSetLayout()
     bindings[b].stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
   }
 
+  // Emissive-triangle pool for NEE (compute-tracer only).
+  bindings[13].binding = 13;
+  bindings[13].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+  bindings[13].descriptorCount = 1;
+  bindings[13].stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+
   VkDescriptorSetLayoutCreateInfo ci {};
   ci.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
-  ci.bindingCount = 13;
+  ci.bindingCount = 14;
   ci.pBindings = bindings;
   if (vkCreateDescriptorSetLayout(this->device, &ci, this->allocator,
                                   &this->rtSetLayout) != VK_SUCCESS) {
@@ -655,7 +663,7 @@ SoRTXRenderBackend::createDescriptorPool()
   sizes[3].type = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
   sizes[3].descriptorCount = 2;
   sizes[4].type = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
-  sizes[4].descriptorCount = 36;
+  sizes[4].descriptorCount = 40;
 
   VkDescriptorPoolCreateInfo ci {};
   ci.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
@@ -1097,6 +1105,142 @@ SoRTXRenderBackend::appendTriangleNormals(const SoRenderCommand & command,
 }
 
 bool
+SoRTXRenderBackend::ensureNeePoolCapacity(VkDeviceSize bytes)
+{
+  if (this->neePoolBuffer != VK_NULL_HANDLE &&
+      this->neePoolCapacity >= bytes) {
+    return true;
+  }
+  // Grow-only pool (see ensureNormalPoolCapacity for the lifetime
+  // argument; the pool is only read by per-frame drained submissions).
+  VkDeviceSize newCapacity = std::max<VkDeviceSize>(64 * 1024, bytes);
+  while (newCapacity < this->neePoolCapacity + bytes) {
+    newCapacity *= 2;
+  }
+  VkBuffer newBuffer = VK_NULL_HANDLE;
+  VkDeviceMemory newMemory = VK_NULL_HANDLE;
+  void * newMapped = nullptr;
+  if (!this->createHostVisibleBuffer(
+        newCapacity, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
+        newBuffer, newMemory)) {
+    return false;
+  }
+  if (vkMapMemory(this->device, newMemory, 0, newCapacity, 0,
+                  &newMapped) != VK_SUCCESS) {
+    vkDestroyBuffer(this->device, newBuffer, this->allocator);
+    vkFreeMemory(this->device, newMemory, this->allocator);
+    return false;
+  }
+  if (this->neePoolBuffer != VK_NULL_HANDLE) {
+    vkDestroyBuffer(this->device, this->neePoolBuffer, this->allocator);
+    this->neePoolBuffer = VK_NULL_HANDLE;
+    vkFreeMemory(this->device, this->neePoolMemory, this->allocator);
+    this->neePoolMemory = VK_NULL_HANDLE;
+    this->neePoolMapped = nullptr;
+  }
+  this->neePoolCapacity = newCapacity;
+  this->neePoolBuffer = newBuffer;
+  this->neePoolMemory = newMemory;
+  this->neePoolMapped = newMapped;
+  this->neePoolUsed = 0;
+  return true;
+}
+
+void
+SoRTXRenderBackend::buildNeePool(const SoDrawList & drawlist)
+{
+  // Full per-frame rebuild: 8 vec4 per entry (v0+v1+v2+color+mat4 xform).
+  this->neePoolUsed = 0;
+  this->neePoolCount = 0;
+  uint32_t entryCount = 0;
+
+  for (int i = 0; i < drawlist.getNumCommands(); ++i) {
+    const SoRenderCommand & command = drawlist.getCommand(i);
+    if (command.pass == SO_RENDERPASS_TRANSPARENT ||
+        command.pass == SO_RENDERPASS_OVERLAY) continue;
+    const SoMaterialData & material = command.material;
+    if (!(material.emissive[0] > 0.0f || material.emissive[1] > 0.0f ||
+          material.emissive[2] > 0.0f)) {
+      continue;
+    }
+    const auto found = this->commandToCache.find(&command);
+    if (found == this->commandToCache.end()) continue;
+    RTXCachedGeometry & entry = this->geometryCache[found->second];
+    if (entry.blas == VK_NULL_HANDLE) continue;
+
+    const SoGeometryDesc & geometry = command.geometry;
+    const uint32_t posStrideFloats = entry.vertexStride / sizeof(float);
+    const bool indexed = entry.indexCount > 0 && entry.idxKey != nullptr;
+    const uint32_t triangleCount =
+      indexed ? entry.indexCount / 3 : entry.vertexCount / 3;
+    if (triangleCount == 0) continue;
+
+    const VkDeviceSize bytes =
+      static_cast<VkDeviceSize>(triangleCount) * 8 * 4 * sizeof(float);
+    if (!this->ensureNeePoolCapacity(this->neePoolUsed + bytes)) {
+      this->emitError("buildNeePool: pool allocation failed");
+      return;
+    }
+    entry.neePoolOffset = static_cast<uint32_t>(this->neePoolUsed /
+                                                (8 * 4 * sizeof(float)));
+    entry.neeCount = triangleCount;
+    this->neePoolUsed += bytes;
+    entryCount += triangleCount;
+
+    float * out = static_cast<float *>(this->neePoolMapped) +
+      static_cast<size_t>(entry.neePoolOffset) * 32;
+    const auto vertex = [&geometry, posStrideFloats](uint32_t j) {
+      return geometry.positions + static_cast<size_t>(j) * posStrideFloats;
+    };
+    const SbMatrix & m = command.modelMatrix;
+    for (uint32_t t = 0; t < triangleCount; ++t) {
+      const uint32_t i0 =
+        indexed ? geometry.indices[static_cast<size_t>(t) * 3 + 0] : t * 3 + 0;
+      const uint32_t i1 =
+        indexed ? geometry.indices[static_cast<size_t>(t) * 3 + 1] : t * 3 + 1;
+      const uint32_t i2 =
+        indexed ? geometry.indices[static_cast<size_t>(t) * 3 + 2] : t * 3 + 2;
+      const float * p0 = vertex(i0);
+      const float * p1 = vertex(i1);
+      const float * p2 = vertex(i2);
+      float * e = out + static_cast<size_t>(t) * 32;
+      for (int c = 0; c < 3; ++c) {
+        e[c] = p0[c];
+        e[4 + c] = p1[c];
+        e[8 + c] = p2[c];
+      }
+      const float e1[3] = {p1[0] - p0[0], p1[1] - p0[1], p1[2] - p0[2]};
+      const float e2[3] = {p2[0] - p0[0], p2[1] - p0[1], p2[2] - p0[2]};
+      const float cx = e1[1] * e2[2] - e1[2] * e2[1];
+      const float cy = e1[2] * e2[0] - e1[0] * e2[2];
+      const float cz = e1[0] * e2[1] - e1[1] * e2[0];
+      e[3] = 0.5f * std::sqrt(cx * cx + cy * cy + cz * cz);
+      e[12] = material.emissive[0];
+      e[13] = material.emissive[1];
+      e[14] = material.emissive[2];
+      e[15] = 0.0f;
+      // GLSL mat4 is column-major and applies column vectors, while
+      // SbMatrix is the row-vector convention (translation in row 3), so
+      // the transposed matrix goes into the pool: xform[c][r] = m[c][r].
+      for (int c = 0; c < 4; ++c) {
+        for (int r = 0; r < 4; ++r) {
+          e[16 + c * 4 + r] = m[c][r];
+        }
+      }
+    }
+  }
+
+  this->neePoolCount = entryCount;
+  if (getenv("FC_VULKAN_RT_DEBUG") && entryCount > 0) {
+    fprintf(stderr, "[RTDBG] nee pool triangles=%u bytes=%llu enabled=%d "
+                    "mis=%d\n",
+            entryCount,
+            static_cast<unsigned long long>(this->neePoolUsed),
+            this->rtNeeEnabled ? 1 : 0, this->rtMisEnabled ? 1 : 0);
+  }
+}
+
+bool
 SoRTXRenderBackend::createPathTracingBuffers(uint32_t width, uint32_t height)
 {
   if (this->accumBuffer != VK_NULL_HANDLE &&
@@ -1421,6 +1565,10 @@ SoRTXRenderBackend::updateDescriptors()
   posHistInfo.buffer = this->positionHistoryBuffer;
   posHistInfo.offset = 0;
   posHistInfo.range = VK_WHOLE_SIZE;
+  VkDescriptorBufferInfo neePoolInfo {};
+  neePoolInfo.buffer = this->neePoolBuffer;
+  neePoolInfo.offset = 0;
+  neePoolInfo.range = VK_WHOLE_SIZE;
 
   // Binding 0: the acceleration structure (TLAS) read by the raygen shader.
   // Only written once the TLAS exists; updateDescriptors() is re-invoked by
@@ -1568,6 +1716,16 @@ SoRTXRenderBackend::updateDescriptors()
     posHistWrite.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
     posHistWrite.pBufferInfo = &posHistInfo;
     writes.push_back(posHistWrite);
+  }
+  if (this->neePoolBuffer != VK_NULL_HANDLE) {
+    VkWriteDescriptorSet neePoolWrite {};
+    neePoolWrite.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+    neePoolWrite.dstSet = rtSet;
+    neePoolWrite.dstBinding = 13;
+    neePoolWrite.descriptorCount = 1;
+    neePoolWrite.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+    neePoolWrite.pBufferInfo = &neePoolInfo;
+    writes.push_back(neePoolWrite);
   }
 
   VkWriteDescriptorSet presentWrite {};
@@ -2764,6 +2922,14 @@ SoRTXRenderBackend::updateMaterials(const SoDrawList & drawlist)
   // These flags never change mid-frame; they were recomputed identically for
   // every command on every frame.
   this->rtPbrEnabled = envFlagEnabled("FC_VULKAN_RT_PBR");
+  {
+    const char * neeEnv = getenv("FC_VULKAN_PT_NEE");
+    this->rtNeeEnabled =
+      (neeEnv == nullptr) ? true : envFlagEnabled("FC_VULKAN_PT_NEE");
+    const char * misEnv = getenv("FC_VULKAN_PT_MIS");
+    this->rtMisEnabled =
+      (misEnv == nullptr) ? true : envFlagEnabled("FC_VULKAN_PT_MIS");
+  }
   this->rtMetalOverride = false;
   this->rtRoughOverride = false;
   this->rtMetalValue = 0.0f;
@@ -2810,8 +2976,8 @@ SoRTXRenderBackend::updateMaterials(const SoDrawList & drawlist)
       const RTXCachedGeometry & entry = this->geometryCache[cacheFound->second];
       out.triangleData[0] = static_cast<float>(entry.normalPoolOffset);
       out.triangleData[1] = static_cast<float>(entry.normalCount);
-      out.triangleData[2] = 0.0f;
-      out.triangleData[3] = 0.0f;
+      out.triangleData[2] = static_cast<float>(entry.neePoolOffset);
+      out.triangleData[3] = static_cast<float>(entry.neeCount);
     }
 
     // Optional PBR (metallic-roughness) parameters.  Off by default so
@@ -3342,6 +3508,12 @@ SoRTXRenderBackend::recordAccelerationStructures(
             this->geometryCache.size());
   }
 
+  // Emissive-triangle pool for NEE.  Rebuilt every frame so the baked
+  // object-to-world transforms stay fresh on transform-only edits (which
+  // refit BLASes instead of rebuilding geometry).  Runs before
+  // updateMaterials(), which carries the pool offsets into the RTMaterial
+  // records.
+  this->buildNeePool(drawlist);
   this->updateMaterials(drawlist);
 
   // TLAS build (instances reference the BLASes built above).  The TLAS
@@ -3431,6 +3603,15 @@ SoRTXRenderBackend::recordAccelerationStructures(
     frame.temporal[2] = 0.0f;
     frame.temporal[3] = 0.0f;
 
+    // NEE: emissive-triangle pool size plus the per-run switches.  NEE and
+    // MIS default ON; FC_VULKAN_PT_NEE=0 restores the BSDF-only emissive
+    // path, FC_VULKAN_PT_MIS=0 drops the balance weight (BSDF hits of
+    // emissive surfaces then contribute nothing, avoiding double count).
+    frame.nee[0] = static_cast<float>(this->neePoolCount);
+    frame.nee[1] = this->rtNeeEnabled ? 1.0f : 0.0f;
+    frame.nee[2] = this->rtMisEnabled ? 1.0f : 0.0f;
+    frame.nee[3] = 0.0f;
+
     std::memcpy(this->frameMapped, &frame, sizeof(frame));
 
     if (getenv("FC_VULKAN_RT_DEBUG")) {
@@ -3439,13 +3620,22 @@ SoRTXRenderBackend::recordAccelerationStructures(
         fprintf(stderr,
                 "[RTDBG] frame: cam=(%.2f,%.2f,%.2f) vp=(%.0fx%.0f) "
                 "bgTop=(%.2f,%.2f,%.2f) bgBottom=(%.2f,%.2f,%.2f) "
-                "state=(%.0f,%.0f,%.0f,%.0f)\n",
+                "state=(%.0f,%.0f,%.0f,%.0f) "
+                "viewR0=(%.2f,%.2f,%.2f) viewR1=(%.2f,%.2f,%.2f) "
+                "viewR2=(%.2f,%.2f,%.2f) ortho=%.0f "
+                "projDiag=(%.3f,%.3f,%.3f,%.3f)\n",
                 frame.cameraPos[0], frame.cameraPos[1], frame.cameraPos[2],
                 frame.viewport[0], frame.viewport[1],
                 frame.bgTop[0], frame.bgTop[1], frame.bgTop[2],
                 frame.bgBottom[0], frame.bgBottom[1], frame.bgBottom[2],
                 frame.state[0], frame.state[1], frame.state[2],
-                frame.state[3]);
+                frame.state[3],
+                frame.view[0], frame.view[1], frame.view[2],
+                frame.view[4], frame.view[5], frame.view[6],
+                frame.view[8], frame.view[9], frame.view[10],
+                frame.viewport[2],
+                frame.projInverse[0], frame.projInverse[5],
+                frame.projInverse[10], frame.projInverse[15]);
       }
     }
   }
@@ -3809,6 +3999,16 @@ SoRTXRenderBackend::shutdown()
   }
   this->normalPoolCapacity = 0;
   this->normalPoolUsed = 0;
+  if (this->neePoolBuffer != VK_NULL_HANDLE) {
+    this->neePoolMapped = nullptr;
+    vkDestroyBuffer(this->device, this->neePoolBuffer, this->allocator);
+    this->neePoolBuffer = VK_NULL_HANDLE;
+    vkFreeMemory(this->device, this->neePoolMemory, this->allocator);
+    this->neePoolMemory = VK_NULL_HANDLE;
+  }
+  this->neePoolCapacity = 0;
+  this->neePoolUsed = 0;
+  this->neePoolCount = 0;
   if (this->descriptorPool != VK_NULL_HANDLE) {
     vkDestroyDescriptorPool(this->device, this->descriptorPool,
                             this->allocator);

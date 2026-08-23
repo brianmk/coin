@@ -37,6 +37,8 @@ layout(set = 0, binding = 2, std140) uniform FrameBlock {
     vec4  u_adaptive;      // x = minSamples, y = relErrorThreshold (0 = off)
     mat4  u_prevViewProj;  // world -> clip of the previous frame's camera
     vec4  u_temporal;      // x = reproject the history this frame
+    vec4  u_nee;           // x = emissive-triangle count, y = NEE enabled,
+                           // z = MIS balance enabled
 } frame;
 
 // std430 mirror of the C++ RTMaterial record; one per draw command, indexed
@@ -54,7 +56,8 @@ struct RTMaterial {
     vec4  lightPosition[8];
     vec4  lightAttenuation[8];
     vec4  lightSpot[8];
-    vec4  triangleData;    // x = triangle-normal pool offset
+    vec4  triangleData;    // x = triangle-normal pool offset, y = normal count,
+                           // z = NEE pool offset, w = NEE entry count
     vec4  pbr;             // x = metalness, y = roughness, z = usePbr,
                            // w = unused
 };
@@ -103,6 +106,21 @@ layout(set = 0, binding = 12, std430) buffer PositionHistoryBuffer {
     vec4 posHist[];
 };
 
+// Emissive-triangle pool for next-event estimation: one entry per triangle
+// of the scene whose material emits.  Vertices are object space, with the
+// command's model matrix baked in so the pool is valid without a per-frame
+// BLAS rebuild; v0.w carries the triangle area.
+struct NeeTriangle {
+    vec4  v0;
+    vec4  v1;
+    vec4  v2;
+    vec4  color;   // rgb = emission
+    mat4  xform;   // object -> world (column-major)
+};
+layout(set = 0, binding = 13, std430) readonly buffer NeePool {
+    NeeTriangle triangles[];
+} neePool;
+
 const int COIN_MAX_LIGHTS = 8;
 
 // Small xorshift-style hash: pixel + seed -> two values in [0,1)^2.
@@ -113,6 +131,12 @@ vec2 hash2(uint px, uint py, uint seed)
     s = (s ^ (s >> 13)) * 3266489917u;
     s ^= s >> 16;
     return vec2(float(s & 0xffffu), float((s >> 16) & 0xffffu)) * (1.0 / 65536.0);
+}
+
+// Three values in [0,1)^3 for multi-dimensional sampling decisions.
+vec3 hash3(uint px, uint py, uint seed)
+{
+    return vec3(hash2(px, py, seed), hash2(px, py, seed + 1u).x);
 }
 
 // Cosine-weighted hemisphere sample around +Z.
@@ -190,6 +214,7 @@ struct HitInfo {
     vec3 pos;
     vec3 normal;
     int materialIndex;
+    int primitiveId;
 };
 
 // Closest-hit query against the TLAS.  All geometry is opaque triangles.
@@ -213,6 +238,7 @@ HitInfo traceClosest(vec3 origin, vec3 dir, float tMax)
     h.t = rayQueryGetIntersectionTEXT(q, true);
     h.pos = origin + dir * h.t;
     h.materialIndex = rayQueryGetIntersectionInstanceCustomIndexEXT(q, true);
+    h.primitiveId = rayQueryGetIntersectionPrimitiveIndexEXT(q, true);
 
     // Flat shading: the object-space face normal comes from the triangle-
     // normal pool (computed on the CPU at BLAS build time) and is
@@ -375,6 +401,62 @@ vec3 coin_rtx_directLighting(vec3 worldPos, vec3 worldN, vec3 rayDir,
     return clamp(lit, 0.0, 1.0);
 }
 
+// Emissive-surface next-event estimation: sample one emissive triangle
+// uniformly, shadow-ray it and evaluate the same shading models as the
+// analytic-light path.  pdf = 1 / (triangleCount * area).
+vec3 coin_rtx_neeEmissive(vec3 worldPos, vec3 worldN, RTMaterial mat,
+                          vec3 sampleXi)
+{
+    const float N = frame.u_nee.x;
+    if (N < 0.5) return vec3(0.0);
+    int t = int(clamp(sampleXi.x * N, 0.0, N - 1.0));
+    NeeTriangle nt = neePool.triangles[t];
+    const float area = max(nt.v0.w, 1e-8);
+    float b0 = sampleXi.y;
+    float b1 = sampleXi.z;
+    if (b0 + b1 > 1.0) { b0 = 1.0 - b0; b1 = 1.0 - b1; }
+    vec3 pObj = nt.v0.xyz * (1.0 - b0 - b1) + nt.v1.xyz * b0 + nt.v2.xyz * b1;
+    vec3 pWorld = (nt.xform * vec4(pObj, 1.0)).xyz;
+    vec3 e1 = (nt.xform * vec4(nt.v1.xyz - nt.v0.xyz, 0.0)).xyz;
+    vec3 e2 = (nt.xform * vec4(nt.v2.xyz - nt.v0.xyz, 0.0)).xyz;
+    vec3 lightN = cross(e1, e2);
+    float lightNLen = length(lightN);
+    if (lightNLen < 1e-9) return vec3(0.0);
+    lightN /= lightNLen;
+    vec3 toLight = pWorld - worldPos;
+    float dist = length(toLight);
+    if (dist < 1e-4) return vec3(0.0);
+    vec3 L = toLight / dist;
+    float cosL = dot(lightN, -L);
+    float cosS = dot(worldN, L);
+    if (cosL <= 0.0 || cosS <= 0.0) return vec3(0.0);
+    if (traceShadow(worldPos + worldN * 0.001, L, dist - 0.001)) {
+        return vec3(0.0);
+    }
+    // Evaluate the shading model in eye space, matching
+    // coin_rtx_directLighting so an emissive surface reads like an
+    // analytic light of the same brightness.
+    vec3 eyePos = (frame.u_view * vec4(worldPos, 1.0)).xyz;
+    vec3 eyeN = normalize(mat3(frame.u_view) * worldN);
+    vec3 eyeV = normalize(-eyePos);
+    vec3 eyeL = normalize((frame.u_view * vec4(L, 0.0)).xyz);
+    vec3 contribution;
+    if (mat.pbr.z > 0.5) {
+        contribution = pbrEval(eyeN, eyeV, eyeL, mat) * cosS;
+    }
+    else {
+        vec3 H = normalize(eyeL + eyeV);
+        float NdotH = max(dot(eyeN, H), 0.0);
+        float shininess = max(mat.params.x * 128.0, 0.0);
+        float specularFactor = shininess > 0.0 ? pow(NdotH, shininess) : 0.0;
+        contribution = mat.diffuse.rgb * cosS +
+                       mat.specular.rgb * specularFactor;
+    }
+    const float pdf = 1.0 / (N * area);
+    return nt.color.rgb * contribution * cosL /
+           max(dist * dist * pdf, 1e-8);
+}
+
 void main()
 {
     uvec2 px = gl_GlobalInvocationID.xy;
@@ -477,6 +559,7 @@ void main()
     vec3 weight = vec3(1.0);
     vec3 rayOrigin = origin;
     vec3 rayDir = dir;
+    float lastPdf = 1.0; // pdf of the direction that brought us to this hit
 
     for (int bounce = 0; bounce < maxBounces; ++bounce) {
         HitInfo h = traceClosest(rayOrigin, rayDir, 1e30);
@@ -500,14 +583,40 @@ void main()
 
         RTMaterial mat = matBuffer.materials[h.materialIndex];
 
-        // Emissive surfaces terminate the path.
-        radiance += weight * mat.emissive.rgb;
+        // Emissive surfaces terminate the path.  With NEE enabled the
+        // emission arrives through the emissive-triangle sampling below, so
+        // a BSDF hit here is double counting unless the balance heuristic
+        // (MIS) splits the weight by the sampling pdfs.
+        float emissionWeight = 1.0;
+        if (bounce > 0 && frame.u_nee.y > 0.5 && frame.u_nee.x > 0.5) {
+            if (frame.u_nee.z > 0.5) {
+                int poolIdx = int(mat.triangleData.z) + h.primitiveId;
+                if (poolIdx >= 0 && poolIdx < int(frame.u_nee.x)) {
+                    float areaHit = max(neePool.triangles[poolIdx].v0.w, 1e-8);
+                    float pNee = 1.0 / (frame.u_nee.x * areaHit);
+                    float pBsdf = max(lastPdf, 1e-8);
+                    emissionWeight =
+                      (pBsdf * pBsdf) / (pBsdf * pBsdf + pNee * pNee);
+                }
+            }
+            else {
+                emissionWeight = 0.0;
+            }
+        }
+        radiance += weight * mat.emissive.rgb * emissionWeight;
         if (dot(mat.emissive.rgb, mat.emissive.rgb) > 0.0) {
             break;
         }
 
-        // Direct lighting (NEE with shadow rays).
+        // Direct lighting (NEE with shadow rays) plus emissive-surface
+        // sampling.  The emissive term also covers the primary ray: the
+        // directly visible surface still receives area-light light.
         radiance += weight * coin_rtx_directLighting(h.pos, h.normal, rayDir, mat);
+        if (frame.u_nee.y > 0.5) {
+            radiance += weight * coin_rtx_neeEmissive(
+              h.pos, h.normal, mat,
+              hash3(px.x, px.y, frameIndex + uint(bounce) * 727u + 11u));
+        }
 
         vec3 n = normalize(h.normal);
         vec3 albedo = mat.diffuse.rgb;
@@ -536,6 +645,7 @@ void main()
                                               3u));
                 newDir = normalize(tangent * s.x + bitangent * s.y + n * s.z);
                 float pdf = 0.5 * s.z / 3.14159265;
+                lastPdf = pdf;
                 vec3 kd = (vec3(1.0) - Fv) * (1.0 - metallic);
                 // f_r = kd*albedo/pi for the cosine lobe; with the 0.5
                 // lobe probability the weight is kd*albedo*cos/pdf =
@@ -563,6 +673,8 @@ void main()
                 }
                 vec3 F = pbrF_Schlick(VdotH, F0);
                 float G = pbrG_Smith(NdotV, NdotL, a);
+                lastPdf = 0.5 * pbrD_GGX(NdotH, a) * NdotH /
+                          max(4.0 * VdotH, 1e-8);
                 weight *= (F * G * VdotH) / max(NdotV * NdotH, 1e-6) / 0.5;
             }
         }
@@ -581,6 +693,7 @@ void main()
             if (hash2(px.x, px.y,
                       frameIndex + uint(bounce) * 431u + 9u).x < specProb) {
                 newDir = reflect(rayDir, n);
+                lastPdf = max(specProb, 1e-4);
                 weight *= mix(albedo, mat.specular.rgb, 0.5) /
                            max(specProb, 1e-4);
             }
@@ -589,6 +702,7 @@ void main()
                                             frameIndex + uint(bounce) * 919u +
                                               1u));
                 newDir = normalize(tangent * s.x + bitangent * s.y + n * s.z);
+                lastPdf = s.z / 3.14159265;
                 weight *= albedo / max(1.0 - specProb, 1e-4);
             }
         }

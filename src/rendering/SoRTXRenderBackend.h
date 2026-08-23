@@ -55,6 +55,10 @@ struct RTXCachedGeometry {
   // (UINT32_MAX = not uploaded yet).
   uint32_t normalPoolOffset = 0xFFFFFFFFu;
   uint32_t normalCount = 0;
+  // Offset/count of this command's emissive triangles in the NEE pool
+  // (UINT32_MAX = not uploaded yet).  Rebuilt per frame in buildNeePool().
+  uint32_t neePoolOffset = 0xFFFFFFFFu;
+  uint32_t neeCount = 0;
 
   // Refit state: when a content change keeps the topology intact (vertex
   // and index counts, stride, indexing unchanged) and only the vertex
@@ -111,7 +115,8 @@ struct RTMaterial {
   float lightPosition[8 * 4];
   float lightAttenuation[8 * 4];
   float lightSpot[8 * 4];
-  float triangleData[4]; // x = triangle-normal pool offset
+  float triangleData[4]; // x = triangle-normal pool offset, y = normal count,
+                         // z = NEE pool offset, w = NEE entry count
   float pbr[4]; // x = metalness, y = roughness, z = usePbr, w = unused
 };
 
@@ -480,6 +485,8 @@ private:
   // Cached PBR/lighting env overrides.  These are loop-invariant per frame;
   // reading them once avoids a getenv()/envFlagEnabled() per command.
   bool rtPbrEnabled = false;
+  bool rtNeeEnabled = false;
+  bool rtMisEnabled = false;
   bool rtMetalOverride = false;
   bool rtRoughOverride = false;
   float rtMetalValue = 0.0f;
@@ -496,6 +503,18 @@ private:
   bool ensureNormalPoolCapacity(VkDeviceSize bytes);
   VkDeviceSize appendTriangleNormals(const SoRenderCommand & command,
                                      RTXCachedGeometry & entry);
+
+  // Emissive-triangle pool for NEE (set 0, binding 13).  Rebuilt per frame
+  // (buildNeePool) so baked transforms stay fresh without a BLAS rebuild;
+  // per-command offsets ride in RTMaterial::triangleData (z/w).
+  VkBuffer neePoolBuffer = VK_NULL_HANDLE;
+  VkDeviceMemory neePoolMemory = VK_NULL_HANDLE;
+  void * neePoolMapped = nullptr;
+  VkDeviceSize neePoolCapacity = 0;
+  VkDeviceSize neePoolUsed = 0;
+  uint32_t neePoolCount = 0;
+  bool ensureNeePoolCapacity(VkDeviceSize bytes);
+  void buildNeePool(const SoDrawList & drawlist);
 
   // --- Cache bookkeeping ---------------------------------------------------
   std::vector<RTXCachedGeometry> geometryCache;
