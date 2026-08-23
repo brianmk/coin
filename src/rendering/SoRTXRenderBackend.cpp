@@ -527,7 +527,8 @@ SoRTXRenderBackend::initialize(const SoRenderBackendInitParams & params)
   }
   if (const char * stopfraction = getenv("FC_VULKAN_PT_STOP_FRACTION")) {
     const float value = static_cast<float>(std::atof(stopfraction));
-    if (value > 0.0f && value <= 1.0f) {
+    // 0 disables the fraction-based auto-stop (run to the sample cap only).
+    if (value >= 0.0f && value <= 1.0f) {
       this->ptAdaptiveStopFraction = value;
     }
   }
@@ -3161,11 +3162,20 @@ SoRTXRenderBackend::updatePathTracingState(const SoDrawList & drawlist,
   // any render pass).  This runs before the caller's render pass on the
   // same submission ordering, so the tracer observes the cleared buffers.
   // Reprojection frames skip the clear: their history replaces the buffer
-  // contents per-pixel in the shader.
+  // contents per-pixel in the shader.  Both members of each ping-pong pair
+  // are cleared: the post-frame swap makes the history buffer the next
+  // frame's live buffer, and a stale accumulation must never leak into a
+  // fresh run.
   if (this->ptEnabled && this->ptFrameIndex == 0 &&
       !this->ptReprojectFrame) {
     vkCmdFillBuffer(cmd, this->accumBuffer, 0, VK_WHOLE_SIZE, 0);
     vkCmdFillBuffer(cmd, this->sumSqBuffer, 0, VK_WHOLE_SIZE, 0);
+    if (this->accumHistoryBuffer != VK_NULL_HANDLE) {
+      vkCmdFillBuffer(cmd, this->accumHistoryBuffer, 0, VK_WHOLE_SIZE, 0);
+    }
+    if (this->sumSqHistoryBuffer != VK_NULL_HANDLE) {
+      vkCmdFillBuffer(cmd, this->sumSqHistoryBuffer, 0, VK_WHOLE_SIZE, 0);
+    }
     VkMemoryBarrier fillBarrier {};
     fillBarrier.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
     fillBarrier.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
