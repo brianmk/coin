@@ -125,10 +125,11 @@ SoRTXRenderBackend::setDenoiserFilter(const char * denoiser)
   // the current choice alone so a stale pref value never silently disables
   // the denoiser.  createDenoiseBackend() resolves the kind from this store
   // on the next buffer (re)creation.
-  if (std::strcmp(denoiser, "rtx") == 0) this->denoiseKind = DenoiseRtx;
-  else if (std::strcmp(denoiser, "oidn") == 0) this->denoiseKind = DenoiseOidn;
-  else if (std::strcmp(denoiser, "fsr") == 0) this->denoiseKind = DenoiseFsr;
-  else if (std::strcmp(denoiser, "none") == 0) this->denoiseKind = DenoiseNone;
+  if (std::strcmp(denoiser, "rtx") == 0) this->denoiseKindPref = DenoiseRtx;
+  else if (std::strcmp(denoiser, "oidn") == 0) this->denoiseKindPref = DenoiseOidn;
+  else if (std::strcmp(denoiser, "fsr") == 0) this->denoiseKindPref = DenoiseFsr;
+  else if (std::strcmp(denoiser, "none") == 0) this->denoiseKindPref = DenoiseNone;
+  this->denoiseKind = this->denoiseKindPref;
   this->denoiseKindDirty = true;
 }
 

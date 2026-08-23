@@ -101,6 +101,7 @@ SoRTXRenderBackend::updatePathTracingState(const SoDrawList & drawlist,
     this->ptAccumulating = FALSE;
     this->ptFrameIndex = 0;
     this->ptIdleFrames = 0;
+    this->ptConverged = FALSE;
   }
   else if (this->ptStartLatch) {
     // The start flag: reset the accumulation and begin a fresh progressive
@@ -109,6 +110,7 @@ SoRTXRenderBackend::updatePathTracingState(const SoDrawList & drawlist,
     this->ptAccumulating = TRUE;
     this->ptFrameIndex = 0;
     this->ptIdleFrames = 0;
+    this->ptConverged = FALSE;
   }
   else if (sceneChanged || (viewChanged && !this->haveLastView)) {
     // A scene edit invalidates the history (surface colors may be stale
@@ -119,6 +121,7 @@ SoRTXRenderBackend::updatePathTracingState(const SoDrawList & drawlist,
     this->ptAccumulating = FALSE;
     this->ptFrameIndex = 0;
     this->ptIdleFrames = 0;
+    this->ptConverged = FALSE;
   }
   else if (viewChanged) {
     // Camera-only change with valid history: stay accumulating and carry
@@ -136,12 +139,14 @@ SoRTXRenderBackend::updatePathTracingState(const SoDrawList & drawlist,
       this->ptAccumulating = TRUE;
       ++this->ptFrameIndex;
       this->ptIdleFrames = 0;
+      this->ptConverged = FALSE;
       this->ptReprojectFrame = TRUE;
     }
     else {
       this->ptAccumulating = FALSE;
       this->ptFrameIndex = 0;
       this->ptIdleFrames = 0;
+      this->ptConverged = FALSE;
     }
   }
   else if (this->ptAccumulating) {
@@ -162,6 +167,10 @@ SoRTXRenderBackend::updatePathTracingState(const SoDrawList & drawlist,
     if (this->ptFrameIndex >= this->ptMaxSamples || adaptivelyConverged) {
       this->ptAccumulating = FALSE;
       this->ptIdleFrames = this->ptSettleFrames;
+      this->ptConverged = TRUE;
+    }
+    else {
+      this->ptConverged = FALSE;
     }
   }
   else if (this->ptIdleFrames < this->ptSettleFrames) {
@@ -176,6 +185,7 @@ SoRTXRenderBackend::updatePathTracingState(const SoDrawList & drawlist,
       this->ptIdleFrames = 0;
       this->ptAccumulating = TRUE;
       this->ptFrameIndex = 0;
+      this->ptConverged = FALSE;
       this->ptReprojectFrame = canReproject;
     }
   }
@@ -346,8 +356,12 @@ SoRTXRenderBackend::recordAccelerationStructures(
   // An accumulated result is only valid while accumulating; a camera move or
   // scene change (which updatePathTracingState may turn into a non-
   // accumulating preview frame) must fall back to the raw/in-shader result
-  // until the next fresh readback completes.
-  if (!this->ptAccumulating) {
+  // until the next fresh readback completes.  A converged (idle) run is NOT
+  // such a case: the G-buffers still hold the final accumulated image, so the
+  // last denoised result must be preserved and presented (dropping it just
+  // before the viewport goes idle would flash the raw/edge-stopped image on
+  // the converged output).
+  if (!this->ptAccumulating && !this->ptConverged) {
     this->denoiseResultReady = FALSE;
   }
   if (!this->createStorageImage(target.extent.width, target.extent.height)) {
@@ -680,7 +694,8 @@ SoRTXRenderBackend::recordTraceAndPresent(const SoRenderParams & params,
     static_cast<float>(origin[1]),
     0.0f,
     0.0f,
-    (this->denoiseResultReady && this->ptAccumulating) ? 1.0f : 0.0f,
+    (this->denoiseResultReady && (this->ptAccumulating || this->ptConverged))
+      ? 1.0f : 0.0f,
     this->denoiseScale,
     0.0f,
     0.0f};

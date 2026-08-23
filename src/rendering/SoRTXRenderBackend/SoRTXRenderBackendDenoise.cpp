@@ -178,19 +178,44 @@ SoRTXRenderBackend::createDenoiseBackend()
   }
   if (this->denoisedBuffer != VK_NULL_HANDLE) return true;
 
-  // Resolve the backend from FC_VULKAN_PT_DENOISER (oidn | rtx | fsr) unless
-  // the user picked one via setDenoiserFilter() (denoiseKindDirty), in which
-  // case the stored preference wins so a runtime choice survives the buffer
-  // recreation that follows a viewport resize.  The enum default
-  // (DenoiseOidn) is overridden by either; FSR degrades to OIDN when the FFX
-  // SDK is not built in.
+  // Resolve the backend from the user's stored choice.  The preference set by
+  // setDenoiserFilter() (denoiseKindPref) survives the teardown above, so a
+  // viewport resize or runtime denoiser change re-creates the SAME backend
+  // instead of silently falling back to the OIDN CPU device.  The
+  // FC_VULKAN_PT_DENOISER env var seeds denoiseKindPref on the first
+  // resolution.  Only when nothing was specified do we default to OIDN.
+  // FSR degrades to OIDN when the FFX SDK is not built in.
   if (!this->denoiseKindDirty) {
+    this->denoiseKind = this->denoiseKindPref;
+  }
+  if (this->denoiseKind != DenoiseRtx && this->denoiseKind != DenoiseOidn &&
+      this->denoiseKind != DenoiseFsr && this->denoiseKind != DenoiseNone) {
     this->denoiseKind = DenoiseOidn;
+  }
+  if (this->denoiseKindPref == DenoiseNone) {
+    // First resolution, no explicit preference: honour the env var, then fall
+    // back to the default (OIDN).
     if (const char * sel = getenv("FC_VULKAN_PT_DENOISER")) {
-      if (std::strcmp(sel, "rtx") == 0) this->denoiseKind = DenoiseRtx;
-      else if (std::strcmp(sel, "fsr") == 0) this->denoiseKind = DenoiseFsr;
-      else if (std::strcmp(sel, "none") == 0) this->denoiseKind = DenoiseNone;
-      else this->denoiseKind = DenoiseOidn;
+      if (std::strcmp(sel, "rtx") == 0) {
+        this->denoiseKind = DenoiseRtx;
+        this->denoiseKindPref = DenoiseRtx;
+      }
+      else if (std::strcmp(sel, "fsr") == 0) {
+        this->denoiseKind = DenoiseFsr;
+        this->denoiseKindPref = DenoiseFsr;
+      }
+      else if (std::strcmp(sel, "none") == 0) {
+        this->denoiseKind = DenoiseNone;
+        this->denoiseKindPref = DenoiseNone;
+      }
+      else {
+        this->denoiseKind = DenoiseOidn;
+        this->denoiseKindPref = DenoiseOidn;
+      }
+    }
+    else {
+      this->denoiseKind = DenoiseOidn;
+      this->denoiseKindPref = DenoiseOidn;
     }
   }
   this->denoiseKindDirty = false;
@@ -479,11 +504,15 @@ SoRTXRenderBackend::updateDenoise()
   if (!this->denoiserActive || this->denoisedBuffer == VK_NULL_HANDLE) return;
   // Only publish a denoised result for a frame whose G-buffers were actually
   // read back this frame.  On a non-accumulating frame (camera moved / scene
-  // edited / converged idle) recordDenoiseReadback() skipped the copy, so the
-  // interop/host images hold stale data; presenting that stale result against
-  // the current raw view would flicker/vibrate.  Fall back to the raw /
-  // in-shader edge-stopped present instead.
-  if (!this->ptAccumulating) {
+  // edited) recordDenoiseReadback() skipped the copy, so the interop/host
+  // images hold stale data; presenting that stale result against the current
+  // raw view would flicker/vibrate.  Fall back to the raw / in-shader
+  // edge-stopped present instead.  A converged (idle) run is NOT a stale
+  // frame: it just stopped accumulating after reaching the sample cap, and
+  // the denoised result produced on the final accumulated frame is the image
+  // the user should keep seeing (dropping it right before the viewport goes
+  // idle flashes the raw/edge-stopped output).
+  if (!this->ptAccumulating && !this->ptConverged) {
     this->denoiseResultReady = FALSE;
     return;
   }

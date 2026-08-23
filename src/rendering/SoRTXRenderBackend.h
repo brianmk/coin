@@ -443,6 +443,11 @@ private:
   SbBool ptEnabled = FALSE;
   SbBool ptStartLatch = FALSE;
   SbBool ptAccumulating = FALSE;
+  //! True once the accumulation reached ptMaxSamples (or the adaptive stop)
+  //! and the run went idle.  Distinguishes a converged image (G-buffers still
+  //! valid, denoised result should be kept and presented) from a camera/move
+  //! preview frame (G-buffers stale, denoised result must be dropped).
+  SbBool ptConverged = FALSE;
   uint32_t ptFrameIndex = 0;
   uint32_t ptMaxBounces = 4;
   // Consecutive frames with an unchanged camera/scene while not accumulating.
@@ -596,6 +601,12 @@ private:
   //! setDenoiserFilter(), by the stored preference name so a runtime choice
   //! survives the next path-tracing buffer (re)creation.
   DenoiseKind denoiseKind = DenoiseNone;
+  //! The denoiser the user asked for (via setDenoiserFilter() or the
+  //! FC_VULKAN_PT_DENOISER env var).  Unlike denoiseKind, this survives the
+  //! teardown performed by destroyDenoiser() on a viewport resize, so the
+  //! recreation resolves the SAME backend instead of silently falling back to
+  //! the OIDN CPU default.  DenoiseNone = "not specified", resolve from env.
+  DenoiseKind denoiseKindPref = DenoiseNone;
   //! True once a denoiser backend has been successfully created.
   bool denoiserActive = false;
   //! Set by setDenoiserFilter() so createDenoiseBackend() re-resolves the
