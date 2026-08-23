@@ -13,6 +13,19 @@
 #include <unordered_map>
 #include <vector>
 
+#if COIN_BUILD_OIDN
+#include <OpenImageDenoise/oidn.h>
+#endif
+
+#if COIN_BUILD_RTX_DENOISER
+#include <cuda.h>
+#include <cuda_runtime.h>
+#include <optix.h>
+#include <optix_stubs.h>
+// optix_function_table_definition.h is included in exactly one .cpp (the
+// denoiser TU) because it defines the optixFunctionTable symbol.
+#endif
+
 /*!
   \brief Cached GPU acceleration structure for one retained SoRenderCommand.
 
@@ -548,6 +561,154 @@ private:
   int pendingDestroyIndex = 0;
   void flushPendingDestroys();
   void deferDestroy(std::function<void()> && fn);
+
+  // --- Denoiser backends (OIDN / RTX-OptiX / FSR) -------------------------
+  // The path tracer writes G-buffers (accumulated radiance, albedo, world
+  // normal, world position) that the present pass either edge-stops in
+  // shader or feeds through a machine-learned denoiser.  This block owns
+  // the external denoiser: the backend selector, staging buffers to move
+  // the G-buffers to/from the denoiser, and the denoised output bound at
+  // present binding 5.
+  enum DenoiseKind { DenoiseNone = 0, DenoiseOidn, DenoiseRtx, DenoiseFsr };
+
+  //! Backend selected (resolved once) by FC_VULKAN_PT_DENOISER.
+  DenoiseKind denoiseKind = DenoiseNone;
+  //! True once any denoiser backend has been successfully created.
+  bool denoiserActive = false;
+
+  // Host-visible staging copies of the G-buffers (device-local accum/normal/
+  // albedo are copied in after the trace, denoised on the host (OIDN) or on
+  // the GPU (RTX/CUDA), then written out).  Only allocated while a denoiser
+  // is active; freed on resize/shutdown.
+  VkBuffer denoiseColorBuf = VK_NULL_HANDLE;      //!< accum average (rgb)
+  VkDeviceMemory denoiseColorMem = VK_NULL_HANDLE;
+  VkBuffer denoiseAlbedoBuf = VK_NULL_HANDLE;     //!< albedo guide
+  VkDeviceMemory denoiseAlbedoMem = VK_NULL_HANDLE;
+  VkBuffer denoiseNormalBuf = VK_NULL_HANDLE;     //!< normal guide
+  VkDeviceMemory denoiseNormalMem = VK_NULL_HANDLE;
+  VkBuffer denoiseGuideBuf = VK_NULL_HANDLE;      //!< [validity mask, ...]
+  VkDeviceMemory denoiseGuideMem = VK_NULL_HANDLE;
+  VkBuffer denoiseOutBuf = VK_NULL_HANDLE;        //!< denoiser output (rgba)
+  VkDeviceMemory denoiseOutMem = VK_NULL_HANDLE;
+  void * denoiseStagingPtr = nullptr;             //!< maps the host buffers
+  uint32_t denoiseWidth = 0;
+  uint32_t denoiseHeight = 0;
+  // Resolution at which the denoiser staging/output were last created (so a
+  // viewport resize tears them down and recreates at the new dimensions).
+  uint32_t denoiseStagedWidth = 0;
+  uint32_t denoiseStagedHeight = 0;
+
+  // Device-local denoised result bound at present binding 5 and sampled by
+  // the present shader when the denoiser has produced a result for the
+  // current frame.
+  VkBuffer denoisedBuffer = VK_NULL_HANDLE;
+  VkDeviceMemory denoisedMemory = VK_NULL_HANDLE;
+  // Albedo G-buffer (binding 14) written by the raygen; the denoiser uses it
+  // as a guide, and it is read back with the other G-buffers.
+  VkBuffer albedoBuffer = VK_NULL_HANDLE;
+  VkDeviceMemory albedoMemory = VK_NULL_HANDLE;
+  //! When true the present pass samples denoisedBuffer instead of doing the
+  //! in-shader edge-stopping filter.
+  SbBool denoiseResultReady = FALSE;
+  //! Scale factor baked into the present shader's denoise branch (1.0 =
+  //! native resolution; >1 when the denoiser runs at reduced resolution).
+  float denoiseScale = 1.0f;
+  //! Minimum accumulated samples before the denoiser output is published.
+  //! The denoiser is trained on partially converged images; feeding it a
+  //! one- or two-sample frame produces a blurred/junk result (NVIDIA's
+  //! vk_optix_denoise example only starts denoising after a start frame).
+  //! When the accumulation is below this the present falls back to the raw
+  //! / in-shader edge-stopped view.  0 disables the gate.
+  uint32_t denoiseMinSamples = 8;
+
+  // Per-frame gating: the readback is recorded only after an accumulating
+  // frame (needs fresh G-buffers) and the denoise itself runs after the
+  // submission's queue wait (host/GPU work cannot be recorded).
+  SbBool oidnReadbackPending = FALSE;
+
+  // --- OIDN backend -------------------------------------------------------
+#if COIN_BUILD_OIDN
+  OIDNDevice oidnDevice = nullptr;
+  OIDNFilter oidnFilter = nullptr;
+  void setupOidnDevice();
+  bool configureOidnFilter();
+#endif
+
+  // --- RTX (OptiX + CUDA) backend -----------------------------------------
+#if COIN_BUILD_RTX_DENOISER
+  OptixDeviceContext rtxDeviceContext = nullptr;
+  OptixDenoiser rtxDenoiser = nullptr;
+  OptixDenoiserModelKind rtxModelKind = OPTIX_DENOISER_MODEL_KIND_AOV;
+  OptixDenoiserSizes rtxSizes {};
+  CUcontext rtxCudaCtx = nullptr;
+  CUstream rtxStream = nullptr;
+  CUdeviceptr rtxScratch = 0;
+  CUdeviceptr rtxState = 0;
+  CUdeviceptr rtxIntensity = 0;
+  CUdeviceptr rtxColorImage = 0;
+  CUdeviceptr rtxAlbedoImage = 0;
+  CUdeviceptr rtxNormalImage = 0;
+  CUdeviceptr rtxOutputImage = 0;
+  uint64_t rtxImagePitch = 0;
+  size_t rtxScratchBytes = 0;
+  size_t rtxStateBytes = 0;
+  size_t rtxOutputPitchBytes = 0;
+  int rtxCudaDevice = 0;
+  bool rtxCudaInitFailed = false;
+  // Interop: the denoiser working images are dedicated device-local Vulkan
+  // buffers whose memory is exported (opaque FD) and imported into CUDA so
+  // OptiX reads/writes them directly.  No host round-trip.  The Vulkan
+  // handles own the allocation; the CUexternalMemory + mapped CUdeviceptr
+  // alias it and must be released (cuDestroyExternalMemory) before the
+  // VkDeviceMemory is freed.
+  VkBuffer rtxColorVk = VK_NULL_HANDLE;
+  VkBuffer rtxAlbedoVk = VK_NULL_HANDLE;
+  VkBuffer rtxNormalVk = VK_NULL_HANDLE;
+  VkBuffer rtxOutputVk = VK_NULL_HANDLE;
+  VkDeviceMemory rtxColorMem = VK_NULL_HANDLE;
+  VkDeviceMemory rtxAlbedoMem = VK_NULL_HANDLE;
+  VkDeviceMemory rtxNormalMem = VK_NULL_HANDLE;
+  VkDeviceMemory rtxOutputMem = VK_NULL_HANDLE;
+  CUexternalMemory rtxColorExt = nullptr;
+  CUexternalMemory rtxAlbedoExt = nullptr;
+  CUexternalMemory rtxNormalExt = nullptr;
+  CUexternalMemory rtxOutputExt = nullptr;
+  // The CUDA kernel that converts the accumulated radiance sum (rgb) /
+  // sample-count (w) into the average color the denoiser expects.
+  CUmodule rtxNormModule = nullptr;
+  CUfunction rtxNormKernel = nullptr;
+  bool rtxInteropReady = false;
+  // vkGetMemoryFdKHR resolved per-device (needed to export the FD).
+  PFN_vkGetMemoryFdKHR vkGetMemoryFdKHR = nullptr;
+#endif
+
+  //! Create the per-backend denoiser resources (called by createPathTracingBuffers).
+  bool createDenoiseBackend();
+  //! Record the device->host readback of the G-buffers on \a cmd.
+  void recordDenoiseReadback(VkCommandBuffer cmd);
+  //! Run the denoiser on the staged G-buffers and publish denoiseResultReady.
+  void updateDenoise();
+  //! Destroy denoiser resources (device + staging + RTX/OIDN handles).
+  void destroyDenoiser();
+  void releaseDenoiseStaging();
+
+#if COIN_BUILD_RTX_DENOISER
+  //! Initialize the private CUDA context + OptiX device context.
+  bool initRtxCuda();
+  //! Create the OptiX denoiser, its scratch/state/intensity buffers, and the
+  //! CUDA-Vulkan interop working images.
+  bool initRtxDenoiser();
+  //! Allocate one exportable device-local buffer and import it into CUDA;
+  //! returns the mapped CUdeviceptr in \a devPtr and owns handle state in the
+  //! ext/mem/buffer out-params.
+  bool createRtxInteropBuffer(size_t bytes, VkBufferUsageFlags usage,
+                              VkBuffer & buffer, VkDeviceMemory & memory,
+                              CUexternalMemory & ext, CUdeviceptr & devPtr);
+  //! Run one OptiX denoiser pass over the interop color/albedo/normal images.
+  bool updateRtxDenoise(uint32_t w, uint32_t h);
+  //! Free the CUDA context + OptiX denoiser state (keeps Vulkan staging).
+  void teardownRtxDenoiser();
+#endif
 };
 
 #endif // COIN_SORTXRENDERBACKEND_H

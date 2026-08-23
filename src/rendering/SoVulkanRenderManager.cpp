@@ -18,13 +18,93 @@
 #include <Inventor/rendering/SoVulkanRenderTarget.h>
 
 #include "rendering/SoRenderBackend.h"
+#include "rendering/SoClippingPlanes.h"
 #include "rendering/SoRenderIRP.h"
 #include "rendering/SoVulkanRenderBackend.h"
 #include "rendering/SoRTXRenderBackend.h"
 
 #include <cmath>
+#include <cstdlib>
+#include <cstring>
 #include <limits>
 #include <memory>
+
+namespace {
+
+// Cached environment checks for the diagnostic flags.  These sit on the
+// per-frame path and the environment does not change during a process
+// lifetime, so the getenv() lookup (not thread-safe) is performed at most
+// once instead of every frame.
+bool clipDebugEnabled()
+{
+  static const bool enabled = std::getenv("FC_VULKAN_CLIP_DEBUG") != nullptr;
+  return enabled;
+}
+
+bool breadcrumbsEnabled()
+{
+  static const bool enabled = std::getenv("FC_VULKAN_BREADCRUMBS") != nullptr;
+  return enabled;
+}
+
+// When FC_VULKAN_CLIP_VERBOSE is set, the near/far probe below logs every
+// frame instead of the sparse every-25-frame sampler, so a probe can assert
+// that the auto-clipping near/far planes recompute after a scene transform
+// change (the cached-bbox correctness case).
+bool clipVerboseEnabled()
+{
+  static const bool enabled = std::getenv("FC_VULKAN_CLIP_VERBOSE") != nullptr;
+  return enabled;
+}
+
+// Cheap content fingerprint over the IR draw list: the world model transform
+// and geometry identity of every command.  The scene bbox (and thus the
+// auto-clipping near/far planes) depends on geometry + world transform, so a
+// change in any command's model matrix (an object or ancestor moved/rotated),
+// its geometry streams, or its counts means the world extent can differ and
+// the cache must refresh.  Command count alone is not a sound proxy: moving a
+// body keeps the same number of draw commands but changes its world extent.
+// This is far cheaper than re-running SoGetBoundingBoxAction over the whole
+// scene every frame, and it is a sound signal -- any extent change
+// necessarily implies a geometry or model-transform change here.
+uint64_t computeSceneFingerprint(const SoIRRenderAction & action)
+{
+  const SoDrawList & drawList = action.getDrawList();
+  uint64_t h = 0x7f4a7c159e3779b9ULL;
+  const int n = drawList.getNumCommands();
+  for (int i = 0; i < n; ++i) {
+    const SoRenderCommand & c = drawList.getCommand(i);
+    const SoGeometryDesc & g = c.geometry;
+    // Mix the world transform (model matrix) so object/ancestor motion and
+    // rotation (which do not change command count) still invalidate the cache.
+    for (int k = 0; k < 16; ++k) {
+      uint32_t bits;
+      std::memcpy(&bits, &(c.modelMatrix[k >> 2][k & 3]), sizeof(bits));
+      const uint64_t v = bits;
+      h ^= v + 0x517cc1b727220a95ULL + (h << 6) + (h >> 2);
+    }
+    // Mix geometry identity (buffers are reallocated on rebuild, so pointer
+    // identity tracks content) and counts.
+    const uint64_t ids[5] = {
+      reinterpret_cast<uintptr_t>(g.positions),
+      reinterpret_cast<uintptr_t>(g.normals),
+      reinterpret_cast<uintptr_t>(g.texcoords),
+      reinterpret_cast<uintptr_t>(g.colors),
+      reinterpret_cast<uintptr_t>(g.indices),
+    };
+    for (uint64_t v : ids) {
+      h ^= v + 0x517cc1b727220a95ULL + (h << 6) + (h >> 2);
+    }
+    h ^= g.vertexCount + 0x517cc1b727220a95ULL + (h << 6) + (h >> 2);
+    h ^= g.indexCount + 0x517cc1b727220a95ULL + (h << 6) + (h >> 2);
+    h ^= g.normalCount + 0x517cc1b727220a95ULL + (h << 6) + (h >> 2);
+    h ^= static_cast<uint64_t>(g.topology) + 0x517cc1b727220a95ULL +
+         (h << 6) + (h >> 2);
+  }
+  return h;
+}
+
+} // namespace
 
 class SoVulkanRenderManagerP {
 public:
@@ -32,6 +112,11 @@ public:
     : irAction(SbViewportRegion())
   {
     this->viewportRegion.setWindowSize(1, 1);
+    // Persist one traversal root so prepareRenderParams() does not heap-allocate
+    // + ref/unref a new separator on every frame.  Children are cleared and
+    // re-added each frame; only the root node itself is retained.
+    this->frameRoot = new SoSeparator;
+    this->frameRoot->ref();
   }
 
   ~SoVulkanRenderManagerP()
@@ -48,12 +133,17 @@ public:
     if (this->decorationScene) {
       this->decorationScene->unref();
     }
+    if (this->frameRoot) {
+      this->frameRoot->unref();
+    }
   }
 
   SoNode * scene = nullptr;
   SoNode * overlayScene = nullptr;
   SoNode * decorationScene = nullptr;
   SoCamera * camera = nullptr;
+  // Persistent traversal root (see the constructor comment).
+  SoSeparator * frameRoot = nullptr;
   SbViewportRegion viewportRegion;
   SbColor4f backgroundColor = SbColor4f(0.0f, 0.0f, 0.0f, 1.0f);
   SbBool backgroundGradient = FALSE;
@@ -86,6 +176,18 @@ public:
   // Camera back-off along the view direction applied by the zoom wall (see
   // setClippingPlanes()); 0.0f when the camera is clear of the surface.
   float cameraShiftZ = 0.0f;
+
+  // Cached world-space scene bounding box for setClippingPlanes().  The box in
+  // camera coordinates still depends on the camera pose, which changes every
+  // frame, so only the (static) world-space box is cached: each frame re-applies
+  // the cheap camera transform instead of running a full scene bbox traversal.
+  // The cache is invalidated when the scene pointer changes (setSceneGraph) or
+  // when the previous frame's IR command count differs (a cheap structural-
+  // change proxy for geometry edits).
+  SbXfBox3f sceneWorldBBox;
+  SoNode * sceneBBoxScene = nullptr;
+  uint64_t sceneBBoxFingerprint = 0;
+  bool sceneBBoxCached = false;
 
   SoIRRenderAction irAction;
   SoVulkanRenderBackend backend;
@@ -136,6 +238,9 @@ SoVulkanRenderManager::setSceneGraph(SoNode * root)
   if (stored) {
     stored->ref();
   }
+  // The bbox is cached in world space; a different scene graph invalidates it.
+  this->pimpl->sceneBBoxCached = false;
+  this->pimpl->sceneBBoxScene = nullptr;
 }
 
 SoNode *
@@ -277,18 +382,21 @@ void
 SoVulkanRenderManager::setWireframeOverlay(SbBool enabled)
 {
   this->pimpl->wireframeOverlay = enabled;
+  this->pimpl->backend.setWireframeOverlay(enabled);
 }
 
 void
 SoVulkanRenderManager::setPointsOverlay(SbBool enabled)
 {
   this->pimpl->pointsOverlay = enabled;
+  this->pimpl->backend.setPointsOverlay(enabled);
 }
 
 void
 SoVulkanRenderManager::setEdgeColor(const SbColor4f & color)
 {
   this->pimpl->edgeColor = color;
+  this->pimpl->backend.setEdgeColor(color);
 }
 
 SbBool
@@ -434,11 +542,54 @@ SoVulkanRenderManager::getPathTracingActive(void) const
     this->pimpl->rtxBackend.getPathTracingActive();
 }
 
+SbBool
+SoVulkanRenderManager::getPathTracingRefining(void) const
+{
+  return this->pimpl->rtxBackendInitialized &&
+    this->pimpl->rtxBackend.getPathTracingRefining();
+}
+
 uint32_t
 SoVulkanRenderManager::getPathTracingSampleCount(void) const
 {
   if (!this->pimpl->rtxBackendInitialized) return 0;
   return this->pimpl->rtxBackend.getPathTracingSampleCount();
+}
+
+void
+SoVulkanRenderManager::setPathTracingBounces(const uint32_t bounces)
+{
+  if (!this->pimpl->rtxBackendInitialized) {
+    SoDebugError::postWarning("SoVulkanRenderManager::setPathTracingBounces",
+                              "ray-tracing backend is not initialized; "
+                              "setting ignored");
+    return;
+  }
+  this->pimpl->rtxBackend.setPathTracingBounces(bounces);
+}
+
+void
+SoVulkanRenderManager::setPathTracingSettleFrames(const uint32_t frames)
+{
+  if (!this->pimpl->rtxBackendInitialized) {
+    SoDebugError::postWarning(
+      "SoVulkanRenderManager::setPathTracingSettleFrames",
+      "ray-tracing backend is not initialized; setting ignored");
+    return;
+  }
+  this->pimpl->rtxBackend.setPathTracingSettleFrames(frames);
+}
+
+void
+SoVulkanRenderManager::setPathTracingDenoiseEnabled(SbBool enabled)
+{
+  if (!this->pimpl->rtxBackendInitialized) {
+    SoDebugError::postWarning(
+      "SoVulkanRenderManager::setPathTracingDenoiseEnabled",
+      "ray-tracing backend is not initialized; setting ignored");
+    return;
+  }
+  this->pimpl->rtxBackend.setPathTracingDenoiseEnabled(enabled);
 }
 
 void
@@ -535,9 +686,28 @@ SoVulkanRenderManagerP::setClippingPlanes(void)
 {
   if (!this->camera || !this->scene) return;
 
-  SoGetBoundingBoxAction bboxaction(this->viewportRegion);
-  bboxaction.apply(this->scene);
-  SbXfBox3f xbox = bboxaction.getXfBoundingBox();
+  // Recompute the world-space bounding box only when the scene pointer changed
+  // or the previous frame's command fingerprint differs.  The fingerprint
+  // covers the world transform AND geometry identity of every command, so a
+  // moved/rotated object (same command count) still invalidates the cache.
+  // The camera pose is applied below every frame; the whole-scene bbox
+  // traversal is the expensive part and is now skipped on unchanged scenes.
+  if (!this->sceneBBoxCached) {
+    SoGetBoundingBoxAction bboxaction(this->viewportRegion);
+    bboxaction.apply(this->scene);
+    this->sceneWorldBBox = bboxaction.getXfBoundingBox();
+    this->sceneBBoxScene = this->scene;
+    this->sceneBBoxFingerprint = computeSceneFingerprint(this->irAction);
+    this->sceneBBoxCached = true;
+  } else if (this->sceneBBoxScene != this->scene ||
+             this->sceneBBoxFingerprint != computeSceneFingerprint(this->irAction)) {
+    SoGetBoundingBoxAction bboxaction(this->viewportRegion);
+    bboxaction.apply(this->scene);
+    this->sceneWorldBBox = bboxaction.getXfBoundingBox();
+    this->sceneBBoxScene = this->scene;
+    this->sceneBBoxFingerprint = computeSceneFingerprint(this->irAction);
+  }
+  SbXfBox3f xbox = this->sceneWorldBBox;
 
   // Transform the world-space bounding box into camera coordinates.  The
   // managed scene graph is geometry-only (the camera is a separate member),
@@ -594,37 +764,41 @@ SoVulkanRenderManagerP::setClippingPlanes(void)
   }
   this->cameraShiftZ = shiftZ;
 
-  float nearval = -zmax - clippingOffset;
-  float farval = -zmin + clippingOffset;
-
-  if (!this->camera->isOfType(SoOrthographicCamera::getClassTypeId())
-      && farval <= 0.0f) {
-    return;
+  // Rebuild the box from the shifted z extent so the shared clipping core
+  // below reads the zoom-wall-adjusted depth.
+  SbBox3f clippedBox = box;
+  if (shiftZ != 0.0f) {
+    float x0, y0, z0, x1, y1, z1;
+    box.getBounds(x0, y0, z0, x1, y1, z1);
+    clippedBox.setBounds(x0, y0, zmin, x1, y1, zmax);
   }
 
-  if (box.isEmpty()) {
-    nearval = 1;
-    farval = 10;
+  // Shared near/far computation (diagonal offset, empty-box defaults,
+  // perspective near limit) with the legacy GL SoRenderManager.
+  const bool isOrtho = this->camera->isOfType(
+    SoOrthographicCamera::getClassTypeId());
+  const bool isPersp = this->camera->isOfType(
+    SoPerspectiveCamera::getClassTypeId());
+  float nearval, farval;
+  if (!coinComputeClippingPlanes(clippedBox, isOrtho, isPersp,
+                                 static_cast<int>(this->autoClipping),
+                                 this->nearplanevalue, nearval, farval)) {
+    return;
   }
 
   // If the whole scene is behind the camera, keep the current near/far planes
   // (they were computed on the previous frame when the scene was in front).
   // Collapsing them to a tiny range here is what makes the view appear
   // "locked": the scene only becomes visible again once it rotates within the
-  // collapsed volume.  This mirrors SoRenderManagerP::setClippingPlanes(),
-  // which returns without touching the planes in this case (its early return
-  // only fires for perspective cameras, so an orthographic camera must handle
-  // it here instead).
+  // collapsed volume.  The shared core already returns early for perspective
+  // cameras; an orthographic camera must handle it here instead.
   if (farval <= 0.0f) {
     return;
   }
 
-  if (getenv("FC_VULKAN_CLIP_DEBUG")) {
+  if (clipDebugEnabled()) {
     static float lastNear = -1.0f, lastFar = -1.0f;
-    static int emptyCount = 0;
-    bool empty = box.isEmpty();
-    if (empty) { emptyCount++; }
-    else { emptyCount = 0; }
+    const bool empty = box.isEmpty();
     if (empty || SbAbs(nearval - lastNear) > 0.05f * SbMax(SbAbs(nearval), 1.0f)
         || SbAbs(farval - lastFar) > 0.05f * SbMax(SbAbs(farval), 1.0f)) {
       lastNear = nearval;
@@ -639,27 +813,6 @@ SoVulkanRenderManagerP::setClippingPlanes(void)
                       "boxz=[%.3f,%.3f] empty=%d nearval=%.6f farval=%.6f closest=%.6f shiftZ=%.6f\n",
               p[0], p[1], p[2], q0, q1, q2, q3,
               z0, z1, empty ? 1 : 0, nearval, farval, -zmax, this->cameraShiftZ);
-    }
-  }
-
-  if (this->camera->isOfType(SoPerspectiveCamera::getClassTypeId())) {
-    float nearlimit;
-    if (this->autoClipping == SoVulkanRenderManager::FIXED_NEAR_PLANE) {
-      nearlimit = this->nearplanevalue;
-    }
-    else {
-      int depthbits = 32;
-      int use_bits = static_cast<int>(float(depthbits) * (1.0f - this->nearplanevalue));
-      float r = static_cast<float>(std::pow(2.0, static_cast<double>(use_bits)));
-      nearlimit = farval / r;
-    }
-
-    if (nearlimit >= farval) {
-      nearlimit = farval / 5000.0f;
-    }
-
-    if (nearval < nearlimit) {
-      nearval = nearlimit;
     }
   }
 
@@ -711,7 +864,7 @@ SoVulkanRenderManagerP::setClippingPlanes(void)
     farval = nearval + clippingOffset;
   }
 
-  const float SLACK = 0.001f;
+  const float SLACK = kSoClippingSlack;
   const float newnear = nearval >= 0 ? nearval * (1.0f - SLACK)
                                      : nearval * (1.0f + SLACK);
   const float newfar = farval >= 0 ? farval * (1.0f + SLACK)
@@ -753,8 +906,32 @@ SoVulkanRenderManagerP::prepareRenderParams(SbBool clearwindow,
   params.viewport = this->viewportRegion;
   params.viewMatrix.makeIdentity();
   params.projMatrix.makeIdentity();
+  {
+    static int camDiag = 0;
+    if (breadcrumbsEnabled() && camDiag++ < 8) {
+      const char * cname = this->camera
+        ? this->camera->getTypeId().getName().getString() : "NULL";
+      SbVec3f cpos(0.0f, 0.0f, 0.0f);
+      float cheight = 0.0f;
+      if (this->camera) {
+        cpos = this->camera->position.getValue();
+        if (this->camera->isOfType(SoOrthographicCamera::getClassTypeId())) {
+          cheight = static_cast<const SoOrthographicCamera*>(this->camera)->height.getValue();
+        }
+      }
+      fprintf(stderr, "[VK-TRACE] params cam=%s pos=(%.3f,%.3f,%.3f) height=%.3f "
+                      "vpAspect=%.3f autoClip=%d near=%.4f far=%.4f\n",
+              cname,
+              static_cast<double>(cpos[0]), static_cast<double>(cpos[1]),
+              static_cast<double>(cpos[2]), static_cast<double>(cheight),
+              static_cast<double>(this->viewportRegion.getViewportAspectRatio()),
+              static_cast<int>(this->autoClipping),
+              static_cast<double>(this->computedNear),
+              static_cast<double>(this->computedFar));
+    }
+  }
   params.clearColor = this->backgroundColor;
-  if (getenv("FC_VULKAN_BREADCRUMBS")) {
+  if (breadcrumbsEnabled()) {
     static bool logged = false;
     if (!logged) {
       logged = true;
@@ -764,9 +941,6 @@ SoVulkanRenderManagerP::prepareRenderParams(SbBool clearwindow,
   params.backgroundGradient = this->backgroundGradient;
   params.backgroundTopColor = this->backgroundTopColor;
   params.backgroundBottomColor = this->backgroundBottomColor;
-  params.wireframeOverlay = this->wireframeOverlay;
-  params.pointsOverlay = this->pointsOverlay;
-  params.edgeColor = this->edgeColor;
   params.clearDepth = 1.0f;
   params.flags = 0;
   if (clearwindow || this->clearWindow) {
@@ -790,8 +964,11 @@ SoVulkanRenderManagerP::prepareRenderParams(SbBool clearwindow,
   // record after the main scene and render in the overlay pass.
   if (this->scene || this->camera || this->overlayScene
       || this->decorationScene) {
-    SoSeparator * root = new SoSeparator;
-    root->ref();
+    // Reuse the persistent traversal root: clear last frame's children and
+    // re-add them so the refcount stays balanced and the node (and any
+    // transient storage it touches in the IR action) is not reallocated.
+    SoSeparator * root = this->frameRoot;
+    root->removeAllChildren();
     if (this->camera) {
       root->addChild(this->camera);
     }
@@ -808,7 +985,6 @@ SoVulkanRenderManagerP::prepareRenderParams(SbBool clearwindow,
       root->addChild(this->decorationScene);
     }
     action.apply(root);
-    root->unref();
   }
   else {
     action.beginFrame();
@@ -907,7 +1083,7 @@ SoVulkanRenderManagerP::prepareRenderParams(SbBool clearwindow,
   // manager camera for any geometry recorded after it, so the rendered
   // view/projection (and face culling) come from a different camera than the
   // one the viewport is using.
-  if (getenv("FC_VULKAN_CLIP_DEBUG")) {
+  if (clipDebugEnabled()) {
     static bool sceneCamLogged = false;
     static int sceneDumpCount = 0;
     if ((!sceneCamLogged || sceneDumpCount < 3) && this->scene) {
@@ -935,7 +1111,6 @@ SoVulkanRenderManagerP::prepareRenderParams(SbBool clearwindow,
       {
         // Recursive type-only dump of the scene (up to 5 levels deep) to spot
         // any stray camera or matrix nodes.
-        SoSeparator * sep = static_cast<SoSeparator*>(this->scene);
         std::function<void(SoNode*, int, int*)> dumpLevel =
             [&dumpLevel](SoNode * n, int depth, int * counter) {
           if (!n) return;
@@ -1054,9 +1229,11 @@ SoVulkanRenderManagerP::prepareRenderParams(SbBool clearwindow,
 
   // Reconstruct near/far from the recorded projection matrix and compare with
   // the auto-clipped values so mismatches (per-object clipping) are obvious.
-  if (getenv("FC_VULKAN_CLIP_DEBUG")) {
+  if (clipDebugEnabled()) {
     static int frames = 0;
-    if (++frames == 10 || frames == 50 || frames % 25 == 0) {
+    ++frames;
+    if (clipVerboseEnabled() || frames == 10 || frames == 50 ||
+        frames % 25 == 0) {
       SbMatrix m = params.projMatrix;
       SbMatrix v = params.viewMatrix;
       // OpenGL-style perspective: col2=(0,0,a,-1), col3=(0,0,b,0) with

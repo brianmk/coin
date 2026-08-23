@@ -21,10 +21,12 @@ layout(set = 0, binding = 1) uniform sampler2D u_rtImage;
 layout(set = 0, binding = 2, std430) readonly buffer AccumBuffer { vec4 accum[]; };
 layout(set = 0, binding = 3, std430) readonly buffer NormalBuffer { vec4 normals[]; };
 layout(set = 0, binding = 4, std430) readonly buffer PositionBuffer { vec4 positions[]; };
+layout(set = 0, binding = 5, std430) readonly buffer DenoisedBuffer { vec4 denoised[]; };
 
 layout(push_constant) uniform PresentPush {
-    vec4 u_present; // x = width, y = height, z = denoiseOn, w = frameIndex
-    vec4 u_origin;  // x = viewport origin x, y = viewport origin y (pixels)
+    vec4 u_present;  // x = width, y = height, z = denoiseOn, w = frameIndex
+    vec4 u_origin;   // x = viewport origin x, y = viewport origin y (pixels)
+    vec4 u_denoise;  // x = OIDN result available (sample denoised buffer)
 } pc;
 
 layout(location = 0) out vec4 fragColor;
@@ -42,6 +44,39 @@ void main()
     const int width = int(max(pc.u_present.x, 1.0));
     const int height = int(max(pc.u_present.y, 1.0));
     const int idx = px.y * width + px.x;
+
+    // OIDN host-side denoise result: when ready it replaces the raw
+    // accumulation entirely (the filter already smoothed the noise).  A
+    // result scale > 1 is the low-resolution motion preview: bilinearly
+    // upsample it from the leading entries of the denoised buffer.
+    if (pc.u_denoise.x > 0.5) {
+        float scale = max(pc.u_denoise.y, 1.0);
+        if (scale < 1.5) {
+            vec4 d = denoised[idx];
+            if (d.a > 0.5) {
+                fragColor = vec4(clamp(d.rgb, 0.0, 1.0), 1.0);
+                return;
+            }
+        }
+        else {
+            int lw = max((width + int(scale) - 1) / int(scale), 1);
+            int lh = max((height + int(scale) - 1) / int(scale), 1);
+            vec2 q = (vec2(px) + vec2(0.5)) / scale - vec2(0.5);
+            q = clamp(q, vec2(0.0), vec2(lw - 1, lh - 1));
+            ivec2 q0 = ivec2(q);
+            vec2 f = q - vec2(q0);
+            ivec2 q1 = min(q0 + ivec2(1, 1), ivec2(lw - 1, lh - 1));
+            vec4 d00 = denoised[q0.y * lw + q0.x];
+            vec4 d10 = denoised[q0.y * lw + q1.x];
+            vec4 d01 = denoised[q1.y * lw + q0.x];
+            vec4 d11 = denoised[q1.y * lw + q1.x];
+            vec4 d = mix(mix(d00, d10, f.x), mix(d01, d11, f.x), f.y);
+            if (d.a > 0.5) {
+                fragColor = vec4(clamp(d.rgb, 0.0, 1.0), 1.0);
+                return;
+            }
+        }
+    }
 
     vec4 c0 = accum[idx];
     if (c0.a <= 0.0) {

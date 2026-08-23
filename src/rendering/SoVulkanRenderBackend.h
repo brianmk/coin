@@ -10,8 +10,16 @@
 #include <cstddef>
 #include <cstdint>
 #include <functional>
+#include <mutex>
 #include <unordered_map>
 #include <vector>
+
+// Shared combine step for the hand-rolled hash functors below.  Keeping one
+// implementation prevents the == operator and the hash from drifting apart.
+static inline size_t hashCombine(size_t hash, size_t value)
+{
+  return hash ^ (value + 0x9e3779b9 + (hash << 6) + (hash >> 2));
+}
 
 /*!
   \brief Cached GPU geometry for one retained SoRenderCommand.
@@ -31,10 +39,18 @@ struct VulkanCachedCommand {
   uint32_t indexCount = 0;
 
   // CPU-expanded wide-line quads (per-frame content; line width > 1 or a
-  // stipple pattern).  Host-visible scratch, sized on demand.
-  VkBuffer wideLineBuffer = VK_NULL_HANDLE;
-  VkDeviceMemory wideLineMemory = VK_NULL_HANDLE;
-  VkDeviceSize wideLineBufferSize = 0;
+  // stipple pattern).  One host-visible scratch buffer per in-flight frame
+  // slot: the quad expansion is a function of the projection matrix, so the
+  // content is rewritten every frame, and the rewrite for frame N +
+  // maxFramesInFlight may not clobber data a still-executing frame N reads.
+  // The slot for the current frame index is selected by beginFrame(), which
+  // waits the slot's fence before the slot is reused.
+  struct VulkanWideLineBuffer {
+    VkBuffer buffer = VK_NULL_HANDLE;
+    VkDeviceMemory memory = VK_NULL_HANDLE;
+    VkDeviceSize size = 0;
+  };
+  std::vector<VulkanWideLineBuffer> wideLineBuffers;
   uint32_t wideLineVertexCount = 0;
 
   // Command that last touched this entry (per-frame arena pointer; used
@@ -153,6 +169,17 @@ public:
   */
   void setMaxFramesInFlight(uint32_t count);
 
+  /*!
+    \brief Configure Vulkan-only display overlays.
+
+    These toggle the wireframe/point edge overlays and their color.  They are
+    deliberately backend state rather than SoRenderParams fields, so the
+    OpenGL backend never sees them.
+  */
+  void setWireframeOverlay(SbBool enabled);
+  void setPointsOverlay(SbBool enabled);
+  void setEdgeColor(const SbColor4f & color);
+
 private:
   // --- Initialization helpers -------------------------------------------
   bool createCommandPool();
@@ -203,12 +230,15 @@ private:
 
   // One texture waiting for its GPU-side upload (staging copy).  The host
   // side (image, memory, staging buffer) is prepared up front; the copies
-  // for all pending uploads are recorded into a single transient command
-  // buffer and submitted once per frame.  The cache index (not a pointer)
-  // identifies the entry: the vector may reallocate while uploads are
-  // still being prepared.
+  // for all pending uploads are recorded either into the current frame's
+  // command buffer (own-queue path) or a single transient command buffer
+  // (external path) and submitted once per frame.  The cache index (not a
+  // pointer) identifies the entry, but eviction may compact the cache after
+  // preparation, so the command pointer is retained to re-resolve the index
+  // before the upload is consumed.
   struct PendingTextureUpload {
     size_t index = 0;
+    const SoRenderCommand * command = nullptr;
     const SoTextureData * texture = nullptr;
     VkBuffer staging = VK_NULL_HANDLE;
     VkDeviceMemory stagingMemory = VK_NULL_HANDLE;
@@ -223,7 +253,9 @@ private:
                            VkBuffer staging);
   bool finalizeTexture(VulkanCachedTexture & entry,
                        const SoTextureData & texture);
-  bool flushTextureUploads(std::vector<PendingTextureUpload> & pending);
+  bool recordPendingTextureUploads();
+  void finalizePendingTextureUploads();
+  bool flushPendingTextureUploadsExternal();
   bool createSampler(const SoTextureData & texture, VkSampler & sampler);
   bool allocateTextureDescriptorSet(VkImageView view, VkSampler sampler,
                                     VkDescriptorSet & set);
@@ -232,6 +264,7 @@ private:
 
   // --- Render recording ---------------------------------------------------
   bool beginCommandBuffer();
+  VkCommandBuffer currentCommandBuffer();
   void recordClear(const SoRenderParams & params,
                    const SoVulkanRenderTarget & target);
   void recordDrawCommand(const SoDrawList & drawlist,
@@ -275,7 +308,21 @@ private:
                     VkBuffer & buffer,
                     VkDeviceMemory & memory,
                     const void * data);
+  // Device-local variant of createBuffer() for retained static geometry.
+  // Uses a transient staging buffer + one-shot transfer and waits for the
+  // copy to complete, so it is only meant for the rare geometry-change
+  // path, never the steady-state per-frame path.
+  bool createBufferDeviceLocal(VkDeviceSize size,
+                               VkBufferUsageFlags usage,
+                               VkBuffer & buffer,
+                               VkDeviceMemory & memory,
+                               const void * data);
+  // Cache VkPhysicalDeviceMemoryProperties once; queried per buffer is pure
+  // driver overhead on the re-upload path.
+  void ensureDeviceMemoryProperties();
   bool growLightingUbo(uint32_t minSlots);
+  bool swapLightingBuffer(VkBuffer newBuffer, VkDeviceMemory newMemory,
+                          void * newMapped, uint32_t newSlotsPerFrame);
   bool prepareLightingSlots(uint32_t neededDraws);
   void beginFrame();
   void flushPendingDestroys();
@@ -283,6 +330,9 @@ private:
   void deferDestroy(std::function<void()> && fn);
   void deferDestroyCacheEntry(VulkanCachedCommand & entry);
   void deferDestroyTextureEntry(VulkanCachedTexture & entry);
+  void waitForInFlightFrames();
+  bool allocateFrameResources();
+  void releaseFrameResources();
 
   // --- Owned device ------------------------------------------------------
   VkInstance instance = VK_NULL_HANDLE;
@@ -293,7 +343,16 @@ private:
   const VkAllocationCallbacks * allocator = nullptr;
 
   VkCommandPool commandPool = VK_NULL_HANDLE;
-  VkCommandBuffer commandBuffer = VK_NULL_HANDLE;
+  // One command buffer and fence per in-flight frame slot.  The own-queue
+  // path (render()) submits slot N's buffer and signals slot N's fence;
+  // beginFrame() waits the fence before reusing the slot's UBO ring half,
+  // command buffer, and deferred-destruction batch.  The external path
+  // records into the caller's command buffer and never signals these
+  // fences; frameFencePending stays false for those slots so beginFrame()
+  // never waits on them.
+  std::vector<VkCommandBuffer> frameCommandBuffers;
+  std::vector<VkFence> frameFences;
+  std::vector<uint8_t> frameFencePending;
 
   // Command buffer being recorded by the current render()/renderExternal()
   // call.  This is the backend's own buffer in render(), or the caller's
@@ -336,6 +395,19 @@ private:
   uint32_t maxFramesInFlight = 3;
   std::vector<std::vector<std::function<void()>>> pendingDestroys;
 
+  // Vulkan-only display overlays (shaded-with-edges / show-vertices).
+  // Configured through the manager; never part of the shared render params.
+  SbBool wireframeOverlay = FALSE;
+  SbBool pointsOverlay = FALSE;
+  SbColor4f edgeColor = SbColor4f(0.05f, 0.05f, 0.05f, 1.0f);
+
+  // Texture uploads gathered during updateGeometryCache().  On the own-queue
+  // path they are recorded into the frame command buffer (no separate
+  // submit); on the external path they are flushed through one transient
+  // submission.  Indices are re-resolved from the command pointers after
+  // cache eviction compacts the texture cache.
+  std::vector<PendingTextureUpload> pendingUploads;
+
   // Texture binding (set 0, binding 1).  A 1x1 white fallback texture is
   // bound whenever a command carries no embedded SoTextureData.
   VkImage whiteImage = VK_NULL_HANDLE;
@@ -357,16 +429,64 @@ private:
   VkShaderModule backgroundFragmentModule = VK_NULL_HANDLE;
   VkPipelineLayout backgroundPipelineLayout = VK_NULL_HANDLE;
 
-  // Render pass is owned per target identity (image + extent).
+  // Render passes are cached by their VkRenderPassCreateInfo identity
+  // (color/depth format, sample count, image layouts).  Pipelines are keyed
+  // on the render-pass handle (see PipelineKey), so reusing the same pass
+  // across targets that differ only in their images/extent keeps the
+  // pipeline cache warm -- in particular for swapchain targets whose images
+  // cycle every frame.
+  struct RenderPassIdentity {
+    VkFormat colorFormat = VK_FORMAT_B8G8R8A8_UNORM;
+    VkFormat depthFormat = VK_FORMAT_UNDEFINED;
+    VkSampleCountFlagBits sampleCount = VK_SAMPLE_COUNT_1_BIT;
+    VkImageLayout colorLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+    VkImageLayout depthLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
+
+    bool operator==(const RenderPassIdentity & other) const
+    {
+      return colorFormat == other.colorFormat &&
+        depthFormat == other.depthFormat &&
+        sampleCount == other.sampleCount &&
+        colorLayout == other.colorLayout &&
+        depthLayout == other.depthLayout;
+    }
+  };
+  struct RenderPassIdentityHash
+  {
+    size_t operator()(const RenderPassIdentity & key) const
+    {
+      size_t hash = std::hash<uint32_t>()(
+        static_cast<uint32_t>(key.colorFormat));
+      hash = hashCombine(hash,
+                         std::hash<uint32_t>()(static_cast<uint32_t>(key.depthFormat)));
+      hash = hashCombine(hash,
+                         std::hash<uint32_t>()(static_cast<uint32_t>(key.sampleCount)));
+      hash = hashCombine(hash,
+                         std::hash<uint32_t>()(static_cast<uint32_t>(key.colorLayout)));
+      hash = hashCombine(hash,
+                         std::hash<uint32_t>()(static_cast<uint32_t>(key.depthLayout)));
+      return hash;
+    }
+  };
+  RenderPassIdentity renderPassIdentity(const SoVulkanRenderTarget & target) const;
+  VkRenderPass getOrCreateRenderPass(const SoVulkanRenderTarget & target);
+  std::unordered_map<RenderPassIdentity, VkRenderPass, RenderPassIdentityHash>
+    renderPassCache;
+
+  // Render pass used by the current frame (looked up from renderPassCache).
   VkRenderPass renderPass = VK_NULL_HANDLE;
-  VkImage renderPassColorImage = VK_NULL_HANDLE;
-  VkImageView renderPassColorView = VK_NULL_HANDLE;
-  VkImage renderPassDepthImage = VK_NULL_HANDLE;
-  VkImageView renderPassDepthView = VK_NULL_HANDLE;
-  VkExtent2D renderPassExtent {0, 0};
-  // Framebuffer cached beside the render pass (same target identity);
-  // recreated only when the target changes instead of every frame.
+
+  // Framebuffer cached for the current target identity (image views +
+  // extent + render pass).  Swapchain targets cycle their images every
+  // frame, so this is recreated on any target change while the render pass
+  // itself survives in renderPassCache.
   VkFramebuffer renderPassFramebuffer = VK_NULL_HANDLE;
+  VkRenderPass renderPassFramebufferPass = VK_NULL_HANDLE;
+  VkImage renderPassFramebufferColorImage = VK_NULL_HANDLE;
+  VkImageView renderPassFramebufferColorView = VK_NULL_HANDLE;
+  VkImage renderPassFramebufferDepthImage = VK_NULL_HANDLE;
+  VkImageView renderPassFramebufferDepthView = VK_NULL_HANDLE;
+  VkExtent2D renderPassFramebufferExtent {0, 0};
 
   // Pipeline cache: keyed by the retained state that affects the created
   // pipeline.  Vulkan pipelines are immutable, so every topology/fill/depth/
@@ -440,60 +560,33 @@ private:
     {
       size_t hash = std::hash<uintptr_t>()(
         reinterpret_cast<uintptr_t>(key.renderPass));
-      hash ^= std::hash<uint32_t>()(key.topology) + 0x9e3779b9 + (hash << 6) +
-        (hash >> 2);
-      hash ^= std::hash<uint32_t>()(key.fillMode) + 0x9e3779b9 + (hash << 6) +
-        (hash >> 2);
-      hash ^= std::hash<uint32_t>()(key.cullMode) + 0x9e3779b9 + (hash << 6) +
-        (hash >> 2);
-      hash ^= std::hash<uint32_t>()(key.ccwFrontFace) + 0x9e3779b9 +
-        (hash << 6) + (hash >> 2);
-      hash ^= std::hash<uint32_t>()(key.depthTestEnable) + 0x9e3779b9 +
-        (hash << 6) + (hash >> 2);
-      hash ^= std::hash<uint32_t>()(key.depthWriteEnable) + 0x9e3779b9 +
-        (hash << 6) + (hash >> 2);
-      hash ^= std::hash<uint32_t>()(key.depthFunction) + 0x9e3779b9 +
-        (hash << 6) + (hash >> 2);
-      hash ^= std::hash<uint32_t>()(key.depthBiasEnable) + 0x9e3779b9 +
-        (hash << 6) + (hash >> 2);
-      hash ^= std::hash<float>()(key.depthBiasConstantFactor) + 0x9e3779b9 +
-        (hash << 6) + (hash >> 2);
-      hash ^= std::hash<float>()(key.depthBiasSlopeFactor) + 0x9e3779b9 +
-        (hash << 6) + (hash >> 2);
-      hash ^= std::hash<uint32_t>()(key.blendEnable) + 0x9e3779b9 +
-        (hash << 6) + (hash >> 2);
-      hash ^= std::hash<uint32_t>()(key.blendSrcRGB) + 0x9e3779b9 +
-        (hash << 6) + (hash >> 2);
-      hash ^= std::hash<uint32_t>()(key.blendDstRGB) + 0x9e3779b9 +
-        (hash << 6) + (hash >> 2);
-      hash ^= std::hash<uint32_t>()(key.blendSrcAlpha) + 0x9e3779b9 +
-        (hash << 6) + (hash >> 2);
-      hash ^= std::hash<uint32_t>()(key.blendDstAlpha) + 0x9e3779b9 +
-        (hash << 6) + (hash >> 2);
-      hash ^= std::hash<uint32_t>()(key.blendEquationRGB) + 0x9e3779b9 +
-        (hash << 6) + (hash >> 2);
-      hash ^= std::hash<uint32_t>()(key.blendEquationAlpha) + 0x9e3779b9 +
-        (hash << 6) + (hash >> 2);
-      hash ^= std::hash<uint32_t>()(key.stencilEnable) + 0x9e3779b9 +
-        (hash << 6) + (hash >> 2);
-      hash ^= std::hash<uint32_t>()(key.stencilFunction) + 0x9e3779b9 +
-        (hash << 6) + (hash >> 2);
-      hash ^= std::hash<uint32_t>()(key.stencilReference) + 0x9e3779b9 +
-        (hash << 6) + (hash >> 2);
-      hash ^= std::hash<uint32_t>()(key.stencilCompareMask) + 0x9e3779b9 +
-        (hash << 6) + (hash >> 2);
-      hash ^= std::hash<uint32_t>()(key.stencilWriteMask) + 0x9e3779b9 +
-        (hash << 6) + (hash >> 2);
-      hash ^= std::hash<uint32_t>()(key.stencilFailOp) + 0x9e3779b9 +
-        (hash << 6) + (hash >> 2);
-      hash ^= std::hash<uint32_t>()(key.stencilZFailOp) + 0x9e3779b9 +
-        (hash << 6) + (hash >> 2);
-      hash ^= std::hash<uint32_t>()(key.stencilZPassOp) + 0x9e3779b9 +
-        (hash << 6) + (hash >> 2);
-      hash ^= std::hash<uint32_t>()(key.sampleCount) + 0x9e3779b9 +
-        (hash << 6) + (hash >> 2);
-      hash ^= std::hash<uint32_t>()(key.wideLine) + 0x9e3779b9 +
-        (hash << 6) + (hash >> 2);
+      hash = hashCombine(hash, std::hash<uint32_t>()(key.topology));
+      hash = hashCombine(hash, std::hash<uint32_t>()(key.fillMode));
+      hash = hashCombine(hash, std::hash<uint32_t>()(key.cullMode));
+      hash = hashCombine(hash, std::hash<uint32_t>()(key.ccwFrontFace));
+      hash = hashCombine(hash, std::hash<uint32_t>()(key.depthTestEnable));
+      hash = hashCombine(hash, std::hash<uint32_t>()(key.depthWriteEnable));
+      hash = hashCombine(hash, std::hash<uint32_t>()(key.depthFunction));
+      hash = hashCombine(hash, std::hash<uint32_t>()(key.depthBiasEnable));
+      hash = hashCombine(hash, std::hash<float>()(key.depthBiasConstantFactor));
+      hash = hashCombine(hash, std::hash<float>()(key.depthBiasSlopeFactor));
+      hash = hashCombine(hash, std::hash<uint32_t>()(key.blendEnable));
+      hash = hashCombine(hash, std::hash<uint32_t>()(key.blendSrcRGB));
+      hash = hashCombine(hash, std::hash<uint32_t>()(key.blendDstRGB));
+      hash = hashCombine(hash, std::hash<uint32_t>()(key.blendSrcAlpha));
+      hash = hashCombine(hash, std::hash<uint32_t>()(key.blendDstAlpha));
+      hash = hashCombine(hash, std::hash<uint32_t>()(key.blendEquationRGB));
+      hash = hashCombine(hash, std::hash<uint32_t>()(key.blendEquationAlpha));
+      hash = hashCombine(hash, std::hash<uint32_t>()(key.stencilEnable));
+      hash = hashCombine(hash, std::hash<uint32_t>()(key.stencilFunction));
+      hash = hashCombine(hash, std::hash<uint32_t>()(key.stencilReference));
+      hash = hashCombine(hash, std::hash<uint32_t>()(key.stencilCompareMask));
+      hash = hashCombine(hash, std::hash<uint32_t>()(key.stencilWriteMask));
+      hash = hashCombine(hash, std::hash<uint32_t>()(key.stencilFailOp));
+      hash = hashCombine(hash, std::hash<uint32_t>()(key.stencilZFailOp));
+      hash = hashCombine(hash, std::hash<uint32_t>()(key.stencilZPassOp));
+      hash = hashCombine(hash, std::hash<uint32_t>()(key.sampleCount));
+      hash = hashCombine(hash, std::hash<uint32_t>()(key.wideLine));
       return hash;
     }
   };
@@ -517,8 +610,7 @@ private:
     {
       size_t hash = std::hash<uintptr_t>()(
         reinterpret_cast<uintptr_t>(key.renderPass));
-      hash ^= std::hash<uint32_t>()(key.sampleCount) + 0x9e3779b9 +
-        (hash << 6) + (hash >> 2);
+      hash = hashCombine(hash, std::hash<uint32_t>()(key.sampleCount));
       return hash;
     }
   };
@@ -529,6 +621,20 @@ private:
   std::unordered_map<const SoRenderCommand *, size_t> commandToCache;
   std::vector<VulkanCachedTexture> textureCache;
   std::unordered_map<const SoRenderCommand *, size_t> commandToTexture;
+
+  // Reusable scratch packing buffer for uploadGeometry().  Resized but never
+  // reallocated across successive uploads, so the interleaved repack does not
+  // churn the heap on every geometry change.
+  std::vector<float> uploadScratch;
+  // Guards uploadScratch.  Geometry uploads run on the render path; if a
+  // backend instance is ever driven from more than one thread (e.g. a shared
+  // shape rendered by parallel camerase), this prevents two threads packing
+  // into and reading out of the same scratch vector simultaneously.
+  std::mutex uploadScratchMutex;
+
+  // Cached physical-device memory properties for device-local buffer creation.
+  VkPhysicalDeviceMemoryProperties deviceMemoryProperties{};
+  bool deviceMemoryPropertiesValid = false;
 };
 
 #endif // COIN_SOVULKANRENDERBACKEND_H

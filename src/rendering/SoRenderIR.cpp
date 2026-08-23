@@ -376,7 +376,7 @@ SoDrawList::buildSortedOrder(const SbMatrix & viewMatrix)
     if (cmd.pass == SO_RENDERPASS_TRANSPARENT) {
       depthBucket = 0x00FFFFFFu - depthBucket;
     }
-    cmd.sortKey = SoIRComputeSortKey(cmd, passOrder, depthBucket);
+    cmd.sortKey = SoIRComputeSortKey(passOrder, depthBucket);
   }
 
   // Sort the INDEX array by sort key, leaving commands in place
@@ -387,14 +387,12 @@ SoDrawList::buildSortedOrder(const SbMatrix & viewMatrix)
 }
 
 uint64_t
-SoIRComputeSortKey(const SoRenderCommand & cmd,
-                   uint32_t passOrderBits,
+SoIRComputeSortKey(uint32_t passOrderBits,
                    uint32_t depthBucket)
 {
   const uint64_t passbits = (static_cast<uint64_t>(passOrderBits) & 0xffULL) << 56;
   const uint64_t depthbits = (static_cast<uint64_t>(depthBucket) & 0x00ffffffULL) << 32;
-  const uint64_t pipelinebits = cmd.pipelineKey & 0x00000000ffffffffULL;
-  return passbits | depthbits | pipelinebits;
+  return passbits | depthbits;
 }
 
 static const char *
@@ -458,7 +456,7 @@ SoIRDumpFirstN(const SoDrawList & drawlist, int count)
       ambient = lighting->ambient;
     }
     SoDebugError::postInfo("SoDrawList",
-                           "[%d] pass=%s depth=%d topo=%d verts=%u idx=%u colors=%p diffuse=(%.3f, %.3f, %.3f, %.3f) lights=%d ambient=(%.3f, %.3f, %.3f) pipeline=0x%016" PRIx64,
+                           "[%d] pass=%s depth=%d topo=%d verts=%u idx=%u colors=%p diffuse=(%.3f, %.3f, %.3f, %.3f) lights=%d ambient=(%.3f, %.3f, %.3f)",
                            i,
                            renderpass_name(cmd.pass),
                            cmd.state.depth.enabled,
@@ -473,8 +471,7 @@ SoIRDumpFirstN(const SoDrawList & drawlist, int count)
                            numlights,
                            ambient[0],
                            ambient[1],
-                           ambient[2],
-                           static_cast<uint64_t>(cmd.pipelineKey));
+                           ambient[2]);
   }
 }
 

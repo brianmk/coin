@@ -80,6 +80,12 @@ struct SoGeometryDesc {
   uint32_t            vertexStride = 0;   //!< Position/normal stride in bytes.
   uint32_t            texcoordStride = 0; //!< Texture-coordinate stride in bytes.
 
+  //!< Producer guarantees the geometry streams are stable, shape-retained
+  //!< buffers whose pointers change exactly when the content changes.  When
+  //!< set, backends may rely on pointer/count identity alone to detect a
+  //!< change (skipping a per-frame content hash); it must be false for
+  //!< per-frame arena pools that rewrite the same pointer in place.
+  bool                retained = false;
 };
 
 // --- Material flags (SoMaterialData::flags) ---
@@ -425,12 +431,6 @@ enum SoRenderPassType : uint8_t {
 typedef uint32_t SoLightingHandle;
 
 /*!
-  \typedef SoPipelineKey
-  \brief Backend-defined key used to cache compiled pipeline state.
-*/
-typedef uint64_t SoPipelineKey;
-
-/*!
   \enum SoLightType
   \brief Light kinds captured in render-backend lighting setups.
 */
@@ -481,7 +481,6 @@ struct SoRenderCommand {
   SoRenderPassType pass = SO_RENDERPASS_OPAQUE;
   SoLightingHandle lightingHandle = 0;
   SoPixelTextData pixelText;
-  SoPipelineKey    pipelineKey = 0;
   uint64_t         sortKey = 0; //!< Backend-computed key used by sorting.
   void *           userData = nullptr; //!< Opaque, non-owned producer data.
 };

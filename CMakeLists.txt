@@ -327,6 +327,44 @@ if(COIN_BUILD_VULKAN_RENDERER)
     list(APPEND COIN_TARGET_LINK_LIBRARIES ${Vulkan_LIBRARIES})
   endif()
   set(HAVE_VULKAN 1)
+  # Optional: Intel Open Image Denoise for the path tracing denoise pass.
+  # When absent the RTX backend falls back to the in-shader edge-stopping
+  # filter in the present pass.
+  find_package(OpenImageDenoise CONFIG QUIET)
+  if(TARGET OpenImageDenoise)
+    list(APPEND COIN_TARGET_LINK_LIBRARIES OpenImageDenoise)
+    set(HAVE_OIDN 1)
+  endif()
+  # Optional: NVIDIA OptiX (RTX) GPU denoiser.  OptiX is header-only; the
+  # host API dlopen()s libnvoptix.so.1 at runtime, so we only need the
+  # include tree plus the CUDA runtime/driver to own the CUcontext the
+  # denoiser images live on.  When absent the backend falls back to OIDN.
+  find_path(OptiX_INCLUDE
+    NAMES optix.h
+    HINTS "${OptiX_INSTALL_DIR}/include" "/opt/optix/include" /usr/local/include
+    NO_DEFAULT_PATH
+  )
+  if(OptiX_INCLUDE)
+    find_library(CUDA_DRIVER_LIB
+      NAMES cuda
+      HINTS ${CUDA_LIB_DIR} "/opt/cuda/lib64" /usr/local/cuda/lib64
+    )
+    find_library(CUDA_RUNTIME_LIB
+      NAMES cudart cudart_static
+      HINTS ${CUDA_LIB_DIR} "/opt/cuda/lib64" /usr/local/cuda/lib64
+    )
+    # OptiX headers include cuda.h and the CUDA driver/runtime headers, so the
+    # CUDA include tree must be on the path whenever the RTX denoiser is on.
+    find_path(CUDA_INCLUDE_DIR cuda.h
+      HINTS /opt/cuda/include /usr/local/cuda/include ${CUDA_TOOLKIT_INCLUDE}
+    )
+    if(CUDA_DRIVER_LIB AND CUDA_RUNTIME_LIB AND CUDA_INCLUDE_DIR)
+      list(APPEND COIN_TARGET_INCLUDE_DIRECTORIES
+           ${OptiX_INCLUDE} ${CUDA_INCLUDE_DIR})
+      list(APPEND COIN_TARGET_LINK_LIBRARIES ${CUDA_RUNTIME_LIB} ${CUDA_DRIVER_LIB})
+      set(HAVE_RTX_DENOISER 1)
+    endif()
+  endif()
 endif()
 
 set(CMAKE_THREAD_PREFER_PTHREAD 1)
@@ -1033,10 +1071,41 @@ if(COIN_THREADSAFE)
 else()
   set(FEAT_HAVE_SAFETHREAD 0)
 endif()
+if(HAVE_OIDN)
+  set(FEAT_HAVE_OIDN 1)
+else()
+  set(FEAT_HAVE_OIDN 0)
+endif()
+if(HAVE_RTX_DENOISER)
+  set(FEAT_HAVE_RTX_DENOISER 1)
+else()
+  set(FEAT_HAVE_RTX_DENOISER 0)
+endif()
+# AMD FidelityFX (FSR) ray-regeneration denoiser is an on-GPU Vulkan compute
+# denoiser that needs the AMD FFX SDK.  It is not currently wired up for a
+# build (the SDK is an optional drop-in); COIN_BUILD_FSR_DENOISER stays 0 so
+# SoRTXRenderBackend degrades to the OIDN path.
+set(HAVE_FSR_DENOISER 0)
+set(FEAT_HAVE_FSR_DENOISER 0)
+
+if(HAVE_OIDN)
+  set(COIN_BUILD_OIDN_VALUE 1)
+else()
+  set(COIN_BUILD_OIDN_VALUE 0)
+endif()
+if(HAVE_RTX_DENOISER)
+  set(COIN_BUILD_RTX_DENOISER_VALUE 1)
+else()
+  set(COIN_BUILD_RTX_DENOISER_VALUE 0)
+endif()
+set(COIN_BUILD_FSR_DENOISER_VALUE 0)
 
 add_compile_definitions(
   COIN_BUILD_LEGACY_GL_RENDERER=${COIN_BUILD_LEGACY_GL_RENDERER_VALUE}
   COIN_BUILD_VULKAN_RENDERER=${COIN_BUILD_VULKAN_RENDERER_VALUE}
+  COIN_BUILD_OIDN=${COIN_BUILD_OIDN_VALUE}
+  COIN_BUILD_RTX_DENOISER=${COIN_BUILD_RTX_DENOISER_VALUE}
+  COIN_BUILD_FSR_DENOISER=${COIN_BUILD_FSR_DENOISER_VALUE}
 )
 
 # ############################################################################

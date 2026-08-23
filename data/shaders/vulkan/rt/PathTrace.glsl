@@ -121,6 +121,9 @@ layout(set = 0, binding = 13, std430) readonly buffer NeePool {
     NeeTriangle triangles[];
 } neePool;
 
+// First-bounce surface albedo G-buffer for the denoiser (rgb = albedo).
+layout(set = 0, binding = 14, std430) buffer AlbedoBuffer { vec4 albedos[]; };
+
 const int COIN_MAX_LIGHTS = 8;
 
 // Small xorshift-style hash: pixel + seed -> two values in [0,1)^2.
@@ -571,6 +574,7 @@ void main()
             if (bounce == 0) {
                 normals[index] = vec4(-rayDir, 1.0);
                 positions[index] = vec4(0.0, 0.0, 0.0, 1.0e7);
+                albedos[index] = vec4(0.0);
             }
             break;
         }
@@ -582,6 +586,10 @@ void main()
         }
 
         RTMaterial mat = matBuffer.materials[h.materialIndex];
+
+        if (bounce == 0) {
+            albedos[index] = vec4(mat.diffuse.rgb, 1.0);
+        }
 
         // Emissive surfaces terminate the path.  With NEE enabled the
         // emission arrives through the emissive-triangle sampling below, so

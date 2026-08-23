@@ -11,6 +11,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <limits>
 #include <mutex>
 
 #include "vulkan/visual/Fragment.spv.h"
@@ -25,6 +26,7 @@ namespace {
 int s_debugFrame = 0;
 static uint32_t s_debugPushCount = 0;
 int s_dumpCmdCount = 0;
+static int s_lightLog = 0;
 
 // Number of per-draw lighting UBO slots a frame will consume.  A command is
 // recorded once in its own pass, again when the wireframe/point overlay
@@ -43,6 +45,11 @@ countDrawCommands(const SoDrawList & drawlist, const int overlayFillMode)
     ++draws;
     if (overlayFillMode >= 0 &&
         command.pass != SO_RENDERPASS_TRANSPARENT) {
+      ++draws;
+    }
+    // The on-top annotations pass re-records every depth-disabled command
+    // after both passes (recordFrame), consuming a second lighting slot.
+    if (!command.state.depth.enabled) {
       ++draws;
     }
   }
@@ -444,23 +451,87 @@ void
 SoVulkanRenderBackend::setMaxFramesInFlight(const uint32_t count)
 {
   if (count == 0) return;
-  // Growing the ring is safe; shrinking flushes the batches that would
-  // otherwise be orphaned (their resources are then released early, which
-  // is still correct -- it just reduces the safety margin).
+  if (count == this->maxFramesInFlight) return;
+
+  // Resizing while submissions are still in flight would free command
+  // buffers/fences that a pending submission references and orphan the ring
+  // batches below the new size; wait for every pending submission first.
+  if (this->isInitialized()) {
+    this->waitForInFlightFrames();
+  }
+
   const size_t oldSize = this->pendingDestroys.size();
   for (size_t i = count; i < oldSize; ++i) {
     for (auto & fn : this->pendingDestroys[i]) {
       if (fn) fn();
     }
   }
+
   this->maxFramesInFlight = count;
   this->pendingDestroys.resize(count);
+
+  // Re-allocate the per-frame-slot command buffers/fences at the new count.
+  // Only valid while the queue is idle (guaranteed by the wait above).
+  if (this->isInitialized()) {
+    this->releaseFrameResources();
+    if (!this->allocateFrameResources()) {
+      this->emitError(
+        "setMaxFramesInFlight: failed to reallocate frame resources");
+    }
+    // The lighting UBO ring is sized maxFramesInFlight * slotsPerFrame; grow
+    // it to match the new in-flight count or the ring-offset math would run
+    // past the allocation.  swapLightingBuffer() waits the (already idle)
+    // in-flight frames and repoints every descriptor set at the new buffer.
+    if (this->lightingBuffer != VK_NULL_HANDLE) {
+      const VkDeviceSize totalBytes =
+        static_cast<VkDeviceSize>(this->maxFramesInFlight) *
+        this->uboSlotsPerFrame * this->uboSlotStride;
+      VkBuffer newBuffer = VK_NULL_HANDLE;
+      VkDeviceMemory newMemory = VK_NULL_HANDLE;
+      void * newMapped = nullptr;
+      if (!this->createBuffer(totalBytes, VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT,
+                              newBuffer, newMemory, nullptr) ||
+          vkMapMemory(this->device, newMemory, 0, totalBytes, 0, &newMapped) !=
+            VK_SUCCESS) {
+        this->emitError(
+          "setMaxFramesInFlight: failed to resize lighting UBO");
+        if (newBuffer != VK_NULL_HANDLE) {
+          vkDestroyBuffer(this->device, newBuffer, this->allocator);
+        }
+        if (newMemory != VK_NULL_HANDLE) {
+          vkFreeMemory(this->device, newMemory, this->allocator);
+        }
+      }
+      else {
+        this->swapLightingBuffer(newBuffer, newMemory, newMapped,
+                                 this->uboSlotsPerFrame);
+      }
+    }
+  }
 }
 
 const char *
 SoVulkanRenderBackend::getName() const
 {
   return "VulkanRenderBackend";
+}
+
+void
+SoVulkanRenderBackend::setWireframeOverlay(SbBool enabled)
+{
+  this->wireframeOverlay = enabled;
+}
+
+void
+SoVulkanRenderBackend::setPointsOverlay(SbBool enabled)
+{
+  this->pointsOverlay = enabled;
+}
+
+void
+SoVulkanRenderBackend::setEdgeColor(const SbColor4f & color)
+{
+  this->edgeColor = color;
 }
 
 SbBool
@@ -563,14 +634,91 @@ SoVulkanRenderBackend::createCommandPool()
                           &this->commandPool) != VK_SUCCESS) {
     return false;
   }
+  return this->allocateFrameResources();
+}
+
+bool
+SoVulkanRenderBackend::allocateFrameResources()
+{
+  if (this->commandPool == VK_NULL_HANDLE) return false;
+  if (this->maxFramesInFlight == 0) return false;
+
+  this->frameCommandBuffers.assign(this->maxFramesInFlight, VK_NULL_HANDLE);
+  this->frameFences.assign(this->maxFramesInFlight, VK_NULL_HANDLE);
+  this->frameFencePending.assign(this->maxFramesInFlight, 0);
 
   VkCommandBufferAllocateInfo ai {};
   ai.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
   ai.commandPool = this->commandPool;
   ai.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
-  ai.commandBufferCount = 1;
-  return vkAllocateCommandBuffers(this->device, &ai,
-                                  &this->commandBuffer) == VK_SUCCESS;
+  ai.commandBufferCount = this->maxFramesInFlight;
+  if (vkAllocateCommandBuffers(this->device, &ai,
+                               this->frameCommandBuffers.data()) !=
+      VK_SUCCESS) {
+    return false;
+  }
+
+  VkFenceCreateInfo fi {};
+  fi.sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO;
+  for (VkFence & fence : this->frameFences) {
+    if (vkCreateFence(this->device, &fi, this->allocator, &fence) !=
+        VK_SUCCESS) {
+      return false;
+    }
+  }
+  return true;
+}
+
+void
+SoVulkanRenderBackend::releaseFrameResources()
+{
+  // The caller must have made the queue idle (shutdown waits) or have waited
+  // the pending fences (setMaxFramesInFlight) before this runs.
+  for (VkCommandBuffer buffer : this->frameCommandBuffers) {
+    if (buffer != VK_NULL_HANDLE) {
+      vkFreeCommandBuffers(this->device, this->commandPool, 1, &buffer);
+    }
+  }
+  this->frameCommandBuffers.clear();
+  for (VkFence fence : this->frameFences) {
+    if (fence != VK_NULL_HANDLE) {
+      vkDestroyFence(this->device, fence, this->allocator);
+    }
+  }
+  this->frameFences.clear();
+  this->frameFencePending.clear();
+}
+
+VkCommandBuffer
+SoVulkanRenderBackend::currentCommandBuffer()
+{
+  if (this->frameCommandBuffers.empty()) return VK_NULL_HANDLE;
+  return this->frameCommandBuffers[this->uboFrameIndex %
+                                   this->frameCommandBuffers.size()];
+}
+
+void
+SoVulkanRenderBackend::waitForInFlightFrames()
+{
+  // Wait every fence that is actually pending.  Fences are only signaled by
+  // endAndSubmit() on the own-queue path; the external path never submits
+  // through this backend, so its fences are never signaled and must never be
+  // waited on (waiting an unsignaled fence would block forever).  The
+  // current frame's slot is never pending here (beginFrame() cleared it),
+  // so growLightingUbo() cannot deadlock on the frame it is recording.
+  // Called from growLightingUbo() and setMaxFramesInFlight(), both of which
+  // must rewrite/teardown resources bound in submitted command buffers, so
+  // this is a deliberately rare, synchronized event.
+  std::vector<VkFence> pending;
+  for (size_t i = 0; i < this->frameFences.size(); ++i) {
+    if (i < this->frameFencePending.size() && this->frameFencePending[i] &&
+        this->frameFences[i] != VK_NULL_HANDLE) {
+      pending.push_back(this->frameFences[i]);
+    }
+  }
+  if (pending.empty()) return;
+  vkWaitForFences(this->device, static_cast<uint32_t>(pending.size()),
+                  pending.data(), VK_TRUE, UINT64_MAX);
 }
 
 bool
@@ -732,28 +880,45 @@ SoVulkanRenderBackend::growLightingUbo(const uint32_t minSlots)
     return false;
   }
 
-  VkBuffer oldBuffer = this->lightingBuffer;
-  VkDeviceMemory oldMemory = this->lightingMemory;
+  return this->swapLightingBuffer(newBuffer, newMemory, newMapped, slots);
+}
+
+bool
+SoVulkanRenderBackend::swapLightingBuffer(VkBuffer newBuffer,
+                                          VkDeviceMemory newMemory,
+                                          void * newMapped,
+                                          const uint32_t newSlotsPerFrame)
+{
+  const VkBuffer oldBuffer = this->lightingBuffer;
+  const VkDeviceMemory oldMemory = this->lightingMemory;
   void * oldMapped = this->lightingMapped;
   this->lightingBuffer = newBuffer;
   this->lightingMemory = newMemory;
   this->lightingMapped = newMapped;
-  this->uboSlotsPerFrame = slots;
+  this->uboSlotsPerFrame = newSlotsPerFrame;
 
   // The old buffer may still be referenced by a pending frame; destroy it
   // only after the batch ring wraps back around (flushPendingDestroys()).
-  VkDevice device = this->device;
+  const VkDevice device = this->device;
   const VkAllocationCallbacks * allocator = this->allocator;
   this->deferDestroy([device, allocator, oldBuffer, oldMemory, oldMapped]() {
-    vkUnmapMemory(device, oldMemory);
-    vkDestroyBuffer(device, oldBuffer, allocator);
-    vkFreeMemory(device, oldMemory, allocator);
+    if (oldMapped != nullptr) vkUnmapMemory(device, oldMemory);
+    if (oldBuffer != VK_NULL_HANDLE) {
+      vkDestroyBuffer(device, oldBuffer, allocator);
+    }
+    if (oldMemory != VK_NULL_HANDLE) {
+      vkFreeMemory(device, oldMemory, allocator);
+    }
   });
 
   // Every descriptor set captured the old buffer handle at allocation time
-  // (binding 0 is the lighting UBO).  Rewrite binding 0 across all live
-  // sets so binds after the swap address the new buffer instead of one that
-  // is about to be destroyed.
+  // (binding 0 is the lighting UBO).  Rewriting the binding of a set that is
+  // bound in an already-submitted command buffer is a spec violation, so
+  // first wait for every in-flight submission to complete.  This is a rare
+  // event (ring growth or a maxFramesInFlight change), so the stall is
+  // acceptable; the current frame's buffer has not been submitted yet, so
+  // updating sets bound only in the recording buffer is safe.
+  this->waitForInFlightFrames();
   std::vector<VkWriteDescriptorSet> writes;
   std::vector<VkDescriptorBufferInfo> bufferInfos;
   const auto collect = [&](const VkDescriptorSet set) {
@@ -800,10 +965,24 @@ SoVulkanRenderBackend::prepareLightingSlots(const uint32_t neededDraws)
 void
 SoVulkanRenderBackend::beginFrame()
 {
-  // One frame boundary: the batch recorded maxFramesInFlight frames ago is
-  // now certainly unused by any submission (the caller may keep at most
-  // maxFramesInFlight frames in flight).
+  // One frame boundary: advance the ring cursor, then, on the own-queue
+  // path, wait the slot's fence.  The slot we are about to record into was
+  // last used maxFramesInFlight frames ago; its fence covers that
+  // submission, so the slot's UBO ring half, command buffer, and deferred
+  // resources are all safe to reuse.  The external path never signals these
+  // fences (the caller owns submission), so frameFencePending stays false
+  // there and no wait occurs -- external correctness rests on the caller
+  // honoring setMaxFramesInFlight().
   this->uboFrameIndex++;
+  const uint32_t slot = this->uboFrameIndex % this->maxFramesInFlight;
+  if (slot < this->frameFencePending.size() &&
+      this->frameFencePending[slot] &&
+      this->frameFences[slot] != VK_NULL_HANDLE) {
+    vkWaitForFences(this->device, 1, &this->frameFences[slot], VK_TRUE,
+                    UINT64_MAX);
+    vkResetFences(this->device, 1, &this->frameFences[slot]);
+    this->frameFencePending[slot] = 0;
+  }
   this->flushPendingDestroys();
 }
 
@@ -841,7 +1020,8 @@ void
 SoVulkanRenderBackend::deferDestroyCacheEntry(VulkanCachedCommand & entry)
 {
   if (entry.vertexBuffer == VK_NULL_HANDLE &&
-      entry.indexBuffer == VK_NULL_HANDLE) {
+      entry.indexBuffer == VK_NULL_HANDLE &&
+      entry.wideLineBuffers.empty()) {
     entry = VulkanCachedCommand();
     return;
   }
@@ -851,9 +1031,19 @@ SoVulkanRenderBackend::deferDestroyCacheEntry(VulkanCachedCommand & entry)
   const VkDeviceMemory vertexMemory = entry.vertexMemory;
   const VkBuffer indexBuffer = entry.indexBuffer;
   const VkDeviceMemory indexMemory = entry.indexMemory;
+  std::vector<VulkanCachedCommand::VulkanWideLineBuffer> wideLine =
+    std::move(entry.wideLineBuffers);
   this->deferDestroy(
     [device, allocator, vertexBuffer, vertexMemory, indexBuffer,
-     indexMemory]() {
+     indexMemory, wideLine]() {
+      for (const VulkanCachedCommand::VulkanWideLineBuffer & slot : wideLine) {
+        if (slot.buffer != VK_NULL_HANDLE) {
+          vkDestroyBuffer(device, slot.buffer, allocator);
+        }
+        if (slot.memory != VK_NULL_HANDLE) {
+          vkFreeMemory(device, slot.memory, allocator);
+        }
+      }
       if (indexBuffer != VK_NULL_HANDLE) {
         vkDestroyBuffer(device, indexBuffer, allocator);
       }
@@ -1451,6 +1641,36 @@ SoVulkanRenderBackend::createRenderPass(const SoVulkanRenderTarget & target,
          VK_SUCCESS;
 }
 
+SoVulkanRenderBackend::RenderPassIdentity
+SoVulkanRenderBackend::renderPassIdentity(const SoVulkanRenderTarget & target) const
+{
+  RenderPassIdentity identity;
+  identity.colorFormat = target.colorFormat;
+  identity.sampleCount = target.sampleCount;
+  identity.colorLayout = target.colorLayout;
+  // createRenderPass() only adds a depth attachment when a depth view is
+  // present, so a configured-but-viewless depth format must not be part of
+  // the identity.
+  identity.depthFormat =
+    (target.depthImageView != VK_NULL_HANDLE) ? target.depthFormat
+                                              : VK_FORMAT_UNDEFINED;
+  identity.depthLayout = target.depthLayout;
+  return identity;
+}
+
+VkRenderPass
+SoVulkanRenderBackend::getOrCreateRenderPass(const SoVulkanRenderTarget & target)
+{
+  const RenderPassIdentity identity = this->renderPassIdentity(target);
+  const auto found = this->renderPassCache.find(identity);
+  if (found != this->renderPassCache.end()) return found->second;
+
+  VkRenderPass pass = VK_NULL_HANDLE;
+  if (!this->createRenderPass(target, pass)) return VK_NULL_HANDLE;
+  this->renderPassCache.emplace(identity, pass);
+  return pass;
+}
+
 bool
 SoVulkanRenderBackend::getOrCreatePipeline(const SoRenderCommand & command,
                                            const SoVulkanRenderTarget & target,
@@ -1630,8 +1850,16 @@ SoVulkanRenderBackend::getOrCreatePipeline(const SoRenderCommand & command,
   // The overlay fill mode passed in by recordFrame() uses SoDrawStyleElement
   // style values, and the retained IR stores the same encoding (see
   // SoRenderIR::fillRenderStateFromState): FILLED=0, LINES=1, POINTS=2.
+  //
+  // Wide lines expand each segment into FILLED quads (drawn as a triangle
+  // list), so the polygon mode must be FILL regardless of the underlying
+  // draw style.  Using the inherited LINES mode here rasterizes the quad's
+  // edges as hairline wireframe instead of the solid line, which makes the
+  // expanded quads (a few pixels wide) effectively invisible -- the
+  // "wide lines don't render" symptom.
   rasterization.polygonMode =
-    fillMode == SoDrawStyleElement::LINES ? VK_POLYGON_MODE_LINE
+    key.wideLine ? VK_POLYGON_MODE_FILL
+    : fillMode == SoDrawStyleElement::LINES ? VK_POLYGON_MODE_LINE
     : fillMode == SoDrawStyleElement::POINTS ? VK_POLYGON_MODE_POINT
     : VK_POLYGON_MODE_FILL;
   // The vertex shader flips Y to match Coin's bottom-left origin; that
@@ -1850,6 +2078,165 @@ SoVulkanRenderBackend::createBuffer(VkDeviceSize size,
 }
 
 void
+SoVulkanRenderBackend::ensureDeviceMemoryProperties()
+{
+  if (!this->deviceMemoryPropertiesValid) {
+    vkGetPhysicalDeviceMemoryProperties(this->physicalDevice,
+                                        &this->deviceMemoryProperties);
+    this->deviceMemoryPropertiesValid = true;
+  }
+}
+
+bool
+SoVulkanRenderBackend::createBufferDeviceLocal(VkDeviceSize size,
+                                               VkBufferUsageFlags usage,
+                                               VkBuffer & buffer,
+                                               VkDeviceMemory & memory,
+                                               const void * data)
+{
+  // Retained static geometry is read by the GPU every frame, so it belongs in
+  // device-local VRAM rather than host-visible memory.  `data` is copied from
+  // a transient host-visible staging buffer with a one-shot transfer that is
+  // fenced before this function returns.  The GPU then reads the mesh from
+  // device memory instead of walking the PCIe/system bus every frame.
+  //
+  // This is only invoked from the geometry-change path (not steady-state), so
+  // the synchronous transfer is acceptable.  On any failure the buffer/memory
+  // are left null and the caller falls back to the host-visible createBuffer().
+  VkBufferCreateInfo ci {};
+  ci.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
+  ci.size = size;
+  ci.usage = usage | VK_BUFFER_USAGE_TRANSFER_DST_BIT;
+  ci.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+  if (vkCreateBuffer(this->device, &ci, this->allocator, &buffer) != VK_SUCCESS) {
+    return false;
+  }
+
+  VkMemoryRequirements requirements;
+  vkGetBufferMemoryRequirements(this->device, buffer, &requirements);
+
+  this->ensureDeviceMemoryProperties();
+  uint32_t memoryTypeIndex = UINT32_MAX;
+  for (uint32_t i = 0; i < this->deviceMemoryProperties.memoryTypeCount; ++i) {
+    if ((requirements.memoryTypeBits & (1u << i)) &&
+        (this->deviceMemoryProperties.memoryTypes[i].propertyFlags &
+         VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT)) {
+      memoryTypeIndex = i;
+      break;
+    }
+  }
+  if (memoryTypeIndex == UINT32_MAX) {
+    vkDestroyBuffer(this->device, buffer, this->allocator);
+    buffer = VK_NULL_HANDLE;
+    return false;
+  }
+
+  VkMemoryAllocateInfo ai {};
+  ai.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
+  ai.allocationSize = requirements.size;
+  ai.memoryTypeIndex = memoryTypeIndex;
+  if (vkAllocateMemory(this->device, &ai, this->allocator, &memory) !=
+      VK_SUCCESS) {
+    vkDestroyBuffer(this->device, buffer, this->allocator);
+    buffer = VK_NULL_HANDLE;
+    return false;
+  }
+  vkBindBufferMemory(this->device, buffer, memory, 0);
+
+  if (!data) return true;
+
+  VkBuffer staging = VK_NULL_HANDLE;
+  VkDeviceMemory stagingMemory = VK_NULL_HANDLE;
+  if (!this->createBuffer(size, VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
+                          staging, stagingMemory, data)) {
+    vkDestroyBuffer(this->device, buffer, this->allocator);
+    vkFreeMemory(this->device, memory, this->allocator);
+    buffer = VK_NULL_HANDLE;
+    memory = VK_NULL_HANDLE;
+    return false;
+  }
+
+  // One-shot transfer command buffer.  The per-frame buffers are not yet begun
+  // at this point (updateGeometryCache runs before beginCommandBuffer), so we
+  // allocate a transient buffer from the shared pool and fence-wait it.
+  VkCommandBufferAllocateInfo allocInfo {};
+  allocInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
+  allocInfo.commandPool = this->commandPool;
+  allocInfo.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+  allocInfo.commandBufferCount = 1;
+  VkCommandBuffer transfer = VK_NULL_HANDLE;
+  bool ok = vkAllocateCommandBuffers(this->device, &allocInfo, &transfer) ==
+    VK_SUCCESS;
+
+  if (ok) {
+    VkCommandBufferBeginInfo bi {};
+    bi.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
+    bi.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+    ok = vkBeginCommandBuffer(transfer, &bi) == VK_SUCCESS;
+  }
+  if (ok) {
+    VkBufferCopy copy {};
+    copy.size = size;
+    vkCmdCopyBuffer(transfer, staging, buffer, 1, &copy);
+    // Make the device-local writes visible to a later vertex-input read.  The
+    // transfer is fenced so the copy has executed, but fence completion alone
+    // does not establish a memory dependency for the buffer being read as
+    // vertex/index attributes in a subsequent submit.  This barrier transitions
+    // it from TRANSFER_WRITE to VERTEX_ATTRIBUTE/INDEX read.
+    VkBufferMemoryBarrier bufBarrier {};
+    bufBarrier.sType = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER;
+    bufBarrier.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+    bufBarrier.dstAccessMask = VK_ACCESS_VERTEX_ATTRIBUTE_READ_BIT |
+                               VK_ACCESS_INDEX_READ_BIT;
+    bufBarrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    bufBarrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    bufBarrier.buffer = buffer;
+    bufBarrier.offset = 0;
+    bufBarrier.size = size;
+    vkCmdPipelineBarrier(transfer,
+                         VK_PIPELINE_STAGE_TRANSFER_BIT,
+                         VK_PIPELINE_STAGE_VERTEX_INPUT_BIT,
+                         0, 0, nullptr, 1, &bufBarrier, 0, nullptr);
+    ok = vkEndCommandBuffer(transfer) == VK_SUCCESS;
+  }
+
+  VkFence fence = VK_NULL_HANDLE;
+  if (ok) {
+    VkFenceCreateInfo fci {};
+    fci.sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO;
+    ok = vkCreateFence(this->device, &fci, this->allocator, &fence) == VK_SUCCESS;
+  }
+  if (ok) {
+    VkSubmitInfo submit {};
+    submit.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
+    submit.commandBufferCount = 1;
+    submit.pCommandBuffers = &transfer;
+    ok = vkQueueSubmit(this->queue, 1, &submit, fence) == VK_SUCCESS;
+  }
+  if (ok) {
+    ok = vkWaitForFences(this->device, 1, &fence, VK_TRUE, UINT64_MAX) ==
+      VK_SUCCESS;
+  }
+  if (fence != VK_NULL_HANDLE) {
+    vkDestroyFence(this->device, fence, this->allocator);
+  }
+  if (transfer != VK_NULL_HANDLE) {
+    vkFreeCommandBuffers(this->device, this->commandPool, 1, &transfer);
+  }
+  vkDestroyBuffer(this->device, staging, this->allocator);
+  vkFreeMemory(this->device, stagingMemory, this->allocator);
+
+  if (!ok) {
+    vkDestroyBuffer(this->device, buffer, this->allocator);
+    vkFreeMemory(this->device, memory, this->allocator);
+    buffer = VK_NULL_HANDLE;
+    memory = VK_NULL_HANDLE;
+    return false;
+  }
+  return true;
+}
+
+void
 SoVulkanRenderBackend::uploadGeometry(VulkanCachedCommand & entry,
                                       const SoRenderCommand & command)
 {
@@ -1857,7 +2244,13 @@ SoVulkanRenderBackend::uploadGeometry(VulkanCachedCommand & entry,
   const uint32_t vertexCount = geometry.vertexCount;
 
   // Pack interleaved vertices with deterministic defaults for absent streams.
-  std::vector<float> vertices(static_cast<size_t>(vertexCount) * 12);
+  // The buffer is a reusable member scratch vector: resize() preserves
+  // capacity, so the heap is only touched on the first (largest) upload that
+  // reaches this size rather than on every geometry change.  The lock spans the
+  // packing plus the synchronous uploads below, which read `vertices`.
+  std::lock_guard<std::mutex> scratchLock(this->uploadScratchMutex);
+  this->uploadScratch.resize(static_cast<size_t>(vertexCount) * 12);
+  float * const vertices = this->uploadScratch.data();
   const uint32_t posStride = geometry.vertexStride
     ? geometry.vertexStride : sizeof(float) * 3;
   const uint32_t posStrideFloats = posStride / sizeof(float);
@@ -1868,7 +2261,7 @@ SoVulkanRenderBackend::uploadGeometry(VulkanCachedCommand & entry,
   const uint32_t texcoordStrideFloats = texcoordStride / sizeof(float);
 
   for (uint32_t i = 0; i < vertexCount; ++i) {
-    float * out = vertices.data() + static_cast<size_t>(i) * 12;
+    float * out = vertices + static_cast<size_t>(i) * 12;
 
     const float * pos = geometry.positions + static_cast<size_t>(i) * posStrideFloats;
     out[0] = pos[0];
@@ -1914,9 +2307,26 @@ SoVulkanRenderBackend::uploadGeometry(VulkanCachedCommand & entry,
 
   const VkDeviceSize vertexBytes =
     static_cast<VkDeviceSize>(vertexCount) * VULKAN_VERTEX_STRIDE;
-  if (!this->createBuffer(vertexBytes, VK_BUFFER_USAGE_VERTEX_BUFFER_BIT,
-                          entry.vertexBuffer, entry.vertexMemory,
-                          vertices.data())) {
+  // Cached static geometry (retained) lives in device-local VRAM so the GPU
+  // does not read large meshes across the PCIe/system bus every frame.  The
+  // upload is staged through a transient one-shot transfer; if device-local is
+  // unavailable or the copy fails, fall back to the host-visible path so
+  // rendering still works.  Non-retained geometry (per-frame overlays,
+  // highlights, text, images -- which rewrite every frame) stays host-visible
+  // so its frequent re-uploads never take the synchronous transfer stall.
+  bool vertexCreated = false;
+  if (geometry.retained) {
+    vertexCreated = this->createBufferDeviceLocal(vertexBytes,
+                                                  VK_BUFFER_USAGE_VERTEX_BUFFER_BIT,
+                                                  entry.vertexBuffer,
+                                                  entry.vertexMemory, vertices);
+  }
+  if (!vertexCreated) {
+    vertexCreated = this->createBuffer(vertexBytes, VK_BUFFER_USAGE_VERTEX_BUFFER_BIT,
+                                       entry.vertexBuffer, entry.vertexMemory,
+                                       vertices);
+  }
+  if (!vertexCreated) {
     this->emitError("uploadGeometry: failed to create vertex buffer");
     return;
   }
@@ -1924,9 +2334,20 @@ SoVulkanRenderBackend::uploadGeometry(VulkanCachedCommand & entry,
   if (geometry.indexCount && geometry.indices) {
     const VkDeviceSize indexBytes =
       static_cast<VkDeviceSize>(geometry.indexCount) * sizeof(uint32_t);
-    if (!this->createBuffer(indexBytes, VK_BUFFER_USAGE_INDEX_BUFFER_BIT,
-                            entry.indexBuffer, entry.indexMemory,
-                            geometry.indices)) {
+    bool indexCreated = false;
+    if (geometry.retained) {
+      indexCreated = this->createBufferDeviceLocal(indexBytes,
+                                                    VK_BUFFER_USAGE_INDEX_BUFFER_BIT,
+                                                    entry.indexBuffer,
+                                                    entry.indexMemory,
+                                                    geometry.indices);
+    }
+    if (!indexCreated) {
+      indexCreated = this->createBuffer(indexBytes, VK_BUFFER_USAGE_INDEX_BUFFER_BIT,
+                                        entry.indexBuffer, entry.indexMemory,
+                                        geometry.indices);
+    }
+    if (!indexCreated) {
       this->emitError("uploadGeometry: failed to create index buffer");
       return;
     }
@@ -1964,14 +2385,15 @@ SoVulkanRenderBackend::destroyCacheEntry(VulkanCachedCommand & entry)
     vkFreeMemory(this->device, entry.vertexMemory, this->allocator);
     entry.vertexMemory = VK_NULL_HANDLE;
   }
-  if (entry.wideLineBuffer) {
-    vkDestroyBuffer(this->device, entry.wideLineBuffer, this->allocator);
-    entry.wideLineBuffer = VK_NULL_HANDLE;
+  for (const VulkanCachedCommand::VulkanWideLineBuffer & slot : entry.wideLineBuffers) {
+    if (slot.buffer) {
+      vkDestroyBuffer(this->device, slot.buffer, this->allocator);
+    }
+    if (slot.memory) {
+      vkFreeMemory(this->device, slot.memory, this->allocator);
+    }
   }
-  if (entry.wideLineMemory) {
-    vkFreeMemory(this->device, entry.wideLineMemory, this->allocator);
-    entry.wideLineMemory = VK_NULL_HANDLE;
-  }
+  entry.wideLineBuffers.clear();
   entry = VulkanCachedCommand();
 }
 
@@ -1992,6 +2414,27 @@ SoVulkanRenderBackend::updateGeometryCache(const SoDrawList & drawlist,
 {
   // The frame boundary was handled by beginFrame() at the entry point.
 
+  // Release uploads left over from a frame that aborted between the cache
+  // update and the flush/finalize step (e.g. a failed framebuffer create).
+  // Their copies were never recorded, but deferring the staging destruction
+  // is uniformly safe and keeps a single cleanup path.
+  for (const PendingTextureUpload & upload : this->pendingUploads) {
+    if (upload.staging == VK_NULL_HANDLE) continue;
+    const VkDevice device = this->device;
+    const VkAllocationCallbacks * allocator = this->allocator;
+    const VkBuffer staging = upload.staging;
+    const VkDeviceMemory stagingMemory = upload.stagingMemory;
+    this->deferDestroy([device, allocator, staging, stagingMemory]() {
+      if (staging != VK_NULL_HANDLE) {
+        vkDestroyBuffer(device, staging, allocator);
+      }
+      if (stagingMemory != VK_NULL_HANDLE) {
+        vkFreeMemory(device, stagingMemory, allocator);
+      }
+    });
+  }
+  this->pendingUploads.clear();
+
   const uint32_t generation = drawlist.getGeneration();
 
   // Make sure the descriptor pool can hold one set per distinct texture in
@@ -2004,7 +2447,7 @@ SoVulkanRenderBackend::updateGeometryCache(const SoDrawList & drawlist,
     // failures fall back to the white texture per command.
   }
 
-  std::vector<PendingTextureUpload> pendingUploads;
+  this->pendingUploads.clear();
 
   for (int i = 0; i < drawlist.getNumCommands(); ++i) {
     const SoRenderCommand & command = drawlist.getCommand(i);
@@ -2027,7 +2470,17 @@ SoVulkanRenderBackend::updateGeometryCache(const SoDrawList & drawlist,
     // it is only a visit stamp for cache eviction below -- never a signal
     // to re-upload.  Re-uploads are driven purely by the producer-owned
     // content keys.
-    const bool geometryMatches = entry.vertexBuffer != VK_NULL_HANDLE &&
+    //
+    // Identity is the primary change signal.  For retained geometry (the
+    // shape-owned retained buffers produced by SoShape::IRRender) the pointers
+    // are stable across frames for an unchanged shape and change whenever the
+    // shape re-tessellates, so a full identity match means the content is
+    // unchanged and the content hash (recomputed on upload) is authoritative --
+    // no need to re-hash every command every frame.  For non-retained geometry
+    // (per-frame arena pools such as SoText2/SoImage, which rewrite the same
+    // pointer in place) the content hash is still verified each frame to catch
+    // in-place edits.
+    const bool identityMatches = entry.vertexBuffer != VK_NULL_HANDLE &&
       entry.posKey == geometry.positions &&
       entry.normalKey == geometry.normals &&
       entry.colorKey == geometry.colors &&
@@ -2037,8 +2490,10 @@ SoVulkanRenderBackend::updateGeometryCache(const SoDrawList & drawlist,
       entry.indexCount == geometry.indexCount &&
       entry.normalCount == geometry.normalCount &&
       entry.vertexStride == vertexStride &&
-      entry.texcoordStride == geometry.texcoordStride &&
-      entry.contentHash == hashGeometryContent(geometry);
+      entry.texcoordStride == geometry.texcoordStride;
+    const bool geometryMatches = identityMatches &&
+      (geometry.retained ||
+       entry.contentHash == hashGeometryContent(geometry));
     if (!geometryMatches) {
       this->deferDestroyCacheEntry(entry);
       this->uploadGeometry(entry, command);
@@ -2049,6 +2504,9 @@ SoVulkanRenderBackend::updateGeometryCache(const SoDrawList & drawlist,
     const SoTextureData & texture = command.material.texture;
     if (texture.pixels && texture.width > 0 && texture.height > 0) {
       VulkanCachedTexture & texEntry = this->getOrCreateTexture(&command);
+      // Texture pixels come from per-frame action storage (arena), which may
+      // rewrite the same pointer in place, so the content hash is always
+      // re-verified -- pointer identity alone is not sound for textures.
       const bool textureMatches = texEntry.image != VK_NULL_HANDLE &&
         texEntry.pixelsKey == texture.pixels &&
         texEntry.width == texture.width &&
@@ -2062,25 +2520,32 @@ SoVulkanRenderBackend::updateGeometryCache(const SoDrawList & drawlist,
         texEntry.contentHash == hashTextureContent(texture);
       if (!textureMatches) {
         this->deferDestroyTextureEntry(texEntry);
-        PendingTextureUpload upload;
-        upload.index = this->commandToTexture[&command];
-        upload.texture = &texture;
-        if (this->prepareTextureUpload(texEntry, texture, upload.staging,
-                                       upload.stagingMemory)) {
-          pendingUploads.push_back(upload);
+        // A command that appears twice in one draw list would otherwise
+        // prepare two uploads for the same entry (leaking the first image);
+        // the first pending upload for this index wins.
+        bool alreadyPending = false;
+        for (const PendingTextureUpload & prior : this->pendingUploads) {
+          if (prior.index == this->commandToTexture[&command]) {
+            alreadyPending = true;
+            break;
+          }
         }
-        // On failure the entry was reset by prepareTextureUpload(); leaving
-        // the content keys unstamped makes the next frame retry the upload.
+        if (!alreadyPending) {
+          PendingTextureUpload upload;
+          upload.command = &command;
+          upload.index = this->commandToTexture[&command];
+          upload.texture = &texture;
+          if (this->prepareTextureUpload(texEntry, texture, upload.staging,
+                                         upload.stagingMemory)) {
+            this->pendingUploads.push_back(upload);
+          }
+          // On failure the entry was reset by prepareTextureUpload();
+          // leaving the content keys unstamped makes the next frame retry.
+        }
       }
       texEntry.commandKey = &command;
       texEntry.cacheGeneration = generation;
     }
-  }
-
-  // Submit every pending texture copy in one queue submission; the flush
-  // also stamps the content identity of each finalized entry.
-  if (!this->flushTextureUploads(pendingUploads)) {
-    this->emitError("updateGeometryCache: texture upload failed");
   }
 
   // Evict entries that were not visited this frame: their command has
@@ -2126,6 +2591,20 @@ SoVulkanRenderBackend::updateGeometryCache(const SoDrawList & drawlist,
                  this->deferDestroyTextureEntry(entry);
                },
                this->commandToTexture);
+
+    // Eviction compacts the texture cache and reindexes it, so the upload
+    // indices captured above are stale.  Re-resolve each pending upload
+    // through its command pointer; entries that were just prepared carry the
+    // current generation and survive the sweep.
+    for (PendingTextureUpload & upload : this->pendingUploads) {
+      const auto it = this->commandToTexture.find(upload.command);
+      if (it != this->commandToTexture.end()) {
+        upload.index = it->second;
+      }
+      else {
+        upload.index = std::numeric_limits<size_t>::max();
+      }
+    }
   }
 }
 
@@ -2366,7 +2845,10 @@ SoVulkanRenderBackend::finalizeTexture(VulkanCachedTexture & entry,
       !this->allocateTextureDescriptorSet(entry.view, entry.sampler,
                                           entry.descriptorSet)) {
     this->emitError("finalizeTexture: view/sampler/descriptor creation failed");
-    this->destroyTextureEntry(entry);
+    // Leave the entry half-initialized for the caller to dispose of.  On the
+    // own-queue path the image is already referenced by recorded copies in
+    // an unsubmitted command buffer, so the caller must defer the
+    // destruction rather than destroy synchronously.
     return false;
   }
   entry.descriptorPool = this->descriptorPool;
@@ -2374,76 +2856,32 @@ SoVulkanRenderBackend::finalizeTexture(VulkanCachedTexture & entry,
 }
 
 bool
-SoVulkanRenderBackend::flushTextureUploads(
-  std::vector<PendingTextureUpload> & pending)
+SoVulkanRenderBackend::recordPendingTextureUploads()
 {
-  if (pending.empty()) return true;
-
-  // All pending copies go into one transient command buffer: one queue
-  // submit (and one wait) per frame instead of per texture.
-  VkCommandBufferAllocateInfo allocInfo {};
-  allocInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
-  allocInfo.commandPool = this->commandPool;
-  allocInfo.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
-  allocInfo.commandBufferCount = 1;
-  VkCommandBuffer uploadBuffer = VK_NULL_HANDLE;
-  if (vkAllocateCommandBuffers(this->device, &allocInfo, &uploadBuffer) !=
-      VK_SUCCESS) {
-    this->emitError(
-      "flushTextureUploads: failed to allocate upload command buffer");
-    goto fail;
-  }
-
-  {
-    VkCommandBufferBeginInfo bi {};
-    bi.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
-    bi.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
-    if (vkBeginCommandBuffer(uploadBuffer, &bi) != VK_SUCCESS) {
-      this->emitError("flushTextureUploads: failed to begin upload buffer");
-      vkFreeCommandBuffers(this->device, this->commandPool, 1, &uploadBuffer);
-      goto fail;
-    }
-  }
-
-  for (const PendingTextureUpload & upload : pending) {
-    this->recordTextureUpload(uploadBuffer, this->textureCache[upload.index],
+  // Own-queue path: record the copies into the frame command buffer, ahead
+  // of the render pass that samples them.  No separate submit is needed, so
+  // no extra queue drain per frame.
+  for (const PendingTextureUpload & upload : this->pendingUploads) {
+    if (upload.index >= this->textureCache.size()) continue;
+    this->recordTextureUpload(this->currentCommandBuffer(),
+                              this->textureCache[upload.index],
                               *upload.texture, upload.staging);
   }
+  return true;
+}
 
-  if (vkEndCommandBuffer(uploadBuffer) != VK_SUCCESS) {
-    this->emitError("flushTextureUploads: failed to end upload buffer");
-    vkFreeCommandBuffers(this->device, this->commandPool, 1, &uploadBuffer);
-    goto fail;
-  }
-
-  {
-    VkSubmitInfo submit {};
-    submit.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
-    submit.commandBufferCount = 1;
-    submit.pCommandBuffers = &uploadBuffer;
-    const VkResult submitResult =
-      vkQueueSubmit(this->queue, 1, &submit, VK_NULL_HANDLE);
-    // The wait also retires any in-flight frames submitted by an external
-    // caller, which keeps ring-buffer reuse in renderExternal() safe even
-    // when the caller pipelines more frames than maxFramesInFlight.
-    vkQueueWaitIdle(this->queue);
-    vkFreeCommandBuffers(this->device, this->commandPool, 1, &uploadBuffer);
-    if (submitResult != VK_SUCCESS) {
-      this->emitError("flushTextureUploads: vkQueueSubmit failed");
-      goto fail;
-    }
-  }
-
-  // Staging buffers are no longer referenced by the completed submission.
-  for (const PendingTextureUpload & upload : pending) {
-    vkDestroyBuffer(this->device, upload.staging, this->allocator);
-    vkFreeMemory(this->device, upload.stagingMemory, this->allocator);
-  }
-
-  // Host-side completion (views/samplers/descriptor sets) and content
-  // identity stamping.  A failure resets the entry and leaves the content
-  // keys unstamped, so the next frame retries the upload.
-  for (const PendingTextureUpload & upload : pending) {
+void
+SoVulkanRenderBackend::finalizePendingTextureUploads()
+{
+  // Own-queue path: create the views/samplers/descriptor sets (bound by the
+  // draws recorded below), stamp the content identity, and defer the staging
+  // buffers to the frame's deferred-destruction batch.  Staging buffers are
+  // referenced by the just-recorded submission, so they are released only
+  // after the slot fence signals.
+  VkDevice device = this->device;
+  const VkAllocationCallbacks * allocator = this->allocator;
+  for (const PendingTextureUpload & upload : this->pendingUploads) {
+    if (upload.index >= this->textureCache.size()) continue;
     VulkanCachedTexture & texEntry = this->textureCache[upload.index];
     if (this->finalizeTexture(texEntry, *upload.texture)) {
       const SoTextureData & texture = *upload.texture;
@@ -2458,20 +2896,142 @@ SoVulkanRenderBackend::flushTextureUploads(
       texEntry.model = texture.model;
       texEntry.contentHash = hashTextureContent(texture);
     }
+    else {
+      // The entry's image is referenced by the recorded copies, so the
+      // half-initialized resources must be destroyed through the deferred
+      // ring, not synchronously.  Keys stay unstamped so the next frame
+      // retries the upload.
+      this->deferDestroyTextureEntry(texEntry);
+    }
+    if (upload.staging != VK_NULL_HANDLE) {
+      const VkBuffer staging = upload.staging;
+      const VkDeviceMemory stagingMemory = upload.stagingMemory;
+      this->deferDestroy([device, allocator, staging, stagingMemory]() {
+        if (staging != VK_NULL_HANDLE) {
+          vkDestroyBuffer(device, staging, allocator);
+        }
+        if (stagingMemory != VK_NULL_HANDLE) {
+          vkFreeMemory(device, stagingMemory, allocator);
+        }
+      });
+    }
   }
-  pending.clear();
-  return true;
+  this->pendingUploads.clear();
+}
 
-fail:
-  for (const PendingTextureUpload & upload : pending) {
+bool
+SoVulkanRenderBackend::flushPendingTextureUploadsExternal()
+{
+  if (this->pendingUploads.empty()) return true;
+
+  // External path: the caller owns the frame command buffer and is already
+  // inside a render pass, so the copies cannot be merged into it.  Record
+  // them into one transient command buffer, submit, and wait.  The wait also
+  // retires any in-flight frames submitted by the external caller, which
+  // keeps ring-buffer reuse in renderExternal() safe even when the caller
+  // pipelines more frames than maxFramesInFlight.
+  VkCommandBufferAllocateInfo allocInfo {};
+  allocInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
+  allocInfo.commandPool = this->commandPool;
+  allocInfo.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+  allocInfo.commandBufferCount = 1;
+  VkCommandBuffer uploadBuffer = VK_NULL_HANDLE;
+  if (vkAllocateCommandBuffers(this->device, &allocInfo, &uploadBuffer) !=
+      VK_SUCCESS) {
+    this->emitError(
+      "flushPendingTextureUploadsExternal: failed to allocate upload "
+      "command buffer");
+    goto fail;
+  }
+
+  {
+    VkCommandBufferBeginInfo bi {};
+    bi.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
+    bi.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+    if (vkBeginCommandBuffer(uploadBuffer, &bi) != VK_SUCCESS) {
+      this->emitError(
+        "flushPendingTextureUploadsExternal: failed to begin upload buffer");
+      vkFreeCommandBuffers(this->device, this->commandPool, 1, &uploadBuffer);
+      goto fail;
+    }
+  }
+
+  for (const PendingTextureUpload & upload : this->pendingUploads) {
+    if (upload.index >= this->textureCache.size()) continue;
+    this->recordTextureUpload(uploadBuffer, this->textureCache[upload.index],
+                              *upload.texture, upload.staging);
+  }
+
+  if (vkEndCommandBuffer(uploadBuffer) != VK_SUCCESS) {
+    this->emitError(
+      "flushPendingTextureUploadsExternal: failed to end upload buffer");
+    vkFreeCommandBuffers(this->device, this->commandPool, 1, &uploadBuffer);
+    goto fail;
+  }
+
+  {
+    VkSubmitInfo submit {};
+    submit.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
+    submit.commandBufferCount = 1;
+    submit.pCommandBuffers = &uploadBuffer;
+    const VkResult submitResult =
+      vkQueueSubmit(this->queue, 1, &submit, VK_NULL_HANDLE);
+    vkQueueWaitIdle(this->queue);
+    vkFreeCommandBuffers(this->device, this->commandPool, 1, &uploadBuffer);
+    if (submitResult != VK_SUCCESS) {
+      this->emitError("flushPendingTextureUploadsExternal: vkQueueSubmit "
+                      "failed");
+      goto fail;
+    }
+  }
+
+  // Staging buffers are no longer referenced by the completed submission.
+  for (const PendingTextureUpload & upload : this->pendingUploads) {
     if (upload.staging != VK_NULL_HANDLE) {
       vkDestroyBuffer(this->device, upload.staging, this->allocator);
       vkFreeMemory(this->device, upload.stagingMemory, this->allocator);
     }
-    // Reset the half-initialized entry so the next frame retries cleanly.
-    this->destroyTextureEntry(this->textureCache[upload.index]);
   }
-  pending.clear();
+
+  // Host-side completion (views/samplers/descriptor sets) and content
+  // identity stamping.  The queue is idle here, so synchronous destruction
+  // on failure is safe.  A failure leaves the content keys unstamped, so the
+  // next frame retries the upload.
+  for (const PendingTextureUpload & upload : this->pendingUploads) {
+    if (upload.index >= this->textureCache.size()) continue;
+    VulkanCachedTexture & texEntry = this->textureCache[upload.index];
+    if (this->finalizeTexture(texEntry, *upload.texture)) {
+      const SoTextureData & texture = *upload.texture;
+      texEntry.pixelsKey = texture.pixels;
+      texEntry.width = texture.width;
+      texEntry.height = texture.height;
+      texEntry.numComponents = texture.numComponents;
+      texEntry.minFilter = texture.minFilter;
+      texEntry.magFilter = texture.magFilter;
+      texEntry.wrapS = texture.wrapS;
+      texEntry.wrapT = texture.wrapT;
+      texEntry.model = texture.model;
+      texEntry.contentHash = hashTextureContent(texture);
+    }
+    else {
+      this->destroyTextureEntry(texEntry);
+    }
+  }
+  this->pendingUploads.clear();
+  return true;
+
+fail:
+  for (const PendingTextureUpload & upload : this->pendingUploads) {
+    if (upload.staging != VK_NULL_HANDLE) {
+      vkDestroyBuffer(this->device, upload.staging, this->allocator);
+      vkFreeMemory(this->device, upload.stagingMemory, this->allocator);
+    }
+    if (upload.index < this->textureCache.size()) {
+      // Reset the half-initialized entry so the next frame retries cleanly.
+      this->destroyTextureEntry(this->textureCache[upload.index]);
+    }
+  }
+  this->pendingUploads.clear();
   return false;
 }
 
@@ -2890,6 +3450,29 @@ SoVulkanRenderBackend::updateLightingUniforms(const SoDrawList & drawlist,
     spot[3] = 1.0f;
   }
 
+  if (envFlagEnabled("FC_VULKAN_LIGHT_DEBUG") && count > 0 &&
+      s_lightLog++ < 6) {
+    fprintf(stderr,
+            "[LIT] cmd=%p pass=%d topo=%d verts=%u lightCount=%d "
+            "ambient=(%.3f,%.3f,%.3f) matAmb=(%.3f,%.3f,%.3f) "
+            "shininess=%.2f\n",
+            (const void*)&command, static_cast<int>(command.pass),
+            static_cast<int>(command.geometry.topology),
+            static_cast<unsigned>(command.geometry.vertexCount), count,
+            lighting->ambient[0], lighting->ambient[1], lighting->ambient[2],
+            material.ambient[0], material.ambient[1], material.ambient[2],
+            material.shininess);
+    for (int li = 0; li < count && li < 3; ++li) {
+      const SoLightData & l = lighting->lights[static_cast<size_t>(li)];
+      fprintf(stderr,
+              "[LIT]   light%d type=%d color=(%.2f,%.2f,%.2f) "
+              "dir=(%.3f,%.3f,%.3f) pos=(%.2f,%.2f,%.2f)\n",
+              li, static_cast<int>(l.type), l.color[0], l.color[1],
+              l.color[2], l.direction[0], l.direction[1], l.direction[2],
+              l.position[0], l.position[1], l.position[2]);
+    }
+  }
+
   if (this->lightingMapped && this->uboSlotStride > 0) {
     std::memcpy(static_cast<char *>(this->lightingMapped) + uboOffset,
                 &ubo, sizeof(ubo));
@@ -2935,6 +3518,18 @@ SoVulkanRenderBackend::expandWideLines(VulkanCachedCommand & entry,
     strip ? (count > 1 ? count - 1 : 0) : count / 2;
   if (!segmentCount) return false;
 
+  static int wlineDiag = 0;
+  const bool isSketchCmd = vertexCount >= 900;
+  const bool wdiag = envFlagEnabled("FC_VULKAN_BACKEND_DEBUG")
+    && (isSketchCmd || wlineDiag < 40) && wlineDiag < 200;
+  if (wdiag) {
+    ++wlineDiag;
+    fprintf(stderr, "[WLINE2] enter frame=%u cmd=%p verts=%u idx=%u strip=%d segs=%u lw=%.2f\n",
+            this->uboFrameIndex, (const void*)&command, vertexCount, count, strip ? 1 : 0,
+            static_cast<unsigned>(segmentCount),
+            static_cast<double>(lineWidth));
+  }
+
   // MVP: clip = P * V * M * pos.  Regular geometry shares the frame view
   // matrix in params (wide lines never render in the overlay pass).
   SbMat model;
@@ -2947,10 +3542,30 @@ SoVulkanRenderBackend::expandWideLines(VulkanCachedCommand & entry,
       }
     }
   };
-  SbMat mv;
-  multiplyMat(params.viewMatrix.getValue(), model, mv);
+  SbMat view;
+  params.viewMatrix.getValue(view);
+  // The GPU visual path computes clip = proj_GL * view_GL * model_GL * pos,
+  // where a *_GL matrix is the transpose of the stored (row-major) SbMat,
+  // because Vulkan/GLSL interprets the raw memory as column-major.  The CPU
+  // quad expansion below must produce the exact same clip positions (the
+  // wide-line vertex shader passes them through).  With the stored accessor
+  // matrices this is equivalent to mvp = transpose(model * view * proj):
+  // (W^T * v)_i = sum_{l,k,j} model[l][k] view[k][j] proj[j][i] v_l
+  //   = sum_j proj_GL[i][j] * (view_GL * model_GL * v)_j.
+  // Multiplying in the naive order (proj*view*model) would place the view
+  // translation into the clip w component (-P.x*... *v + 1), producing huge
+  // negative w for off-origin geometry, a failing near-plane test, and
+  // geometry collapsed onto NDC (0,0).
+  SbMat vp;
+  multiplyMat(view, proj, vp);
+  SbMat wm;
+  multiplyMat(model, vp, wm);
   SbMat mvp;
-  multiplyMat(proj, mv, mvp);
+  for (int r = 0; r < 4; ++r) {
+    for (int c = 0; c < 4; ++c) {
+      mvp[r][c] = wm[c][r];
+    }
+  }
   const SbVec2s viewportSize = params.viewport.getViewportSizePixels();
   const float vpWidth = static_cast<float>(viewportSize[0] > 0
     ? viewportSize[0] : 1);
@@ -3031,6 +3646,9 @@ SoVulkanRenderBackend::expandWideLines(VulkanCachedCommand & entry,
   // clip position (4) + color (4) + distance in pixels (1).
   std::vector<float> quads(static_cast<size_t>(segmentCount) * 6 * 9);
   size_t outIndex = 0;
+  size_t diagSkippedW = 0;
+  size_t diagSkippedDeg = 0;
+  const float nearEps = 1.0e-5f;
   for (uint32_t s = 0; s < segmentCount; ++s) {
     uint32_t i0;
     uint32_t i1;
@@ -3049,16 +3667,75 @@ SoVulkanRenderBackend::expandWideLines(VulkanCachedCommand & entry,
 
     const float * c0 = clipCache.data() + static_cast<size_t>(i0) * 4;
     const float * c1 = clipCache.data() + static_cast<size_t>(i1) * 4;
-    if (c0[3] <= 0.0f || c1[3] <= 0.0f) continue;
 
-    const float ndc0x = c0[0] / c0[3];
-    const float ndc0y = c0[1] / c0[3];
-    const float ndc1x = c1[0] / c1[3];
-    const float ndc1y = c1[1] / c1[3];
+    // Near-plane clip in the remapped clip space.  A point is visible when
+    // it is in front of the eye (w > nearEps) AND in front of the near plane
+    // (the remapped z, cache[2] >= 0, i.e. z_ndc >= 0).  The old code
+    // dropped the WHOLE segment when either endpoint had w <= 0, so a
+    // segment merely crossing the near plane vanished at close-in views.
+    // Instead, clip against the boundary: when only one endpoint is visible
+    // the segment straddles the near plane, so keep the visible half and
+    // interpolate the hidden endpoint onto the plane.  Behind-the-eye points
+    // also land behind the near plane (cache[2] < 0), so this single clip
+    // surface handles both the near-plane and eye-plane crossings.
+    const float fa = c0[2];
+    const float fb = c1[2];
+    const bool visible0 = (c0[3] > nearEps) && (fa >= 0.0f);
+    const bool visible1 = (c1[3] > nearEps) && (fb >= 0.0f);
+    if (!visible0 && !visible1) {
+      if (wdiag) ++diagSkippedW;
+      continue;
+    }
+
+    // tA/tB give the interpolation fraction along c0 -> c1 for each emitted
+    // end (0 = original c0, 1 = original c1, intermediate = clipped onto the
+    // near plane).  Exactly one end is ever clipped because a plane meets a
+    // line segment at most once.
+    float tA;
+    float tB;
+    if (visible0 && visible1) {
+      tA = 0.0f;
+      tB = 1.0f;
+    }
+    else {
+      const float denom = fa - fb;
+      const float tclip = (denom != 0.0f) ? fa / denom : 0.0f;
+      tA = visible0 ? 0.0f : tclip;
+      tB = visible1 ? 1.0f : tclip;
+    }
+
+    const float cA[4] = {
+      c0[0] + tA * (c1[0] - c0[0]),
+      c0[1] + tA * (c1[1] - c0[1]),
+      c0[2] + tA * (c1[2] - c0[2]),
+      c0[3] + tA * (c1[3] - c0[3]),
+    };
+    const float cB[4] = {
+      c0[0] + tB * (c1[0] - c0[0]),
+      c0[1] + tB * (c1[1] - c0[1]),
+      c0[2] + tB * (c1[2] - c0[2]),
+      c0[3] + tB * (c1[3] - c0[3]),
+    };
+    // Guard against a degenerate clip that lands on/behind the eye plane.
+    if (cA[3] <= nearEps || cB[3] <= nearEps) {
+      if (wdiag) ++diagSkippedW;
+      continue;
+    }
+
+    const float dA = distances[i0] + tA * (distances[i1] - distances[i0]);
+    const float dB = distances[i0] + tB * (distances[i1] - distances[i0]);
+
+    const float ndc0x = cA[0] / cA[3];
+    const float ndc0y = cA[1] / cA[3];
+    const float ndc1x = cB[0] / cB[3];
+    const float ndc1y = cB[1] / cB[3];
     const float dx = ndc1x - ndc0x;
     const float dy = ndc1y - ndc0y;
     const float length = std::sqrt(dx * dx + dy * dy);
-    if (length < 1.0e-8f) continue;
+    if (length < 1.0e-8f) {
+      if (wdiag) ++diagSkippedDeg;
+      continue;
+    }
     const float dirx = dx / length;
     const float diry = dy / length;
     // Anisotropic NDC offset mirroring the GL geometry shader
@@ -3073,32 +3750,77 @@ SoVulkanRenderBackend::expandWideLines(VulkanCachedCommand & entry,
     for (int corner = 0; corner < 4; ++corner) {
       const int endpoint = corner < 2 ? 0 : 1;
       const float sign = (corner % 2 == 0) ? 1.0f : -1.0f;
-      const float w = endpoint == 0 ? c0[3] : c1[3];
-      corners[corner][0] = (endpoint == 0 ? c0[0] : c1[0]) + sign * offx * w;
-      corners[corner][1] = (endpoint == 0 ? c0[1] : c1[1]) + sign * offy * w;
-      corners[corner][2] = endpoint == 0 ? c0[2] : c1[2];
+      const float w = endpoint == 0 ? cA[3] : cB[3];
+      corners[corner][0] = (endpoint == 0 ? cA[0] : cB[0]) + sign * offx * w;
+      corners[corner][1] = (endpoint == 0 ? cA[1] : cB[1]) + sign * offy * w;
+      corners[corner][2] = endpoint == 0 ? cA[2] : cB[2];
       corners[corner][3] = w;
     }
+    // Colors, interpolated for a clipped (near-plane) endpoint.  The
+    // default is opaque white when the command has no per-vertex colors.
+    const float defaultColor[4] = { 1.0f, 1.0f, 1.0f, 1.0f };
+    const float * p0 = col0 ? col0 : defaultColor;
+    const float * p1 = col1 ? col1 : defaultColor;
+    float colA[4];
+    float colB[4];
+    for (int i = 0; i < 4; ++i) {
+      colA[i] = p0[i] + tA * (p1[i] - p0[i]);
+      colB[i] = p0[i] + tB * (p1[i] - p0[i]);
+    }
+
     static const int triOrder[6] = { 0, 1, 2, 2, 1, 3 };
     for (int t = 0; t < 6; ++t) {
       const int corner = triOrder[t];
       const int endpoint = corner < 2 ? 0 : 1;
-      const float * col = endpoint == 0 ? col0 : col1;
+      const float * col = endpoint == 0 ? colA : colB;
       float * out = quads.data() + outIndex;
       outIndex += 9;
       out[0] = corners[corner][0];
       out[1] = corners[corner][1];
       out[2] = corners[corner][2];
       out[3] = corners[corner][3];
-      out[4] = col ? col[0] : 1.0f;
-      out[5] = col ? col[1] : 1.0f;
-      out[6] = col ? col[2] : 1.0f;
-      out[7] = col ? col[3] : 1.0f;
-      out[8] = distances[endpoint == 0 ? i0 : i1];
+      out[4] = col[0];
+      out[5] = col[1];
+      out[6] = col[2];
+      out[7] = col[3];
+      out[8] = endpoint == 0 ? dA : dB;
     }
   }
   quads.resize(outIndex);
-  if (outIndex < 9) return false;
+  if (outIndex < 9) {
+    if (wdiag) {
+      fprintf(stderr, "[WLINE2] FAIL cmd=%p verts=%u segs=%u outIndex=%zu "
+                      "skippedW=%zu skippedDeg=%zu\n",
+              (const void*)&command, vertexCount,
+              static_cast<unsigned>(segmentCount), outIndex,
+              diagSkippedW, diagSkippedDeg);
+    }
+    return false;
+  }
+  if (wdiag) {
+    const SbMatrix vwd = params.viewMatrix;
+    const SbMatrix pwd(proj);
+    fprintf(stderr, "[WLINE2] OK cmd=%p verts=%u segs=%u quads=%zu "
+                    "skippedW=%zu skippedDeg=%zu firstSegNDC=(%.3f,%.3f)->(%.3f,%.3f)\n",
+            (const void*)&command, vertexCount, static_cast<unsigned>(segmentCount),
+            outIndex / 9, diagSkippedW, diagSkippedDeg,
+            static_cast<double>(clipCache[0] / clipCache[3]),
+            static_cast<double>(clipCache[1] / clipCache[3]),
+            static_cast<double>(clipCache[4] / clipCache[7]),
+            static_cast<double>(clipCache[5] / clipCache[7]));
+    fprintf(stderr, "[WLINE2]   viewT=(%.3f,%.3f,%.3f) v11=%.4f v00=%.4f "
+                    "isId=%d proj00=%.4f proj11=%.4f proj33=%.4f "
+                    "cmdViewT=(%.3f,%.3f,%.3f)\n",
+            static_cast<double>(vwd[3][0]), static_cast<double>(vwd[3][1]),
+            static_cast<double>(vwd[3][2]),
+            static_cast<double>(vwd[1][1]), static_cast<double>(vwd[0][0]),
+            (vwd[0][0] == 1.0f && vwd[3][0] == 0.0f && vwd[3][1] == 0.0f) ? 1 : 0,
+            static_cast<double>(pwd[0][0]), static_cast<double>(pwd[1][1]),
+            static_cast<double>(pwd[3][3]),
+            static_cast<double>(command.viewMatrix[3][0]),
+            static_cast<double>(command.viewMatrix[3][1]),
+            static_cast<double>(command.viewMatrix[3][2]));
+  }
 
   if (envFlagEnabled("FC_VULKAN_BACKEND_DEBUG")) {
     static int distLog = 0;
@@ -3114,33 +3836,53 @@ SoVulkanRenderBackend::expandWideLines(VulkanCachedCommand & entry,
 
   const VkDeviceSize needed =
     static_cast<VkDeviceSize>(outIndex) * sizeof(float);
-  if (entry.wideLineBufferSize < needed) {
-    if (entry.wideLineBuffer) {
-      vkDestroyBuffer(this->device, entry.wideLineBuffer, this->allocator);
-      entry.wideLineBuffer = VK_NULL_HANDLE;
-    }
-    if (entry.wideLineMemory) {
-      vkFreeMemory(this->device, entry.wideLineMemory, this->allocator);
-      entry.wideLineMemory = VK_NULL_HANDLE;
+  // Ring of host-visible scratch buffers, one per in-flight frame slot: the
+  // quad expansion is recomputed every frame (it depends on the projection
+  // matrix), so the slot selected for the current frame index is reused only
+  // after the same slot's previous submission has completed (beginFrame
+  // waits the slot fence).  Growth defers the old buffer's destruction
+  // instead of destroying it synchronously, since a still-executing frame
+  // may reference it.
+  if (entry.wideLineBuffers.size() < this->maxFramesInFlight) {
+    entry.wideLineBuffers.resize(this->maxFramesInFlight);
+  }
+  VulkanCachedCommand::VulkanWideLineBuffer & slot =
+    entry.wideLineBuffers[this->uboFrameIndex % this->maxFramesInFlight];
+  if (slot.size < needed) {
+    if (slot.buffer != VK_NULL_HANDLE || slot.memory != VK_NULL_HANDLE) {
+      const VkDevice device = this->device;
+      const VkAllocationCallbacks * allocator = this->allocator;
+      const VkBuffer oldBuffer = slot.buffer;
+      const VkDeviceMemory oldMemory = slot.memory;
+      slot.buffer = VK_NULL_HANDLE;
+      slot.memory = VK_NULL_HANDLE;
+      slot.size = 0;
+      this->deferDestroy([device, allocator, oldBuffer, oldMemory]() {
+        if (oldBuffer != VK_NULL_HANDLE) {
+          vkDestroyBuffer(device, oldBuffer, allocator);
+        }
+        if (oldMemory != VK_NULL_HANDLE) {
+          vkFreeMemory(device, oldMemory, allocator);
+        }
+      });
     }
     if (!this->createBuffer(needed, VK_BUFFER_USAGE_VERTEX_BUFFER_BIT,
-                            entry.wideLineBuffer, entry.wideLineMemory,
-                            quads.data())) {
+                            slot.buffer, slot.memory, quads.data())) {
       this->emitError("expandWideLines: failed to create quad buffer");
-      entry.wideLineBufferSize = 0;
+      slot.size = 0;
       return false;
     }
-    entry.wideLineBufferSize = needed;
+    slot.size = needed;
   }
   else {
     void * mapped = nullptr;
-    if (vkMapMemory(this->device, entry.wideLineMemory, 0, needed, 0,
+    if (vkMapMemory(this->device, slot.memory, 0, needed, 0,
                     &mapped) != VK_SUCCESS) {
       this->emitError("expandWideLines: vkMapMemory failed");
       return false;
     }
     std::memcpy(mapped, quads.data(), static_cast<size_t>(needed));
-    vkUnmapMemory(this->device, entry.wideLineMemory);
+    vkUnmapMemory(this->device, slot.memory);
   }
 
   entry.wideLineVertexCount = static_cast<uint32_t>(outIndex / 9);
@@ -3455,11 +4197,19 @@ SoVulkanRenderBackend::recordDrawCommand(const SoDrawList & drawlist,
       return;
     }
     VkDeviceSize wideOffset = 0;
-    vkCmdBindVertexBuffers(this->activeCommandBuffer, 0, 1,
-                           &entry.wideLineBuffer, &wideOffset);
+    const VulkanCachedCommand::VulkanWideLineBuffer & wslot =
+      entry.wideLineBuffers[this->uboFrameIndex % this->maxFramesInFlight];
+    vkCmdBindVertexBuffers(this->activeCommandBuffer, 0, 1, &wslot.buffer,
+                           &wideOffset);
   }
 
   if (useWideLine) {
+    static int wldrawDiag = 0;
+    if (envFlagEnabled("FC_VULKAN_BACKEND_DEBUG") && wldrawDiag++ < 40) {
+      fprintf(stderr, "[WLINE2] DRAW cmd=%p wideLineVertexCount=%u pass=%d\n",
+              (const void*)&command, entry.wideLineVertexCount,
+              static_cast<int>(command.pass));
+    }
     vkCmdDraw(this->activeCommandBuffer, entry.wideLineVertexCount, 1, 0, 0);
   }
   else if (indexed) {
@@ -3477,22 +4227,32 @@ SoVulkanRenderBackend::beginCommandBuffer()
   VkCommandBufferBeginInfo bi {};
   bi.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
   bi.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
-  return vkBeginCommandBuffer(this->commandBuffer, &bi) == VK_SUCCESS;
+  return vkBeginCommandBuffer(this->currentCommandBuffer(), &bi) == VK_SUCCESS;
 }
 
 bool
 SoVulkanRenderBackend::endAndSubmit()
 {
-  if (vkEndCommandBuffer(this->commandBuffer) != VK_SUCCESS) return false;
+  VkCommandBuffer cmd = this->currentCommandBuffer();
+  if (vkEndCommandBuffer(cmd) != VK_SUCCESS) return false;
 
   VkSubmitInfo si {};
   si.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
   si.commandBufferCount = 1;
-  si.pCommandBuffers = &this->commandBuffer;
-  if (vkQueueSubmit(this->queue, 1, &si, VK_NULL_HANDLE) != VK_SUCCESS) {
+  si.pCommandBuffers = &cmd;
+  const uint32_t slot = this->uboFrameIndex % this->maxFramesInFlight;
+  const VkFence fence = this->frameFences[slot];
+  if (vkQueueSubmit(this->queue, 1, &si, fence) != VK_SUCCESS) {
+    // The fence stays unsignaled (no signal was requested), so beginFrame()
+    // would wait forever on the next reuse of this slot.  Signal it by
+    // submitting nothing and relying on the next frame's failure path, but
+    // mark the slot as not pending so the wait is skipped; a submission
+    // failure (typically device loss) leaves the backend unusable anyway.
+    this->frameFencePending[slot] = 0;
     return false;
   }
-  return vkQueueWaitIdle(this->queue) == VK_SUCCESS;
+  this->frameFencePending[slot] = 1;
+  return true;
 }
 
 // --- Lifecycle ------------------------------------------------------------
@@ -3506,6 +4266,20 @@ SoVulkanRenderBackend::shutdown()
 
   // The queue is idle, so every deferred resource is safe to release now.
   this->flushAllPendingDestroys();
+
+  // Release uploads abandoned by a frame that aborted between the cache
+  // update and the flush/finalize step.  Their copies were never recorded,
+  // so synchronous destruction is safe here.
+  for (const PendingTextureUpload & upload : this->pendingUploads) {
+    if (upload.staging != VK_NULL_HANDLE) {
+      vkDestroyBuffer(this->device, upload.staging, this->allocator);
+      vkFreeMemory(this->device, upload.stagingMemory, this->allocator);
+    }
+    if (upload.index < this->textureCache.size()) {
+      this->destroyTextureEntry(this->textureCache[upload.index]);
+    }
+  }
+  this->pendingUploads.clear();
 
   this->invalidateCache();
 
@@ -3523,15 +4297,18 @@ SoVulkanRenderBackend::shutdown()
   }
   this->backgroundPipelineCache.clear();
 
-  if (this->renderPass != VK_NULL_HANDLE) {
-    vkDestroyRenderPass(this->device, this->renderPass, this->allocator);
-    this->renderPass = VK_NULL_HANDLE;
-  }
   if (this->renderPassFramebuffer != VK_NULL_HANDLE) {
     vkDestroyFramebuffer(this->device, this->renderPassFramebuffer,
                          this->allocator);
     this->renderPassFramebuffer = VK_NULL_HANDLE;
   }
+  for (auto & entry : this->renderPassCache) {
+    if (entry.second != VK_NULL_HANDLE) {
+      vkDestroyRenderPass(this->device, entry.second, this->allocator);
+    }
+  }
+  this->renderPassCache.clear();
+  this->renderPass = VK_NULL_HANDLE;
   if (this->fragmentModule != VK_NULL_HANDLE) {
     vkDestroyShaderModule(this->device, this->fragmentModule, this->allocator);
     this->fragmentModule = VK_NULL_HANDLE;
@@ -3608,11 +4385,7 @@ SoVulkanRenderBackend::shutdown()
                                  this->allocator);
     this->descriptorSetLayout = VK_NULL_HANDLE;
   }
-  if (this->commandBuffer != VK_NULL_HANDLE) {
-    vkFreeCommandBuffers(this->device, this->commandPool, 1,
-                         &this->commandBuffer);
-    this->commandBuffer = VK_NULL_HANDLE;
-  }
+  this->releaseFrameResources();
   if (this->commandPool != VK_NULL_HANDLE) {
     vkDestroyCommandPool(this->device, this->commandPool, this->allocator);
     this->commandPool = VK_NULL_HANDLE;
@@ -3670,52 +4443,15 @@ SoVulkanRenderBackend::renderInternal(const SoDrawList & drawlist,
   // deferred maxFramesInFlight frames ago.
   this->beginFrame();
 
-  // (Re)create the render pass when the destination changes identity.
-  const bool targetChanged =
-    this->renderPass == VK_NULL_HANDLE ||
-    this->renderPassColorImage != target->colorImage ||
-    this->renderPassColorView != target->colorImageView ||
-    this->renderPassDepthImage != target->depthImage ||
-    this->renderPassDepthView != target->depthImageView ||
-    this->renderPassExtent.width != target->extent.width ||
-    this->renderPassExtent.height != target->extent.height;
-  if (targetChanged) {
-    if (this->renderPass != VK_NULL_HANDLE) {
-      // Pipelines are keyed on the render pass handle (see PipelineKey).
-      // The old pass is destroyed below, so any cached pipelines referencing
-      // it would be both stale for the new pass and unsafe to keep (the
-      // handle may be recycled by the driver).  Drop both caches while the
-      // old pass is still alive; they rebuild lazily on the next frame.
-      for (auto & entry : this->pipelineCache) {
-        if (entry.second != VK_NULL_HANDLE) {
-          vkDestroyPipeline(this->device, entry.second, this->allocator);
-        }
-      }
-      this->pipelineCache.clear();
-      for (auto & entry : this->backgroundPipelineCache) {
-        if (entry.second != VK_NULL_HANDLE) {
-          vkDestroyPipeline(this->device, entry.second, this->allocator);
-        }
-      }
-      this->backgroundPipelineCache.clear();
-
-      vkDestroyRenderPass(this->device, this->renderPass, this->allocator);
-      this->renderPass = VK_NULL_HANDLE;
-      if (this->renderPassFramebuffer != VK_NULL_HANDLE) {
-        vkDestroyFramebuffer(this->device, this->renderPassFramebuffer,
-                             this->allocator);
-        this->renderPassFramebuffer = VK_NULL_HANDLE;
-      }
-    }
-    if (!this->createRenderPass(*target, this->renderPass)) {
-      this->emitError("failed to create Vulkan render pass");
-      return FALSE;
-    }
-    this->renderPassColorImage = target->colorImage;
-    this->renderPassColorView = target->colorImageView;
-    this->renderPassDepthImage = target->depthImage;
-    this->renderPassDepthView = target->depthImageView;
-    this->renderPassExtent = target->extent;
+  // Render passes are cached by their attachment identity (formats, sample
+  // count, image layouts), not by the target's images: swapchain targets
+  // cycle their images every frame, and pipelines are keyed on the render
+  // pass handle, so reusing the pass across image changes keeps the pipeline
+  // cache warm.
+  this->renderPass = this->getOrCreateRenderPass(*target);
+  if (this->renderPass == VK_NULL_HANDLE) {
+    this->emitError("failed to create Vulkan render pass");
+    return FALSE;
   }
 
   this->updateGeometryCache(drawlist, overlaysOnly);
@@ -3733,9 +4469,30 @@ SoVulkanRenderBackend::renderInternal(const SoDrawList & drawlist,
     return FALSE;
   }
 
-  // The framebuffer is cached beside the render pass and only recreated
-  // when the target identity changes (see targetChanged above).
-  if (this->renderPassFramebuffer == VK_NULL_HANDLE) {
+  // The framebuffer is cached for the current target identity (image views +
+  // extent + render pass) and recreated whenever any of those change.  The
+  // old framebuffer is released through the deferred ring: an older in-flight
+  // submission may still reference it (the per-frame vkQueueWaitIdle is gone,
+  // so only the current slot's fence has been waited by beginFrame()).
+  if (this->renderPassFramebuffer == VK_NULL_HANDLE ||
+      this->renderPassFramebufferPass != this->renderPass ||
+      this->renderPassFramebufferColorImage != target->colorImage ||
+      this->renderPassFramebufferColorView != target->colorImageView ||
+      this->renderPassFramebufferDepthImage != target->depthImage ||
+      this->renderPassFramebufferDepthView != target->depthImageView ||
+      this->renderPassFramebufferExtent.width != target->extent.width ||
+      this->renderPassFramebufferExtent.height != target->extent.height) {
+    if (this->renderPassFramebuffer != VK_NULL_HANDLE) {
+      const VkDevice device = this->device;
+      const VkAllocationCallbacks * allocator = this->allocator;
+      const VkFramebuffer oldFramebuffer = this->renderPassFramebuffer;
+      this->deferDestroy([device, allocator, oldFramebuffer]() {
+        if (oldFramebuffer != VK_NULL_HANDLE) {
+          vkDestroyFramebuffer(device, oldFramebuffer, allocator);
+        }
+      });
+      this->renderPassFramebuffer = VK_NULL_HANDLE;
+    }
     VkFramebufferCreateInfo fci {};
     fci.sType = VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO;
     fci.renderPass = this->renderPass;
@@ -3757,12 +4514,29 @@ SoVulkanRenderBackend::renderInternal(const SoDrawList & drawlist,
       // The one-shot command buffer was begun above and never submitted; an
       // implicit reset only happens on submission, so reset it explicitly or
       // every later beginCommandBuffer() will fail.
-      vkEndCommandBuffer(this->commandBuffer);
-      vkResetCommandBuffer(this->commandBuffer, 0);
+      vkEndCommandBuffer(this->currentCommandBuffer());
+      vkResetCommandBuffer(this->currentCommandBuffer(), 0);
       return FALSE;
     }
+    this->renderPassFramebufferPass = this->renderPass;
+    this->renderPassFramebufferColorImage = target->colorImage;
+    this->renderPassFramebufferColorView = target->colorImageView;
+    this->renderPassFramebufferDepthImage = target->depthImage;
+    this->renderPassFramebufferDepthView = target->depthImageView;
+    this->renderPassFramebufferExtent = target->extent;
   }
   const VkFramebuffer framebuffer = this->renderPassFramebuffer;
+
+  // Record the pending texture copies into the frame command buffer (one
+  // submit for the whole frame instead of a separate transfer submit) and
+  // finalize the host-side resources.  The draws that sample these textures
+  // are recorded below, after the copies, and the descriptor sets they bind
+  // must already exist.  Staging buffers are released through the deferred
+  // ring once the slot fence signals.
+  if (!this->recordPendingTextureUploads()) {
+    this->emitError("failed to record texture uploads");
+  }
+  this->finalizePendingTextureUploads();
 
   VkRenderPassBeginInfo rpbi {};
   rpbi.sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO;
@@ -3773,9 +4547,10 @@ SoVulkanRenderBackend::renderInternal(const SoDrawList & drawlist,
   rpbi.clearValueCount = 0;
   rpbi.pClearValues = nullptr;
 
-  vkCmdBeginRenderPass(this->commandBuffer, &rpbi, VK_SUBPASS_CONTENTS_INLINE);
+  vkCmdBeginRenderPass(this->currentCommandBuffer(), &rpbi,
+                       VK_SUBPASS_CONTENTS_INLINE);
 
-  this->activeCommandBuffer = this->commandBuffer;
+  this->activeCommandBuffer = this->currentCommandBuffer();
   bool recorded = true;
   if (overlaysOnly) {
     this->recordOverlayBlock(drawlist, params, *target, this->renderPass);
@@ -3785,7 +4560,7 @@ SoVulkanRenderBackend::renderInternal(const SoDrawList & drawlist,
   }
   this->activeCommandBuffer = VK_NULL_HANDLE;
 
-  vkCmdEndRenderPass(this->commandBuffer);
+  vkCmdEndRenderPass(this->currentCommandBuffer());
 
   // Submit even when recordFrame() failed: an unsubmitted one-shot command
   // buffer cannot be reused, and a partial frame is preferable to a dead
@@ -3851,6 +4626,10 @@ SoVulkanRenderBackend::renderExternal(const SoDrawList & drawlist,
 
   this->beginFrame();
   this->updateGeometryCache(drawlist);
+  if (!this->flushPendingTextureUploadsExternal()) {
+    this->emitError("renderExternal: texture upload failed");
+    return FALSE;
+  }
 
   this->activeCommandBuffer = commandBuffer;
   const bool recorded = this->recordFrame(drawlist, params, *target, renderPass);
@@ -3901,6 +4680,10 @@ SoVulkanRenderBackend::renderExternalOverlay(const SoDrawList & drawlist,
     this->emitError("failed to reserve lighting UBO slots");
     return FALSE;
   }
+  if (!this->flushPendingTextureUploadsExternal()) {
+    this->emitError("renderExternalOverlay: texture upload failed");
+    return FALSE;
+  }
 
   this->activeCommandBuffer = commandBuffer;
   this->recordOverlayBlock(drawlist, params, *target, renderPass);
@@ -3926,25 +4709,40 @@ SoVulkanRenderBackend::recordFrame(const SoDrawList & drawlist,
   // land in the requested region.
   this->applyViewport(params, target);
 
-  // Vulkan-only display options.  The render params carry the values from
-  // the GUI/preferences when wired; environment variables act as a
+  // Vulkan-only display options, configured through setWireframeOverlay()/
+  // setPointsOverlay()/setEdgeColor().  Environment variables act as a
   // diagnostic fallback for the command line.
   const bool wireframeOverlay =
-    params.wireframeOverlay || envFlagEnabled("FC_VULKAN_WIREFRAME");
+    this->wireframeOverlay || envFlagEnabled("FC_VULKAN_WIREFRAME");
   const bool pointsOverlay =
-    params.pointsOverlay || envFlagEnabled("FC_VULKAN_POINTS");
+    this->pointsOverlay || envFlagEnabled("FC_VULKAN_POINTS");
   float overlayColor[4] = {
-    params.edgeColor[0], params.edgeColor[1], params.edgeColor[2],
-    params.edgeColor[3]
+    this->edgeColor[0], this->edgeColor[1], this->edgeColor[2],
+    this->edgeColor[3]
   };
-  if (getenv("FC_VULKAN_EDGE_COLOR")) {
+  // Parse the FC_VULKAN_EDGE_COLOR override (a diagnostic switch) once; it is
+  // process-lifetime and this runs on the overlay path, so two getenv() calls
+  // per frame is pure overhead.  Only RGB is taken from the hex value; alpha
+  // keeps the configured edgeColor's.
+  struct EdgeColorOverride { bool present; float rgb[3]; };
+  static const EdgeColorOverride edgeOverride = []() {
+    EdgeColorOverride o{false, {0.0f, 0.0f, 0.0f}};
     const char * hex = getenv("FC_VULKAN_EDGE_COLOR");
-    unsigned int value = 0;
-    if (sscanf(hex, "%x", &value) == 1) {
-      overlayColor[0] = ((value >> 16) & 0xff) / 255.0f;
-      overlayColor[1] = ((value >> 8) & 0xff) / 255.0f;
-      overlayColor[2] = (value & 0xff) / 255.0f;
+    if (hex) {
+      unsigned int value = 0;
+      if (sscanf(hex, "%x", &value) == 1) {
+        o.present = true;
+        o.rgb[0] = ((value >> 16) & 0xff) / 255.0f;
+        o.rgb[1] = ((value >> 8) & 0xff) / 255.0f;
+        o.rgb[2] = (value & 0xff) / 255.0f;
+      }
     }
+    return o;
+  }();
+  if (edgeOverride.present) {
+    overlayColor[0] = edgeOverride.rgb[0];
+    overlayColor[1] = edgeOverride.rgb[1];
+    overlayColor[2] = edgeOverride.rgb[2];
   }
   // No overlay when neither is requested; otherwise re-draw opaque geometry
   // in the requested draw style (SoDrawStyleElement encoding: LINES=1,

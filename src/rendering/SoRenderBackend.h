@@ -42,13 +42,6 @@ struct SoRenderParams {
   SbColor4f        backgroundTopColor = SbColor4f(0.0f, 0.0f, 0.0f, 1.0f);
   SbColor4f        backgroundBottomColor = SbColor4f(0.0f, 0.0f, 0.0f, 1.0f);
 
-  // Vulkan-only display overlays (shaded-with-edges / show-vertices).
-  // Present here so the Vulkan manager can forward them to its backend; the
-  // OpenGL backend ignores these fields entirely.
-  SbBool           wireframeOverlay = FALSE;
-  SbBool           pointsOverlay = FALSE;
-  SbColor4f        edgeColor = SbColor4f(0.05f, 0.05f, 0.05f, 1.0f);
-
   /*!
     \brief Backend-defined render destination for this frame.
 

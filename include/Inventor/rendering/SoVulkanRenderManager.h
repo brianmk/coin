@@ -3,11 +3,24 @@
 #ifndef COIN_SOVULKANRENDERMANAGER_H
 #define COIN_SOVULKANRENDERMANAGER_H
 
+/*!
+  The whole class is compiled only when COIN_BUILD_VULKAN_RENDERER is set (by
+  Coin's own build and by applications that opt in).  Without it the header
+  expands to nothing, so an installed Coin built without the Vulkan renderer
+  does not force a Vulkan SDK dependency on its consumers.
+*/
+
+#ifndef COIN_BUILD_VULKAN_RENDERER
+#define COIN_BUILD_VULKAN_RENDERER 0
+#endif
+
+#if COIN_BUILD_VULKAN_RENDERER
+
 #include <Inventor/SbColor4f.h>
 #include <Inventor/SbVec2s.h>
 
 // Pull in Vulkan handle types for renderExternal().  This header is only
-// built when COIN_BUILD_VULKAN_RENDERER is enabled.
+// fully compiled when COIN_BUILD_VULKAN_RENDERER is enabled.
 #include <vulkan/vulkan.h>
 
 class SbViewportRegion;
@@ -186,8 +199,10 @@ public:
     and VK_KHR_ray_tracing_pipeline enabled (the embedding application is
     responsible for enabling them on the QVulkanWindow device).  When the RT
     backend cannot initialize, this method logs a warning and keeps the raster
-    backend; getRayTracingActive() reports the effective state.  Call after
-    initialize(); the setting applies to subsequent render()/renderExternal().
+    backend; getRayTracingActive() reports the effective state.  Must be called
+    BEFORE initialize(): the setting is only honored by initialize() (which
+    brings the RT backend up or falls back to raster), and subsequent calls
+    merely toggle path tracing on an already-active RT backend.
   */
   void setRayTracing(SbBool enabled);
 
@@ -215,11 +230,27 @@ public:
   */
   void setPathTracingStart(SbBool start);
 
-  //! True while progressive path-tracing accumulation is running.
+  //! True while the ray-tracing backend is accumulating a progressive run.
   SbBool getPathTracingActive(void) const;
+
+  //! True while path tracing still needs continuous frames (accumulating or
+  //! in the post-move settle window).  The embedding viewport drives its
+  //! continuous update from this.
+  SbBool getPathTracingRefining(void) const;
 
   //! Samples accumulated in the current progressive run (0 when idle).
   uint32_t getPathTracingSampleCount(void) const;
+
+  //! Maximum path-tracing bounces (1..16); forwarded to the RT backend.
+  void setPathTracingBounces(uint32_t bounces);
+
+  //! Frames of a static camera before the accumulation auto-restarts
+  //! (1..120); forwarded to the RT backend.
+  void setPathTracingSettleFrames(uint32_t frames);
+
+  //! Enable/disable the edge-stopping denoise pass; forwarded to the RT
+  //! backend.
+  void setPathTracingDenoiseEnabled(SbBool enabled);
 
   SoVulkanRenderBackend * getBackend(void) const;
 
@@ -229,5 +260,7 @@ public:
 private:
   class SoVulkanRenderManagerP * pimpl;
 };
+
+#endif // COIN_BUILD_VULKAN_RENDERER
 
 #endif // COIN_SOVULKANRENDERMANAGER_H

@@ -16,7 +16,18 @@
   to the backend through SoRenderBackendInitParams::userData.  Render targets
   are delivered per frame through SoRenderParams::renderTarget and are never
   retained by the backend beyond the current render() call.
+
+  The whole contract is compiled only when COIN_BUILD_VULKAN_RENDERER is set
+  (by Coin's own build and by applications that opt in).  Without it the
+  header expands to nothing, so an installed Coin built without the Vulkan
+  renderer does not force a Vulkan SDK dependency on its consumers.
 */
+
+#ifndef COIN_BUILD_VULKAN_RENDERER
+#define COIN_BUILD_VULKAN_RENDERER 0
+#endif
+
+#if COIN_BUILD_VULKAN_RENDERER
 
 #include <cstdint>
 
@@ -69,5 +80,7 @@ struct SoVulkanRenderTarget {
   VkExtent2D extent {0, 0};                        //!< Attachment extent in pixels.
   VkSampleCountFlagBits sampleCount = VK_SAMPLE_COUNT_1_BIT; //!< MSAA samples.
 };
+
+#endif // COIN_BUILD_VULKAN_RENDERER
 
 #endif // COIN_SOVULKANRENDERTARGET_H

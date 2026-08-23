@@ -48,8 +48,7 @@ private:
 /*!
   \brief Compute the coarse/fine sort key used by SoDrawList::buildSortedOrder().
 */
-uint64_t SoIRComputeSortKey(const SoRenderCommand & cmd,
-                            uint32_t passOrderBits,
+uint64_t SoIRComputeSortKey(uint32_t passOrderBits,
                             uint32_t depthBucket);
 
 //! Dump a compact summary of the draw list to Coin's debug output.
