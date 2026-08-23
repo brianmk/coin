@@ -34,22 +34,8 @@ envFlagEnabled(const char * name)
 // draw command, indexed by the instance custom index (the command index).
 // C++ packs the float arrays without padding, which matches std430: 5 vec4
 // + 6 arrays of 8 vec4 = 80 + 768 = 848 bytes.
-struct RTMaterial {
-  float diffuse[4];
-  float ambient[4];
-  float specular[4];
-  float emissive[4];
-  float params[4]; // x = shininess, y = twoSided, z = lightCount,
-                   // w = shadingModel (0 = unlit, 1 = gouraud)
-  float lightType[8 * 4];
-  float lightColor[8 * 4];
-  float lightDirection[8 * 4];
-  float lightPosition[8 * 4];
-  float lightAttenuation[8 * 4];
-  float lightSpot[8 * 4];
-  float triangleData[4]; // x = triangle-normal pool offset
-  float pbr[4]; // x = metalness, y = roughness, z = usePbr, w = unused
-};
+// (struct RTMaterial is defined in SoRTXRenderBackend.h; the static assert
+// below pins its size to the shader layout.)
 static_assert(sizeof(RTMaterial) == 880,
               "RTMaterial must match PathTrace.glsl std430 layout");
 
@@ -161,6 +147,98 @@ hashGeometry(const SoGeometryDesc & geometry, uint32_t vertexStride,
   return h;
 }
 
+// A cheap per-frame "change signal" for one command's geometry.  It mixes
+// only the metadata plus a sampled subset of positions and indices, so it is
+// far cheaper than the full hashGeometry() walk (which hashes every index for
+// scenes up to 65536 indices).  When this signal is unchanged from the cache
+// entry, the geometry is assumed unchanged for cache purposes and the full
+// hash is reused, avoiding the per-frame full-index walk over large CAD parts.
+uint64_t
+hashGeometrySignal(const SoGeometryDesc & geometry, uint32_t vertexStride,
+                   bool indexed)
+{
+  uint64_t h = 1469598103934665603ull;
+  const auto mix = [&h](uint64_t v) {
+    h ^= v;
+    h *= 1099511628211ull;
+  };
+  mix(geometry.vertexCount);
+  mix(geometry.indexCount);
+  mix(vertexStride);
+
+  const size_t posStrideFloats = vertexStride / sizeof(float);
+  const size_t totalFloats =
+    static_cast<size_t>(geometry.vertexCount) * posStrideFloats;
+  if (totalFloats > 0) {
+    // Sample the position data (same sampling rate as hashGeometry).
+    const size_t samples = 512;
+    const size_t step = totalFloats > samples ? totalFloats / samples : 1;
+    for (size_t i = 0; i < totalFloats; i += step) {
+      mix(std::bit_cast<uint32_t>(geometry.positions[i]));
+    }
+    mix(std::bit_cast<uint32_t>(geometry.positions[totalFloats - 1]));
+  }
+
+  if (indexed && geometry.indexCount > 0) {
+    // Sample indices (same rate as the large-scene fallback).
+    const size_t count = geometry.indexCount;
+    const size_t samples = 256;
+    const size_t step = count > samples ? count / samples : 1;
+    for (size_t i = 0; i < count; i += step) {
+      mix(geometry.indices[i]);
+    }
+    mix(geometry.indices[count - 1]);
+  }
+  return h;
+}
+
+// FNV-1a hash of a command's vertex positions only.  Separates position
+// edits (refit-able: topology unchanged) from index edits (topology change,
+// full rebuild required).
+uint64_t
+hashPositions(const SoGeometryDesc & geometry, uint32_t vertexStride)
+{
+  uint64_t h = 1469598103934665603ull;
+  const auto mix = [&h](uint64_t v) {
+    h ^= v;
+    h *= 1099511628211ull;
+  };
+  const size_t posStrideFloats = vertexStride / sizeof(float);
+  const size_t totalFloats =
+    static_cast<size_t>(geometry.vertexCount) * posStrideFloats;
+  for (size_t i = 0; i < totalFloats; ++i) {
+    mix(std::bit_cast<uint32_t>(geometry.positions[i]));
+  }
+  return h;
+}
+
+// FNV-1a hash of a command's index data only (full walk up to the same
+// 65536 threshold as hashGeometry, uniform sampling beyond).
+uint64_t
+hashIndices(const SoGeometryDesc & geometry)
+{
+  uint64_t h = 1469598103934665603ull;
+  const auto mix = [&h](uint64_t v) {
+    h ^= v;
+    h *= 1099511628211ull;
+  };
+  const size_t count = geometry.indexCount;
+  if (count <= 65536) {
+    for (size_t i = 0; i < count; ++i) {
+      mix(geometry.indices[i]);
+    }
+  }
+  else {
+    const size_t samples = 256;
+    const size_t step = count / samples;
+    for (size_t i = 0; i < count; i += step) {
+      mix(geometry.indices[i]);
+    }
+    mix(geometry.indices[count - 1]);
+  }
+  return h;
+}
+
 } // namespace
 
 SoRTXRenderBackend::SoRTXRenderBackend()
@@ -188,6 +266,7 @@ SoRTXRenderBackend::setPathTracingEnabled(SbBool enabled)
   this->ptAccumulating = FALSE;
   this->ptStartLatch = FALSE;
   this->ptFrameIndex = 0;
+  this->ptIdleFrames = 0;
   this->haveLastView = FALSE;
 }
 
@@ -212,6 +291,7 @@ SoRTXRenderBackend::setPathTracingStart(SbBool start)
   else {
     this->ptStartLatch = FALSE;
     this->ptAccumulating = FALSE;
+    this->ptIdleFrames = 0;
   }
 }
 
@@ -221,10 +301,40 @@ SoRTXRenderBackend::getPathTracingActive(void) const
   return this->ptEnabled && this->ptAccumulating;
 }
 
+SbBool
+SoRTXRenderBackend::getPathTracingRefining(void) const
+{
+  // Request continuous frames while working toward a converged image: while
+  // accumulating, and during the short post-move settle window (ptIdleFrames
+  // below the settle threshold) so the auto-restart has frames to count.
+  // After convergence ptIdleFrames is saturated at ptSettleFrames, so this
+  // reads FALSE and the viewport can go idle.
+  return this->ptEnabled &&
+    (this->ptAccumulating || this->ptIdleFrames < this->ptSettleFrames);
+}
+
 uint32_t
 SoRTXRenderBackend::getPathTracingSampleCount(void) const
 {
   return this->ptAccumulating ? this->ptFrameIndex + 1 : 0;
+}
+
+void
+SoRTXRenderBackend::setPathTracingBounces(const uint32_t bounces)
+{
+  this->ptMaxBounces = std::max(1u, std::min(16u, bounces));
+}
+
+void
+SoRTXRenderBackend::setPathTracingSettleFrames(const uint32_t frames)
+{
+  this->ptSettleFrames = std::max(1u, std::min(120u, frames));
+}
+
+void
+SoRTXRenderBackend::setPathTracingDenoiseEnabled(SbBool enabled)
+{
+  this->ptDenoise = enabled;
 }
 
 SbBool
@@ -382,6 +492,18 @@ SoRTXRenderBackend::initialize(const SoRenderBackendInitParams & params)
     const int value = std::atoi(bounces);
     if (value >= 1 && value <= 16) {
       this->ptMaxBounces = static_cast<uint32_t>(value);
+    }
+  }
+  if (const char * settle = getenv("FC_VULKAN_PT_SETTLE")) {
+    const int value = std::atoi(settle);
+    if (value >= 1 && value <= 120) {
+      this->ptSettleFrames = static_cast<uint32_t>(value);
+    }
+  }
+  if (const char * maxsamples = getenv("FC_VULKAN_PT_MAXSAMPLES")) {
+    const int value = std::atoi(maxsamples);
+    if (value >= 1 && value <= 100000) {
+      this->ptMaxSamples = static_cast<uint32_t>(value);
     }
   }
 
@@ -1663,29 +1785,109 @@ SoRTXRenderBackend::updateGeometryCache(const SoDrawList & drawlist)
         geometry.vertexCount > MAX_VERTEX_COUNT) continue;
     if (geometry.topology != SO_TOPOLOGY_TRIANGLES) continue;
 
-    RTXCachedGeometry & entry = this->getOrCreateCache(&command);
     const uint32_t vertexStride = geometry.vertexStride
       ? geometry.vertexStride : sizeof(float) * 3;
     const bool indexed = geometry.indexCount > 0 && geometry.indices != nullptr;
-    const uint64_t hash = hashGeometry(geometry, vertexStride, indexed);
-    const bool matches = entry.blas != VK_NULL_HANDLE &&
-      entry.contentHash == hash;
-    if (!matches) {
-      // Buffers/AS are rebuilt in recordAccelerationStructures (they need a
-      // command buffer); only release old resources and record the new
-      // identity here.  Destruction is deferred: a pending frame may still
-      // reference the old BLAS.
-      this->cacheChanged = true;
-      this->deferDestroyCacheEntry(entry);
-      entry.posKey = geometry.positions;
-      entry.idxKey = geometry.indices;
-      entry.vertexCount = geometry.vertexCount;
-      entry.indexCount = geometry.indexCount;
-      entry.vertexStride = vertexStride;
-      entry.contentHash = hash;
+
+    // Cheap probe first: only run the full index hash when the change signal
+    // disagrees with the cache entry.  The sampled signal costs a fraction of
+    // the full hashGeometry() (which hashes every index up to 65536), so for
+    // unchanged large CAD parts we reuse contentHash instead of re-walking
+    // the whole index buffer every frame.
+    const uint64_t signal = hashGeometrySignal(geometry, vertexStride, indexed);
+    uint64_t hash = 0;
+    RTXCachedGeometry * entryPtr = nullptr;
+
+    const auto found = this->commandToCache.find(&command);
+    if (found != this->commandToCache.end()) {
+      RTXCachedGeometry & entry = this->geometryCache[found->second];
+      hash = entry.contentHash;
+      bool matches = entry.blas != VK_NULL_HANDLE &&
+        entry.changeSignal == signal && entry.contentHash != 0;
+      if (!matches) {
+        hash = hashGeometry(geometry, vertexStride, indexed);
+        matches = entry.blas != VK_NULL_HANDLE && entry.contentHash == hash;
+      }
+      if (!matches) {
+        // Split the identity: position-only changes (same topology) refit
+        // the existing BLAS in place; index/topology changes destroy and
+        // rebuild.
+        const uint64_t vertexHash = hashPositions(geometry, vertexStride);
+        const uint64_t indexHash = indexed ? hashIndices(geometry) : 0;
+        const bool topologyStable =
+          entry.blas != VK_NULL_HANDLE &&
+          entry.vertexCount == geometry.vertexCount &&
+          entry.indexCount == geometry.indexCount &&
+          entry.vertexStride == vertexStride &&
+          ((entry.idxKey != nullptr) == indexed) &&
+          entry.indexHash == indexHash;
+        this->cacheChanged = true;
+        if (topologyStable) {
+          // In-place UPDATE build (see refitBlas()); keep buffers and BLAS.
+          entry.refitPending = true;
+          entry.posKey = geometry.positions;
+          entry.idxKey = geometry.indices;
+        }
+        else {
+          // Buffers/AS are rebuilt in recordAccelerationStructures (they
+          // need a command buffer); only release old resources and record
+          // the new identity here.  Destruction is deferred: a pending
+          // frame may still reference the old BLAS.
+          this->deferDestroyCacheEntry(entry);
+          entry.posKey = geometry.positions;
+          entry.idxKey = geometry.indices;
+          entry.vertexCount = geometry.vertexCount;
+          entry.indexCount = geometry.indexCount;
+          entry.vertexStride = vertexStride;
+        }
+        entry.contentHash = hash;
+        entry.changeSignal = signal;
+        entry.vertexHash = vertexHash;
+        entry.indexHash = indexHash;
+      }
+      entryPtr = &entry;
     }
-    entry.commandKey = &command;
-    entry.cacheGeneration = frame;
+    else {
+      // The command pointer changed (draw-list storage reallocation or
+      // reordering when objects are added/removed): instead of thrashing a
+      // full BLAS rebuild, re-key the unclaimed entry whose content is
+      // identical so the acceleration structure survives the pointer churn.
+      hash = hashGeometry(geometry, vertexStride, indexed);
+      RTXCachedGeometry * match = nullptr;
+      for (RTXCachedGeometry & e : this->geometryCache) {
+        if (e.cacheGeneration == frame) continue;
+        if (e.blas != VK_NULL_HANDLE && e.contentHash == hash &&
+            e.vertexCount == geometry.vertexCount &&
+            e.indexCount == geometry.indexCount &&
+            e.vertexStride == vertexStride &&
+            ((e.idxKey != nullptr) == indexed)) {
+          match = &e;
+          break;
+        }
+      }
+      if (match) {
+        match->changeSignal = signal;
+        this->commandToCache[&command] =
+          static_cast<size_t>(match - this->geometryCache.data());
+        entryPtr = match;
+      }
+      else {
+        this->cacheChanged = true;
+        RTXCachedGeometry & entry = this->getOrCreateCache(&command);
+        entry.posKey = geometry.positions;
+        entry.idxKey = geometry.indices;
+        entry.vertexCount = geometry.vertexCount;
+        entry.indexCount = geometry.indexCount;
+        entry.vertexStride = vertexStride;
+        entry.contentHash = hash;
+        entry.changeSignal = signal;
+        entry.vertexHash = hashPositions(geometry, vertexStride);
+        entry.indexHash = indexed ? hashIndices(geometry) : 0;
+        entryPtr = &entry;
+      }
+    }
+    entryPtr->commandKey = &command;
+    entryPtr->cacheGeneration = frame;
   }
 
   // Evict entries whose command disappeared from the draw list this frame
@@ -1872,7 +2074,10 @@ SoRTXRenderBackend::buildBlas(RTXCachedGeometry & entry,
   buildInfo.sType =
     VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_BUILD_GEOMETRY_INFO_KHR;
   buildInfo.type = VK_ACCELERATION_STRUCTURE_TYPE_BOTTOM_LEVEL_KHR;
-  buildInfo.flags = VK_BUILD_ACCELERATION_STRUCTURE_PREFER_FAST_TRACE_BIT_KHR;
+  // ALLOW_UPDATE: lets position-only edits refit this BLAS in place (see
+  // refitBlas()) instead of destroying and rebuilding it.
+  buildInfo.flags = VK_BUILD_ACCELERATION_STRUCTURE_PREFER_FAST_TRACE_BIT_KHR |
+                    VK_BUILD_ACCELERATION_STRUCTURE_ALLOW_UPDATE_BIT_KHR;
   buildInfo.mode = VK_BUILD_ACCELERATION_STRUCTURE_MODE_BUILD_KHR;
   buildInfo.geometryCount = 1;
   buildInfo.pGeometries = &asGeometry;
@@ -1903,6 +2108,16 @@ SoRTXRenderBackend::buildBlas(RTXCachedGeometry & entry,
                                        &entry.blas) != VK_SUCCESS) {
     return false;
   }
+  // Capture the BLAS device address now.  It is constant for the lifetime of
+  // the BLAS, so the per-frame instance collection in buildTlas() reuses it
+  // instead of calling vkGetAccelerationStructureDeviceAddressKHR every frame.
+  entry.devAddr = 0;
+  VkAccelerationStructureDeviceAddressInfoKHR devAddrInfo {};
+  devAddrInfo.sType =
+    VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_DEVICE_ADDRESS_INFO_KHR;
+  devAddrInfo.accelerationStructure = entry.blas;
+  entry.devAddr = vkGetAccelerationStructureDeviceAddressKHR(this->device,
+                                                             &devAddrInfo);
 
   buildInfo.dstAccelerationStructure = entry.blas;
   buildInfo.scratchData.deviceAddress = this->scratchAddress;
@@ -1926,12 +2141,152 @@ SoRTXRenderBackend::buildBlas(RTXCachedGeometry & entry,
 }
 
 bool
+SoRTXRenderBackend::refitBlas(RTXCachedGeometry & entry,
+                              const SoRenderCommand & command,
+                              VkCommandBuffer cmd)
+{
+  const SoGeometryDesc & geometry = command.geometry;
+  const uint32_t posStrideFloats = entry.vertexStride / sizeof(float);
+
+  if (getenv("FC_VULKAN_RT_DEBUG")) {
+    fprintf(stderr,
+            "[RTDBG] refitBlas verts=%u idx=%u stride=%u pos=%p\n",
+            entry.vertexCount, entry.indexCount, entry.vertexStride,
+            static_cast<const void *>(geometry.positions));
+  }
+
+  // Upload the new vertex positions into the EXISTING device buffers; the
+  // index buffer and topology are unchanged (the refit precondition checked
+  // in updateGeometryCache()).
+  const VkDeviceSize vertexBytes =
+    static_cast<VkDeviceSize>(entry.vertexCount) * 3 * sizeof(float);
+
+  // Moved vertices change the object-space flat normals: append a fresh
+  // normal-pool record and let updateMaterials() pick up the new offset
+  // (the pool is grow-only, matching the rebuild path).
+  this->appendTriangleNormals(command, entry);
+  std::vector<float> positions(static_cast<size_t>(entry.vertexCount) * 3);
+  for (uint32_t i = 0; i < entry.vertexCount; ++i) {
+    const float * p =
+      geometry.positions + static_cast<size_t>(i) * posStrideFloats;
+    positions[static_cast<size_t>(i) * 3 + 0] = p[0];
+    positions[static_cast<size_t>(i) * 3 + 1] = p[1];
+    positions[static_cast<size_t>(i) * 3 + 2] = p[2];
+  }
+
+  VkBuffer staging = VK_NULL_HANDLE;
+  VkDeviceMemory stagingMemory = VK_NULL_HANDLE;
+  if (!this->createHostVisibleBuffer(vertexBytes,
+                                     VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
+                                     staging, stagingMemory)) {
+    return false;
+  }
+  void * mapped = nullptr;
+  if (vkMapMemory(this->device, stagingMemory, 0, vertexBytes, 0, &mapped) !=
+        VK_SUCCESS ||
+      mapped == nullptr) {
+    this->emitError("refitBlas: vkMapMemory (vertex staging) failed");
+    vkDestroyBuffer(this->device, staging, this->allocator);
+    vkFreeMemory(this->device, stagingMemory, this->allocator);
+    return false;
+  }
+  std::memcpy(mapped, positions.data(), static_cast<size_t>(vertexBytes));
+  vkUnmapMemory(this->device, stagingMemory);
+
+  VkBufferCopy vertexCopy {};
+  vertexCopy.size = vertexBytes;
+  vkCmdCopyBuffer(cmd, staging, entry.vertexBuffer, 1, &vertexCopy);
+  VkMemoryBarrier copyBarrier {};
+  copyBarrier.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
+  copyBarrier.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+  copyBarrier.dstAccessMask =
+    VK_ACCESS_ACCELERATION_STRUCTURE_READ_BIT_KHR;
+  vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_TRANSFER_BIT,
+                       VK_PIPELINE_STAGE_ACCELERATION_STRUCTURE_BUILD_BIT_KHR,
+                       0, 1, &copyBarrier, 0, nullptr, 0, nullptr);
+  this->pendingStagingDestroys.emplace_back(staging, stagingMemory);
+
+  // --- In-place UPDATE build ---------------------------------------------
+  VkAccelerationStructureGeometryTrianglesDataKHR triangles {};
+  triangles.sType =
+    VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_TRIANGLES_DATA_KHR;
+  triangles.vertexFormat = VK_FORMAT_R32G32B32_SFLOAT;
+  triangles.vertexData.deviceAddress =
+    this->getDeviceAddress(entry.vertexBuffer);
+  triangles.vertexStride = 3 * sizeof(float);
+  triangles.maxVertex = entry.vertexCount - 1;
+  const bool indexed = entry.indexCount > 0;
+  triangles.indexType =
+    indexed ? VK_INDEX_TYPE_UINT32 : VK_INDEX_TYPE_NONE_KHR;
+  triangles.indexData.deviceAddress =
+    indexed ? this->getDeviceAddress(entry.indexBuffer) : 0;
+
+  VkAccelerationStructureGeometryKHR asGeometry {};
+  asGeometry.sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_KHR;
+  asGeometry.geometryType = VK_GEOMETRY_TYPE_TRIANGLES_KHR;
+  asGeometry.geometry.triangles = triangles;
+  asGeometry.flags = VK_GEOMETRY_OPAQUE_BIT_KHR;
+
+  const uint32_t maxPrimitives =
+    indexed ? entry.indexCount / 3 : entry.vertexCount / 3;
+  if (maxPrimitives == 0) return false;
+
+  VkAccelerationStructureBuildGeometryInfoKHR buildInfo {};
+  buildInfo.sType =
+    VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_BUILD_GEOMETRY_INFO_KHR;
+  buildInfo.type = VK_ACCELERATION_STRUCTURE_TYPE_BOTTOM_LEVEL_KHR;
+  buildInfo.flags = VK_BUILD_ACCELERATION_STRUCTURE_PREFER_FAST_TRACE_BIT_KHR |
+                    VK_BUILD_ACCELERATION_STRUCTURE_ALLOW_UPDATE_BIT_KHR;
+  buildInfo.mode = VK_BUILD_ACCELERATION_STRUCTURE_MODE_UPDATE_KHR;
+  buildInfo.srcAccelerationStructure = entry.blas;
+  buildInfo.dstAccelerationStructure = entry.blas;
+  buildInfo.geometryCount = 1;
+  buildInfo.pGeometries = &asGeometry;
+
+  VkAccelerationStructureBuildSizesInfoKHR sizeInfo {};
+  sizeInfo.sType =
+    VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_BUILD_SIZES_INFO_KHR;
+  vkGetAccelerationStructureBuildSizesKHR(
+    this->device, VK_ACCELERATION_STRUCTURE_BUILD_TYPE_DEVICE_KHR,
+    &buildInfo, &maxPrimitives, &sizeInfo);
+  // createScratchBuffer() is grow-only; the update scratch size is bounded
+  // by the build scratch size already allocated.
+  if (!this->createScratchBuffer(sizeInfo.buildScratchSize)) {
+    return false;
+  }
+  buildInfo.scratchData.deviceAddress = this->scratchAddress;
+
+  VkAccelerationStructureBuildRangeInfoKHR rangeInfo {};
+  rangeInfo.primitiveCount = maxPrimitives;
+  rangeInfo.primitiveOffset = 0;
+  rangeInfo.firstVertex = 0;
+  rangeInfo.transformOffset = 0;
+  const VkAccelerationStructureBuildRangeInfoKHR * rangeInfos[] = {&rangeInfo};
+  vkCmdBuildAccelerationStructuresKHR(cmd, 1, &buildInfo, rangeInfos);
+
+  VkMemoryBarrier blasBarrier {};
+  blasBarrier.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
+  blasBarrier.srcAccessMask = VK_ACCESS_ACCELERATION_STRUCTURE_WRITE_BIT_KHR;
+  blasBarrier.dstAccessMask = VK_ACCESS_ACCELERATION_STRUCTURE_READ_BIT_KHR;
+  vkCmdPipelineBarrier(cmd,
+                       VK_PIPELINE_STAGE_ACCELERATION_STRUCTURE_BUILD_BIT_KHR,
+                       VK_PIPELINE_STAGE_ACCELERATION_STRUCTURE_BUILD_BIT_KHR,
+                       0, 1, &blasBarrier, 0, nullptr, 0, nullptr);
+
+  entry.refitPending = false;
+  return true;
+}
+
+bool
 SoRTXRenderBackend::buildTlas(const SoDrawList & drawlist, VkCommandBuffer cmd)
 {
   // Collect instance data for every cached geometry command (opaque only).
   // instanceCustomIndex is the draw-list command index so the closest-hit
   // shader can index the material buffer with gl_InstanceCustomIndexEXT.
-  std::vector<VkAccelerationStructureInstanceKHR> instances;
+  // Reuse a grow-only scratch vector instead of reallocating each frame.
+  std::vector<VkAccelerationStructureInstanceKHR> & instances =
+    this->instanceScratch;
+  instances.clear();
   for (int i = 0; i < drawlist.getNumCommands(); ++i) {
     const SoRenderCommand & command = drawlist.getCommand(i);
     if (command.pass == SO_RENDERPASS_TRANSPARENT ||
@@ -1953,12 +2308,20 @@ SoRTXRenderBackend::buildTlas(const SoDrawList & drawlist, VkCommandBuffer cmd)
     instance.mask = 0xFF;
     instance.instanceShaderBindingTableRecordOffset = 0;
     instance.flags = 0;
-    VkAccelerationStructureDeviceAddressInfoKHR addrInfo {};
-    addrInfo.sType =
-      VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_DEVICE_ADDRESS_INFO_KHR;
-    addrInfo.accelerationStructure = entry.blas;
-    instance.accelerationStructureReference =
-      vkGetAccelerationStructureDeviceAddressKHR(this->device, &addrInfo);
+    // The BLAS device address is stable for the BLAS lifetime and was
+    // captured at build time, so querying it here every frame is wasted work.
+    // Fall back to a query only if the cached address is missing.
+    if (entry.devAddr) {
+      instance.accelerationStructureReference = entry.devAddr;
+    }
+    else {
+      VkAccelerationStructureDeviceAddressInfoKHR addrInfo {};
+      addrInfo.sType =
+        VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_DEVICE_ADDRESS_INFO_KHR;
+      addrInfo.accelerationStructure = entry.blas;
+      instance.accelerationStructureReference =
+        vkGetAccelerationStructureDeviceAddressKHR(this->device, &addrInfo);
+    }
     instances.push_back(instance);
   }
   this->instanceCount = static_cast<uint32_t>(instances.size());
@@ -2142,7 +2505,28 @@ SoRTXRenderBackend::updateMaterials(const SoDrawList & drawlist)
   }
   this->materialCount = static_cast<uint32_t>(count);
 
-  std::vector<RTMaterial> materials(static_cast<size_t>(count));
+  // Cache the PBR/lighting env overrides once for the whole frame instead of
+  // calling envFlagEnabled()/getenv() inside the per-command loop below.
+  // These flags never change mid-frame; they were recomputed identically for
+  // every command on every frame.
+  this->rtPbrEnabled = envFlagEnabled("FC_VULKAN_RT_PBR");
+  this->rtMetalOverride = false;
+  this->rtRoughOverride = false;
+  this->rtMetalValue = 0.0f;
+  this->rtRoughValue = 0.0f;
+  if (const char * metalEnv = getenv("FC_VULKAN_RT_METAL")) {
+    this->rtMetalOverride = true;
+    this->rtMetalValue = strtof(metalEnv, nullptr);
+  }
+  if (const char * roughEnv = getenv("FC_VULKAN_RT_ROUGH")) {
+    this->rtRoughOverride = true;
+    this->rtRoughValue = strtof(roughEnv, nullptr);
+  }
+
+  // Reuse a grow-only scratch buffer instead of reallocating a fresh
+  // std::vector<RTMaterial> from the heap every frame.
+  std::vector<RTMaterial> & materials = this->materialScratch;
+  materials.resize(static_cast<size_t>(count));
   for (int i = 0; i < count; ++i) {
     const SoRenderCommand & command = drawlist.getCommand(i);
     const SoMaterialData & material = command.material;
@@ -2183,15 +2567,13 @@ SoRTXRenderBackend::updateMaterials(const SoDrawList & drawlist)
     // 0 and every shading path above falls back to the legacy model.
     out.pbr[0] = material.metalness;
     out.pbr[1] = material.roughness;
-    out.pbr[2] = envFlagEnabled("FC_VULKAN_RT_PBR") ? 1.0f : 0.0f;
+    out.pbr[2] = this->rtPbrEnabled ? 1.0f : 0.0f;
     out.pbr[3] = 0.0f;
-    const char * metalEnv = getenv("FC_VULKAN_RT_METAL");
-    if (metalEnv) {
-      out.pbr[0] = strtof(metalEnv, nullptr);
+    if (this->rtMetalOverride) {
+      out.pbr[0] = this->rtMetalValue;
     }
-    const char * roughEnv = getenv("FC_VULKAN_RT_ROUGH");
-    if (roughEnv) {
-      out.pbr[1] = strtof(roughEnv, nullptr);
+    if (this->rtRoughOverride) {
+      out.pbr[1] = this->rtRoughValue;
     }
 
     const SoLightingData * lighting =
@@ -2251,38 +2633,57 @@ SoRTXRenderBackend::updateMaterials(const SoDrawList & drawlist)
 // --- Frame recording ------------------------------------------------------
 
 VkCommandBuffer
-SoRTXRenderBackend::beginTransientCommandBuffer(VkCommandPool & pool)
+SoRTXRenderBackend::beginTransientCommandBuffer()
 {
-  VkCommandPoolCreateInfo pci {};
-  pci.sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO;
-  pci.flags = VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT |
-              VK_COMMAND_POOL_CREATE_TRANSIENT_BIT;
-  pci.queueFamilyIndex = this->queueFamilyIndex;
-  if (vkCreateCommandPool(this->device, &pci, this->allocator, &pool) !=
-      VK_SUCCESS) {
-    return VK_NULL_HANDLE;
+  // Persistent transient pool + one-shot command buffer for the AS phase,
+  // allocated once instead of per frame.  The caller submits and waits the
+  // buffer every frame; resetting it here is safe because the submission is
+  // provably complete (vkQueueWaitIdle) by the time the next frame begins.
+  if (this->transientPool == VK_NULL_HANDLE) {
+    VkCommandPoolCreateInfo pci {};
+    pci.sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO;
+    pci.flags = VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT |
+                VK_COMMAND_POOL_CREATE_TRANSIENT_BIT;
+    pci.queueFamilyIndex = this->queueFamilyIndex;
+    if (vkCreateCommandPool(this->device, &pci, this->allocator,
+                            &this->transientPool) != VK_SUCCESS) {
+      return VK_NULL_HANDLE;
+    }
+    VkCommandBufferAllocateInfo ai {};
+    ai.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
+    ai.commandPool = this->transientPool;
+    ai.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+    ai.commandBufferCount = 1;
+    if (vkAllocateCommandBuffers(this->device, &ai,
+                                 &this->transientCommandBuffer) !=
+        VK_SUCCESS) {
+      vkDestroyCommandPool(this->device, this->transientPool, this->allocator);
+      this->transientPool = VK_NULL_HANDLE;
+      return VK_NULL_HANDLE;
+    }
   }
-  VkCommandBufferAllocateInfo ai {};
-  ai.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
-  ai.commandPool = pool;
-  ai.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
-  ai.commandBufferCount = 1;
-  VkCommandBuffer cmd = VK_NULL_HANDLE;
-  if (vkAllocateCommandBuffers(this->device, &ai, &cmd) != VK_SUCCESS) {
-    vkDestroyCommandPool(this->device, pool, this->allocator);
-    pool = VK_NULL_HANDLE;
-    return VK_NULL_HANDLE;
-  }
+  vkResetCommandBuffer(this->transientCommandBuffer, 0);
   VkCommandBufferBeginInfo bi {};
   bi.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
   bi.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
-  if (vkBeginCommandBuffer(cmd, &bi) != VK_SUCCESS) {
-    vkFreeCommandBuffers(this->device, pool, 1, &cmd);
-    vkDestroyCommandPool(this->device, pool, this->allocator);
-    pool = VK_NULL_HANDLE;
+  if (vkBeginCommandBuffer(this->transientCommandBuffer, &bi) != VK_SUCCESS) {
     return VK_NULL_HANDLE;
   }
-  return cmd;
+  return this->transientCommandBuffer;
+}
+
+void
+SoRTXRenderBackend::releaseTransientCommandBuffer()
+{
+  if (this->transientCommandBuffer != VK_NULL_HANDLE) {
+    vkFreeCommandBuffers(this->device, this->transientPool, 1,
+                         &this->transientCommandBuffer);
+    this->transientCommandBuffer = VK_NULL_HANDLE;
+  }
+  if (this->transientPool != VK_NULL_HANDLE) {
+    vkDestroyCommandPool(this->device, this->transientPool, this->allocator);
+    this->transientPool = VK_NULL_HANDLE;
+  }
 }
 
 namespace {
@@ -2340,6 +2741,7 @@ SoRTXRenderBackend::updatePathTracingState(const SoDrawList & drawlist,
   if (!this->ptEnabled) {
     this->ptAccumulating = FALSE;
     this->ptFrameIndex = 0;
+    this->ptIdleFrames = 0;
   }
   else if (this->ptStartLatch) {
     // The start flag: reset the accumulation and begin a fresh progressive
@@ -2347,14 +2749,38 @@ SoRTXRenderBackend::updatePathTracingState(const SoDrawList & drawlist,
     this->ptStartLatch = FALSE;
     this->ptAccumulating = TRUE;
     this->ptFrameIndex = 0;
+    this->ptIdleFrames = 0;
   }
   else if (viewChanged || sceneChanged) {
+    // Drop to the 1-spp live preview while the camera/scene is moving: the
+    // accumulated rays are from the previous viewpoint and are useless.
     this->ptAccumulating = FALSE;
     this->ptFrameIndex = 0;
+    this->ptIdleFrames = 0;
   }
   else if (this->ptAccumulating) {
     ++this->ptFrameIndex;
+    // Converged: stop accumulating so the viewport can go idle instead of
+    // tracing the same converged image forever.  Saturate the idle counter so
+    // getPathTracingRefining() turns the continuous-update request off.
+    if (this->ptFrameIndex >= this->ptMaxSamples) {
+      this->ptAccumulating = FALSE;
+      this->ptIdleFrames = this->ptSettleFrames;
+    }
   }
+  else if (this->ptIdleFrames < this->ptSettleFrames) {
+    // Static but not accumulating (a move just stopped): count idle frames
+    // and, once the camera has settled for a short window, auto-restart a
+    // fresh accumulation so the view refines itself without an explicit
+    // startPathTracing() call.
+    ++this->ptIdleFrames;
+    if (this->ptIdleFrames >= this->ptSettleFrames) {
+      this->ptIdleFrames = 0;
+      this->ptAccumulating = TRUE;
+      this->ptFrameIndex = 0;
+    }
+  }
+  // else: converged idle -- nothing to do until the camera or scene moves.
 
   if (getenv("FC_VULKAN_PT_DEBUG")) {
     static uint32_t debugFrame = 0;
@@ -2459,9 +2885,13 @@ SoRTXRenderBackend::recordAccelerationStructures(
     this->storageImageNeedsLayoutInit = false;
   }
 
-  // BLAS builds (lazy per command; only for entries without an AS).  The
-  // builds also (re)upload the triangle-normal pool entries consumed by
-  // updateMaterials(), which therefore runs after this loop.
+  // BLAS builds (lazy per command; only for entries without an AS) and
+  // refits (topology-stable position edits).  The builds also (re)upload
+  // the triangle-normal pool entries consumed by updateMaterials(), which
+  // therefore runs after this loop.
+  this->statBlasBuilt = 0;
+  this->statBlasRefit = 0;
+  this->statBlasReused = 0;
   for (int i = 0; i < drawlist.getNumCommands(); ++i) {
     const SoRenderCommand & command = drawlist.getCommand(i);
     if (command.pass == SO_RENDERPASS_TRANSPARENT ||
@@ -2469,11 +2899,29 @@ SoRTXRenderBackend::recordAccelerationStructures(
     const auto found = this->commandToCache.find(&command);
     if (found == this->commandToCache.end()) continue;
     RTXCachedGeometry & entry = this->geometryCache[found->second];
-    if (entry.blas != VK_NULL_HANDLE) continue;
-    if (!this->buildBlas(entry, command, cmd)) {
-      this->emitError("recordAccelerationStructures: failed to build BLAS");
-      return false;
+    if (entry.refitPending) {
+      ++this->statBlasRefit;
+      if (!this->refitBlas(entry, command, cmd)) {
+        this->emitError("recordAccelerationStructures: failed to refit BLAS");
+        return false;
+      }
     }
+    else if (entry.blas == VK_NULL_HANDLE) {
+      ++this->statBlasBuilt;
+      if (!this->buildBlas(entry, command, cmd)) {
+        this->emitError("recordAccelerationStructures: failed to build BLAS");
+        return false;
+      }
+    }
+    else {
+      ++this->statBlasReused;
+    }
+  }
+  if (getenv("FC_VULKAN_RT_DEBUG")) {
+    fprintf(stderr,
+            "[RTDBG] blas built=%u refit=%u reused=%u cache=%zu\n",
+            this->statBlasBuilt, this->statBlasRefit, this->statBlasReused,
+            this->geometryCache.size());
   }
 
   this->updateMaterials(drawlist);
@@ -2671,14 +3119,15 @@ SoRTXRenderBackend::recordTraceAndPresent(const SoRenderParams & params,
   scissor.extent = target.extent;
   vkCmdSetScissor(cmd, 0, 1, &scissor);
 
-  // Present push constant: viewport size, denoiseOn (path tracing), the
-  // progressive frame index for diagnostics, and the viewport origin so the
-  // fragment shader indexes the accumulation buffers relative to the
-  // viewport (not the framebuffer) when rendering into a sub-rect.
+  // Present push constant: viewport size, denoiseOn (path tracing and the
+  // denoise toggle), the progressive frame index for diagnostics, and the
+  // viewport origin so the fragment shader indexes the accumulation buffers
+  // relative to the viewport (not the framebuffer) when rendering into a
+  // sub-rect.
   const float presentPush[8] = {
     static_cast<float>(size[0]),
     static_cast<float>(size[1]),
-    this->ptEnabled ? 1.0f : 0.0f,
+    (this->ptEnabled && this->ptDenoise) ? 1.0f : 0.0f,
     static_cast<float>(this->ptFrameIndex),
     static_cast<float>(origin[0]),
     static_cast<float>(origin[1]),
@@ -2901,6 +3350,7 @@ SoRTXRenderBackend::shutdown()
                         this->allocator);
     this->offscreenRenderPass = VK_NULL_HANDLE;
   }
+  this->releaseTransientCommandBuffer();
   this->offscreenColorImage = VK_NULL_HANDLE;
   this->offscreenColorView = VK_NULL_HANDLE;
   this->rtDescriptorSets[0] = VK_NULL_HANDLE;
@@ -3027,13 +3477,11 @@ SoRTXRenderBackend::render(const SoDrawList & drawlist,
   const VkRenderPass renderPass = this->offscreenRenderPass;
   const VkFramebuffer framebuffer = this->offscreenFramebuffer;
 
-  // One-shot command buffer from a temporary pool.  The AS phase (BLAS/TLAS
-  // builds and buffer copies) is not allowed inside a render pass, so it is
+  // Persistent transient command buffer for the AS phase (BLAS/TLAS builds
+  // and buffer copies), which is not allowed inside a render pass.  It is
   // recorded first, then the render pass begins and only the trace/present
   // work is recorded inside it.
-  VkCommandPool pool = VK_NULL_HANDLE;
-  VkCommandBuffer cmd =
-    this->beginTransientCommandBuffer(pool);
+  VkCommandBuffer cmd = this->beginTransientCommandBuffer();
   if (cmd == VK_NULL_HANDLE) {
     this->emitError("failed to allocate RT command buffer");
     return FALSE;
@@ -3116,15 +3564,11 @@ SoRTXRenderBackend::render(const SoDrawList & drawlist,
   const bool submitted = submitResult == VK_SUCCESS && waitResult == VK_SUCCESS;
 
   // Staging buffers are only referenced by the private submission; release
-  // them after it provably completed (or never ran).  The command buffer
-  // and pool are released in either case.
+  // them after it provably completed (or never ran).  The transient command
+  // buffer stays pooled for the next frame.
   if (submitted) {
     this->freePendingStagingDestroys();
   }
-
-  vkFreeCommandBuffers(this->device, pool, 1, &cmd);
-  vkDestroyCommandPool(this->device, pool, this->allocator);
-  // The cached render pass and framebuffer stay alive for reuse.
 
   if (!asOk || !traceOk || !submitted) {
     this->emitError("render: RT frame failed");
@@ -3167,12 +3611,11 @@ SoRTXRenderBackend::renderExternal(const SoDrawList & drawlist,
 
   // The caller's command buffer is already inside an active render pass, so
   // the acceleration-structure phase (BLAS/TLAS builds and buffer copies) is
-  // recorded on a private one-shot command buffer which is submitted and
-  // waited on here.  Queue submission is strictly ordered and the wait makes
-  // the AS writes visible to the trace recorded below, so no explicit
+  // recorded on the persistent transient command buffer which is submitted
+  // and waited on here.  Queue submission is strictly ordered and the wait
+  // makes the AS writes visible to the trace recorded below, so no explicit
   // synchronization with the caller's buffer is required.
-  VkCommandPool pool = VK_NULL_HANDLE;
-  VkCommandBuffer cmd = this->beginTransientCommandBuffer(pool);
+  VkCommandBuffer cmd = this->beginTransientCommandBuffer();
   if (cmd == VK_NULL_HANDLE) {
     this->emitError("renderExternal: failed to allocate AS command buffer");
     return FALSE;
@@ -3195,8 +3638,6 @@ SoRTXRenderBackend::renderExternal(const SoDrawList & drawlist,
   if (submitted) {
     this->freePendingStagingDestroys();
   }
-  vkFreeCommandBuffers(this->device, pool, 1, &cmd);
-  vkDestroyCommandPool(this->device, pool, this->allocator);
 
   if (!asOk || !submitted) {
     this->emitError("renderExternal: AS phase failed");

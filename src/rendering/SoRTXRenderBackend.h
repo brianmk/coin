@@ -31,6 +31,10 @@ struct RTXCachedGeometry {
   VkDeviceMemory blasMemory = VK_NULL_HANDLE;
   uint32_t vertexCount = 0;
   uint32_t indexCount = 0;
+  // Device address of the BLAS, captured once at build time.  It never changes
+  // for a given BLAS, so querying it with vkGetAccelerationStructureDeviceAddressKHR
+  // every frame (per instance) is pure driver-call overhead.
+  uint64_t devAddr = 0;
 
   // Identity keys mirroring the producer-owned storage of the last build.
   // The storage is a per-frame arena (SoIRRenderAction::geometryPool), so
@@ -41,6 +45,9 @@ struct RTXCachedGeometry {
   uint32_t vertexStride = 0;
   uint32_t cacheGeneration = 0;
   uint64_t contentHash = 0;
+  // Cheap per-frame change signal (hashGeometrySignal).  When it matches
+  // contentHash is reused; only a mismatch triggers the full hashGeometry().
+  uint64_t changeSignal = 0;
   // Command that last touched this entry (per-frame arena pointer; used
   // only as an identity key for map rebuilds after cache eviction).
   const SoRenderCommand * commandKey = nullptr;
@@ -48,6 +55,16 @@ struct RTXCachedGeometry {
   // (UINT32_MAX = not uploaded yet).
   uint32_t normalPoolOffset = 0xFFFFFFFFu;
   uint32_t normalCount = 0;
+
+  // Refit state: when a content change keeps the topology intact (vertex
+  // and index counts, stride, indexing unchanged) and only the vertex
+  // positions moved, the BLAS is updated in place with
+  // VK_BUILD_ACCELERATION_STRUCTURE_MODE_UPDATE_KHR instead of being
+  // destroyed and rebuilt.  vertexHash/indexHash split the content identity
+  // so index (topology) changes can be told apart from position changes.
+  bool refitPending = false;
+  uint64_t vertexHash = 0;
+  uint64_t indexHash = 0;
 };
 
 /*!
@@ -71,6 +88,33 @@ struct RTXCachedGeometry {
   index).  No textures, no MSAA on the traced image (present pass runs at
   the swapchain sample count).
 */
+/*!
+  \brief One material record per draw-list command, matching the std430
+  layout of the RTMaterial block in PathTrace.glsl.
+
+  C++ packs the float arrays without padding, which matches std430: 5 vec4
+  (diffuse/ambient/specular/emissive/params) + 6 arrays of 8 vec4 (lights) +
+  triangleData + pbr = 848 + 32 = 880 bytes.  Defined here so the backend can
+  own a reusable std::vector<RTMaterial> scratch buffer without keeping a
+  per-frame heap allocation.
+*/
+struct RTMaterial {
+  float diffuse[4];
+  float ambient[4];
+  float specular[4];
+  float emissive[4];
+  float params[4]; // x = shininess, y = twoSided, z = lightCount,
+                   // w = shadingModel (0 = unlit, 1 = gouraud)
+  float lightType[8 * 4];
+  float lightColor[8 * 4];
+  float lightDirection[8 * 4];
+  float lightPosition[8 * 4];
+  float lightAttenuation[8 * 4];
+  float lightSpot[8 * 4];
+  float triangleData[4]; // x = triangle-normal pool offset
+  float pbr[4]; // x = metalness, y = roughness, z = usePbr, w = unused
+};
+
 class SoRTXRenderBackend : public SoRenderBackend {
 public:
   SoRTXRenderBackend();
@@ -109,11 +153,45 @@ public:
   */
   void setPathTracingStart(SbBool start);
 
-  //! True while progressive accumulation is running (start flag consumed).
+  //! True while the accumulation is running (start flag consumed).
   SbBool getPathTracingActive(void) const;
+
+  //! True while path tracing still needs continuous frames: accumulating, or
+  //! in the post-move settle window waiting to auto-restart.  The embedding
+  //! viewport uses this to keep requesting updates (a progressive renderer
+  //! must not go idle between the preview and the auto-restart).
+  SbBool getPathTracingRefining(void) const;
 
   //! Samples accumulated in the current progressive run (0 when idle).
   uint32_t getPathTracingSampleCount(void) const;
+
+  /*!
+    \brief Set the maximum number of path-tracing bounces (1..16).
+
+    Higher bounce counts add more indirect-light transport at the cost of
+    noisier early frames.  The env override FC_VULKAN_PT_BOUNCES sets the
+    default before initialize().
+  */
+  void setPathTracingBounces(uint32_t bounces);
+
+  /*!
+    \brief Frames of a static camera before the accumulation auto-restarts
+    (1..120, default 6).
+
+    After a camera or scene change the backend drops to a 1-sample live
+    preview; once the camera stays static for this many frames a fresh
+    accumulation starts automatically.  The env override FC_VULKAN_PT_SETTLE
+    sets the default before initialize().
+  */
+  void setPathTracingSettleFrames(uint32_t frames);
+
+  /*!
+    \brief Enable/disable the edge-stopping denoise pass (default on).
+
+    When disabled, the present pass shows the raw accumulated radiance, so
+    the Monte-Carlo noise of the early accumulation frames is visible.
+  */
+  void setPathTracingDenoiseEnabled(SbBool enabled);
 
   /*!
     \brief Record the draw list into a caller-owned command buffer/render pass.
@@ -160,6 +238,8 @@ private:
   RTXCachedGeometry & getOrCreateCache(const SoRenderCommand * command);
   bool buildBlas(RTXCachedGeometry & entry, const SoRenderCommand & command,
                  VkCommandBuffer cmd);
+  bool refitBlas(RTXCachedGeometry & entry, const SoRenderCommand & command,
+                 VkCommandBuffer cmd);
   void destroyCacheEntry(RTXCachedGeometry & entry);
   bool buildTlas(const SoDrawList & drawlist, VkCommandBuffer cmd);
 
@@ -179,7 +259,8 @@ private:
                              const SoVulkanRenderTarget & target,
                              VkCommandBuffer cmd,
                              VkRenderPass renderPass);
-  VkCommandBuffer beginTransientCommandBuffer(VkCommandPool & pool);
+  VkCommandBuffer beginTransientCommandBuffer();
+  void releaseTransientCommandBuffer();
 
   // --- Device handles ----------------------------------------------------
   VkInstance instance = VK_NULL_HANDLE;
@@ -188,6 +269,13 @@ private:
   VkQueue queue = VK_NULL_HANDLE;
   uint32_t queueFamilyIndex = 0;
   const VkAllocationCallbacks * allocator = nullptr;
+
+  // Persistent transient command pool + buffer for the one-shot
+  // acceleration-structure phase (BLAS/TLAS builds and buffer copies, which
+  // are not allowed inside a render pass).  Allocated once instead of per
+  // frame; the caller submits and waits the buffer every frame.
+  VkCommandPool transientPool = VK_NULL_HANDLE;
+  VkCommandBuffer transientCommandBuffer = VK_NULL_HANDLE;
 
   // --- RT pipeline resources ---------------------------------------------
   // The tracer has two dispatch modes:
@@ -298,6 +386,19 @@ private:
   SbBool ptAccumulating = FALSE;
   uint32_t ptFrameIndex = 0;
   uint32_t ptMaxBounces = 4;
+  // Consecutive frames with an unchanged camera/scene while not accumulating.
+  // Once this reaches the settle threshold (see updatePathTracingState) a
+  // fresh accumulation auto-starts, so the view refines itself after a move
+  // without an explicit startPathTracing() call.
+  uint32_t ptIdleFrames = 0;
+  // Frames of a static camera before an auto-restart (FC_VULKAN_PT_SETTLE).
+  uint32_t ptSettleFrames = 6;
+  // Accumulated samples at which the run auto-stops (FC_VULKAN_PT_MAXSAMPLES):
+  // the image is converged, so the viewport can go idle instead of tracing
+  // forever.  A camera move resets back to the preview/restart cycle.
+  uint32_t ptMaxSamples = 256;
+  // Whether the edge-stopping denoise present pass is active.
+  SbBool ptDenoise = TRUE;
   float lastViewMatrix[16] = {};
   float lastProjMatrix[16] = {};
   uint32_t lastViewportWidth = 0;
@@ -314,6 +415,9 @@ private:
   VkDeviceMemory instanceMemory = VK_NULL_HANDLE;
   uint32_t instanceCount = 0;
   uint32_t instanceBufferCapacity = 0;
+  // Reusable per-frame instance collection (grown on demand) instead of a
+  // fresh heap allocation inside buildTlas() every frame.
+  std::vector<VkAccelerationStructureInstanceKHR> instanceScratch;
   VkBuffer scratchBuffer = VK_NULL_HANDLE;
   VkDeviceMemory scratchMemory = VK_NULL_HANDLE;
   VkDeviceSize scratchSize = 0;
@@ -331,6 +435,17 @@ private:
   VkBuffer frameBuffer = VK_NULL_HANDLE;
   VkDeviceMemory frameMemory = VK_NULL_HANDLE;
   void * frameMapped = nullptr;
+
+  // Reusable scratch for updateMaterials(), grown on demand instead of
+  // allocating a fresh std::vector<RTMaterial> every frame.
+  std::vector<RTMaterial> materialScratch;
+  // Cached PBR/lighting env overrides.  These are loop-invariant per frame;
+  // reading them once avoids a getenv()/envFlagEnabled() per command.
+  bool rtPbrEnabled = false;
+  bool rtMetalOverride = false;
+  bool rtRoughOverride = false;
+  float rtMetalValue = 0.0f;
+  float rtRoughValue = 0.0f;
 
   // Object-space per-triangle geometric normals (set 0, binding 7).  Grow-
   // only pool appended by buildBlas(); per-command offsets are carried in
@@ -355,6 +470,12 @@ private:
   // not stamped by the end of updateGeometryCache() are evicted.
   uint32_t cacheFrame = 0;
   void deferDestroyCacheEntry(RTXCachedGeometry & entry);
+
+  // Per-frame BLAS build statistics (reset each frame; observable via the
+  // [RTDBG] breadcrumb when FC_VULKAN_RT_DEBUG is set).
+  uint32_t statBlasBuilt = 0;
+  uint32_t statBlasRefit = 0;
+  uint32_t statBlasReused = 0;
 
   // Staging buffers destroyed by buildBlas() are released only after the
   // owning command buffer finished executing (destroying a bound buffer
