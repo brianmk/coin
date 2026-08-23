@@ -248,9 +248,17 @@ public:
   //! (1..120); forwarded to the RT backend.
   void setPathTracingSettleFrames(uint32_t frames);
 
+  //! Accumulated-sample cap before the run auto-stops (1..4096); forwarded
+  //! to the RT backend.
+  void setPathTracingMaxSamples(uint32_t samples);
+
   //! Enable/disable the edge-stopping denoise pass; forwarded to the RT
   //! backend.
   void setPathTracingDenoiseEnabled(SbBool enabled);
+
+  //! Select the denoiser backend by name ("rtx", "oidn", "fsr", "none");
+  //! forwarded to the RT backend and applied on the next buffer create.
+  void setPathTracingDenoiser(const char * denoiser);
 
   SoVulkanRenderBackend * getBackend(void) const;
 

@@ -581,6 +581,18 @@ SoVulkanRenderManager::setPathTracingSettleFrames(const uint32_t frames)
 }
 
 void
+SoVulkanRenderManager::setPathTracingMaxSamples(const uint32_t samples)
+{
+  if (!this->pimpl->rtxBackendInitialized) {
+    SoDebugError::postWarning(
+      "SoVulkanRenderManager::setPathTracingMaxSamples",
+      "ray-tracing backend is not initialized; setting ignored");
+    return;
+  }
+  this->pimpl->rtxBackend.setPathTracingMaxSamples(samples);
+}
+
+void
 SoVulkanRenderManager::setPathTracingDenoiseEnabled(SbBool enabled)
 {
   if (!this->pimpl->rtxBackendInitialized) {
@@ -590,6 +602,18 @@ SoVulkanRenderManager::setPathTracingDenoiseEnabled(SbBool enabled)
     return;
   }
   this->pimpl->rtxBackend.setPathTracingDenoiseEnabled(enabled);
+}
+
+void
+SoVulkanRenderManager::setPathTracingDenoiser(const char * denoiser)
+{
+  if (!this->pimpl->rtxBackendInitialized) {
+    SoDebugError::postWarning(
+      "SoVulkanRenderManager::setPathTracingDenoiser",
+      "ray-tracing backend is not initialized; setting ignored");
+    return;
+  }
+  this->pimpl->rtxBackend.setDenoiserFilter(denoiser);
 }
 
 void

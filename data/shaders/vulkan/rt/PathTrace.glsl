@@ -732,6 +732,27 @@ void main()
     if (accumulating > 0.5) {
         vec4 acc = accum[index];
         vec4 s = sq[index];
+        // Firefly rejection (FC_VULKAN_PT_FIREFLY = standard-deviation
+        // multiplier, 0 = off): before adding this sample, if it is many
+        // sigma brighter than the pixel's running mean it is an outlier
+        // (firefly) spike.  Replace it with the running mean so it does not
+        // poison the average.  On flat surfaces which the denoiser leaves
+        // grainy this removes the extreme high-variance draws that read as
+        // isolated bright speckles, without clipping real highlights (only
+        // points far from the mean are touched).
+        float fireflySigma = frame.u_adaptive.z;
+        if (fireflySigma > 0.0 && acc.a > 1.0) {
+            vec3 mean = acc.rgb / acc.a;
+            float m2 = max(dot(mean, mean), 1e-10);
+            float v2 = max(dot(s.rgb, s.rgb) / acc.a - m2, 0.0);
+            float sigma = sqrt(v2);
+            float sampleLum = max(max(outColor.r, outColor.g), outColor.b);
+            float meanLum = max(max(mean.r, mean.g), mean.b);
+            // Reject if the sample is > fireflySigma sigma above the mean.
+            if (sigma > 1e-5 && sampleLum > meanLum + fireflySigma * sigma) {
+                outColor = vec4(mean, 1.0);
+            }
+        }
         if (frame.u_temporal.x > 0.5) {
             // Temporal reprojection: carry the previous frame's history
             // forward where this pixel's world point was also visible to

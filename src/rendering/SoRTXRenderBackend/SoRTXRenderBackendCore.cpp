@@ -106,9 +106,30 @@ SoRTXRenderBackend::setPathTracingSettleFrames(const uint32_t frames)
 }
 
 void
+SoRTXRenderBackend::setPathTracingMaxSamples(const uint32_t samples)
+{
+  this->ptMaxSamples = std::max(1u, std::min(4096u, samples));
+}
+
+void
 SoRTXRenderBackend::setPathTracingDenoiseEnabled(SbBool enabled)
 {
   this->ptDenoise = enabled;
+}
+
+void
+SoRTXRenderBackend::setDenoiserFilter(const char * denoiser)
+{
+  if (!denoiser || denoiser[0] == '\0') return;
+  // Map the user-facing name onto the private enum; an unknown name leaves
+  // the current choice alone so a stale pref value never silently disables
+  // the denoiser.  createDenoiseBackend() resolves the kind from this store
+  // on the next buffer (re)creation.
+  if (std::strcmp(denoiser, "rtx") == 0) this->denoiseKind = DenoiseRtx;
+  else if (std::strcmp(denoiser, "oidn") == 0) this->denoiseKind = DenoiseOidn;
+  else if (std::strcmp(denoiser, "fsr") == 0) this->denoiseKind = DenoiseFsr;
+  else if (std::strcmp(denoiser, "none") == 0) this->denoiseKind = DenoiseNone;
+  this->denoiseKindDirty = true;
 }
 
 SbBool
@@ -301,6 +322,15 @@ SoRTXRenderBackend::initialize(const SoRenderBackendInitParams & params)
     // 0 disables the fraction-based auto-stop (run to the sample cap only).
     if (value >= 0.0f && value <= 1.0f) {
       this->ptAdaptiveStopFraction = value;
+    }
+  }
+  // Firefly rejection: replace samples far brighter than the pixel's running
+  // mean (outlier spikes) with that mean.  FC_VULKAN_PT_FIREFLY is the
+  // standard-deviation multiplier; 0 (default) disables it.
+  if (const char * firefly = getenv("FC_VULKAN_PT_FIREFLY")) {
+    const float value = static_cast<float>(std::atof(firefly));
+    if (value >= 0.0f) {
+      this->ptFireflySigma = value;
     }
   }
   // Temporal reprojection: carry converged samples across camera moves.

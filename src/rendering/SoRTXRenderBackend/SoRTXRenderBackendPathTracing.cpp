@@ -505,7 +505,7 @@ SoRTXRenderBackend::recordAccelerationStructures(
     frame.adaptive[0] = static_cast<float>(this->ptAdaptiveMinSamples);
     frame.adaptive[1] = this->ptAdaptiveEnabled
       ? this->ptAdaptiveThreshold : 0.0f;
-    frame.adaptive[2] = 0.0f;
+    frame.adaptive[2] = this->ptFireflySigma;
     frame.adaptive[3] = 0.0f;
 
     // Temporal reprojection: the previous frame's camera (world -> clip)

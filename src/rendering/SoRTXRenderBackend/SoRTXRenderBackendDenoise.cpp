@@ -156,24 +156,34 @@ SoRTXRenderBackend::createDenoiseBackend()
 {
   if (this->denoiseWidth == 0 || this->denoiseHeight == 0) return false;
   // Resize: if the staging/output already exist but the resolution changed,
-  // tear them down first so they are recreated at the new dimensions.
+  // tear them down first so they are recreated at the new dimensions.  A
+  // runtime denoiser change (denoiseKindDirty, set by setDenoiserFilter)
+  // forces the same teardown so the new backend is configured on the next
+  // frame even without a resize.
   if (this->denoisedBuffer != VK_NULL_HANDLE &&
       (this->denoiseStagedWidth != this->denoiseWidth ||
-       this->denoiseStagedHeight != this->denoiseHeight)) {
+       this->denoiseStagedHeight != this->denoiseHeight ||
+       this->denoiseKindDirty)) {
     this->destroyDenoiser();
   }
   if (this->denoisedBuffer != VK_NULL_HANDLE) return true;
 
-  // Resolve the backend once from FC_VULKAN_PT_DENOISER (oidn | rtx | fsr).
-  // The enum default (DenoiseOidn) is overridden by env; FSR degrades to
-  // OIDN when the FFX SDK is not built in.
-  this->denoiseKind = DenoiseOidn;
-  if (const char * sel = getenv("FC_VULKAN_PT_DENOISER")) {
-    if (std::strcmp(sel, "rtx") == 0) this->denoiseKind = DenoiseRtx;
-    else if (std::strcmp(sel, "fsr") == 0) this->denoiseKind = DenoiseFsr;
-    else if (std::strcmp(sel, "none") == 0) this->denoiseKind = DenoiseNone;
-    else this->denoiseKind = DenoiseOidn;
+  // Resolve the backend from FC_VULKAN_PT_DENOISER (oidn | rtx | fsr) unless
+  // the user picked one via setDenoiserFilter() (denoiseKindDirty), in which
+  // case the stored preference wins so a runtime choice survives the buffer
+  // recreation that follows a viewport resize.  The enum default
+  // (DenoiseOidn) is overridden by either; FSR degrades to OIDN when the FFX
+  // SDK is not built in.
+  if (!this->denoiseKindDirty) {
+    this->denoiseKind = DenoiseOidn;
+    if (const char * sel = getenv("FC_VULKAN_PT_DENOISER")) {
+      if (std::strcmp(sel, "rtx") == 0) this->denoiseKind = DenoiseRtx;
+      else if (std::strcmp(sel, "fsr") == 0) this->denoiseKind = DenoiseFsr;
+      else if (std::strcmp(sel, "none") == 0) this->denoiseKind = DenoiseNone;
+      else this->denoiseKind = DenoiseOidn;
+    }
   }
+  this->denoiseKindDirty = false;
 
   // Compute the denoiser working resolution.  A scale factor >1 lets the
   // denoiser run at reduced resolution (cheaper) and the raster present pass
@@ -186,39 +196,69 @@ SoRTXRenderBackend::createDenoiseBackend()
     return true;
   }
 
+  // Set when the host-visible staging block (OIDN/FSR) cannot be allocated;
+  // the device-local denoised/albedo buffers still get created so descriptor
+  // bindings stay valid, but the host-side denoiser backends are skipped.
+  bool stagingFailed = false;
+
   // Host-visible staging buffers: one mapped block covering color, albedo,
-  // normal, guide and output for the current resolution.  Allocates a single
+  // normal and output for the current resolution.  Allocates a single
   // host-visible buffer so the maps stay valid for the life of the backend
-  // and the denoiser can read the G-buffer rows directly.
+  // and the denoiser can read the G-buffer rows directly.  Regions are laid
+  // out as [0]=color, [1]=albedo, [2]=normal, [3]=output (the readback copies
+  // three guides and the denoiser writes one output).  A single guide slot is
+  // enough: the real per-pixel validity comes from the sample count in
+  // color[3], so the old position/guide region was never used.  Keeping the
+  // block at 4x imageBytes (not 5x) avoids wasting 20% of the host-visible
+  // barrier, which is the constrained resource that fails the allocation.
+  //
+  // The RTX path needs no host staging: it copies the G-buffers device-to-
+  // device into CUDA-Vulkan interop images and runs OptiX entirely on the
+  // GPU, so skip the host-coherent block (several image-sized regions is the
+  // exact allocation that can run the driver out of host-visible memory) and
+  // only allocate it for the host-side OIDN/FSR backends.
   const VkDeviceSize pixelBytes = 4 * sizeof(float);
   const VkDeviceSize imageBytes =
     static_cast<VkDeviceSize>(this->denoiseWidth) * this->denoiseHeight *
     pixelBytes;
-  const VkDeviceSize totalBytes = imageBytes * 5; // color+albedo+normal+guide+out
-  if (!this->createHostVisibleBuffer(
-        totalBytes, VK_BUFFER_USAGE_TRANSFER_DST_BIT |
-          VK_BUFFER_USAGE_TRANSFER_SRC_BIT | VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
-        this->denoiseColorBuf, this->denoiseColorMem)) {
-    this->emitError("failed to create denoiser staging buffer");
-    return false;
-  }
-  // The five logical regions share one backing allocation; derive the
-  // handles by offset.  We keep VkBuffer handles identical (the staging
-  // buffer) and only the mapped pointers differ, which is fine for the
-  // host-side denoisers.
-  this->denoiseAlbedoBuf = this->denoiseColorBuf;
-  this->denoiseNormalBuf = this->denoiseColorBuf;
-  this->denoiseGuideBuf = this->denoiseColorBuf;
-  this->denoiseOutBuf = this->denoiseColorBuf;
-  this->denoiseAlbedoMem = this->denoiseColorMem;
-  this->denoiseNormalMem = this->denoiseColorMem;
-  this->denoiseGuideMem = this->denoiseColorMem;
-  this->denoiseOutMem = this->denoiseColorMem;
-  if (vkMapMemory(this->device, this->denoiseColorMem, 0, totalBytes, 0,
-                  &this->denoiseStagingPtr) != VK_SUCCESS) {
-    this->denoiseStagingPtr = nullptr;
-    this->emitError("failed to map denoiser staging buffer");
-    return false;
+  if (this->denoiseKind != DenoiseRtx) {
+    const VkDeviceSize totalBytes = imageBytes * 4; // color+albedo+normal+out
+    if (!this->createHostVisibleBuffer(
+          totalBytes, VK_BUFFER_USAGE_TRANSFER_DST_BIT |
+            VK_BUFFER_USAGE_TRANSFER_SRC_BIT |
+            VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
+          this->denoiseColorBuf, this->denoiseColorMem)) {
+      // The host-visible staging block is the constrained allocation (several
+      // image-sized regions at viewport resolution); if the driver cannot back
+      // it, degrade gracefully rather than failing the whole path-tracing
+      // buffer setup (which previously cascaded through createPathTracingBuffers
+      // into renderExternal and VK_ERROR_DEVICE_LOST).  Mark the staging as
+      // unavailable so the OIDN/FSR backends are skipped, but keep going so
+      // the device-local denoised/albedo buffers (which the present shader
+      // bindings depend on) are still created and the descriptors stay valid.
+      this->emitError("failed to create denoiser staging buffer; disabling denoiser");
+      stagingFailed = true;
+    }
+    else {
+      // The four logical regions share one backing allocation; derive the
+      // handles by offset.  We keep VkBuffer handles identical (the staging
+      // buffer) and only the mapped pointers differ, which is fine for the
+      // host-side denoisers.
+      this->denoiseAlbedoBuf = this->denoiseColorBuf;
+      this->denoiseNormalBuf = this->denoiseColorBuf;
+      this->denoiseGuideBuf = this->denoiseColorBuf;
+      this->denoiseOutBuf = this->denoiseColorBuf;
+      this->denoiseAlbedoMem = this->denoiseColorMem;
+      this->denoiseNormalMem = this->denoiseColorMem;
+      this->denoiseGuideMem = this->denoiseColorMem;
+      this->denoiseOutMem = this->denoiseColorMem;
+      if (vkMapMemory(this->device, this->denoiseColorMem, 0, totalBytes, 0,
+                      &this->denoiseStagingPtr) != VK_SUCCESS) {
+        this->denoiseStagingPtr = nullptr;
+        this->emitError("failed to map denoiser staging buffer; disabling denoiser");
+        stagingFailed = true;
+      }
+    }
   }
 
   // Device-local output image bound at present binding 5.  The present
@@ -252,7 +292,10 @@ SoRTXRenderBackend::createDenoiseBackend()
   // Backend-specific setup.
 #if COIN_BUILD_OIDN
   if (this->denoiseKind == DenoiseOidn) {
-    if (!this->configureOidnFilter()) return false;
+    if (stagingFailed || !this->configureOidnFilter()) {
+      this->emitError("OIDN denoiser unavailable; disabling denoise");
+      this->denoiseKind = DenoiseNone;
+    }
   }
 #endif
 
@@ -276,7 +319,10 @@ SoRTXRenderBackend::createDenoiseBackend()
       this->teardownRtxDenoiser();
       this->denoiseKind = DenoiseOidn;
 #if COIN_BUILD_OIDN
-      if (!this->configureOidnFilter()) return false;
+      if (!this->configureOidnFilter()) {
+        this->emitError("OIDN fallback unavailable; disabling denoise");
+        this->denoiseKind = DenoiseNone;
+      }
 #endif
     }
   }
@@ -287,7 +333,10 @@ SoRTXRenderBackend::createDenoiseBackend()
     this->emitError("AMD FSR denoiser is not built in; falling back to OIDN");
     this->denoiseKind = DenoiseOidn;
 #if COIN_BUILD_OIDN
-    if (!this->configureOidnFilter()) return false;
+    if (!this->configureOidnFilter()) {
+      this->emitError("OIDN fallback unavailable; disabling denoise");
+      this->denoiseKind = DenoiseNone;
+    }
 #endif
   }
 #endif
@@ -509,7 +558,7 @@ SoRTXRenderBackend::updateDenoise()
   float * normal = reinterpret_cast<float *>(
     static_cast<uint8_t *>(this->denoiseStagingPtr) + 2 * stride);
   float * out = reinterpret_cast<float *>(
-    static_cast<uint8_t *>(this->denoiseStagingPtr) + 4 * stride);
+    static_cast<uint8_t *>(this->denoiseStagingPtr) + 3 * stride);
 
   // The accum buffer stores a sum of radiance with the sample count in w;
   // convert to the average color the denoiser wants.  The guide (position
@@ -585,7 +634,7 @@ SoRTXRenderBackend::updateDenoise()
     vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_HOST_BIT,
                          VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 1, &hostBar, 0,
                          nullptr, 0, nullptr);
-    VkBufferCopy cOut {4 * stride, 0, stride};
+    VkBufferCopy cOut {3 * stride, 0, stride};
     vkCmdCopyBuffer(cmd, this->denoiseOutBuf, this->denoisedBuffer, 1, &cOut);
     VkMemoryBarrier outBar {};
     outBar.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
@@ -635,6 +684,22 @@ SoRTXRenderBackend::releaseDenoiseStaging()
     this->denoiseGuideMem = VK_NULL_HANDLE;
     this->denoiseOutMem = VK_NULL_HANDLE;
   }
+  // The device-local denoised output and albedo G-buffer are kept across a
+  // mid-life degrade (they underpin the present shader bindings 5 and 14 and
+  // are only freed by destroyDenoiser()/shutdown()), so a failed OIDN staging
+  // allocation does not leave dangling descriptors.
+  this->denoiseResultReady = FALSE;
+}
+
+void
+SoRTXRenderBackend::destroyDenoiser()
+{
+  this->releaseDenoiseStaging();
+
+  // Device-local denoised output (present binding 5) and albedo G-buffer
+  // (binding 14).  Free them only on full teardown, not on a mid-life degrade
+  // (releaseDenoiseStaging above keeps them so the descriptor set stays
+  // valid); the whole backend is going away here so it is safe.
   if (this->denoisedBuffer != VK_NULL_HANDLE) {
     vkDestroyBuffer(this->device, this->denoisedBuffer, this->allocator);
     vkFreeMemory(this->device, this->denoisedMemory, this->allocator);
@@ -647,13 +712,6 @@ SoRTXRenderBackend::releaseDenoiseStaging()
     this->albedoBuffer = VK_NULL_HANDLE;
     this->albedoMemory = VK_NULL_HANDLE;
   }
-  this->denoiseResultReady = FALSE;
-}
-
-void
-SoRTXRenderBackend::destroyDenoiser()
-{
-  this->releaseDenoiseStaging();
 
 #if COIN_BUILD_OIDN
   if (this->oidnFilter) {

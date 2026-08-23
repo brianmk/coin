@@ -204,12 +204,28 @@ public:
   void setPathTracingSettleFrames(uint32_t frames);
 
   /*!
+    \brief Set the accumulated-sample cap before the run auto-stops (default
+    256).  The env override FC_VULKAN_PT_MAXSAMPLES sets the default before
+    initialize().
+  */
+  void setPathTracingMaxSamples(uint32_t samples);
+
+  /*!
     \brief Enable/disable the edge-stopping denoise pass (default on).
 
     When disabled, the present pass shows the raw accumulated radiance, so
     the Monte-Carlo noise of the early accumulation frames is visible.
   */
   void setPathTracingDenoiseEnabled(SbBool enabled);
+
+  /*!
+    \brief Select the denoiser backend by name ("rtx", "oidn", "fsr",
+    "none").  The selection is applied on the next path-tracing buffer
+    (re)creation (the resolve in createDenoiseBackend is keyed on the
+    store here, falling back to the FC_VULKAN_PT_DENOISER env var when the
+    setter is never called).  An empty string leaves the current choice.
+  */
+  void setDenoiserFilter(const char * denoiser);
 
   /*!
     \brief Record the draw list into a caller-owned command buffer/render pass.
@@ -447,6 +463,11 @@ private:
   uint32_t ptAdaptiveMinSamples = 4;
   float ptAdaptiveThreshold = 0.05f;
   float ptAdaptiveStopFraction = 0.02f;
+  // Firefly rejection: standard-deviation multiplier under which a sample
+  // far brighter than the pixel's running mean is replaced by that mean.
+  // 0 disables it.  Set from FC_VULKAN_PT_FIREFLY (default 0, off) so the
+  // env override can enable it per run.
+  float ptFireflySigma = 0.0f;
   uint32_t ptLastActivePixels = 0;
   float ptLastActiveFraction = 1.0f;
   // Temporal reprojection (FC_VULKAN_PT_TEMPORAL); the world->clip matrix
@@ -571,10 +592,16 @@ private:
   // present binding 5.
   enum DenoiseKind { DenoiseNone = 0, DenoiseOidn, DenoiseRtx, DenoiseFsr };
 
-  //! Backend selected (resolved once) by FC_VULKAN_PT_DENOISER.
+  //! Backend selected (resolved) by FC_VULKAN_PT_DENOISER or, when set via
+  //! setDenoiserFilter(), by the stored preference name so a runtime choice
+  //! survives the next path-tracing buffer (re)creation.
   DenoiseKind denoiseKind = DenoiseNone;
-  //! True once any denoiser backend has been successfully created.
+  //! True once a denoiser backend has been successfully created.
   bool denoiserActive = false;
+  //! Set by setDenoiserFilter() so createDenoiseBackend() re-resolves the
+  //! kind from the stored preference (instead of the env var) on the next
+  //! buffer (re)creation.
+  bool denoiseKindDirty = false;
 
   // Host-visible staging copies of the G-buffers (device-local accum/normal/
   // albedo are copied in after the trace, denoised on the host (OIDN) or on
