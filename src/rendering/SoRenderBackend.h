@@ -53,6 +53,13 @@ struct SoRenderParams {
     specific.  The pointer is borrowed for the duration of render() only.
   */
   void * renderTarget = nullptr;
+
+  //! Monotonically increasing generation counter for the camera used this
+  //! frame.  Bumped whenever the active camera node changes or its pose
+  //! (position/orientation/projection) changes, so a backend can reliably
+  //! detect a camera move without diffing floating-point matrices.  A value
+  //! of 0 means "not supplied" (the backend should fall back to the matrices).
+  uint32_t cameraVersion = 0;
 };
 
 /*!

@@ -49,12 +49,27 @@ SoRTXRenderBackend::updatePathTracingState(const SoDrawList & drawlist,
   params.projMatrix.getValue(projValue);
   std::memcpy(projMatrix, &projValue[0][0], sizeof(projMatrix));
   const SbVec2s & vpSize = params.viewport.getViewportSizePixels();
-  const bool viewChanged =
-    !this->haveLastView ||
-    !matricesNearlyEqual(viewMatrix, this->lastViewMatrix, 16) ||
-    !matricesNearlyEqual(projMatrix, this->lastProjMatrix, 16) ||
-    this->lastViewportWidth != static_cast<uint32_t>(vpSize[0]) ||
-    this->lastViewportHeight != static_cast<uint32_t>(vpSize[1]);
+  // Prefer the manager's camera generation counter when supplied: it is the
+  // authoritative camera-motion signal and cannot be fooled by floating-point
+  // equality tolerances (a real pan/rotation may produce a matrix variation
+  // swallowed by the epsilon below, so a stale-converged viewport never
+  // resumes).  Fall back to the matrix diff only when no counter is present
+  // (0 == "not supplied", e.g. a direct backend test harness).
+  bool viewChanged = false;
+  if (params.cameraVersion != 0) {
+    viewChanged = !this->haveLastCameraVersion ||
+                  params.cameraVersion != this->lastCameraVersion ||
+                  this->lastViewportWidth != static_cast<uint32_t>(vpSize[0]) ||
+                  this->lastViewportHeight != static_cast<uint32_t>(vpSize[1]);
+  }
+  else {
+    viewChanged =
+      !this->haveLastView ||
+      !matricesNearlyEqual(viewMatrix, this->lastViewMatrix, 16) ||
+      !matricesNearlyEqual(projMatrix, this->lastProjMatrix, 16) ||
+      this->lastViewportWidth != static_cast<uint32_t>(vpSize[0]) ||
+      this->lastViewportHeight != static_cast<uint32_t>(vpSize[1]);
+  }
   const bool sceneChanged = this->cacheChanged;
 
   // The temporal-reprojection path starts every frame disabled; only the
@@ -236,6 +251,8 @@ SoRTXRenderBackend::updatePathTracingState(const SoDrawList & drawlist,
   std::memcpy(this->lastProjMatrix, projMatrix, sizeof(projMatrix));
   this->lastViewportWidth = static_cast<uint32_t>(vpSize[0]);
   this->lastViewportHeight = static_cast<uint32_t>(vpSize[1]);
+  this->lastCameraVersion = params.cameraVersion;
+  this->haveLastCameraVersion = params.cameraVersion != 0;
   this->haveLastView = TRUE;
   this->cacheChanged = false;
 

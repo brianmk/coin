@@ -42,6 +42,8 @@ SoRTXRenderBackend::setPathTracingEnabled(SbBool enabled)
   this->ptFrameIndex = 0;
   this->ptIdleFrames = 0;
   this->haveLastView = FALSE;
+  this->haveLastCameraVersion = FALSE;
+  this->lastCameraVersion = 0;
 }
 
 SbBool

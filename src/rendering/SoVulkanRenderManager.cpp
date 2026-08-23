@@ -160,6 +160,32 @@ public:
     SoVulkanRenderManager::NO_AUTO_CLIPPING;
   float nearplanevalue = 0.6f;
 
+  //! Generation counter bumped every time the active camera's identity
+  //! changes (a different node, position, orientation or projection).  The
+  //! ray-tracing backend reads this instead of diffing floating-point view
+  //! matrices, which are fragile (a real camera move can produce variations
+  //! swallowed by the equality epsilon, and single-precision translation can
+  //! alias under a hash).  A monotonically increasing integer is unambiguous.
+  uint32_t cameraVersion = 0;
+
+  //! Fingerprint of the camera pose (position + forward direction) used to
+  //! detect in-place pose changes of the same camera node, because a pointer
+  //! comparison cannot see a rotation/pan/zoom that mutates the node.
+  uint32_t cameraPoseFingerprint = 0;
+
+  //! Resolve the camera that will render this frame.  The scene graph is the
+  //! single camera authority (FreeCAD's navigation mutates the camera node
+  //! inside the scene it passes to setSceneGraph), so the camera is found
+  //! there first.  The retained pointer set by setCamera() is only a
+  //! fallback/hint for the case where the camera lives outside the scene
+  //! root (overlay-only setups).  Returns nullptr if no camera is available.
+  SoCamera * resolveActiveCamera();
+
+  //! Refresh the retained camera pointer from the scene-graph authority and
+  //! bump cameraVersion when the active camera (or its pose) changes.
+  void refreshActiveCamera();
+
+
   // Near/far planes computed by setClippingPlanes(), consumed by
   // prepareRenderParams().  Deliberately NOT written back into
   // SoCamera::nearDistance/farDistance: the camera node is shared with the
@@ -705,10 +731,86 @@ SoVulkanRenderManager::renderExternal(SbBool clearwindow,
   return TRUE;
 }
 
+SoCamera *
+SoVulkanRenderManagerP::resolveActiveCamera()
+{
+  // The scene graph passed to setSceneGraph() is the GL viewer's superscene,
+  // which CONTAINS the camera node that navigation actually mutates (FreeCAD
+  // keeps the camera inside the scene root separator).  Prefer that node: it
+  // is the single authority and cannot go stale, whereas the retained pointer
+  // set by setCamera() is a snapshot that diverges as soon as the camera is
+  // rotated/panned without an intervening sync.
+  if (this->scene) {
+    if (this->scene->getTypeId().isDerivedFrom(SoSeparator::getClassTypeId())) {
+      SoSeparator * sep = static_cast<SoSeparator *>(this->scene);
+      for (int i = 0; i < sep->getNumChildren(); ++i) {
+        SoNode * child = sep->getChild(i);
+        if (child && child->isOfType(SoCamera::getClassTypeId())) {
+          return static_cast<SoCamera *>(child);
+        }
+      }
+    }
+    // The camera may be nested deeper (a subset/child separator).  Search the
+    // subtree for the first camera, mirroring SoCamera::doAction() semantics of
+    // using the camera encountered first in traversal order.
+    SoSearchAction search;
+    search.setType(SoCamera::getClassTypeId());
+    search.setSearchingAll(TRUE);
+    search.apply(this->scene);
+    const SoPathList & paths = search.getPaths();
+    if (paths.getLength() > 0) {
+      return static_cast<SoCamera *>(paths[0]->getTail());
+    }
+  }
+  // No camera in the scene graph: fall back to the retained pointer (used by
+  // overlay-only or programmatic render setups that manage a camera outside
+  // the scene).
+  return this->camera;
+}
+
+// Refresh the retained camera pointer from the authoritative scene-graph
+// camera and bump the generation counter when the active camera (or its
+// pose) changes.  Called at the top of every prepareRenderParams() so all
+// downstream reads of `this->camera` see the node that is actually in the
+// scene -- the node navigation mutates -- instead of a possibly-stale
+// snapshot.  The refcount is managed so the node stays alive for the frame.
+void
+SoVulkanRenderManagerP::refreshActiveCamera()
+{
+  SoCamera * resolved = this->resolveActiveCamera();
+  if (resolved && resolved != this->camera) {
+    SoCamera *& stored = this->camera;
+    if (stored) {
+      stored->unref();
+    }
+    stored = resolved;
+    stored->ref();
+    this->cameraVersion++;
+  }
+  else if (resolved == this->camera) {
+    // Same node: detect pose changes (a rotation/pan/zoom mutates the node in
+    // place), which a pointer comparison alone cannot see.  Compare the pose
+    // fingerprint so the backend's viewChanged reliably fires on a camera move.
+    SbVec3f pos = this->camera->position.getValue();
+    SbRotation ori = this->camera->orientation.getValue();
+    SbVec3f fp;
+    ori.multVec(SbVec3f(0.0f, 0.0f, 1.0f), fp);
+    uint32_t fp1 = (uint32_t)((int)(pos[0] * 256.0f)) ^
+                   (uint32_t)((int)(pos[1] * 256.0f)) ^
+                   (uint32_t)((int)(pos[2] * 256.0f)) ^
+                   (uint32_t)((int)(fp[0] * 256.0f));
+    if (fp1 != this->cameraPoseFingerprint) {
+      this->cameraPoseFingerprint = fp1;
+      this->cameraVersion++;
+    }
+  }
+}
+
 void
 SoVulkanRenderManagerP::setClippingPlanes(void)
 {
-  if (!this->camera || !this->scene) return;
+  SoCamera * camera = this->resolveActiveCamera();
+  if (!camera || !this->scene) return;
 
   // Recompute the world-space bounding box only when the scene pointer changed
   // or the previous frame's command fingerprint differs.  The fingerprint
@@ -740,9 +842,9 @@ SoVulkanRenderManagerP::setClippingPlanes(void)
   // same math SoRenderManagerP::setClippingPlanes() applies after looking up
   // the camera-to-world matrix.
   SbMatrix mat;
-  mat.setTranslate(-this->camera->position.getValue());
+  mat.setTranslate(-camera->position.getValue());
   xbox.transform(mat);
-  mat = this->camera->orientation.getValue().inverse();
+  mat = camera->orientation.getValue().inverse();
   xbox.transform(mat);
   SbBox3f box = xbox.project();
 
@@ -799,9 +901,9 @@ SoVulkanRenderManagerP::setClippingPlanes(void)
 
   // Shared near/far computation (diagonal offset, empty-box defaults,
   // perspective near limit) with the legacy GL SoRenderManager.
-  const bool isOrtho = this->camera->isOfType(
+  const bool isOrtho = camera->isOfType(
     SoOrthographicCamera::getClassTypeId());
-  const bool isPersp = this->camera->isOfType(
+  const bool isPersp = camera->isOfType(
     SoPerspectiveCamera::getClassTypeId());
   float nearval, farval;
   if (!coinComputeClippingPlanes(clippedBox, isOrtho, isPersp,
@@ -827,8 +929,8 @@ SoVulkanRenderManagerP::setClippingPlanes(void)
         || SbAbs(farval - lastFar) > 0.05f * SbMax(SbAbs(farval), 1.0f)) {
       lastNear = nearval;
       lastFar = farval;
-      SbVec3f p = this->camera->position.getValue();
-      SbRotation o = this->camera->orientation.getValue();
+      SbVec3f p = camera->position.getValue();
+      SbRotation o = camera->orientation.getValue();
       float q0, q1, q2, q3;
       o.getValue(q0, q1, q2, q3);
       float x0, y0, z0, x1, y1, z1;
@@ -914,6 +1016,12 @@ SoVulkanRenderManagerP::prepareRenderParams(SbBool clearwindow,
     return FALSE;
   }
 
+  // The scene graph is the single camera authority.  Refresh the retained
+  // camera pointer (and the generation counter) from the camera node inside
+  // the scene every frame so auto-clipping and the matrix build always track
+  // the node navigation actually mutates, never a stale snapshot.
+  this->refreshActiveCamera();
+
   // Keep the near/far planes tight around the scene so zooming and orbiting
   // never push geometry outside the view volume.  The GL SoRenderManager does
   // this automatically (VARIABLE_NEAR_PLANE); without the equivalent here,
@@ -974,6 +1082,9 @@ SoVulkanRenderManagerP::prepareRenderParams(SbBool clearwindow,
     params.flags |= SO_PARAM_CLEAR_DEPTH;
   }
   params.renderTarget = this->renderTarget;
+  // Hand the camera generation counter to the backends so a camera move is
+  // detected unambiguously (see SoRenderParams::cameraVersion).
+  params.cameraVersion = this->cameraVersion;
 
   // SoIRRenderAction::apply() resets the frame, so the camera and the scene
   // must be traversed in a single apply() call.  The managed scene graph is

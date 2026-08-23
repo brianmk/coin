@@ -486,6 +486,12 @@ private:
   uint32_t lastViewportWidth = 0;
   uint32_t lastViewportHeight = 0;
   SbBool haveLastView = FALSE;
+  //! Generator counter of the camera that produced the last processed frame
+  //! (SoRenderParams::cameraVersion).  When nonzero it is the authoritative
+  //! camera-motion signal: the manager bumps it on any camera move, so the
+  //! backend never has to rely on a floating-point matrix diff.
+  uint32_t lastCameraVersion = 0;
+  SbBool haveLastCameraVersion = FALSE;
 
   // TLAS (rebuilt every frame) and scratch buffer (sized for the largest
   // build, reused by BLAS and TLAS builds).
