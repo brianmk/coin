@@ -377,6 +377,13 @@ private:
   VkDeviceMemory normalMemory = VK_NULL_HANDLE;
   VkBuffer positionBuffer = VK_NULL_HANDLE;
   VkDeviceMemory positionMemory = VK_NULL_HANDLE;
+  // Adaptive sampling: per-pixel radiance sums-of-squares (variance test)
+  // and a per-frame host-readable active-pixel counter.
+  VkBuffer sumSqBuffer = VK_NULL_HANDLE;
+  VkDeviceMemory sumSqMemory = VK_NULL_HANDLE;
+  VkBuffer activeCounterBuffer = VK_NULL_HANDLE;
+  VkDeviceMemory activeCounterMemory = VK_NULL_HANDLE;
+  void * activeCounterMapped = nullptr;
   uint32_t ptBufferWidth = 0;
   uint32_t ptBufferHeight = 0;
 
@@ -399,6 +406,14 @@ private:
   uint32_t ptMaxSamples = 256;
   // Whether the edge-stopping denoise present pass is active.
   SbBool ptDenoise = TRUE;
+  // Adaptive sampling state (see updateAdaptiveStats()).
+  SbBool ptAdaptiveEnabled = TRUE;
+  uint32_t ptAdaptiveMinSamples = 4;
+  float ptAdaptiveThreshold = 0.05f;
+  float ptAdaptiveStopFraction = 0.02f;
+  uint32_t ptLastActivePixels = 0;
+  float ptLastActiveFraction = 1.0f;
+  void updateAdaptiveStats();
   float lastViewMatrix[16] = {};
   float lastProjMatrix[16] = {};
   uint32_t lastViewportWidth = 0;

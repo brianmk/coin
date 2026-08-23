@@ -34,6 +34,7 @@ layout(set = 0, binding = 2, std140) uniform FrameBlock {
     vec4  u_bgTop;         // gradient top color
     vec4  u_bgBottom;      // gradient bottom color
     vec4  u_state;         // x = frameIndex, y = pathTracing, z = accumulating, w = maxBounces
+    vec4  u_adaptive;      // x = minSamples, y = relErrorThreshold (0 = off)
 } frame;
 
 // std430 mirror of the C++ RTMaterial record; one per draw command, indexed
@@ -73,6 +74,18 @@ layout(set = 0, binding = 4, std430) buffer AccumBuffer { vec4 accum[]; };
 // First-bounce G-buffers for the denoising present pass.
 layout(set = 0, binding = 5, std430) buffer NormalBuffer { vec4 normals[]; };
 layout(set = 0, binding = 6, std430) buffer PositionBuffer { vec4 positions[]; };
+
+// Per-pixel sums-of-squares for the adaptive-sampling variance test
+// (rgb = sum(radiance^2), a = sample count, mirroring the accumulation
+// buffer).  Cleared with the accumulation buffer on every fresh run.
+layout(set = 0, binding = 8, std430) buffer SumSqBuffer { vec4 sq[]; };
+
+// Per-frame active-pixel counter (pixels that actually traced this frame;
+// converged pixels early-out and do not add).  Cleared every frame and read
+// back by the host after the queue wait.
+layout(set = 0, binding = 9, std430) buffer ActiveCounter {
+    uint counts[];
+};
 
 const int COIN_MAX_LIGHTS = 8;
 
@@ -359,6 +372,27 @@ void main()
     const int maxBounces = int(clamp(frame.u_state.w, 1.0, 16.0));
     const int index = int(px.y * uint(max(frame.u_viewport.x, 1.0)) + px.x);
 
+    // Adaptive sampling: once enough samples accumulated, a pixel whose
+    // relative variance fell below the threshold is converged and skips
+    // tracing entirely (its mean is shown as-is).  The early-out must come
+    // before the ray setup so the entire path loop is skipped.
+    if (ptEnabled > 0.5 && accumulating > 0.5 &&
+        frame.u_adaptive.y > 0.0) {
+        const uint nPrev = uint(max(accum[index].a, 0.0));
+        const uint minSamples = uint(max(frame.u_adaptive.x, 1.0));
+        if (nPrev >= minSamples) {
+            vec3 mean = accum[index].rgb / float(nPrev);
+            float m2 = max(dot(mean, mean), 1e-10);
+            float v2 = max(dot(sq[index].rgb, sq[index].rgb) / float(nPrev) -
+                           m2, 0.0);
+            if (sqrt(v2) < frame.u_adaptive.y * sqrt(m2)) {
+                imageStore(storageImage, ivec2(px),
+                           clamp(vec4(mean, 1.0), 0.0, 1.0));
+                return;
+            }
+        }
+    }
+
     // Primary ray with per-frame sub-pixel jitter while accumulating.
     vec2 jitter = vec2(0.5);
     if (ptEnabled > 0.5 && accumulating > 0.5) {
@@ -560,6 +594,11 @@ void main()
         acc.rgb += outColor.rgb;
         acc.a += 1.0;
         accum[index] = acc;
+        vec4 s = sq[index];
+        s.rgb += outColor.rgb * outColor.rgb;
+        s.a += 1.0;
+        sq[index] = s;
+        atomicAdd(counts[0], 1u);
     }
     else {
         accum[index] = outColor;

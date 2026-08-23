@@ -50,8 +50,9 @@ struct alignas(16) RTXFrameBlock {
   float bgBottom[4];
   float state[4]; // x = frameIndex, y = pathTracing, z = accumulating,
                   // w = maxBounces
+  float adaptive[4]; // x = minSamples, y = relErrorThreshold (0 = off)
 };
-static_assert(sizeof(RTXFrameBlock) == 3 * 64 + 5 * 16,
+static_assert(sizeof(RTXFrameBlock) == 3 * 64 + 6 * 16,
               "RTXFrameBlock must match FrameBlock std140 layout");
 
 // Push constant block of the raygen shader (RaygenPush in Raygen.glsl).
@@ -506,6 +507,28 @@ SoRTXRenderBackend::initialize(const SoRenderBackendInitParams & params)
       this->ptMaxSamples = static_cast<uint32_t>(value);
     }
   }
+  // Adaptive sampling tuning (see PathTrace.glsl u_adaptive).
+  if (const char * adaptive = getenv("FC_VULKAN_PT_ADAPTIVE")) {
+    this->ptAdaptiveEnabled = std::atoi(adaptive) != 0 ? TRUE : FALSE;
+  }
+  if (const char * minsamples = getenv("FC_VULKAN_PT_MIN_SAMPLES")) {
+    const int value = std::atoi(minsamples);
+    if (value >= 1 && value <= 256) {
+      this->ptAdaptiveMinSamples = static_cast<uint32_t>(value);
+    }
+  }
+  if (const char * threshold = getenv("FC_VULKAN_PT_THRESHOLD")) {
+    const float value = static_cast<float>(std::atof(threshold));
+    if (value > 0.0f && value <= 1.0f) {
+      this->ptAdaptiveThreshold = value;
+    }
+  }
+  if (const char * stopfraction = getenv("FC_VULKAN_PT_STOP_FRACTION")) {
+    const float value = static_cast<float>(std::atof(stopfraction));
+    if (value > 0.0f && value <= 1.0f) {
+      this->ptAdaptiveStopFraction = value;
+    }
+  }
 
   this->setInitialized(TRUE);
   this->emitLog("initialized (Vulkan ray tracing)");
@@ -520,7 +543,7 @@ SoRTXRenderBackend::createDescriptorSetLayout()
   // rays and writes the image/accum/G-buffers, the miss shader samples the
   // frame UBO, and the closest-hit shader reads materials, the frame UBO
   // and the triangle-normal pool.
-  VkDescriptorSetLayoutBinding bindings[8] {};
+  VkDescriptorSetLayoutBinding bindings[10] {};
   bindings[0].binding = 0;
   bindings[0].descriptorType = VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR;
   bindings[0].descriptorCount = 1;
@@ -560,9 +583,20 @@ SoRTXRenderBackend::createDescriptorSetLayout()
   bindings[7].stageFlags = VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR |
     VK_SHADER_STAGE_COMPUTE_BIT;
 
+  // Adaptive sampling: per-pixel sums-of-squares and the active-pixel
+  // counter (compute-tracer only).
+  bindings[8].binding = 8;
+  bindings[8].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+  bindings[8].descriptorCount = 1;
+  bindings[8].stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+  bindings[9].binding = 9;
+  bindings[9].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+  bindings[9].descriptorCount = 1;
+  bindings[9].stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+
   VkDescriptorSetLayoutCreateInfo ci {};
   ci.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
-  ci.bindingCount = 8;
+  ci.bindingCount = 10;
   ci.pBindings = bindings;
   if (vkCreateDescriptorSetLayout(this->device, &ci, this->allocator,
                                   &this->rtSetLayout) != VK_SUCCESS) {
@@ -605,7 +639,7 @@ SoRTXRenderBackend::createDescriptorPool()
   sizes[3].type = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
   sizes[3].descriptorCount = 2;
   sizes[4].type = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
-  sizes[4].descriptorCount = 16;
+  sizes[4].descriptorCount = 20;
 
   VkDescriptorPoolCreateInfo ci {};
   ci.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
@@ -1064,14 +1098,23 @@ SoRTXRenderBackend::createPathTracingBuffers(uint32_t width, uint32_t height)
     const VkDeviceMemory normalMem = this->normalMemory;
     const VkBuffer position = this->positionBuffer;
     const VkDeviceMemory positionMem = this->positionMemory;
+    const VkBuffer sumSq = this->sumSqBuffer;
+    const VkDeviceMemory sumSqMem = this->sumSqMemory;
+    const VkBuffer counter = this->activeCounterBuffer;
+    const VkDeviceMemory counterMem = this->activeCounterMemory;
     this->deferDestroy([device, allocator, accum, accumMem, normal,
-                        normalMem, position, positionMem]() {
+                        normalMem, position, positionMem, sumSq, sumSqMem,
+                        counter, counterMem]() {
       vkDestroyBuffer(device, accum, allocator);
       vkFreeMemory(device, accumMem, allocator);
       vkDestroyBuffer(device, normal, allocator);
       vkFreeMemory(device, normalMem, allocator);
       vkDestroyBuffer(device, position, allocator);
       vkFreeMemory(device, positionMem, allocator);
+      vkDestroyBuffer(device, sumSq, allocator);
+      vkFreeMemory(device, sumSqMem, allocator);
+      vkDestroyBuffer(device, counter, allocator);
+      vkFreeMemory(device, counterMem, allocator);
     });
     this->accumBuffer = VK_NULL_HANDLE;
     this->accumMemory = VK_NULL_HANDLE;
@@ -1079,6 +1122,11 @@ SoRTXRenderBackend::createPathTracingBuffers(uint32_t width, uint32_t height)
     this->normalMemory = VK_NULL_HANDLE;
     this->positionBuffer = VK_NULL_HANDLE;
     this->positionMemory = VK_NULL_HANDLE;
+    this->sumSqBuffer = VK_NULL_HANDLE;
+    this->sumSqMemory = VK_NULL_HANDLE;
+    this->activeCounterBuffer = VK_NULL_HANDLE;
+    this->activeCounterMemory = VK_NULL_HANDLE;
+    this->activeCounterMapped = nullptr;
   }
   this->ptBufferWidth = width;
   this->ptBufferHeight = height;
@@ -1120,6 +1168,56 @@ SoRTXRenderBackend::createPathTracingBuffers(uint32_t width, uint32_t height)
     this->ptBufferWidth = 0;
     this->ptBufferHeight = 0;
     return false;
+  }
+  // Sums-of-squares (cleared via vkCmdFillBuffer like the accumulation
+  // buffer) and the host-readable active-pixel counter (4 bytes; 16 keeps
+  // the buffer comfortably above any minimum-alignment requirement).
+  if (!this->createDeviceLocalBuffer(bytes, accumUsage, this->sumSqBuffer,
+                                     this->sumSqMemory)) {
+    vkDestroyBuffer(this->device, this->positionBuffer, this->allocator);
+    vkFreeMemory(this->device, this->positionMemory, this->allocator);
+    vkDestroyBuffer(this->device, this->normalBuffer, this->allocator);
+    vkFreeMemory(this->device, this->normalMemory, this->allocator);
+    vkDestroyBuffer(this->device, this->accumBuffer, this->allocator);
+    vkFreeMemory(this->device, this->accumMemory, this->allocator);
+    this->positionBuffer = VK_NULL_HANDLE;
+    this->positionMemory = VK_NULL_HANDLE;
+    this->normalBuffer = VK_NULL_HANDLE;
+    this->normalMemory = VK_NULL_HANDLE;
+    this->accumBuffer = VK_NULL_HANDLE;
+    this->accumMemory = VK_NULL_HANDLE;
+    this->ptBufferWidth = 0;
+    this->ptBufferHeight = 0;
+    return false;
+  }
+  if (!this->createHostVisibleBuffer(
+        16, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT |
+              VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+        this->activeCounterBuffer, this->activeCounterMemory)) {
+    vkDestroyBuffer(this->device, this->sumSqBuffer, this->allocator);
+    vkFreeMemory(this->device, this->sumSqMemory, this->allocator);
+    vkDestroyBuffer(this->device, this->positionBuffer, this->allocator);
+    vkFreeMemory(this->device, this->positionMemory, this->allocator);
+    vkDestroyBuffer(this->device, this->normalBuffer, this->allocator);
+    vkFreeMemory(this->device, this->normalMemory, this->allocator);
+    vkDestroyBuffer(this->device, this->accumBuffer, this->allocator);
+    vkFreeMemory(this->device, this->accumMemory, this->allocator);
+    this->sumSqBuffer = VK_NULL_HANDLE;
+    this->sumSqMemory = VK_NULL_HANDLE;
+    this->positionBuffer = VK_NULL_HANDLE;
+    this->positionMemory = VK_NULL_HANDLE;
+    this->normalBuffer = VK_NULL_HANDLE;
+    this->normalMemory = VK_NULL_HANDLE;
+    this->accumBuffer = VK_NULL_HANDLE;
+    this->accumMemory = VK_NULL_HANDLE;
+    this->ptBufferWidth = 0;
+    this->ptBufferHeight = 0;
+    return false;
+  }
+  if (vkMapMemory(this->device, this->activeCounterMemory, 0,
+                  VK_WHOLE_SIZE, 0, &this->activeCounterMapped) !=
+      VK_SUCCESS) {
+    this->activeCounterMapped = nullptr;
   }
   // Fresh buffers: refresh the descriptor sets so the new handles are
   // visible to the trace and present passes.
@@ -1217,6 +1315,14 @@ SoRTXRenderBackend::updateDescriptors()
   normalPoolInfo.buffer = this->normalPoolBuffer;
   normalPoolInfo.offset = 0;
   normalPoolInfo.range = VK_WHOLE_SIZE;
+  VkDescriptorBufferInfo sumSqInfo {};
+  sumSqInfo.buffer = this->sumSqBuffer;
+  sumSqInfo.offset = 0;
+  sumSqInfo.range = VK_WHOLE_SIZE;
+  VkDescriptorBufferInfo counterInfo {};
+  counterInfo.buffer = this->activeCounterBuffer;
+  counterInfo.offset = 0;
+  counterInfo.range = VK_WHOLE_SIZE;
 
   // Binding 0: the acceleration structure (TLAS) read by the raygen shader.
   // Only written once the TLAS exists; updateDescriptors() is re-invoked by
@@ -1314,6 +1420,26 @@ SoRTXRenderBackend::updateDescriptors()
     poolWrite.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
     poolWrite.pBufferInfo = &normalPoolInfo;
     writes.push_back(poolWrite);
+  }
+  if (this->sumSqBuffer != VK_NULL_HANDLE) {
+    VkWriteDescriptorSet sumSqWrite {};
+    sumSqWrite.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+    sumSqWrite.dstSet = rtSet;
+    sumSqWrite.dstBinding = 8;
+    sumSqWrite.descriptorCount = 1;
+    sumSqWrite.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+    sumSqWrite.pBufferInfo = &sumSqInfo;
+    writes.push_back(sumSqWrite);
+  }
+  if (this->activeCounterBuffer != VK_NULL_HANDLE) {
+    VkWriteDescriptorSet counterWrite {};
+    counterWrite.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+    counterWrite.dstSet = rtSet;
+    counterWrite.dstBinding = 9;
+    counterWrite.descriptorCount = 1;
+    counterWrite.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+    counterWrite.pBufferInfo = &counterInfo;
+    writes.push_back(counterWrite);
   }
 
   VkWriteDescriptorSet presentWrite {};
@@ -2761,9 +2887,19 @@ SoRTXRenderBackend::updatePathTracingState(const SoDrawList & drawlist,
   else if (this->ptAccumulating) {
     ++this->ptFrameIndex;
     // Converged: stop accumulating so the viewport can go idle instead of
-    // tracing the same converged image forever.  Saturate the idle counter so
-    // getPathTracingRefining() turns the continuous-update request off.
-    if (this->ptFrameIndex >= this->ptMaxSamples) {
+    // tracing the same converged image forever.  Two stop conditions: the
+    // hard sample cap, and the adaptive-sampling active-pixel fraction
+    // (read back from the previous frame): once almost every pixel's
+    // variance fell below the threshold, tracing more samples wastes GPU
+    // time.  Saturate the idle counter so getPathTracingRefining() turns
+    // the continuous-update request off.
+    // Adaptive convergence only exists on the compute tracer (the SBT
+    // raygen does not maintain the active-pixel counter).
+    const bool adaptivelyConverged =
+      !this->useSbtPipeline && this->ptAdaptiveEnabled &&
+      this->ptFrameIndex >= this->ptAdaptiveMinSamples &&
+      this->ptLastActiveFraction < this->ptAdaptiveStopFraction;
+    if (this->ptFrameIndex >= this->ptMaxSamples || adaptivelyConverged) {
       this->ptAccumulating = FALSE;
       this->ptIdleFrames = this->ptSettleFrames;
     }
@@ -2781,6 +2917,15 @@ SoRTXRenderBackend::updatePathTracingState(const SoDrawList & drawlist,
     }
   }
   // else: converged idle -- nothing to do until the camera or scene moves.
+
+  if (getenv("FC_VULKAN_RT_DEBUG") && this->ptEnabled) {
+    fprintf(stderr,
+            "[RTDBG] ptState viewChanged=%d sceneChanged=%d accum=%d "
+            "frameIndex=%u idle=%u\n",
+            viewChanged ? 1 : 0, sceneChanged ? 1 : 0,
+            this->ptAccumulating ? 1 : 0, this->ptFrameIndex,
+            this->ptIdleFrames);
+  }
 
   if (getenv("FC_VULKAN_PT_DEBUG")) {
     static uint32_t debugFrame = 0;
@@ -2821,12 +2966,13 @@ SoRTXRenderBackend::updatePathTracingState(const SoDrawList & drawlist,
   this->haveLastView = TRUE;
   this->cacheChanged = false;
 
-  // A zero frame index means a fresh accumulation: clear the buffer with a
-  // fill recorded here (still outside any render pass).  This runs before
-  // the caller's render pass on the same submission ordering, so the
-  // raygen shader observes the cleared buffer.
+  // A zero frame index means a fresh accumulation: clear the accumulation
+  // and sums-of-squares buffers with a fill recorded here (still outside
+  // any render pass).  This runs before the caller's render pass on the
+  // same submission ordering, so the tracer observes the cleared buffers.
   if (this->ptEnabled && this->ptFrameIndex == 0) {
     vkCmdFillBuffer(cmd, this->accumBuffer, 0, VK_WHOLE_SIZE, 0);
+    vkCmdFillBuffer(cmd, this->sumSqBuffer, 0, VK_WHOLE_SIZE, 0);
     VkMemoryBarrier fillBarrier {};
     fillBarrier.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
     fillBarrier.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
@@ -2836,6 +2982,48 @@ SoRTXRenderBackend::updatePathTracingState(const SoDrawList & drawlist,
                          VK_PIPELINE_STAGE_RAY_TRACING_SHADER_BIT_KHR |
                            VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
                          0, 1, &fillBarrier, 0, nullptr, 0, nullptr);
+  }
+  // The active-pixel counter is per-frame: zero it before every traced
+  // frame (the host reads it back after the submission's queue wait).
+  if (this->ptEnabled && this->activeCounterBuffer != VK_NULL_HANDLE) {
+    vkCmdFillBuffer(cmd, this->activeCounterBuffer, 0, VK_WHOLE_SIZE, 0);
+    // Make the fill visible to the compute tracer's atomics.
+    VkMemoryBarrier counterBarrier {};
+    counterBarrier.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
+    counterBarrier.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+    counterBarrier.dstAccessMask = VK_ACCESS_SHADER_WRITE_BIT |
+      VK_ACCESS_SHADER_READ_BIT;
+    vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_TRANSFER_BIT,
+                         VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, 1,
+                         &counterBarrier, 0, nullptr, 0, nullptr);
+  }
+}
+
+void
+SoRTXRenderBackend::updateAdaptiveStats()
+{
+  // Called after the submission's queue wait: the host-visible counter
+  // holds this frame's active-pixel count.
+  uint32_t active = 0;
+  if (this->activeCounterMapped && this->ptEnabled && this->ptAccumulating) {
+    active = *static_cast<const uint32_t *>(this->activeCounterMapped);
+  }
+  this->ptLastActivePixels = active;
+  const uint64_t total =
+    static_cast<uint64_t>(this->ptBufferWidth) * this->ptBufferHeight;
+  // Non-accumulating frames carry no meaningful count; report fully active
+  // so a stale value can never prematurely stop the next progressive run.
+  this->ptLastActiveFraction =
+    (this->ptEnabled && this->ptAccumulating && total > 0)
+      ? static_cast<float>(active) / static_cast<float>(total) : 1.0f;
+  if (getenv("FC_VULKAN_RT_DEBUG") && this->ptEnabled) {
+    fprintf(stderr,
+            "[RTDBG] adaptive active=%u/%llu fraction=%.4f frameIndex=%u "
+            "accum=%d self=%p buf=%ux%u\n",
+            active, static_cast<unsigned long long>(total),
+            this->ptLastActiveFraction, this->ptFrameIndex,
+            this->ptAccumulating ? 1 : 0, static_cast<const void *>(this),
+            this->ptBufferWidth, this->ptBufferHeight);
   }
 }
 
@@ -2997,6 +3185,13 @@ SoRTXRenderBackend::recordAccelerationStructures(
       ? 3.0f : (this->ptEnabled ? 1.0f : 0.0f);
     frame.state[2] = this->ptAccumulating ? 1.0f : 0.0f;
     frame.state[3] = static_cast<float>(this->ptMaxBounces);
+
+    // Adaptive sampling parameters; a zero threshold disables the early-out.
+    frame.adaptive[0] = static_cast<float>(this->ptAdaptiveMinSamples);
+    frame.adaptive[1] = this->ptAdaptiveEnabled
+      ? this->ptAdaptiveThreshold : 0.0f;
+    frame.adaptive[2] = 0.0f;
+    frame.adaptive[3] = 0.0f;
 
     std::memcpy(this->frameMapped, &frame, sizeof(frame));
 
@@ -3556,6 +3751,9 @@ SoRTXRenderBackend::render(const SoDrawList & drawlist,
   const VkResult submitResult = vkQueueSubmit(this->queue, 1, &si, VK_NULL_HANDLE);
   const VkResult waitResult = submitResult == VK_SUCCESS
     ? vkQueueWaitIdle(this->queue) : VK_SUCCESS;
+  if (submitResult == VK_SUCCESS && waitResult == VK_SUCCESS) {
+    this->updateAdaptiveStats();
+  }
   if (getenv("FC_VULKAN_RT_DEBUG")) {
     fprintf(stderr, "[RTDBG] submit=%d wait=%d asOk=%d traceOk=%d\n",
             static_cast<int>(submitResult), static_cast<int>(waitResult),
@@ -3631,6 +3829,9 @@ SoRTXRenderBackend::renderExternal(const SoDrawList & drawlist,
     si.pCommandBuffers = &cmd;
     submitted = vkQueueSubmit(this->queue, 1, &si, VK_NULL_HANDLE) ==
       VK_SUCCESS && vkQueueWaitIdle(this->queue) == VK_SUCCESS;
+  }
+  if (submitted) {
+    this->updateAdaptiveStats();
   }
   // Staging buffers are only referenced by the private submission; release
   // them after it provably completed (or never ran).  The command buffer
