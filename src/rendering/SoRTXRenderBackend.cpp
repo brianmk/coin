@@ -51,8 +51,10 @@ struct alignas(16) RTXFrameBlock {
   float state[4]; // x = frameIndex, y = pathTracing, z = accumulating,
                   // w = maxBounces
   float adaptive[4]; // x = minSamples, y = relErrorThreshold (0 = off)
+  float prevViewProj[16]; // world -> clip of the previous frame's camera
+  float temporal[4];      // x = reproject this frame
 };
-static_assert(sizeof(RTXFrameBlock) == 3 * 64 + 6 * 16,
+static_assert(sizeof(RTXFrameBlock) == 4 * 64 + 7 * 16,
               "RTXFrameBlock must match FrameBlock std140 layout");
 
 // Push constant block of the raygen shader (RaygenPush in Raygen.glsl).
@@ -529,6 +531,10 @@ SoRTXRenderBackend::initialize(const SoRenderBackendInitParams & params)
       this->ptAdaptiveStopFraction = value;
     }
   }
+  // Temporal reprojection: carry converged samples across camera moves.
+  if (const char * temporal = getenv("FC_VULKAN_PT_TEMPORAL")) {
+    this->ptTemporalEnabled = std::atoi(temporal) != 0 ? TRUE : FALSE;
+  }
 
   this->setInitialized(TRUE);
   this->emitLog("initialized (Vulkan ray tracing)");
@@ -543,7 +549,7 @@ SoRTXRenderBackend::createDescriptorSetLayout()
   // rays and writes the image/accum/G-buffers, the miss shader samples the
   // frame UBO, and the closest-hit shader reads materials, the frame UBO
   // and the triangle-normal pool.
-  VkDescriptorSetLayoutBinding bindings[10] {};
+  VkDescriptorSetLayoutBinding bindings[13] {};
   bindings[0].binding = 0;
   bindings[0].descriptorType = VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR;
   bindings[0].descriptorCount = 1;
@@ -594,9 +600,18 @@ SoRTXRenderBackend::createDescriptorSetLayout()
   bindings[9].descriptorCount = 1;
   bindings[9].stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
 
+  // Temporal reprojection history: accumulation, sums-of-squares and world
+  // positions of the previous traced frame (compute-tracer only).
+  for (uint32_t b = 10; b <= 12; ++b) {
+    bindings[b].binding = b;
+    bindings[b].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+    bindings[b].descriptorCount = 1;
+    bindings[b].stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+  }
+
   VkDescriptorSetLayoutCreateInfo ci {};
   ci.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
-  ci.bindingCount = 10;
+  ci.bindingCount = 13;
   ci.pBindings = bindings;
   if (vkCreateDescriptorSetLayout(this->device, &ci, this->allocator,
                                   &this->rtSetLayout) != VK_SUCCESS) {
@@ -639,7 +654,7 @@ SoRTXRenderBackend::createDescriptorPool()
   sizes[3].type = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
   sizes[3].descriptorCount = 2;
   sizes[4].type = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
-  sizes[4].descriptorCount = 20;
+  sizes[4].descriptorCount = 36;
 
   VkDescriptorPoolCreateInfo ci {};
   ci.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
@@ -1102,9 +1117,16 @@ SoRTXRenderBackend::createPathTracingBuffers(uint32_t width, uint32_t height)
     const VkDeviceMemory sumSqMem = this->sumSqMemory;
     const VkBuffer counter = this->activeCounterBuffer;
     const VkDeviceMemory counterMem = this->activeCounterMemory;
+    const VkBuffer accumHist = this->accumHistoryBuffer;
+    const VkDeviceMemory accumHistMem = this->accumHistoryMemory;
+    const VkBuffer sumSqHist = this->sumSqHistoryBuffer;
+    const VkDeviceMemory sumSqHistMem = this->sumSqHistoryMemory;
+    const VkBuffer posHist = this->positionHistoryBuffer;
+    const VkDeviceMemory posHistMem = this->positionHistoryMemory;
     this->deferDestroy([device, allocator, accum, accumMem, normal,
                         normalMem, position, positionMem, sumSq, sumSqMem,
-                        counter, counterMem]() {
+                        counter, counterMem, accumHist, accumHistMem,
+                        sumSqHist, sumSqHistMem, posHist, posHistMem]() {
       vkDestroyBuffer(device, accum, allocator);
       vkFreeMemory(device, accumMem, allocator);
       vkDestroyBuffer(device, normal, allocator);
@@ -1115,6 +1137,12 @@ SoRTXRenderBackend::createPathTracingBuffers(uint32_t width, uint32_t height)
       vkFreeMemory(device, sumSqMem, allocator);
       vkDestroyBuffer(device, counter, allocator);
       vkFreeMemory(device, counterMem, allocator);
+      vkDestroyBuffer(device, accumHist, allocator);
+      vkFreeMemory(device, accumHistMem, allocator);
+      vkDestroyBuffer(device, sumSqHist, allocator);
+      vkFreeMemory(device, sumSqHistMem, allocator);
+      vkDestroyBuffer(device, posHist, allocator);
+      vkFreeMemory(device, posHistMem, allocator);
     });
     this->accumBuffer = VK_NULL_HANDLE;
     this->accumMemory = VK_NULL_HANDLE;
@@ -1127,6 +1155,14 @@ SoRTXRenderBackend::createPathTracingBuffers(uint32_t width, uint32_t height)
     this->activeCounterBuffer = VK_NULL_HANDLE;
     this->activeCounterMemory = VK_NULL_HANDLE;
     this->activeCounterMapped = nullptr;
+    this->accumHistoryBuffer = VK_NULL_HANDLE;
+    this->accumHistoryMemory = VK_NULL_HANDLE;
+    this->sumSqHistoryBuffer = VK_NULL_HANDLE;
+    this->sumSqHistoryMemory = VK_NULL_HANDLE;
+    this->positionHistoryBuffer = VK_NULL_HANDLE;
+    this->positionHistoryMemory = VK_NULL_HANDLE;
+    this->ptHistoryValid = FALSE;
+    this->ptReprojectFrame = FALSE;
   }
   this->ptBufferWidth = width;
   this->ptBufferHeight = height;
@@ -1218,6 +1254,55 @@ SoRTXRenderBackend::createPathTracingBuffers(uint32_t width, uint32_t height)
                   VK_WHOLE_SIZE, 0, &this->activeCounterMapped) !=
       VK_SUCCESS) {
     this->activeCounterMapped = nullptr;
+  }
+  // Temporal reprojection history.  The accumulation and sums-of-squares
+  // history buffers also carry TRANSFER_DST: after a swap they can become
+  // the live fill targets for the next fresh run.
+  if (!this->createDeviceLocalBuffer(bytes, accumUsage,
+                                     this->accumHistoryBuffer,
+                                     this->accumHistoryMemory) ||
+      !this->createDeviceLocalBuffer(bytes, accumUsage,
+                                     this->sumSqHistoryBuffer,
+                                     this->sumSqHistoryMemory) ||
+      !this->createDeviceLocalBuffer(bytes, usage,
+                                     this->positionHistoryBuffer,
+                                     this->positionHistoryMemory)) {
+    vkDestroyBuffer(this->device, this->accumHistoryBuffer, this->allocator);
+    vkFreeMemory(this->device, this->accumHistoryMemory, this->allocator);
+    vkDestroyBuffer(this->device, this->sumSqHistoryBuffer, this->allocator);
+    vkFreeMemory(this->device, this->sumSqHistoryMemory, this->allocator);
+    vkDestroyBuffer(this->device, this->positionHistoryBuffer, this->allocator);
+    vkFreeMemory(this->device, this->positionHistoryMemory, this->allocator);
+    vkDestroyBuffer(this->device, this->activeCounterBuffer, this->allocator);
+    vkFreeMemory(this->device, this->activeCounterMemory, this->allocator);
+    vkDestroyBuffer(this->device, this->sumSqBuffer, this->allocator);
+    vkFreeMemory(this->device, this->sumSqMemory, this->allocator);
+    vkDestroyBuffer(this->device, this->positionBuffer, this->allocator);
+    vkFreeMemory(this->device, this->positionMemory, this->allocator);
+    vkDestroyBuffer(this->device, this->normalBuffer, this->allocator);
+    vkFreeMemory(this->device, this->normalMemory, this->allocator);
+    vkDestroyBuffer(this->device, this->accumBuffer, this->allocator);
+    vkFreeMemory(this->device, this->accumMemory, this->allocator);
+    this->accumHistoryBuffer = VK_NULL_HANDLE;
+    this->accumHistoryMemory = VK_NULL_HANDLE;
+    this->sumSqHistoryBuffer = VK_NULL_HANDLE;
+    this->sumSqHistoryMemory = VK_NULL_HANDLE;
+    this->positionHistoryBuffer = VK_NULL_HANDLE;
+    this->positionHistoryMemory = VK_NULL_HANDLE;
+    this->activeCounterBuffer = VK_NULL_HANDLE;
+    this->activeCounterMemory = VK_NULL_HANDLE;
+    this->activeCounterMapped = nullptr;
+    this->sumSqBuffer = VK_NULL_HANDLE;
+    this->sumSqMemory = VK_NULL_HANDLE;
+    this->positionBuffer = VK_NULL_HANDLE;
+    this->positionMemory = VK_NULL_HANDLE;
+    this->normalBuffer = VK_NULL_HANDLE;
+    this->normalMemory = VK_NULL_HANDLE;
+    this->accumBuffer = VK_NULL_HANDLE;
+    this->accumMemory = VK_NULL_HANDLE;
+    this->ptBufferWidth = 0;
+    this->ptBufferHeight = 0;
+    return false;
   }
   // Fresh buffers: refresh the descriptor sets so the new handles are
   // visible to the trace and present passes.
@@ -1323,6 +1408,18 @@ SoRTXRenderBackend::updateDescriptors()
   counterInfo.buffer = this->activeCounterBuffer;
   counterInfo.offset = 0;
   counterInfo.range = VK_WHOLE_SIZE;
+  VkDescriptorBufferInfo accumHistInfo {};
+  accumHistInfo.buffer = this->accumHistoryBuffer;
+  accumHistInfo.offset = 0;
+  accumHistInfo.range = VK_WHOLE_SIZE;
+  VkDescriptorBufferInfo sumSqHistInfo {};
+  sumSqHistInfo.buffer = this->sumSqHistoryBuffer;
+  sumSqHistInfo.offset = 0;
+  sumSqHistInfo.range = VK_WHOLE_SIZE;
+  VkDescriptorBufferInfo posHistInfo {};
+  posHistInfo.buffer = this->positionHistoryBuffer;
+  posHistInfo.offset = 0;
+  posHistInfo.range = VK_WHOLE_SIZE;
 
   // Binding 0: the acceleration structure (TLAS) read by the raygen shader.
   // Only written once the TLAS exists; updateDescriptors() is re-invoked by
@@ -1440,6 +1537,36 @@ SoRTXRenderBackend::updateDescriptors()
     counterWrite.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
     counterWrite.pBufferInfo = &counterInfo;
     writes.push_back(counterWrite);
+  }
+  if (this->accumHistoryBuffer != VK_NULL_HANDLE) {
+    VkWriteDescriptorSet accumHistWrite {};
+    accumHistWrite.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+    accumHistWrite.dstSet = rtSet;
+    accumHistWrite.dstBinding = 10;
+    accumHistWrite.descriptorCount = 1;
+    accumHistWrite.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+    accumHistWrite.pBufferInfo = &accumHistInfo;
+    writes.push_back(accumHistWrite);
+  }
+  if (this->sumSqHistoryBuffer != VK_NULL_HANDLE) {
+    VkWriteDescriptorSet sumSqHistWrite {};
+    sumSqHistWrite.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+    sumSqHistWrite.dstSet = rtSet;
+    sumSqHistWrite.dstBinding = 11;
+    sumSqHistWrite.descriptorCount = 1;
+    sumSqHistWrite.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+    sumSqHistWrite.pBufferInfo = &sumSqHistInfo;
+    writes.push_back(sumSqHistWrite);
+  }
+  if (this->positionHistoryBuffer != VK_NULL_HANDLE) {
+    VkWriteDescriptorSet posHistWrite {};
+    posHistWrite.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+    posHistWrite.dstSet = rtSet;
+    posHistWrite.dstBinding = 12;
+    posHistWrite.descriptorCount = 1;
+    posHistWrite.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+    posHistWrite.pBufferInfo = &posHistInfo;
+    writes.push_back(posHistWrite);
   }
 
   VkWriteDescriptorSet presentWrite {};
@@ -2864,6 +2991,46 @@ SoRTXRenderBackend::updatePathTracingState(const SoDrawList & drawlist,
     this->lastViewportHeight != static_cast<uint32_t>(vpSize[1]);
   const bool sceneChanged = this->cacheChanged;
 
+  // The temporal-reprojection path starts every frame disabled; only the
+  // camera-move and auto-restart branches below re-enable it for exactly
+  // one frame.  The previous frame's camera is still in lastViewMatrix /
+  // lastProjMatrix here (they are overwritten further down), so compose
+  // the world->clip matrix of the previous frame for the shader's
+  // history-reprojection test.  Row-vector convention (Coin's SbMatrix):
+  // world->clip = view * proj, matching the column-vector layout the
+  // shader receives from the raw matrix copies.
+  this->ptReprojectFrame = FALSE;
+  {
+    SbMatrix prevView(lastViewMatrix[0], lastViewMatrix[1],
+                      lastViewMatrix[2], lastViewMatrix[3],
+                      lastViewMatrix[4], lastViewMatrix[5],
+                      lastViewMatrix[6], lastViewMatrix[7],
+                      lastViewMatrix[8], lastViewMatrix[9],
+                      lastViewMatrix[10], lastViewMatrix[11],
+                      lastViewMatrix[12], lastViewMatrix[13],
+                      lastViewMatrix[14], lastViewMatrix[15]);
+    SbMatrix prevProj(lastProjMatrix[0], lastProjMatrix[1],
+                      lastProjMatrix[2], lastProjMatrix[3],
+                      lastProjMatrix[4], lastProjMatrix[5],
+                      lastProjMatrix[6], lastProjMatrix[7],
+                      lastProjMatrix[8], lastProjMatrix[9],
+                      lastProjMatrix[10], lastProjMatrix[11],
+                      lastProjMatrix[12], lastProjMatrix[13],
+                      lastProjMatrix[14], lastProjMatrix[15]);
+    prevView.multRight(prevProj);
+    SbMat prevVpValue;
+    prevView.getValue(prevVpValue);
+    std::memcpy(this->prevViewProj, &prevVpValue[0][0], sizeof(float) * 16);
+  }
+  // Camera-only changes keep accumulating: the shader reprojects the
+  // previous frame's history through the old camera instead of discarding
+  // the converged samples.
+  const bool canReproject =
+    this->ptTemporalEnabled && !this->useSbtPipeline && this->ptHistoryValid &&
+    this->accumHistoryBuffer != VK_NULL_HANDLE &&
+    this->ptBufferWidth == static_cast<uint32_t>(vpSize[0]) &&
+    this->ptBufferHeight == static_cast<uint32_t>(vpSize[1]);
+
   if (!this->ptEnabled) {
     this->ptAccumulating = FALSE;
     this->ptFrameIndex = 0;
@@ -2877,12 +3044,32 @@ SoRTXRenderBackend::updatePathTracingState(const SoDrawList & drawlist,
     this->ptFrameIndex = 0;
     this->ptIdleFrames = 0;
   }
-  else if (viewChanged || sceneChanged) {
-    // Drop to the 1-spp live preview while the camera/scene is moving: the
-    // accumulated rays are from the previous viewpoint and are useless.
+  else if (sceneChanged || (viewChanged && !this->haveLastView)) {
+    // A scene edit invalidates the history (surface colors may be stale
+    // even where positions match), and the very first frame has nothing to
+    // reproject: drop to the 1-spp live preview; the settle counter then
+    // restarts accumulation.  Camera-only changes fall through to the
+    // reprojection branch below.
     this->ptAccumulating = FALSE;
     this->ptFrameIndex = 0;
     this->ptIdleFrames = 0;
+  }
+  else if (viewChanged) {
+    // Camera-only change with valid history: stay accumulating and carry
+    // the previous frame's samples across the move (temporal
+    // reprojection).  Without history support, keep the legacy preview
+    // drop so the viewport stays responsive while orbiting.
+    if (canReproject) {
+      this->ptAccumulating = TRUE;
+      this->ptFrameIndex = 0;
+      this->ptIdleFrames = 0;
+      this->ptReprojectFrame = TRUE;
+    }
+    else {
+      this->ptAccumulating = FALSE;
+      this->ptFrameIndex = 0;
+      this->ptIdleFrames = 0;
+    }
   }
   else if (this->ptAccumulating) {
     ++this->ptFrameIndex;
@@ -2908,12 +3095,15 @@ SoRTXRenderBackend::updatePathTracingState(const SoDrawList & drawlist,
     // Static but not accumulating (a move just stopped): count idle frames
     // and, once the camera has settled for a short window, auto-restart a
     // fresh accumulation so the view refines itself without an explicit
-    // startPathTracing() call.
+    // startPathTracing() call.  With valid history the restart reprojects
+    // it (the camera is static, so the test reduces to a per-pixel surface
+    // match) instead of clearing the accumulated samples.
     ++this->ptIdleFrames;
     if (this->ptIdleFrames >= this->ptSettleFrames) {
       this->ptIdleFrames = 0;
       this->ptAccumulating = TRUE;
       this->ptFrameIndex = 0;
+      this->ptReprojectFrame = canReproject;
     }
   }
   // else: converged idle -- nothing to do until the camera or scene moves.
@@ -2921,10 +3111,10 @@ SoRTXRenderBackend::updatePathTracingState(const SoDrawList & drawlist,
   if (getenv("FC_VULKAN_RT_DEBUG") && this->ptEnabled) {
     fprintf(stderr,
             "[RTDBG] ptState viewChanged=%d sceneChanged=%d accum=%d "
-            "frameIndex=%u idle=%u\n",
+            "frameIndex=%u idle=%u reproject=%d\n",
             viewChanged ? 1 : 0, sceneChanged ? 1 : 0,
             this->ptAccumulating ? 1 : 0, this->ptFrameIndex,
-            this->ptIdleFrames);
+            this->ptIdleFrames, this->ptReprojectFrame ? 1 : 0);
   }
 
   if (getenv("FC_VULKAN_PT_DEBUG")) {
@@ -2970,7 +3160,10 @@ SoRTXRenderBackend::updatePathTracingState(const SoDrawList & drawlist,
   // and sums-of-squares buffers with a fill recorded here (still outside
   // any render pass).  This runs before the caller's render pass on the
   // same submission ordering, so the tracer observes the cleared buffers.
-  if (this->ptEnabled && this->ptFrameIndex == 0) {
+  // Reprojection frames skip the clear: their history replaces the buffer
+  // contents per-pixel in the shader.
+  if (this->ptEnabled && this->ptFrameIndex == 0 &&
+      !this->ptReprojectFrame) {
     vkCmdFillBuffer(cmd, this->accumBuffer, 0, VK_WHOLE_SIZE, 0);
     vkCmdFillBuffer(cmd, this->sumSqBuffer, 0, VK_WHOLE_SIZE, 0);
     VkMemoryBarrier fillBarrier {};
@@ -3000,13 +3193,40 @@ SoRTXRenderBackend::updatePathTracingState(const SoDrawList & drawlist,
 }
 
 void
+SoRTXRenderBackend::swapPathTracingHistory()
+{
+  // Called after the submission's queue wait on traced frames: hand the
+  // just-written live buffers to the shader as next frame's history and
+  // retire the old history into the live slots.  Only the compute tracer
+  // maintains the accumulation buffers the history mirrors.
+  if (!this->ptEnabled || !this->ptAccumulating || this->useSbtPipeline) {
+    return;
+  }
+  std::swap(this->accumBuffer, this->accumHistoryBuffer);
+  std::swap(this->accumMemory, this->accumHistoryMemory);
+  std::swap(this->sumSqBuffer, this->sumSqHistoryBuffer);
+  std::swap(this->sumSqMemory, this->sumSqHistoryMemory);
+  std::swap(this->positionBuffer, this->positionHistoryBuffer);
+  std::swap(this->positionMemory, this->positionHistoryMemory);
+  this->ptHistoryValid = TRUE;
+  this->ptReprojectFrame = FALSE;
+  // The descriptor sets still reference the previous buffer handles;
+  // updateDescriptors() rewrites them at the start of the next frame.
+}
+
+void
 SoRTXRenderBackend::updateAdaptiveStats()
 {
   // Called after the submission's queue wait: the host-visible counter
-  // holds this frame's active-pixel count.
+  // holds this frame's active-pixel count (counts[0]) and the number of
+  // pixels that accepted reprojected history (counts[1]).
   uint32_t active = 0;
+  uint32_t reprojected = 0;
   if (this->activeCounterMapped && this->ptEnabled && this->ptAccumulating) {
-    active = *static_cast<const uint32_t *>(this->activeCounterMapped);
+    const uint32_t * counts =
+      static_cast<const uint32_t *>(this->activeCounterMapped);
+    active = counts[0];
+    reprojected = counts[1];
   }
   this->ptLastActivePixels = active;
   const uint64_t total =
@@ -3019,11 +3239,11 @@ SoRTXRenderBackend::updateAdaptiveStats()
   if (getenv("FC_VULKAN_RT_DEBUG") && this->ptEnabled) {
     fprintf(stderr,
             "[RTDBG] adaptive active=%u/%llu fraction=%.4f frameIndex=%u "
-            "accum=%d self=%p buf=%ux%u\n",
+            "accum=%d self=%p buf=%ux%u reprojected=%u\n",
             active, static_cast<unsigned long long>(total),
             this->ptLastActiveFraction, this->ptFrameIndex,
             this->ptAccumulating ? 1 : 0, static_cast<const void *>(this),
-            this->ptBufferWidth, this->ptBufferHeight);
+            this->ptBufferWidth, this->ptBufferHeight, reprojected);
   }
 }
 
@@ -3192,6 +3412,14 @@ SoRTXRenderBackend::recordAccelerationStructures(
       ? this->ptAdaptiveThreshold : 0.0f;
     frame.adaptive[2] = 0.0f;
     frame.adaptive[3] = 0.0f;
+
+    // Temporal reprojection: the previous frame's camera (world -> clip)
+    // and the reproject-this-frame flag.
+    std::memcpy(frame.prevViewProj, this->prevViewProj, sizeof(float) * 16);
+    frame.temporal[0] = this->ptReprojectFrame ? 1.0f : 0.0f;
+    frame.temporal[1] = 0.0f;
+    frame.temporal[2] = 0.0f;
+    frame.temporal[3] = 0.0f;
 
     std::memcpy(this->frameMapped, &frame, sizeof(frame));
 
@@ -3417,6 +3645,57 @@ SoRTXRenderBackend::shutdown()
     vkDestroyBuffer(this->device, this->positionBuffer, this->allocator);
     this->positionBuffer = VK_NULL_HANDLE;
   }
+  if (this->positionMemory != VK_NULL_HANDLE) {
+    vkFreeMemory(this->device, this->positionMemory, this->allocator);
+    this->positionMemory = VK_NULL_HANDLE;
+  }
+  if (this->sumSqBuffer != VK_NULL_HANDLE) {
+    vkDestroyBuffer(this->device, this->sumSqBuffer, this->allocator);
+    this->sumSqBuffer = VK_NULL_HANDLE;
+  }
+  if (this->sumSqMemory != VK_NULL_HANDLE) {
+    vkFreeMemory(this->device, this->sumSqMemory, this->allocator);
+    this->sumSqMemory = VK_NULL_HANDLE;
+  }
+  if (this->activeCounterBuffer != VK_NULL_HANDLE) {
+    if (this->activeCounterMapped != nullptr) {
+      vkUnmapMemory(this->device, this->activeCounterMemory);
+      this->activeCounterMapped = nullptr;
+    }
+    vkDestroyBuffer(this->device, this->activeCounterBuffer, this->allocator);
+    this->activeCounterBuffer = VK_NULL_HANDLE;
+  }
+  if (this->activeCounterMemory != VK_NULL_HANDLE) {
+    vkFreeMemory(this->device, this->activeCounterMemory, this->allocator);
+    this->activeCounterMemory = VK_NULL_HANDLE;
+  }
+  if (this->accumHistoryBuffer != VK_NULL_HANDLE) {
+    vkDestroyBuffer(this->device, this->accumHistoryBuffer, this->allocator);
+    this->accumHistoryBuffer = VK_NULL_HANDLE;
+  }
+  if (this->accumHistoryMemory != VK_NULL_HANDLE) {
+    vkFreeMemory(this->device, this->accumHistoryMemory, this->allocator);
+    this->accumHistoryMemory = VK_NULL_HANDLE;
+  }
+  if (this->sumSqHistoryBuffer != VK_NULL_HANDLE) {
+    vkDestroyBuffer(this->device, this->sumSqHistoryBuffer, this->allocator);
+    this->sumSqHistoryBuffer = VK_NULL_HANDLE;
+  }
+  if (this->sumSqHistoryMemory != VK_NULL_HANDLE) {
+    vkFreeMemory(this->device, this->sumSqHistoryMemory, this->allocator);
+    this->sumSqHistoryMemory = VK_NULL_HANDLE;
+  }
+  if (this->positionHistoryBuffer != VK_NULL_HANDLE) {
+    vkDestroyBuffer(this->device, this->positionHistoryBuffer,
+                    this->allocator);
+    this->positionHistoryBuffer = VK_NULL_HANDLE;
+  }
+  if (this->positionHistoryMemory != VK_NULL_HANDLE) {
+    vkFreeMemory(this->device, this->positionHistoryMemory, this->allocator);
+    this->positionHistoryMemory = VK_NULL_HANDLE;
+  }
+  this->ptHistoryValid = FALSE;
+  this->ptReprojectFrame = FALSE;
   if (this->positionMemory != VK_NULL_HANDLE) {
     vkFreeMemory(this->device, this->positionMemory, this->allocator);
     this->positionMemory = VK_NULL_HANDLE;
@@ -3753,6 +4032,7 @@ SoRTXRenderBackend::render(const SoDrawList & drawlist,
     ? vkQueueWaitIdle(this->queue) : VK_SUCCESS;
   if (submitResult == VK_SUCCESS && waitResult == VK_SUCCESS) {
     this->updateAdaptiveStats();
+    this->swapPathTracingHistory();
   }
   if (getenv("FC_VULKAN_RT_DEBUG")) {
     fprintf(stderr, "[RTDBG] submit=%d wait=%d asOk=%d traceOk=%d\n",
@@ -3832,6 +4112,7 @@ SoRTXRenderBackend::renderExternal(const SoDrawList & drawlist,
   }
   if (submitted) {
     this->updateAdaptiveStats();
+    this->swapPathTracingHistory();
   }
   // Staging buffers are only referenced by the private submission; release
   // them after it provably completed (or never ran).  The command buffer

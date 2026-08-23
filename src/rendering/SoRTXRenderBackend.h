@@ -384,6 +384,24 @@ private:
   VkBuffer activeCounterBuffer = VK_NULL_HANDLE;
   VkDeviceMemory activeCounterMemory = VK_NULL_HANDLE;
   void * activeCounterMapped = nullptr;
+  // Temporal reprojection history: copies of the previous traced frame's
+  // accumulation, sums-of-squares and world positions.  Handles are
+  // swapped with the live buffers after every traced frame, so the shader
+  // can carry converged samples across camera moves.
+  VkBuffer accumHistoryBuffer = VK_NULL_HANDLE;
+  VkDeviceMemory accumHistoryMemory = VK_NULL_HANDLE;
+  VkBuffer sumSqHistoryBuffer = VK_NULL_HANDLE;
+  VkDeviceMemory sumSqHistoryMemory = VK_NULL_HANDLE;
+  VkBuffer positionHistoryBuffer = VK_NULL_HANDLE;
+  VkDeviceMemory positionHistoryMemory = VK_NULL_HANDLE;
+  // Set once at least one traced frame has been swapped into history; the
+  // reprojection path only runs with valid history (fresh buffers and
+  // resizes reset it).
+  SbBool ptHistoryValid = FALSE;
+  // Set on the first accumulating frame after a camera-only change (or an
+  // auto-restart): the shader reprojects the history buffers instead of
+  // discarding the previous accumulation.
+  SbBool ptReprojectFrame = FALSE;
   uint32_t ptBufferWidth = 0;
   uint32_t ptBufferHeight = 0;
 
@@ -413,7 +431,12 @@ private:
   float ptAdaptiveStopFraction = 0.02f;
   uint32_t ptLastActivePixels = 0;
   float ptLastActiveFraction = 1.0f;
+  // Temporal reprojection (FC_VULKAN_PT_TEMPORAL); the world->clip matrix
+  // of the previous frame's camera for the history reprojection test.
+  SbBool ptTemporalEnabled = TRUE;
+  float prevViewProj[16] = {};
   void updateAdaptiveStats();
+  void swapPathTracingHistory();
   float lastViewMatrix[16] = {};
   float lastProjMatrix[16] = {};
   uint32_t lastViewportWidth = 0;

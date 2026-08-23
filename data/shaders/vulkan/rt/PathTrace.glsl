@@ -35,6 +35,8 @@ layout(set = 0, binding = 2, std140) uniform FrameBlock {
     vec4  u_bgBottom;      // gradient bottom color
     vec4  u_state;         // x = frameIndex, y = pathTracing, z = accumulating, w = maxBounces
     vec4  u_adaptive;      // x = minSamples, y = relErrorThreshold (0 = off)
+    mat4  u_prevViewProj;  // world -> clip of the previous frame's camera
+    vec4  u_temporal;      // x = reproject the history this frame
 } frame;
 
 // std430 mirror of the C++ RTMaterial record; one per draw command, indexed
@@ -82,9 +84,23 @@ layout(set = 0, binding = 8, std430) buffer SumSqBuffer { vec4 sq[]; };
 
 // Per-frame active-pixel counter (pixels that actually traced this frame;
 // converged pixels early-out and do not add).  Cleared every frame and read
-// back by the host after the queue wait.
+// back by the host after the queue wait.  counts[1] counts the pixels that
+// accepted reprojected history.
 layout(set = 0, binding = 9, std430) buffer ActiveCounter {
     uint counts[];
+};
+
+// Temporal reprojection history: the previous traced frame's accumulation,
+// sums-of-squares and world positions (the host swaps the live buffers into
+// these slots after every traced frame).
+layout(set = 0, binding = 10, std430) buffer AccumHistoryBuffer {
+    vec4 accumHist[];
+};
+layout(set = 0, binding = 11, std430) buffer SumSqHistoryBuffer {
+    vec4 sqHist[];
+};
+layout(set = 0, binding = 12, std430) buffer PositionHistoryBuffer {
+    vec4 posHist[];
 };
 
 const int COIN_MAX_LIGHTS = 8;
@@ -375,9 +391,11 @@ void main()
     // Adaptive sampling: once enough samples accumulated, a pixel whose
     // relative variance fell below the threshold is converged and skips
     // tracing entirely (its mean is shown as-is).  The early-out must come
-    // before the ray setup so the entire path loop is skipped.
+    // before the ray setup so the entire path loop is skipped.  On
+    // reprojection frames it is disabled: the buffer contents are stale
+    // until the history rewrite below has run.
     if (ptEnabled > 0.5 && accumulating > 0.5 &&
-        frame.u_adaptive.y > 0.0) {
+        frame.u_adaptive.y > 0.0 && frame.u_temporal.x < 0.5) {
         const uint nPrev = uint(max(accum[index].a, 0.0));
         const uint minSamples = uint(max(frame.u_adaptive.x, 1.0));
         if (nPrev >= minSamples) {
@@ -591,10 +609,46 @@ void main()
     vec4 outColor = vec4(clamp(radiance, 0.0, 1.0), 1.0);
     if (accumulating > 0.5) {
         vec4 acc = accum[index];
+        vec4 s = sq[index];
+        if (frame.u_temporal.x > 0.5) {
+            // Temporal reprojection: carry the previous frame's history
+            // forward where this pixel's world point was also visible to
+            // the previous camera (mapped through u_prevViewProj).  A
+            // position mismatch means disocclusion or a surface change,
+            // so the pixel restarts from zero samples instead.
+            acc = vec4(0.0);
+            s = vec4(0.0);
+            if (positions[index].w < 1.0e7) {
+                vec4 oldClip = frame.u_prevViewProj *
+                    vec4(positions[index].xyz, 1.0);
+                if (oldClip.w > 0.0) {
+                    vec2 oldNdc = oldClip.xy / oldClip.w;
+                    vec2 oldPxF = vec2(oldNdc.x * 0.5 + 0.5,
+                                       0.5 - oldNdc.y * 0.5) *
+                        frame.u_viewport.xy;
+                    const ivec2 vpSize = ivec2(frame.u_viewport.xy);
+                    ivec2 oldPixel = ivec2(floor(oldPxF));
+                    if (oldPixel.x >= 0 && oldPixel.y >= 0 &&
+                        oldPixel.x < vpSize.x && oldPixel.y < vpSize.y) {
+                        const int q = oldPixel.y * vpSize.x + oldPixel.x;
+                        const vec3 delta =
+                            posHist[q].xyz - positions[index].xyz;
+                        if (posHist[q].w < 1.0e7 &&
+                            dot(delta, delta) <
+                            max(4.0e-4,
+                                4.0e-6 * dot(positions[index].xyz,
+                                              positions[index].xyz))) {
+                            acc = accumHist[q];
+                            s = sqHist[q];
+                            atomicAdd(counts[1], 1u);
+                        }
+                    }
+                }
+            }
+        }
         acc.rgb += outColor.rgb;
         acc.a += 1.0;
         accum[index] = acc;
-        vec4 s = sq[index];
         s.rgb += outColor.rgb * outColor.rgb;
         s.a += 1.0;
         sq[index] = s;
