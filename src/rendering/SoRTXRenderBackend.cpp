@@ -1232,11 +1232,13 @@ SoRTXRenderBackend::buildNeePool(const SoDrawList & drawlist)
 
   this->neePoolCount = entryCount;
   if (getenv("FC_VULKAN_RT_DEBUG") && entryCount > 0) {
+    const float * e = static_cast<const float *>(this->neePoolMapped);
     fprintf(stderr, "[RTDBG] nee pool triangles=%u bytes=%llu enabled=%d "
-                    "mis=%d\n",
+                    "mis=%d xformT=(%.2f,%.2f,%.2f)\n",
             entryCount,
             static_cast<unsigned long long>(this->neePoolUsed),
-            this->rtNeeEnabled ? 1 : 0, this->rtMisEnabled ? 1 : 0);
+            this->rtNeeEnabled ? 1 : 0, this->rtMisEnabled ? 1 : 0,
+            e[28], e[29], e[30]);
   }
 }
 
