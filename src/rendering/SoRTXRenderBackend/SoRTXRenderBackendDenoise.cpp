@@ -164,7 +164,17 @@ SoRTXRenderBackend::createDenoiseBackend()
       (this->denoiseStagedWidth != this->denoiseWidth ||
        this->denoiseStagedHeight != this->denoiseHeight ||
        this->denoiseKindDirty)) {
+    // destroyDenoiser() is a full teardown that zeroes denoiseWidth/Height,
+    // but here we are mid-recreation at the same working resolution; snapshot
+    // the dimensions (and re-set them) so the rest of createDenoiseBackend()
+    // still allocates the buffers at the current extent instead of falling
+    // through to a zero-size allocation (an nvidia zero-size device object
+    // returns VK_ERROR_DEVICE_LOST and poisons the frame).
+    const uint32_t width = this->denoiseWidth;
+    const uint32_t height = this->denoiseHeight;
     this->destroyDenoiser();
+    this->denoiseWidth = width;
+    this->denoiseHeight = height;
   }
   if (this->denoisedBuffer != VK_NULL_HANDLE) return true;
 

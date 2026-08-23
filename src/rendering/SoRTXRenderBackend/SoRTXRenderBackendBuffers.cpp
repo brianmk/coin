@@ -286,6 +286,11 @@ SoRTXRenderBackend::createStorageImage(uint32_t width, uint32_t height)
 bool
 SoRTXRenderBackend::createPathTracingBuffers(uint32_t width, uint32_t height)
 {
+  // Qt can present a transient 0x0 target while the window is being resized;
+  // never size path-tracing (or denoiser) buffers to 0 or the allocation
+  // degenerates to a zero-size device object (which nvidia returns
+  // VK_ERROR_DEVICE_LOST for) and poisons the whole frame.
+  if (width == 0 || height == 0) return true;
   if (this->accumBuffer != VK_NULL_HANDLE &&
       this->ptBufferWidth == width && this->ptBufferHeight == height) {
     return true;
