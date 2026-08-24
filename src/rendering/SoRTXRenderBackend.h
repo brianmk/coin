@@ -61,12 +61,6 @@ struct RTXCachedGeometry {
   // Cheap per-frame change signal (hashGeometrySignal).  When it matches
   // contentHash is reused; only a mismatch triggers the full hashGeometry().
   uint64_t changeSignal = 0;
-  // Fingerprint of the command's material/diffuse/emissive state.  A
-  // selection or preselect colour override (FreeCAD's SoFCInteractiveElement)
-  // changes only the material, not the geometry; hashing it means such a
-  // change marks the cache dirty so the path tracer re-traces and shows the
-  // highlight instead of retaining the previous (un-highlighted) frame.
-  uint64_t materialHash = 0;
   // Command that last touched this entry (per-frame arena pointer; used
   // only as an identity key for map rebuilds after cache eviction).
   const SoRenderCommand * commandKey = nullptr;
