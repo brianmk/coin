@@ -443,6 +443,7 @@ SoRTXRenderBackend::updateGeometryCache(const SoDrawList & drawlist)
     // unchanged large CAD parts we reuse contentHash instead of re-walking
     // the whole index buffer every frame.
     const uint64_t signal = hashGeometrySignal(geometry, vertexStride, indexed);
+    const uint64_t matSignal = hashMaterialSignal(command.material);
     uint64_t hash = 0;
     RTXCachedGeometry * entryPtr = nullptr;
 
@@ -493,6 +494,15 @@ SoRTXRenderBackend::updateGeometryCache(const SoDrawList & drawlist)
         entry.vertexHash = vertexHash;
         entry.indexHash = indexHash;
       }
+      // A material-only change (selection/preselection highlight colour) does
+      // not touch the geometry or the BLAS, but DOES change the image: mark
+      // the cache dirty so the path tracer drops back to a live preview and
+      // re-traces with the new colour, instead of keeping the previous
+      // accumulated frame.
+      if (matSignal != entry.materialHash) {
+        entry.materialHash = matSignal;
+        this->cacheChanged = true;
+      }
       entryPtr = &entry;
     }
     else {
@@ -515,6 +525,10 @@ SoRTXRenderBackend::updateGeometryCache(const SoDrawList & drawlist)
       }
       if (match) {
         match->changeSignal = signal;
+        if (matSignal != match->materialHash) {
+          match->materialHash = matSignal;
+          this->cacheChanged = true;
+        }
         this->commandToCache[&command] =
           static_cast<size_t>(match - this->geometryCache.data());
         entryPtr = match;
@@ -529,6 +543,7 @@ SoRTXRenderBackend::updateGeometryCache(const SoDrawList & drawlist)
         entry.vertexStride = vertexStride;
         entry.contentHash = hash;
         entry.changeSignal = signal;
+        entry.materialHash = matSignal;
         entry.vertexHash = hashPositions(geometry, vertexStride);
         entry.indexHash = indexed ? hashIndices(geometry) : 0;
         entryPtr = &entry;

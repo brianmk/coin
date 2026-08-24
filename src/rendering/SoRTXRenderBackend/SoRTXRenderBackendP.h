@@ -208,6 +208,30 @@ hashGeometrySignal(const SoGeometryDesc & geometry, uint32_t vertexStride,
   return h;
 }
 
+// FNV-1a hash of a command's material/diffuse/emissive state.  FreeCAD's
+// selection & preselect highlight apply a colour override through
+// SoFCInteractiveElement, which changes only the material (not the geometry)
+// of the selected face's command.  Hashing the material lets the geometry
+// cache mark such a change dirty so the path tracer re-traces and shows the
+// highlight, instead of keeping the previous accumulated (un-highlighted)
+// frame.
+inline uint64_t
+hashMaterialSignal(const SoMaterialData & material)
+{
+  uint64_t h = 1469598103934665603ull;
+  const auto mix = [&h](uint64_t v) {
+    h ^= v;
+    h *= 1099511628211ull;
+  };
+  for (int i = 0; i < 4; ++i) {
+    mix(std::bit_cast<uint32_t>(material.diffuse[i]));
+    mix(std::bit_cast<uint32_t>(material.emissive[i]));
+  }
+  mix(static_cast<uint32_t>(material.shadingModel));
+  mix(std::bit_cast<uint32_t>(material.opacity));
+  return h;
+}
+
 // FNV-1a hash of a command's vertex positions only.  Separates position
 // edits (refit-able: topology unchanged) from index edits (topology change,
 // full rebuild required).
