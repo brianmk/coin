@@ -128,16 +128,29 @@ hashGeometry(const SoGeometryDesc & geometry, uint32_t vertexStride,
   mix(geometry.indexCount);
   mix(vertexStride);
 
+  // Only the 3 position floats per vertex are part of the acceleration
+  // structure (the BLAS uses VK_FORMAT_R32G32B32_SFLOAT).  A hover or
+  // selection recolor bakes per-face colors into the interleaved vertex
+  // buffer but leaves the traced positions unchanged; hashing the whole
+  // stride would then report a spurious geometry change and force a
+  // re-trace/re-denoise.  Hash positions only, walking the interleaved
+  // buffer at the vertex stride.
   const size_t posStrideFloats = vertexStride / sizeof(float);
-  const size_t totalFloats =
-    static_cast<size_t>(geometry.vertexCount) * posStrideFloats;
-  if (totalFloats > 0) {
+  const size_t totalVertices = geometry.vertexCount;
+  if (totalVertices > 0) {
     const size_t samples = 512;
-    const size_t step = totalFloats > samples ? totalFloats / samples : 1;
-    for (size_t i = 0; i < totalFloats; i += step) {
-      mix(std::bit_cast<uint32_t>(geometry.positions[i]));
+    const size_t step = totalVertices > samples ? totalVertices / samples : 1;
+    for (size_t i = 0; i < totalVertices; i += step) {
+      const float * p = geometry.positions + static_cast<size_t>(i) * posStrideFloats;
+      mix(std::bit_cast<uint32_t>(p[0]));
+      mix(std::bit_cast<uint32_t>(p[1]));
+      mix(std::bit_cast<uint32_t>(p[2]));
     }
-    mix(std::bit_cast<uint32_t>(geometry.positions[totalFloats - 1]));
+    const float * last = geometry.positions +
+      static_cast<size_t>(totalVertices - 1) * posStrideFloats;
+    mix(std::bit_cast<uint32_t>(last[0]));
+    mix(std::bit_cast<uint32_t>(last[1]));
+    mix(std::bit_cast<uint32_t>(last[2]));
   }
 
   if (indexed) {
@@ -182,17 +195,24 @@ hashGeometrySignal(const SoGeometryDesc & geometry, uint32_t vertexStride,
   mix(geometry.indexCount);
   mix(vertexStride);
 
+  // Positions only (see hashGeometry): the traced BLAS uses 3 floats/vertex.
   const size_t posStrideFloats = vertexStride / sizeof(float);
-  const size_t totalFloats =
-    static_cast<size_t>(geometry.vertexCount) * posStrideFloats;
-  if (totalFloats > 0) {
+  const size_t totalVertices = geometry.vertexCount;
+  if (totalVertices > 0) {
     // Sample the position data (same sampling rate as hashGeometry).
     const size_t samples = 512;
-    const size_t step = totalFloats > samples ? totalFloats / samples : 1;
-    for (size_t i = 0; i < totalFloats; i += step) {
-      mix(std::bit_cast<uint32_t>(geometry.positions[i]));
+    const size_t step = totalVertices > samples ? totalVertices / samples : 1;
+    for (size_t i = 0; i < totalVertices; i += step) {
+      const float * p = geometry.positions + static_cast<size_t>(i) * posStrideFloats;
+      mix(std::bit_cast<uint32_t>(p[0]));
+      mix(std::bit_cast<uint32_t>(p[1]));
+      mix(std::bit_cast<uint32_t>(p[2]));
     }
-    mix(std::bit_cast<uint32_t>(geometry.positions[totalFloats - 1]));
+    const float * last = geometry.positions +
+      static_cast<size_t>(totalVertices - 1) * posStrideFloats;
+    mix(std::bit_cast<uint32_t>(last[0]));
+    mix(std::bit_cast<uint32_t>(last[1]));
+    mix(std::bit_cast<uint32_t>(last[2]));
   }
 
   if (indexed && geometry.indexCount > 0) {
@@ -220,10 +240,12 @@ hashPositions(const SoGeometryDesc & geometry, uint32_t vertexStride)
     h *= 1099511628211ull;
   };
   const size_t posStrideFloats = vertexStride / sizeof(float);
-  const size_t totalFloats =
-    static_cast<size_t>(geometry.vertexCount) * posStrideFloats;
-  for (size_t i = 0; i < totalFloats; ++i) {
-    mix(std::bit_cast<uint32_t>(geometry.positions[i]));
+  const size_t totalVertices = geometry.vertexCount;
+  for (size_t i = 0; i < totalVertices; ++i) {
+    const float * p = geometry.positions + static_cast<size_t>(i) * posStrideFloats;
+    mix(std::bit_cast<uint32_t>(p[0]));
+    mix(std::bit_cast<uint32_t>(p[1]));
+    mix(std::bit_cast<uint32_t>(p[2]));
   }
   return h;
 }
