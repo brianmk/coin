@@ -116,37 +116,86 @@ SoRTXRenderBackend::setEnvSkyBrightness(const float brightness)
 }
 
 // Procedural environment/cubemap presets.  Each is a skin for the analytic
-// sky: an explicit top/bottom gradient (overriding the viewport's background
-// colors) plus a sun.  They are defined here so the backend owns the palette
-// and the GUI lists them by name without carrying data.
+// sky (mode 0: an explicit top/bottom gradient overriding the viewport's
+// background colors plus a sun) or a camera-centered room cove (mode 1: a
+// colored floor, four walls and ceiling traced in the shader so the cubemap
+// reads as a real scene like a desk / table / white lab).  They are defined
+// here so the backend owns the palette and the GUI lists them by name without
+// carrying data.  Keep in sync with the RTXFrameBlock envRoom members.
 struct RtxEnvPreset {
   const char * name;
-  float skyTop[3];
-  float skyBottom[3];
+  int mode;              // 0 = sky gradient, 1 = room cove
+  float skyTop[3];       // sky mode: zenith gradient color
+  float skyBottom[3];    // sky mode: horizon gradient color
   float sunDir[3];
   float sunColor[3];
   float sunPower;
   float intensity;
   float skyBrightness;
+  // Room cove (mode 1): colors + geometry (heights are camera-relative).
+  float wallColor[3];
+  float floorColor[3];
+  float ceilColor[3];
+  float roomHalfExtent;
+  float roomFloorY;
+  float roomCeilY;
 };
 
 namespace {
 const RtxEnvPreset kRtxEnvPresets[] = {
-  { "Daylight",
+  // -- Sky-gradient presets ----------------------------------------------
+  { "Daylight", 0,
     {0.30f, 0.50f, 0.80f}, {0.85f, 0.88f, 0.90f},
-    {0.35f, 0.80f, 0.25f}, {1.00f, 0.95f, 0.85f}, 20.0f, 0.45f, 1.0f },
-  { "Sunset",
+    {0.35f, 0.80f, 0.25f}, {1.00f, 0.95f, 0.85f}, 20.0f, 0.45f, 1.0f,
+    {0.75f, 0.76f, 0.78f}, {0.45f, 0.30f, 0.18f}, {0.90f, 0.90f, 0.90f},
+    3.0f, -1.2f, 2.5f },
+  { "Sunset", 0,
     {0.25f, 0.18f, 0.35f}, {0.95f, 0.55f, 0.30f},
-    {0.55f, 0.25f, 0.45f}, {1.00f, 0.55f, 0.25f}, 12.0f, 0.40f, 1.0f },
-  { "Overcast",
+    {0.55f, 0.25f, 0.45f}, {1.00f, 0.55f, 0.25f}, 12.0f, 0.40f, 1.0f,
+    {0.75f, 0.76f, 0.78f}, {0.45f, 0.30f, 0.18f}, {0.90f, 0.90f, 0.90f},
+    3.0f, -1.2f, 2.5f },
+  { "Overcast", 0,
     {0.60f, 0.62f, 0.66f}, {0.82f, 0.83f, 0.85f},
-    {0.20f, 0.90f, 0.15f}, {0.90f, 0.90f, 0.90f}, 6.0f, 0.32f, 1.0f },
-  { "Neutral Studio",
+    {0.20f, 0.90f, 0.15f}, {0.90f, 0.90f, 0.90f}, 6.0f, 0.32f, 1.0f,
+    {0.75f, 0.76f, 0.78f}, {0.45f, 0.30f, 0.18f}, {0.90f, 0.90f, 0.90f},
+    3.0f, -1.2f, 2.5f },
+  { "Neutral Studio", 0,
     {0.55f, 0.58f, 0.62f}, {0.80f, 0.81f, 0.83f},
-    {0.30f, 0.85f, 0.40f}, {1.00f, 1.00f, 1.00f}, 30.0f, 0.40f, 1.0f },
-  { "Night",
+    {0.30f, 0.85f, 0.40f}, {1.00f, 1.00f, 1.00f}, 30.0f, 0.40f, 1.0f,
+    {0.75f, 0.76f, 0.78f}, {0.45f, 0.30f, 0.18f}, {0.90f, 0.90f, 0.90f},
+    3.0f, -1.2f, 2.5f },
+  { "Night", 0,
     {0.02f, 0.03f, 0.06f}, {0.05f, 0.08f, 0.15f},
-    {0.40f, 0.85f, 0.60f}, {0.55f, 0.65f, 0.95f}, 100.0f, 0.12f, 1.0f },
+    {0.40f, 0.85f, 0.60f}, {0.55f, 0.65f, 0.95f}, 100.0f, 0.12f, 1.0f,
+    {0.75f, 0.76f, 0.78f}, {0.45f, 0.30f, 0.18f}, {0.90f, 0.90f, 0.90f},
+    3.0f, -1.2f, 2.5f },
+  // -- Room-cove presets -------------------------------------------------
+  // A wooden desk surface under a soft white room; the low floor plane reads
+  // as the desk/table top.
+  { "Desk", 1,
+    {0.30f, 0.50f, 0.80f}, {0.85f, 0.88f, 0.90f},
+    {0.30f, 0.45f, 0.30f}, {1.00f, 0.90f, 0.75f}, 20.0f, 0.55f, 1.0f,
+    {0.78f, 0.80f, 0.82f}, {0.42f, 0.26f, 0.15f}, {0.93f, 0.93f, 0.94f},
+    2.8f, -0.55f, 2.6f },
+  { "Table", 1,
+    {0.30f, 0.50f, 0.80f}, {0.85f, 0.88f, 0.90f},
+    {0.32f, 0.48f, 0.28f}, {1.00f, 0.85f, 0.65f}, 18.0f, 0.50f, 1.0f,
+    {0.80f, 0.82f, 0.84f}, {0.48f, 0.30f, 0.17f}, {0.94f, 0.94f, 0.95f},
+    3.0f, -0.80f, 2.6f },
+  // A bright, clean white lab/shop: all-white walls and ceiling with a pale
+  // floor and a soft cool fill.
+  { "White Lab", 1,
+    {0.30f, 0.50f, 0.80f}, {0.85f, 0.88f, 0.90f},
+    {0.20f, 0.50f, 0.35f}, {1.00f, 1.00f, 1.00f}, 10.0f, 0.55f, 1.0f,
+    {0.88f, 0.90f, 0.92f}, {0.68f, 0.70f, 0.72f}, {0.94f, 0.95f, 0.96f},
+    3.4f, -1.4f, 3.0f },
+  // A pure white seamless background: every surface is near-white so objects
+  // sit in a neutral studio with even ambient light.
+  { "White Background", 1,
+    {0.30f, 0.50f, 0.80f}, {0.85f, 0.88f, 0.90f},
+    {0.20f, 0.40f, 0.40f}, {1.00f, 1.00f, 1.00f}, 8.0f, 0.45f, 1.0f,
+    {0.92f, 0.92f, 0.92f}, {0.90f, 0.90f, 0.90f}, {0.93f, 0.93f, 0.93f},
+    4.0f, -2.0f, 3.5f },
 };
 } // anonymous namespace
 
@@ -189,7 +238,14 @@ SoRTXRenderBackend::setEnvMap(const int index)
     this->envSunColor[i] = p.sunColor[i];
     this->envSkyTop[i] = p.skyTop[i];
     this->envSkyBottom[i] = p.skyBottom[i];
+    this->envWallColor[i] = p.wallColor[i];
+    this->envFloorColor[i] = p.floorColor[i];
+    this->envCeilColor[i] = p.ceilColor[i];
   }
+  this->envMapMode = p.mode == 1 ? 1 : 0;
+  this->envRoomHalfExtent = p.roomHalfExtent;
+  this->envRoomFloorY = p.roomFloorY;
+  this->envRoomCeilY = p.roomCeilY;
 }
 
 int

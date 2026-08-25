@@ -65,10 +65,14 @@ struct alignas(16) RTXFrameBlock {
   float env[4];           // procedural IBL: x = intensity, yzw = sun dir (world)
   float envColor[4];      // procedural IBL: rgb = sun color, w = sun power / sky
                           // sky brightness factor
+  float envRoom[4];       // room cove: rgb = wall color, w = mode (0 sky, 1 room)
+  float envRoomFloor[4];  // room cove: rgb = floor color, w = floor Y (rel camera)
+  float envRoomCeil[4];   // room cove: rgb = ceiling color, w = ceiling Y (rel cam)
+  float envRoomScale[4];  // room cove: x = half extent (world units)
 };
 inline void checkRtlFrameBlockLayout() {
-  // 4 mat4 (view/viewInverse/projInverse/prevViewProj) + 10 vec4.
-  static_assert(sizeof(RTXFrameBlock) == 4 * 64 + 10 * 16,
+  // 4 mat4 (view/viewInverse/projInverse/prevViewProj) + 14 vec4.
+  static_assert(sizeof(RTXFrameBlock) == 4 * 64 + 14 * 16,
                 "RTXFrameBlock must match FrameBlock std140 layout");
 }
 

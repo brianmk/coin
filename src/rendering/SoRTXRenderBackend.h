@@ -723,6 +723,19 @@ private:
   //! envMapId < 0.
   float envSkyTop[3] = {0.30f, 0.50f, 0.80f};
   float envSkyBottom[3] = {0.85f, 0.88f, 0.90f};
+  //! Room-scene parameters of the active environment preset.  When
+  //! envMapMode is 1 the env radiance comes from a camera-centered cove
+  //! box (a back-facing box the viewer sits inside) with a colored floor,
+  //! four walls and a ceiling, so the cubemap reads as a real scene (desk,
+  //! table, white lab) whose surface reflections carry the room.  Keep in
+  //! sync with the RtxEnvPreset fields (see setEnvMap).
+  int envMapMode = 0;                 // 0 = sky gradient, 1 = room cove
+  float envWallColor[3] = {0.75f, 0.76f, 0.78f};
+  float envFloorColor[3] = {0.45f, 0.30f, 0.18f};
+  float envCeilColor[3] = {0.90f, 0.90f, 0.90f};
+  float envRoomHalfExtent = 3.0f;     // half width/depth of the cove, world units
+  float envRoomFloorY = -1.2f;        // floor height relative to the camera
+  float envRoomCeilY = 2.5f;          // ceiling height relative to the camera
 
   //! Backend selected (resolved) by FC_VULKAN_PT_DENOISER or, when set via
   //! setDenoiserFilter(), by the stored preference name so a runtime choice

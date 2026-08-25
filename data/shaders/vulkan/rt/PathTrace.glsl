@@ -41,6 +41,10 @@ layout(set = 0, binding = 2, std140) uniform FrameBlock {
                            // z = MIS balance enabled
     vec4  u_env;           // procedural IBL: x = intensity, yzw = sun dir (world)
     vec4  u_envColor;      // procedural IBL: rgb = sun color, w = sky brightness
+    vec4  u_envRoom;       // room cove: rgb = wall color, w = mode (0 sky, 1 room)
+    vec4  u_envRoomFloor;  // room cove: rgb = floor color, w = floor Y (rel camera)
+    vec4  u_envRoomCeil;   // room cove: rgb = ceiling color, w = ceiling Y (rel cam)
+    vec4  u_envRoomScale;  // room cove: x = half extent (world units)
 } frame;
 
 // std430 mirror of the C++ RTMaterial record; one per draw command, indexed
@@ -153,39 +157,85 @@ vec3 sampleCosine(vec2 u)
 }
 
 // --- Procedural environment / IBL ----------------------------------------
-// The environment is an analytic sky: a vertical gradient between the
-// background bottom (horizon) and top (zenith) colors, plus a sun disk that
-// falls off with a user-set power around the sun direction.  This gives
-// image-based lighting without an HDR cubemap: the radiance at a direction
-// is a closed-form function, so it can be evaluated for the primary-ray miss
-// (background/sky reflections), as a diffuse irradiance term (sky ambient)
-// and as a specular IBL term (polished surfaces picking up the sun/sky).
-vec3 envSkyColor(vec3 dir)
-{
-    // dir.y in [-1,1]; -1 = straight down = horizon color, +1 = zenith.
-    float t = clamp(dir.y * 0.5 + 0.5, 0.0, 1.0);
-    return mix(frame.u_bgBottom.rgb, frame.u_bgTop.rgb, t);
-}
-
+// The environment is either an analytic sky (mode 0): a vertical gradient
+// between the background bottom (horizon) and top (zenith) colors, plus a sun
+// disk that falls off with a user-set power around the sun direction; or a
+// camera-centered "room cove" (mode 1): a back-facing box the viewer sits
+// inside with a colored floor, four walls and a ceiling, so the cubemap reads
+// as a real scene (desk / table / white lab) whose reflections carry the room.
+// In both cases radiance is a closed-form function of direction, so it can be
+// evaluated for the primary-ray miss (background/reflections), as a diffuse
+// irradiance term (ambient) and as a specular IBL term (glossy surfaces).
 vec3 envSunDir()
 {
     return normalize(frame.u_env.yzw);
 }
 
-// Environment radiance along a world direction.
+// Surface color of the environment along a world direction, independent of
+// the intensity/lighting scale.  Sky mode returns the vertical gradient;
+// room mode returns the face of the camera-aligned cove box the ray leaves.
+vec3 envSurfaceColor(vec3 dir)
+{
+    if (frame.u_envRoom.w > 0.5) {
+        // Room cove: a box centered on the camera.  floorY/ceilY are
+        // camera-relative offsets; the box spans +/-E on X and Z.  Trace a
+        // ray from the box center (camera) along dir and take the nearest
+        // back-facing plane the ray exits through.
+        const float E = max(frame.u_envRoomScale.x, 0.1);
+        const float floorY = frame.u_envRoomFloor.w; // camera-relative
+        const float ceilY = frame.u_envRoomCeil.w;   // camera-relative
+        vec3 n = normalize(dir);
+        float t = 1e30;
+        vec3 color = vec3(0.0);
+        // X walls (+/-E).
+        if (n.x > 1e-5) {
+            float tx = E / n.x;
+            if (tx < t) { t = tx; color = frame.u_envRoom.rgb; }
+        }
+        if (n.x < -1e-5) {
+            float tx = -E / n.x;
+            if (tx < t) { t = tx; color = frame.u_envRoom.rgb; }
+        }
+        // Z walls (+/-E).
+        if (n.z > 1e-5) {
+            float tz = E / n.z;
+            if (tz < t) { t = tz; color = frame.u_envRoom.rgb; }
+        }
+        if (n.z < -1e-5) {
+            float tz = -E / n.z;
+            if (tz < t) { t = tz; color = frame.u_envRoom.rgb; }
+        }
+        // Floor / ceiling planes (ray from the box center, so t = off / n.y).
+        if (n.y < -1e-5) {
+            float ty = floorY / n.y;
+            if (ty >= 0.0 && ty < t) { t = ty; color = frame.u_envRoomFloor.rgb; }
+        }
+        if (n.y > 1e-5) {
+            float ty = ceilY / n.y;
+            if (ty >= 0.0 && ty < t) { t = ty; color = frame.u_envRoomCeil.rgb; }
+        }
+        return color;
+    }
+    // Sky gradient: dir.y in [-1,1]; -1 = horizon color, +1 = zenith.
+    float t = clamp(dir.y * 0.5 + 0.5, 0.0, 1.0);
+    return mix(frame.u_bgBottom.rgb, frame.u_bgTop.rgb, t);
+}
+
+// Environment radiance along a world direction (surface color * sky/room
+// intensity, plus the sun disk).
 vec3 envRadiance(vec3 dir)
 {
     vec3 n = normalize(dir);
-    vec3 sky = envSkyColor(n) * frame.u_env.x;
+    vec3 env = envSurfaceColor(n) * frame.u_env.x;
     float d = max(dot(n, envSunDir()), 0.0);
     vec3 sun = frame.u_envColor.rgb * pow(d, max(frame.u_envColor.w, 1.0));
-    return sky + sun * frame.u_env.x;
+    return env + sun * frame.u_env.x;
 }
 
-// Diffuse irradiance of the environment at a surface normal (sky ambient).
-// Approximates the cosine-weighted hemisphere integral of envSkyColor by
-// sampling the sky at N fixed cosine-hemisphere directions, deterministic so
-// the single-sample preview does not flicker frame to frame.
+// Diffuse irradiance of the environment at a surface normal (ambient).
+// Approximates the cosine-weighted hemisphere integral of envSurfaceColor by
+// sampling at N fixed cosine-hemisphere directions, deterministic so the
+// single-sample preview does not flicker frame to frame.
 vec3 envIrradiance(vec3 n)
 {
     vec3 up = (abs(n.y) < 0.999) ? vec3(0.0, 1.0, 0.0) : vec3(1.0, 0.0, 0.0);
@@ -200,22 +250,20 @@ vec3 envIrradiance(vec3 n)
         float sinT = sqrt(max(1.0 - cosT * cosT, 0.0));
         vec3 dir = tangent * (cos(fi) * sinT) + bitangent * (sin(fi) * sinT) +
                    n * cosT;
-        irr += envSkyColor(dir);
+        irr += envSurfaceColor(dir);
     }
     return (irr / float(N)) * 3.14159265 * frame.u_env.x;
 }
 
 // Specular IBL at a reflection direction with a roughness blur estimate.
-// Samples the sky (and sun) at the reflected direction; a higher roughness
-// darkens and desaturates the sky term while the sun falls off through the
-// reflection (a cheap prefilter-free approximation).
+// Samples the environment (and sun) at the reflected direction; a higher
+// roughness darkens and desaturates the surface term while the sun stays only
+// for glossy reflections so it reads as a hot spot.
 vec3 envSpecular(vec3 r, float roughness)
 {
     vec3 rn = normalize(r);
     float rough = clamp(roughness, 0.0, 1.0);
     vec3 radiance = envRadiance(rn);
-    // Sky term softens and fades with roughness; the sun stays only for
-    // glossy reflections (low roughness) so it reads as a hot spot.
     float sunAlign = max(dot(rn, envSunDir()), 0.0);
     radiance *= mix(1.0, (0.3 + 0.7 * sunAlign), rough);
     return radiance;
@@ -658,6 +706,9 @@ void main()
         else {
             float t = clamp(float(px.y) / max(frame.u_viewport.y, 1.0), 0.0, 1.0);
             rgb = mix(frame.u_bgTop.rgb, frame.u_bgBottom.rgb, t);
+            if (frame.u_env.x > 1.0e-4) {
+                rgb = envRadiance(dir);
+            }
         }
         imageStore(storageImage, ivec2(px), clamp(vec4(rgb, 1.0), 0.0, 1.0));
         return;
@@ -758,6 +809,9 @@ void main()
         else {
             float t = clamp(float(px.y) / max(frame.u_viewport.y, 1.0), 0.0, 1.0);
             rgb = mix(frame.u_bgTop.rgb, frame.u_bgBottom.rgb, t);
+            if (frame.u_env.x > 1.0e-4) {
+                rgb = envRadiance(dir);
+            }
         }
         imageStore(storageImage, ivec2(px), clamp(vec4(rgb, 1.0), 0.0, 1.0));
         return;
@@ -774,9 +828,16 @@ void main()
         HitInfo h = traceClosest(rayOrigin, rayDir, 1e30);
 
         if (!h.hit) {
-            // Miss: background gradient contributes and the path ends.
+            // Miss: the environment radiance (room cove or sky gradient)
+            // contributes and the path ends.  When no env is active
+            // (envRoom.w == 0 and env.x == 0) fall back to the flat
+            // viewport gradient so the default view is unchanged.
             float t = clamp(float(px.y) / max(frame.u_viewport.y, 1.0), 0.0, 1.0);
-            radiance += weight * mix(frame.u_bgTop.rgb, frame.u_bgBottom.rgb, t);
+            vec3 envMiss = envRadiance(rayDir);
+            if (frame.u_env.x <= 1.0e-4) {
+                envMiss = mix(frame.u_bgTop.rgb, frame.u_bgBottom.rgb, t);
+            }
+            radiance += weight * envMiss;
             if (bounce == 0) {
                 normals[index] = vec4(-rayDir, 1.0);
                 positions[index] = vec4(0.0, 0.0, 0.0, 1.0e7);

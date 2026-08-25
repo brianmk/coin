@@ -525,43 +525,6 @@ SoRTXRenderBackend::recordAccelerationStructures(
     SbMat pValue;
     params.projMatrix.getValue(pValue);
 
-    if (getenv("FC_VULKAN_RT_DEBUG")) {
-      const SbVec2s & vpS = params.viewport.getViewportSizePixels();
-      SbMatrix vp = params.viewMatrix * params.projMatrix;
-      float xmin = 1e9, xmax = -1e9, ymin = 1e9, ymax = -1e9;
-      for (int cx = 0; cx < 2; ++cx)
-        for (int cy = 0; cy < 2; ++cy)
-          for (int cz = 0; cz < 2; ++cz) {
-            SbVec3f wc(5.0f + cx * 2.0f, 0.0f + cy * 2.0f,
-                       3.0f + cz * 2.0f), c;
-            vp.multVecMatrix(wc, c);
-            float px = (c[0] * 0.5f + 0.5f) * vpS[0];
-            float py = (1.0f - (c[1] * 0.5f + 0.5f)) * vpS[1];
-            xmin = std::min(xmin, px); xmax = std::max(xmax, px);
-            ymin = std::min(ymin, py); ymax = std::max(ymax, py);
-          }
-      fprintf(stderr, "[RTDBG] project cubeWorld bbox viewport=%dx%d "
-                      "screen=(%.0f..%.0f, %.0f..%.0f) size=(%.0fx%.0f)\n",
-              vpS[0], vpS[1], xmin, xmax, ymin, ymax,
-              xmax - xmin, ymax - ymin);
-      // Also project the same cube placed at the ORIGIN (placement dropped).
-      float x2min = 1e9, x2max = -1e9, y2min = 1e9, y2max = -1e9;
-      for (int cx = 0; cx < 2; ++cx)
-        for (int cy = 0; cy < 2; ++cy)
-          for (int cz = 0; cz < 2; ++cz) {
-            SbVec3f wc(0.0f + cx * 2.0f, 0.0f + cy * 2.0f,
-                       0.0f + cz * 2.0f), c;
-            vp.multVecMatrix(wc, c);
-            float px = (c[0] * 0.5f + 0.5f) * vpS[0];
-            float py = (1.0f - (c[1] * 0.5f + 0.5f)) * vpS[1];
-            x2min = std::min(x2min, px); x2max = std::max(x2max, px);
-            y2min = std::min(y2min, py); y2max = std::max(y2max, py);
-          }
-      fprintf(stderr, "[RTDBG] project ORIGIN cube bbox "
-                      "screen=(%.0f..%.0f, %.0f..%.0f)\n",
-              x2min, x2max, y2min, y2max);
-    }
-
     frame.cameraPos[0] = frame.viewInverse[12];
     frame.cameraPos[1] = frame.viewInverse[13];
     frame.cameraPos[2] = frame.viewInverse[14];
@@ -653,7 +616,11 @@ SoRTXRenderBackend::recordAccelerationStructures(
     // Procedural IBL environment params (RtxModeEnvironment): normalized
     // world-space sun direction plus the sky/sun shading scales.  The sky
     // brightness folds into u_env.x so no extra block field is needed.
-    frame.env[0] = this->envIntensity * this->envSkyBrightness;
+    // When no environment preset is active (envMapId < 0) the intensity is
+    // driven to zero so the PT/preview miss falls back to the plain viewport
+    // gradient and the default view is unchanged.
+    frame.env[0] = this->envMapId >= 0
+      ? this->envIntensity * this->envSkyBrightness : 0.0f;
     float sdx = this->envSunDir[0];
     float sdy = this->envSunDir[1];
     float sdz = this->envSunDir[2];
@@ -666,6 +633,25 @@ SoRTXRenderBackend::recordAccelerationStructures(
     frame.envColor[1] = this->envSunColor[1];
     frame.envColor[2] = this->envSunColor[2];
     frame.envColor[3] = this->envSunPower;
+
+    // Room-cove environment: when envMapMode is set the shader traces a
+    // camera-centered box (floor + four walls + ceiling) instead of the sky
+    // gradient, so the cubemap reads as a real scene (desk / table / white
+    // lab) whose reflections carry the room.  Straightforward packing of the
+    // per-preset room parameters; all unused components are zeroed.
+    frame.envRoom[0] = this->envWallColor[0];
+    frame.envRoom[1] = this->envWallColor[1];
+    frame.envRoom[2] = this->envWallColor[2];
+    frame.envRoom[3] = this->envMapMode == 1 ? 1.0f : 0.0f;
+    frame.envRoomFloor[0] = this->envFloorColor[0];
+    frame.envRoomFloor[1] = this->envFloorColor[1];
+    frame.envRoomFloor[2] = this->envFloorColor[2];
+    frame.envRoomFloor[3] = this->envRoomFloorY;
+    frame.envRoomCeil[0] = this->envCeilColor[0];
+    frame.envRoomCeil[1] = this->envCeilColor[1];
+    frame.envRoomCeil[2] = this->envCeilColor[2];
+    frame.envRoomCeil[3] = this->envRoomCeilY;
+    frame.envRoomScale[0] = this->envRoomHalfExtent;
 
     std::memcpy(this->frameMapped, &frame, sizeof(frame));
 
