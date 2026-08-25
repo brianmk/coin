@@ -185,6 +185,16 @@ public:
   void setEnvSunPower(float power);
   void setEnvSkyBrightness(float brightness);
 
+  //! Select a procedural environment/cubemap preset by index (-1 = use the
+  //! viewport background gradient).  Overrides the frame sky + env params.
+  void setEnvMap(int index);
+  //! Current environment/cubemap preset index (-1 = viewport background).
+  int getEnvMap(void) const;
+  //! Number of available environment/cubemap presets.
+  static int getEnvMapCount(void);
+  //! Human-readable name of an environment/cubemap preset (or nullptr).
+  static const char * getEnvMapName(int index);
+
   //! True when path tracing is enabled (see setPathTracingEnabled()).
   SbBool getPathTracingEnabled(void) const;
 
@@ -700,6 +710,19 @@ private:
   float envSunColor[3] = {1.0f, 0.94f, 0.82f};
   float envSunPower = 12.0f;
   float envSkyBrightness = 1.0f;
+
+  //! Selected environment/cubemap preset.  -1 = use the viewport's own
+  //! background gradient (the default); >= 0 indexes the RtxEnvPreset table
+  //! and overrides both the frame's sky (u_bgTop/u_bgBottom) and the env
+  //! lighting params (u_env/u_envColor) so the sky and its IBL contribution
+  //! match the chosen cubemap.
+  int envMapId = -1;
+  //! Sky gradient (top/bottom) of the active environment preset, used to
+  //! override the frame's u_bgTop/u_bgBottom so envSkyColor samples the
+  //! cubemap sky rather than the viewport background.  Ignored when
+  //! envMapId < 0.
+  float envSkyTop[3] = {0.30f, 0.50f, 0.80f};
+  float envSkyBottom[3] = {0.85f, 0.88f, 0.90f};
 
   //! Backend selected (resolved) by FC_VULKAN_PT_DENOISER or, when set via
   //! setDenoiserFilter(), by the stored preference name so a runtime choice

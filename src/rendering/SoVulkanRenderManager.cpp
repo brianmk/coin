@@ -652,6 +652,37 @@ SoVulkanRenderManager::getViewMode(void) const
   return static_cast<int>(this->pimpl->rtxBackend.getViewMode());
 }
 
+void
+SoVulkanRenderManager::setEnvMap(const int index)
+{
+  if (!this->pimpl->rtxBackendInitialized) {
+    SoDebugError::postWarning("SoVulkanRenderManager::setEnvMap",
+                              "ray-tracing backend is not initialized; "
+                              "environment is unavailable");
+    return;
+  }
+  this->pimpl->rtxBackend.setEnvMap(index);
+}
+
+int
+SoVulkanRenderManager::getEnvMap(void) const
+{
+  if (!this->pimpl->rtxBackendInitialized) return -1;
+  return this->pimpl->rtxBackend.getEnvMap();
+}
+
+int
+SoVulkanRenderManager::getEnvMapCount(void)
+{
+  return SoRTXRenderBackend::getEnvMapCount();
+}
+
+const char *
+SoVulkanRenderManager::getEnvMapName(const int index)
+{
+  return SoRTXRenderBackend::getEnvMapName(index);
+}
+
 SbBool
 SoVulkanRenderManager::getPathTracingEnabled(void) const
 {

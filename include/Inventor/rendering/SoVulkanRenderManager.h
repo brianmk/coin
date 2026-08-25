@@ -263,6 +263,21 @@ public:
   //! Current ray-traced view mode (RtxViewMode value, 0=off.
   int getViewMode(void) const;
   /*!
+    \brief Select the "cubemap" environment preset for the environment-lit
+    view (and the path-tracer background).
+
+    \a index indexes the backend's procedural environment presets; -1 restores
+    the viewport background gradient.  Only meaningful while the ray-tracing
+    backend is active.  See also getEnvMapCount().
+  */
+  void setEnvMap(int index);
+  //! Current environment/cubemap preset index (-1 = viewport background).
+  int getEnvMap(void) const;
+  //! Number of available environment/cubemap presets.
+  static int getEnvMapCount(void);
+  //! Human-readable name of an environment preset index.
+  static const char * getEnvMapName(int index);
+  /*!
     \brief Start flag for progressive path-tracing refinement.
 
     TRUE starts (or restarts) the progressive accumulation; any camera move

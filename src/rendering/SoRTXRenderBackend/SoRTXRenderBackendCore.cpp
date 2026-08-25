@@ -115,6 +115,89 @@ SoRTXRenderBackend::setEnvSkyBrightness(const float brightness)
   this->envSkyBrightness = brightness;
 }
 
+// Procedural environment/cubemap presets.  Each is a skin for the analytic
+// sky: an explicit top/bottom gradient (overriding the viewport's background
+// colors) plus a sun.  They are defined here so the backend owns the palette
+// and the GUI lists them by name without carrying data.
+struct RtxEnvPreset {
+  const char * name;
+  float skyTop[3];
+  float skyBottom[3];
+  float sunDir[3];
+  float sunColor[3];
+  float sunPower;
+  float intensity;
+  float skyBrightness;
+};
+
+namespace {
+const RtxEnvPreset kRtxEnvPresets[] = {
+  { "Daylight",
+    {0.30f, 0.50f, 0.80f}, {0.85f, 0.88f, 0.90f},
+    {0.35f, 0.80f, 0.25f}, {1.00f, 0.95f, 0.85f}, 20.0f, 0.45f, 1.0f },
+  { "Sunset",
+    {0.25f, 0.18f, 0.35f}, {0.95f, 0.55f, 0.30f},
+    {0.55f, 0.25f, 0.45f}, {1.00f, 0.55f, 0.25f}, 12.0f, 0.40f, 1.0f },
+  { "Overcast",
+    {0.60f, 0.62f, 0.66f}, {0.82f, 0.83f, 0.85f},
+    {0.20f, 0.90f, 0.15f}, {0.90f, 0.90f, 0.90f}, 6.0f, 0.32f, 1.0f },
+  { "Neutral Studio",
+    {0.55f, 0.58f, 0.62f}, {0.80f, 0.81f, 0.83f},
+    {0.30f, 0.85f, 0.40f}, {1.00f, 1.00f, 1.00f}, 30.0f, 0.40f, 1.0f },
+  { "Night",
+    {0.02f, 0.03f, 0.06f}, {0.05f, 0.08f, 0.15f},
+    {0.40f, 0.85f, 0.60f}, {0.55f, 0.65f, 0.95f}, 100.0f, 0.12f, 1.0f },
+};
+} // anonymous namespace
+
+const char *
+SoRTXRenderBackend::getEnvMapName(const int index)
+{
+  if (index < 0 || index >= getEnvMapCount()) return nullptr;
+  return kRtxEnvPresets[index].name;
+}
+
+int
+SoRTXRenderBackend::getEnvMapCount(void)
+{
+  return static_cast<int>(sizeof(kRtxEnvPresets) / sizeof(kRtxEnvPresets[0]));
+}
+
+void
+SoRTXRenderBackend::setEnvMap(const int index)
+{
+  if (index == this->envMapId) return;
+  // Any environment override invalidates the accumulated image (the sky and
+  // its contribution change), so drop back to a fresh run like a view-mode
+  // change does.
+  this->ptAccumulating = FALSE;
+  this->ptStartLatch = FALSE;
+  this->ptFrameIndex = 0;
+  this->ptIdleFrames = 0;
+  this->ptWasMoving = FALSE;
+  this->ptDenoisePending = FALSE;
+  this->ptConverged = FALSE;
+  this->denoiseResultReady = FALSE;
+  this->envMapId = index;
+  if (index < 0 || index >= getEnvMapCount()) return;
+  const RtxEnvPreset & p = kRtxEnvPresets[index];
+  this->envIntensity = p.intensity;
+  this->envSunPower = p.sunPower;
+  this->envSkyBrightness = p.skyBrightness;
+  for (int i = 0; i < 3; ++i) {
+    this->envSunDir[i] = p.sunDir[i];
+    this->envSunColor[i] = p.sunColor[i];
+    this->envSkyTop[i] = p.skyTop[i];
+    this->envSkyBottom[i] = p.skyBottom[i];
+  }
+}
+
+int
+SoRTXRenderBackend::getEnvMap(void) const
+{
+  return this->envMapId;
+}
+
 void
 SoRTXRenderBackend::setPathTracingStart(SbBool start)
 {

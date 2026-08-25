@@ -525,6 +525,43 @@ SoRTXRenderBackend::recordAccelerationStructures(
     SbMat pValue;
     params.projMatrix.getValue(pValue);
 
+    if (getenv("FC_VULKAN_RT_DEBUG")) {
+      const SbVec2s & vpS = params.viewport.getViewportSizePixels();
+      SbMatrix vp = params.viewMatrix * params.projMatrix;
+      float xmin = 1e9, xmax = -1e9, ymin = 1e9, ymax = -1e9;
+      for (int cx = 0; cx < 2; ++cx)
+        for (int cy = 0; cy < 2; ++cy)
+          for (int cz = 0; cz < 2; ++cz) {
+            SbVec3f wc(5.0f + cx * 2.0f, 0.0f + cy * 2.0f,
+                       3.0f + cz * 2.0f), c;
+            vp.multVecMatrix(wc, c);
+            float px = (c[0] * 0.5f + 0.5f) * vpS[0];
+            float py = (1.0f - (c[1] * 0.5f + 0.5f)) * vpS[1];
+            xmin = std::min(xmin, px); xmax = std::max(xmax, px);
+            ymin = std::min(ymin, py); ymax = std::max(ymax, py);
+          }
+      fprintf(stderr, "[RTDBG] project cubeWorld bbox viewport=%dx%d "
+                      "screen=(%.0f..%.0f, %.0f..%.0f) size=(%.0fx%.0f)\n",
+              vpS[0], vpS[1], xmin, xmax, ymin, ymax,
+              xmax - xmin, ymax - ymin);
+      // Also project the same cube placed at the ORIGIN (placement dropped).
+      float x2min = 1e9, x2max = -1e9, y2min = 1e9, y2max = -1e9;
+      for (int cx = 0; cx < 2; ++cx)
+        for (int cy = 0; cy < 2; ++cy)
+          for (int cz = 0; cz < 2; ++cz) {
+            SbVec3f wc(0.0f + cx * 2.0f, 0.0f + cy * 2.0f,
+                       0.0f + cz * 2.0f), c;
+            vp.multVecMatrix(wc, c);
+            float px = (c[0] * 0.5f + 0.5f) * vpS[0];
+            float py = (1.0f - (c[1] * 0.5f + 0.5f)) * vpS[1];
+            x2min = std::min(x2min, px); x2max = std::max(x2max, px);
+            y2min = std::min(y2min, py); y2max = std::max(y2max, py);
+          }
+      fprintf(stderr, "[RTDBG] project ORIGIN cube bbox "
+                      "screen=(%.0f..%.0f, %.0f..%.0f)\n",
+              x2min, x2max, y2min, y2max);
+    }
+
     frame.cameraPos[0] = frame.viewInverse[12];
     frame.cameraPos[1] = frame.viewInverse[13];
     frame.cameraPos[2] = frame.viewInverse[14];
@@ -539,13 +576,26 @@ SoRTXRenderBackend::recordAccelerationStructures(
     frame.viewport[2] = params.projMatrix[3][3] != 0.0f ? 1.0f : 0.0f;
     frame.viewport[3] = 0.0f;
 
-    frame.bgTop[0] = params.backgroundTopColor[0];
-    frame.bgTop[1] = params.backgroundTopColor[1];
-    frame.bgTop[2] = params.backgroundTopColor[2];
+    // Sky: the viewport background gradient by default; when an environment
+    // preset (cubemap) is selected it overrides these so the analytic
+    // envSkyColor samples the cubemap sky rather than the viewport's colors.
+    if (this->envMapId >= 0) {
+      frame.bgTop[0] = this->envSkyTop[0];
+      frame.bgTop[1] = this->envSkyTop[1];
+      frame.bgTop[2] = this->envSkyTop[2];
+      frame.bgBottom[0] = this->envSkyBottom[0];
+      frame.bgBottom[1] = this->envSkyBottom[1];
+      frame.bgBottom[2] = this->envSkyBottom[2];
+    }
+    else {
+      frame.bgTop[0] = params.backgroundTopColor[0];
+      frame.bgTop[1] = params.backgroundTopColor[1];
+      frame.bgTop[2] = params.backgroundTopColor[2];
+      frame.bgBottom[0] = params.backgroundBottomColor[0];
+      frame.bgBottom[1] = params.backgroundBottomColor[1];
+      frame.bgBottom[2] = params.backgroundBottomColor[2];
+    }
     frame.bgTop[3] = 1.0f;
-    frame.bgBottom[0] = params.backgroundBottomColor[0];
-    frame.bgBottom[1] = params.backgroundBottomColor[1];
-    frame.bgBottom[2] = params.backgroundBottomColor[2];
     frame.bgBottom[3] = 1.0f;
 
     frame.state[0] = static_cast<float>(this->ptFrameIndex);
