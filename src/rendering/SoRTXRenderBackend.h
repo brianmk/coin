@@ -138,6 +138,19 @@ public:
   SoRTXRenderBackend();
   ~SoRTXRenderBackend() override;
 
+  /*!
+    \brief Ray-traced view mode (which rendering stage the tracer runs).
+
+    This augments (does not replace) ptEnabled: ptEnabled is the legacy
+    "is the ray tracer rendering" flag that also owns the accumulate/denoise
+    state machine.  RtxModeAmbientOcclusion engages the ray tracer as a
+    real-time single-sample preview that traces occlusion rays per pixel
+    (u_state.y == 2) without accumulation or denoising; RtxModePathTrace is
+    the full accumulating path tracer (u_state.y == 1).  RtxModeOff leaves
+    ptEnabled untouched (callers that want raster set ptEnabled false instead).
+  */
+  enum class RtxViewMode { RtxModeOff = 0, RtxModeAmbientOcclusion, RtxModePathTrace };
+
   const char * getName() const override;
   SbBool initialize(const SoRenderBackendInitParams & params) override;
   void shutdown() override;
@@ -154,6 +167,11 @@ public:
     renderExternal() call.  Requires the ray-tracing backend to be active.
   */
   void setPathTracingEnabled(SbBool enabled);
+
+  //! Set the ray-traced view mode (see RtxViewMode).
+  void setViewMode(RtxViewMode mode);
+  //! Current ray-traced view mode (see RtxViewMode).
+  RtxViewMode getViewMode(void) const;
 
   //! True when path tracing is enabled (see setPathTracingEnabled()).
   SbBool getPathTracingEnabled(void) const;
@@ -304,6 +322,26 @@ private:
   uint32_t queueFamilyIndex = 0;
   const VkAllocationCallbacks * allocator = nullptr;
 
+  // Cached physical-device identity used to gate the NVIDIA-only CUDA/OptiX
+  // denoiser.  The ray-query compute path tracer itself is vendor-neutral
+  // (it only needs VK_KHR_ray_query, which AMD RDNA2+/Intel Arc also expose),
+  // but the external CUDA/OptiX denoiser only works when the Vulkan device is
+  // an NVIDIA GPU and the CUDA context is bound to that same device.  Query
+  // these once at initialize() so the denoiser selection can fall back to
+  // OIDN instead of grabbing the wrong CUDA device on non-NVIDIA or
+  // multi-GPU machines.
+  uint32_t deviceVendorID = 0;
+  uint32_t deviceID = 0;
+  // True once the physical device has been identified as NVIDIA.  Drives the
+  // RTX denoiser gate; the Vulkan ray-tracing pipeline itself is unaffected.
+  bool deviceIsNvidia = false;
+  // Thin-process device UUID (VK_UUID_SIZE bytes) used to bind the CUDA
+  // context to the SAME GPU that owns the Vulkan device, so the
+  // VK_KHR_external_memory_fd interop imports physically-identical memory.
+  // Empty when VkPhysicalDeviceIDProperties is unavailable on this device.
+  uint8_t deviceUUID[16] = {0};
+  bool haveDeviceUUID = false;
+
   // Persistent transient command pool + buffer for the one-shot
   // acceleration-structure phase (BLAS/TLAS builds and buffer copies, which
   // are not allowed inside a render pass).  Allocated once instead of per
@@ -449,6 +487,11 @@ private:
   //! preview frame (G-buffers stale, denoised result must be dropped).
   SbBool ptConverged = FALSE;
   uint32_t ptFrameIndex = 0;
+  // Ordinal of the last frame this backend rendered (copied from
+  // SoRenderParams::frame in render()/renderExternal()).  Emitted in the
+  // [RTDBG] adaptive ptState/blas lines so probes can correlate backend
+  // traces to phase markers and frame dumps on one monotonic key.
+  uint32_t ptLastFrame = 0;
   uint32_t ptMaxBounces = 4;
   // Consecutive frames with an unchanged camera/scene while not accumulating.
   // Once this reaches the settle threshold (see updatePathTracingState) a
@@ -467,14 +510,29 @@ private:
   SbBool ptAdaptiveEnabled = TRUE;
   uint32_t ptAdaptiveMinSamples = 4;
   float ptAdaptiveThreshold = 0.05f;
-  float ptAdaptiveStopFraction = 0.02f;
+  // Stop adaptively once the residual active-pixel fraction falls below this.
+  // The observed plateau of firefly/highlight pixels on a typical scene sits
+  // around 5-7% and never drops to the old 0.02, so the run only ever stopped
+  // at the hard sample cap, leaving those pixels noisy.  Raising it slightly
+  // above the plateau hands the last residual to the guide-based denoiser
+  // instead of tracing to the cap.  FC_VULKAN_PT_STOP_FRACTION overrides.
+  float ptAdaptiveStopFraction = 0.05f;
   // Firefly rejection: standard-deviation multiplier under which a sample
   // far brighter than the pixel's running mean is replaced by that mean.
-  // 0 disables it.  Set from FC_VULKAN_PT_FIREFLY (default 0, off) so the
-  // env override can enable it per run.
-  float ptFireflySigma = 0.0f;
+  // 0 disables it.  Default 5.0 clamps extreme outliers so the stubborn
+  // firefly pixels' variance genuinely drops (letting adaptive sampling
+  // converge) instead of staying pinned above the threshold.  Set from
+  // FC_VULKAN_PT_FIREFLY (0 = off) to override per run.
+  float ptFireflySigma = 5.0f;
   uint32_t ptLastActivePixels = 0;
   float ptLastActiveFraction = 1.0f;
+  //! Denoise-at-target latch.  Set when the accumulation reaches the target
+  //! sample count (ptMaxSamples) so the denoiser runs exactly once on the
+  //! final accumulated image instead of re-denoising a changing partial every
+  //! frame (the "keeps getting grainy" churn).  The target frame keeps
+  //! ptAccumulating set so the G-buffer readback is recorded; updateDenoise
+  //! consumes the latch and then drops to converged-idle.
+  SbBool ptDenoisePending = FALSE;
   // Temporal reprojection (FC_VULKAN_PT_TEMPORAL); the world->clip matrix
   // of the previous frame's camera for the history reprojection test.
   SbBool ptTemporalEnabled = TRUE;
@@ -492,6 +550,13 @@ private:
   //! backend never has to rely on a floating-point matrix diff.
   uint32_t lastCameraVersion = 0;
   SbBool haveLastCameraVersion = FALSE;
+  //! True while a camera-only move is being reprojected (viewChanged with
+  //! temporal history).  On the frame the move concludes, the accumulation is
+  //! restarted cleanly: the per-pixel history carried across the unsettled
+  //! move is mismatch-prone (disocclusions, surfaces that only became visible
+  //! mid-orbit, samples seeded at a stale jitter), and building more samples
+  //! on it locks the adaptive sampler at mutually-inconsistent partial values.
+  SbBool ptWasMoving = FALSE;
 
   // TLAS (rebuilt every frame) and scratch buffer (sized for the largest
   // build, reused by BLAS and TLAS builds).
@@ -602,6 +667,9 @@ private:
   // the G-buffers to/from the denoiser, and the denoised output bound at
   // present binding 5.
   enum DenoiseKind { DenoiseNone = 0, DenoiseOidn, DenoiseRtx, DenoiseFsr };
+
+  //! Current ray-traced view mode (see the public RtxViewMode enum).
+  RtxViewMode rtxViewMode = RtxViewMode::RtxModeOff;
 
   //! Backend selected (resolved) by FC_VULKAN_PT_DENOISER or, when set via
   //! setDenoiserFilter(), by the stored preference name so a runtime choice
@@ -732,6 +800,11 @@ private:
   void recordDenoiseReadback(VkCommandBuffer cmd);
   //! Run the denoiser on the staged G-buffers and publish denoiseResultReady.
   void updateDenoise();
+  //! After publishing a denoised result at target: clear the denoise latch and
+  //! transition to converged-idle so the viewport keeps the denoised image and
+  //! stops the continuous-update loop.  Also used on the failure paths (with a
+  //! published raw result) so the run does not retry a failed denoise forever.
+  void convergeAfterDenoise();
   //! Destroy denoiser resources (device + staging + RTX/OIDN handles).
   void destroyDenoiser();
   void releaseDenoiseStaging();

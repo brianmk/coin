@@ -60,6 +60,13 @@ struct SoRenderParams {
   //! detect a camera move without diffing floating-point matrices.  A value
   //! of 0 means "not supplied" (the backend should fall back to the matrices).
   uint32_t cameraVersion = 0;
+
+  //! 1-based ordinal of the presented frame this render belongs to, bumped
+  //! exactly once per frame by the embedding (SoVulkanRenderManager).  Used
+  //! as a stable, ordering-independent correlation key between backend
+  //! debug traces (RTDBG lines), captured frame dumps and probe phase
+  //! markers.  0 means "not supplied".
+  uint32_t frame = 0;
 };
 
 /*!

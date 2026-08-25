@@ -282,6 +282,35 @@ bool traceShadow(vec3 origin, vec3 dir, float tMax)
       gl_RayQueryCommittedIntersectionTriangleEXT;
 }
 
+// Ambient-occlusion visibility at a hit point: N rays over the cosine-
+// weighted hemisphere distributed by the golden-angle spiral, returned as the
+// fraction that reach the background unoccluded (1 = fully open).  Single-
+// sample, no accumulation -- the seed only stabilises the spiral phase so the
+// real-time preview does not flicker frame to frame.
+float coin_rtx_ao(vec3 worldPos, vec3 worldN, vec2 seed)
+{
+    vec3 N = normalize(worldN);
+    // Tangent basis around N.
+    vec3 up = (abs(N.y) < 0.999) ? vec3(0.0, 1.0, 0.0) : vec3(1.0, 0.0, 0.0);
+    vec3 T = normalize(cross(up, N));
+    vec3 B = cross(N, T);
+    float phase = seed.x * 6.2831853;
+    vec3 P = worldPos + N * 0.001;
+    float visible = 0.0;
+    const int N_SAMPLES = 8;
+    for (int i = 0; i < N_SAMPLES; ++i) {
+        float fi = float(i) + phase;
+        float phi = fi * 2.39996;                 // golden angle (radians)
+        float cosT = 1.0 - (float(i) + 0.5) / float(N_SAMPLES);
+        float sinT = sqrt(max(1.0 - cosT * cosT, 0.0));
+        vec3 dir = T * (cos(phi) * sinT) + B * (sin(phi) * sinT) + N * cosT;
+        if (!traceShadow(P, dir, 1e30)) {
+            visible += 1.0;
+        }
+    }
+    return visible / float(N_SAMPLES);
+}
+
 // Same Gouraud evaluation as the raster visual program and the v1 chit.
 vec3 coin_rtx_gouraud(vec3 eyePos, vec3 eyeNormal, vec3 baseColor,
                       RTMaterial mat)
@@ -480,15 +509,21 @@ void main()
     // reprojection frames it is disabled: the buffer contents are stale
     // until the history rewrite below has run.
     if (ptEnabled > 0.5 && accumulating > 0.5 &&
-        frame.u_adaptive.y > 0.0 && frame.u_temporal.x < 0.5) {
+        frame.u_adaptive.y > 0.0 && frame.u_temporal.x < 0.5 &&
+        frame.u_adaptive.w > 0.5) {
         const uint nPrev = uint(max(accum[index].a, 0.0));
         const uint minSamples = uint(max(frame.u_adaptive.x, 1.0));
         if (nPrev >= minSamples) {
             vec3 mean = accum[index].rgb / float(nPrev);
+            // Variance per component: E[x^2] - E[x]^2, where accum.rgb is the
+            // running sum of samples and sq.rgb is the running sum of squared
+            // samples.  The scalar relative-error test below compares the
+            // magnitude of the per-component variance against the mean.
+            vec3 v2 = max(sq[index].rgb / float(nPrev) - mean * mean,
+                          vec3(0.0));
+            float relVar = max(v2.x, max(v2.y, v2.z));
             float m2 = max(dot(mean, mean), 1e-10);
-            float v2 = max(dot(sq[index].rgb, sq[index].rgb) / float(nPrev) -
-                           m2, 0.0);
-            if (sqrt(v2) < frame.u_adaptive.y * sqrt(m2)) {
+            if (relVar < (frame.u_adaptive.y * frame.u_adaptive.y) * m2) {
                 imageStore(storageImage, ivec2(px),
                            clamp(vec4(mean, 1.0), 0.0, 1.0));
                 return;
@@ -548,6 +583,45 @@ void main()
             else {
                 rgb = mat.diffuse.rgb;
             }
+        }
+        else {
+            float t = clamp(float(px.y) / max(frame.u_viewport.y, 1.0), 0.0, 1.0);
+            rgb = mix(frame.u_bgTop.rgb, frame.u_bgBottom.rgb, t);
+        }
+        imageStore(storageImage, ivec2(px), clamp(vec4(rgb, 1.0), 0.0, 1.0));
+        return;
+    }
+
+    // --- Ambient-occlusion preview (u_state.y == 2) ----------------------
+    // Single primary ray + a hemisphere of occlusion rays, one sample, no
+    // accumulation: a real-time AO preview that recomputes on every camera
+    // move like the raster viewport.  Diffuse/ambient/emissive are darkened
+    // by the visibility factor; direct lights are left as-is so the preview
+    // reads like a shaded CAD view rather than a flat grey AO map.
+    if (ptEnabled > 1.5 && ptEnabled < 2.5) {
+        HitInfo h = traceClosest(origin, dir, 1e30);
+        vec3 rgb;
+        if (h.hit) {
+            RTMaterial mat = matBuffer.materials[h.materialIndex];
+            float ao = coin_rtx_ao(h.pos, h.normal, hash2(px.x, px.y, frameIndex));
+            if (mat.pbr.z > 0.5) {
+                rgb = (mat.diffuse.rgb * ao) +
+                      coin_rtx_directLighting(h.pos, h.normal, dir, mat) +
+                      mat.emissive.rgb;
+            }
+            else if (mat.params.w > 0.5) {
+                vec3 eyePos = (frame.u_view * vec4(h.pos, 1.0)).xyz;
+                vec3 eyeN = normalize(mat3(frame.u_view) * h.normal);
+                rgb = (mat.diffuse.rgb * ao) +
+                      coin_rtx_gouraud(eyePos, eyeN, mat.diffuse.rgb, mat) +
+                      mat.emissive.rgb;
+            }
+            else {
+                rgb = mat.diffuse.rgb * ao + mat.emissive.rgb;
+            }
+            normals[index] = vec4(h.normal, 1.0);
+            positions[index] = vec4(h.pos, h.t);
+            albedos[index] = vec4(mat.diffuse.rgb, 1.0);
         }
         else {
             float t = clamp(float(px.y) / max(frame.u_viewport.y, 1.0), 0.0, 1.0);
@@ -743,9 +817,11 @@ void main()
         float fireflySigma = frame.u_adaptive.z;
         if (fireflySigma > 0.0 && acc.a > 1.0) {
             vec3 mean = acc.rgb / acc.a;
-            float m2 = max(dot(mean, mean), 1e-10);
-            float v2 = max(dot(s.rgb, s.rgb) / acc.a - m2, 0.0);
-            float sigma = sqrt(v2);
+            // Per-component variance: E[x^2] - E[x]^2 (s.rgb holds the sum of
+            // squared samples).  Take the largest-component sigma so a firefly
+            // on any channel is caught.
+            vec3 v2 = max(s.rgb / acc.a - mean * mean, vec3(0.0));
+            float sigma = sqrt(max(v2.x, max(v2.y, v2.z)));
             float sampleLum = max(max(outColor.r, outColor.g), outColor.b);
             float meanLum = max(max(mean.r, mean.g), mean.b);
             // Reject if the sample is > fireflySigma sigma above the mean.

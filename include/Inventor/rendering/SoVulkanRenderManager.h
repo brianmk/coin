@@ -210,6 +210,36 @@ public:
   SbBool getRayTracingActive(void) const;
 
   /*!
+    \brief Lazily bring up the ray-tracing backend after initialization.
+
+    initialize() only builds the RT backend when setRayTracing(TRUE) preceded
+    it.  When it was NOT built (path tracing was off at startup, so nothing
+    paid for the RT stack on the raster-only path), this method can still bring
+    it up later from the device context saved by initialize(), so enabling path
+    tracing at runtime needs no window re-initialization.  Returns TRUE when
+    the RT backend is ready after the call (already initialized, or brought up
+    and the device supports it); FALSE when the device lacks ray tracing or no
+    context is available.
+  */
+  SbBool ensureRayTracing(void);
+
+  /*!
+    \brief Request (or cancel) path tracing, bringing the RT backend up lazily.
+
+    This is the single cohesive entry for a runtime raster <-> path-tracing
+    toggle.  It sets the ray-tracing request flag, lazily initializes the RTX
+    backend when it was skipped at startup (so a toggle needs no window
+    re-initialization), and enables/disables path tracing -- all in one call,
+    instead of requiring the caller to orchestrate setRayTracing() up front and
+    then ensureRayTracing() and setPathTracingEnabled().  When \a enabled is
+    TRUE and the device cannot bring up ray tracing, the request is cleared and
+    the raster backend is used; returns FALSE.  Has no effect before
+    initialize(): the request is honored there (mirrors setRayTracing()).
+    Returns TRUE when ray tracing is active after the call.
+  */
+  SbBool requestRayTracing(SbBool enabled);
+
+  /*!
     \brief Enable/disable path tracing on the ray-tracing backend.
 
     Path tracing runs a multi-bounce path tracer with shadow rays,
@@ -221,6 +251,17 @@ public:
   //! True when path tracing is enabled.
   SbBool getPathTracingEnabled(void) const;
 
+  /*!
+    \brief Select the ray-traced view mode.
+
+    \a mode is one of the RtxViewMode values in SoRTXRenderBackend:
+      0 = off/raster (interactive), 1 = single-sample ambient-occlusion
+    preview, 2 = accumulating path tracer.  Only meaningful while the
+    ray-tracing backend is active (see setPathTracingEnabled()).
+  */
+  void setViewMode(int mode);
+  //! Current ray-traced view mode (RtxViewMode value, 0=off.
+  int getViewMode(void) const;
   /*!
     \brief Start flag for progressive path-tracing refinement.
 
@@ -264,6 +305,12 @@ public:
 
   //! The RT backend, or NULL when ray tracing is unavailable.
   SoRTXRenderBackend * getRayTracingBackend(void) const;
+
+  //! Ordinal of the last presented frame (1-based; 0 before the first render).
+  //! Bumped exactly once per render()/renderExternal() and copied into that
+  //! frame's SoRenderParams::frame.  A stable correlation key shared by
+  //! backend debug traces, captured frame dumps and probe phase markers.
+  uint32_t getRenderFrameCount(void) const;
 
 private:
   class SoVulkanRenderManagerP * pimpl;

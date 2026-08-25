@@ -58,7 +58,7 @@ const char * kCointerpNormalizePtx =
 "//\n"
 "\n"
 ".version 9.3\n"
-".target sm_100\n"
+".target sm_75\n"
 ".address_size 64\n"
 "\n"
 "	// .globl	cointerp_normalize\n"
@@ -185,9 +185,12 @@ SoRTXRenderBackend::createDenoiseBackend()
   // FC_VULKAN_PT_DENOISER env var seeds denoiseKindPref on the first
   // resolution.  Only when nothing was specified do we default to OIDN.
   // FSR degrades to OIDN when the FFX SDK is not built in.
-  if (!this->denoiseKindDirty) {
-    this->denoiseKind = this->denoiseKindPref;
-  }
+  // Always re-resolve from denoiseKindPref: destroyDenoiser() (called above on
+  // a resize or a runtime denoiser switch) zeroes denoiseKind, so restoring it
+  // from the preference unconditionally is what makes a runtime
+  // setDenoiserFilter() -> createDenoiseBackend() transition actually take
+  // effect instead of leaving the denoiser inactive (denoiseKind == None).
+  this->denoiseKind = this->denoiseKindPref;
   if (this->denoiseKind != DenoiseRtx && this->denoiseKind != DenoiseOidn &&
       this->denoiseKind != DenoiseFsr && this->denoiseKind != DenoiseNone) {
     this->denoiseKind = DenoiseOidn;
@@ -344,7 +347,27 @@ SoRTXRenderBackend::createDenoiseBackend()
       return OPTIX_DENOISER_MODEL_KIND_AOV;
     }();
 
-    if (this->initRtxCuda() && this->initRtxDenoiser()) {
+    // The CUDA/OptiX denoiser runs by importing Vulkan device memory into
+    // CUDA (VK_KHR_external_memory_fd) and is therefore only valid when the
+    // Vulkan device is an NVIDIA GPU.  The ray-query path tracer itself is
+    // vendor-neutral: on an AMD/Intel RT-capable device it renders fine, so
+    // only the denoiser must be gated here and degraded to OIDN.
+    if (!this->deviceIsNvidia) {
+      if (getenv("FC_VULKAN_PT_DENOISER_DEBUG")) {
+        fprintf(stderr,
+                "[DENOISE] RTX denoiser unavailable: Vulkan device vendor "
+                "0x%04x is not NVIDIA; using OIDN\n",
+                this->deviceVendorID);
+      }
+      this->denoiseKind = DenoiseOidn;
+#if COIN_BUILD_OIDN
+      if (!this->configureOidnFilter()) {
+        this->emitError("OIDN fallback unavailable; disabling denoise");
+        this->denoiseKind = DenoiseNone;
+      }
+#endif
+    }
+    else if (this->initRtxCuda() && this->initRtxDenoiser()) {
       this->denoiserActive = true;
     }
     else {
@@ -363,8 +386,15 @@ SoRTXRenderBackend::createDenoiseBackend()
   }
 #endif
 
-#if COIN_BUILD_FSR_DENOISER
   if (this->denoiseKind == DenoiseFsr) {
+#if COIN_BUILD_FSR_DENOISER
+    // FSR setup would go here once the AMD FFX SDK is wired into the build.
+#endif
+    // FSR is not implemented (the SDK is an optional drop-in; see CMakeLists).
+    // Keep the degradation OUTSIDE the build guard so selecting "fsr" always
+    // falls back to OIDN with a message instead of leaving the denoiser
+    // inactive: with denoiseKind still FSR the configured check below matches
+    // neither OIDN nor RTX and the denoiser turns off (raw grainy output).
     this->emitError("AMD FSR denoiser is not built in; falling back to OIDN");
     this->denoiseKind = DenoiseOidn;
 #if COIN_BUILD_OIDN
@@ -374,7 +404,6 @@ SoRTXRenderBackend::createDenoiseBackend()
     }
 #endif
   }
-#endif
 
   // Confirm a backend was actually configured for the resolved kind.  The
   // degraded paths above reset denoiseKind to Oidn and reconfigure the OIDN
@@ -502,17 +531,22 @@ void
 SoRTXRenderBackend::updateDenoise()
 {
   if (!this->denoiserActive || this->denoisedBuffer == VK_NULL_HANDLE) return;
-  // Only publish a denoised result for a frame whose G-buffers were actually
-  // read back this frame.  On a non-accumulating frame (camera moved / scene
-  // edited) recordDenoiseReadback() skipped the copy, so the interop/host
-  // images hold stale data; presenting that stale result against the current
-  // raw view would flicker/vibrate.  Fall back to the raw / in-shader
-  // edge-stopped present instead.  A converged (idle) run is NOT a stale
-  // frame: it just stopped accumulating after reaching the sample cap, and
-  // the denoised result produced on the final accumulated frame is the image
-  // the user should keep seeing (dropping it right before the viewport goes
-  // idle flashes the raw/edge-stopped output).
+  // Denoise-at-target: the denoiser runs exactly once, when the accumulation
+  // reaches the target sample count (ptDenoisePending, set by the state
+  // machine in updatePathTracingState).  Re-denoising a changing partial
+  // image every accumulating frame is what churns the presented output and
+  // reads as "keeps getting grainy after I move the camera."  While
+  // accumulating toward the target the present shader shows the in-shader
+  // edge-stopped running mean, which is monotonic and clean; the denoised
+  // result is published once, on the final accumulated frame, and kept for
+  // the idle view.
+  if (!this->ptDenoisePending) {
+    return;
+  }
+  // Not accumulating means the target was never reached for this run (e.g. a
+  // move reset it); clear the latch so it does not fire against stale data.
   if (!this->ptAccumulating && !this->ptConverged) {
+    this->ptDenoisePending = FALSE;
     this->denoiseResultReady = FALSE;
     return;
   }
@@ -522,6 +556,7 @@ SoRTXRenderBackend::updateDenoise()
   // raw / in-shader edge-stopped accumulation instead.
   if (this->denoiseMinSamples > 0 &&
       this->ptFrameIndex + 1 < this->denoiseMinSamples) {
+    this->ptDenoisePending = FALSE;
     this->denoiseResultReady = FALSE;
     return;
   }
@@ -538,6 +573,7 @@ SoRTXRenderBackend::updateDenoise()
       std::chrono::steady_clock::now().time_since_epoch()).count();
     if (!this->updateRtxDenoise(w, h)) {
       this->denoiseResultReady = FALSE;
+      this->convergeAfterDenoise();
       return;
     }
     // Copy the CUDA output image (interop device buffer) back to the
@@ -569,6 +605,7 @@ SoRTXRenderBackend::updateDenoise()
       vkQueueSubmit(this->queue, 1, &si, VK_NULL_HANDLE);
       vkQueueWaitIdle(this->queue);
       this->denoiseResultReady = TRUE;
+      this->convergeAfterDenoise();
     }
     if (getenv("FC_VULKAN_PT_DENOISE_TIMING")) {
       const double t1 = std::chrono::duration<double>(
@@ -582,6 +619,7 @@ SoRTXRenderBackend::updateDenoise()
 
   if (this->denoiseColorBuf == VK_NULL_HANDLE || this->denoiseStagingPtr == nullptr) {
     this->denoiseResultReady = FALSE;
+    this->convergeAfterDenoise();
     return;
   }
   const double t0 = std::chrono::duration<double>(
@@ -650,6 +688,7 @@ SoRTXRenderBackend::updateDenoise()
 
   if (!ran) {
     this->denoiseResultReady = FALSE;
+    this->convergeAfterDenoise();
     return;
   }
 
@@ -690,6 +729,7 @@ SoRTXRenderBackend::updateDenoise()
     vkQueueSubmit(this->queue, 1, &si, VK_NULL_HANDLE);
     vkQueueWaitIdle(this->queue);
     this->denoiseResultReady = TRUE;
+    this->convergeAfterDenoise();
   }
   if (getenv("FC_VULKAN_PT_DENOISE_TIMING")) {
     const double t1 = std::chrono::duration<double>(
@@ -698,6 +738,23 @@ SoRTXRenderBackend::updateDenoise()
             static_cast<int>(this->denoiseKind), "denoise", (t1 - t0) * 1000.0,
             w, h);
   }
+}
+
+void
+SoRTXRenderBackend::convergeAfterDenoise()
+{
+  // Denoise-at-target completion: the accumulated image is final.  Stop
+  // accumulating (ptAccumulating FALSE), publish the denoised result and mark
+  // converged so getPathTracingRefining() goes FALSE and the viewport keeps
+  // the (raw or denoised) target image without busy-looping.  ptIdleFrames
+  // starts at 0 so the refresh loop requests a few frames that present the
+  // just-published denoised result before it idles; the converged branch in
+  // updatePathTracingState saturates it without auto-restarting.
+  this->ptDenoisePending = FALSE;
+  this->ptConverged = TRUE;
+  this->ptAccumulating = FALSE;
+  this->ptIdleFrames = 0;
+  this->ptWasMoving = FALSE;
 }
 
 void
@@ -866,16 +923,52 @@ SoRTXRenderBackend::initRtxCuda()
     return false;
   }
 
-  // Enumerate devices and pick the first CUDA-capable device.  We assume the
-  // VkPhysicalDevice and CUdevice refer to the same GPU (the RTX backend
-  // already requires a raytracing Vulkan device, i.e. an NVIDIA GPU).
+  // Enumerate devices and pick the CUDA device that corresponds to the Vulkan
+  // physical device, so the external-memory interop imports memory from the
+  // same GPU.  Without a match (no UUID available, or the device is absent
+  // from this CUDA context) fall back to the first Turing-or-newer device --
+  // the OptiX AOV denoiser needs compute capability 7.5+ (Turing) and a
+  // single-slot context.  Picking device 0 unconditionally was safe only on a
+  // single-GPU NVIDIA machine; on a dual-NVIDIA workstation it could bind CUDA
+  // to a different GPU than the one rendering, silently corrupting the interop.
   int deviceCount = 0;
   if (cuDeviceGetCount(&deviceCount) != CUDA_SUCCESS || deviceCount <= 0) {
     this->rtxCudaInitFailed = true;
     return false;
   }
-  this->rtxCudaDevice = 0;
-  if (cuDeviceGet(&this->rtxCudaDevice, 0) != CUDA_SUCCESS) {
+
+  int chosenIndex = -1;
+  int fallbackIndex = -1;
+  for (int i = 0; i < deviceCount; ++i) {
+    CUdevice dev {};
+    if (cuDeviceGet(&dev, i) != CUDA_SUCCESS) continue;
+    int ccMajor = 0, ccMinor = 0;
+    cuDeviceGetAttribute(&ccMajor, CU_DEVICE_ATTRIBUTE_COMPUTE_CAPABILITY_MAJOR,
+                         dev);
+    cuDeviceGetAttribute(&ccMinor, CU_DEVICE_ATTRIBUTE_COMPUTE_CAPABILITY_MINOR,
+                         dev);
+    // Turing (7.5) is the minimum for the RTX/OptiX denoiser here; older
+    // devices (Maxwell/Kepler) cannot run the AOV denoiser.
+    if (ccMajor < 7 || (ccMajor == 7 && ccMinor < 5)) continue;
+    if (fallbackIndex < 0) fallbackIndex = i;
+    // Prefer the device whose UUID matches the Vulkan physical device.
+    if (this->haveDeviceUUID) {
+      CUuuid cuUuid {};
+      if (cuDeviceGetUuid(&cuUuid, dev) == CUDA_SUCCESS) {
+        if (std::memcmp(cuUuid.bytes, this->deviceUUID, sizeof(this->deviceUUID))
+            == 0) {
+          chosenIndex = i;
+          break;
+        }
+      }
+    }
+  }
+  if (chosenIndex < 0) chosenIndex = fallbackIndex;
+  if (chosenIndex < 0) {
+    this->rtxCudaInitFailed = true;
+    return false;
+  }
+  if (cuDeviceGet(&this->rtxCudaDevice, chosenIndex) != CUDA_SUCCESS) {
     this->rtxCudaInitFailed = true;
     return false;
   }

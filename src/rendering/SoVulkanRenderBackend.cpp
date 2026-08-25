@@ -1698,11 +1698,23 @@ SoVulkanRenderBackend::getOrCreatePipeline(const SoRenderCommand & command,
     command.state.raster.polygonOffsetFactor != 0.0f ||
     command.state.raster.polygonOffsetUnits != 0.0f;
   const bool depthBias = overlay || polygonOffset;
+  // GL polygon-offset units map ~1:1 onto Vulkan's depthBiasConstantFactor,
+  // but the two differ in how `r` (the minimum resolvable depth step) is
+  // derived: GL uses the (fixed-point, 24-bit) depth range while this backend
+  // commonly owns a float (D32_SFLOAT) depth attachment, whose resolvable
+  // step is far finer.  A GL-sized offset therefore leaves the coplanar
+  // selection/hover overlay Z-fighting with the base (a dark seam along the
+  // face boundary).  Scale the GL decal up so the overlay wins the depth test
+  // decisively; the slope factor keeps it from detaching at grazing,
+  // silhouette edges.
+  constexpr float kDecalScale = 512.0f;
+  const float kUseDecal = envFlagEnabled("FC_VULKAN_RASTER_DECAL")
+    ? kDecalScale : 1.0f;
   const float depthBiasConstant = polygonOffset
-    ? command.state.raster.polygonOffsetUnits
+    ? command.state.raster.polygonOffsetUnits * kUseDecal
     : (overlay ? -0.5f : 0.0f);
   const float depthBiasSlope = polygonOffset
-    ? command.state.raster.polygonOffsetFactor
+    ? command.state.raster.polygonOffsetFactor * kUseDecal
     : (overlay ? -0.5f : 0.0f);
   PipelineKey key;
   // Wide-line rendering (line width > 1 and/or a stipple pattern) expands

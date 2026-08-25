@@ -426,8 +426,6 @@ SoRTXRenderBackend::updateGeometryCache(const SoDrawList & drawlist)
 
   for (int i = 0; i < drawlist.getNumCommands(); ++i) {
     const SoRenderCommand & command = drawlist.getCommand(i);
-    if (command.pass == SO_RENDERPASS_TRANSPARENT ||
-        command.pass == SO_RENDERPASS_OVERLAY) continue;
     const SoGeometryDesc & geometry = command.geometry;
     if (!geometry.positions || geometry.vertexCount == 0 ||
         geometry.vertexCount > MAX_VERTEX_COUNT) continue;
@@ -436,6 +434,75 @@ SoRTXRenderBackend::updateGeometryCache(const SoDrawList & drawlist)
     const uint32_t vertexStride = geometry.vertexStride
       ? geometry.vertexStride : sizeof(float) * 3;
     const bool indexed = geometry.indexCount > 0 && geometry.indices != nullptr;
+
+    const bool traced = (command.pass != SO_RENDERPASS_TRANSPARENT &&
+                         command.pass != SO_RENDERPASS_OVERLAY);
+    if (!traced) {
+      // A traced base command that the selection highlight temporarily
+      // promotes out of the OPAQUE pass (OPAQUE -> OVERLAY on select, back on
+      // deselect) must not invalidate the geometry cache.  Without this the
+      // command's cache entry is evicted while it is in OVERLAY and then
+      // rebuilt as "new" when it returns to OPAQUE -- a false scene change
+      // that restarts the accumulation and denoiser on every selection toggle.
+      // Keep the matching entry alive by content signal (the cheap probe used
+      // by the traced path below) so it re-keys, with no rebuild and no
+      // cacheChanged, when the command returns to the traced pass.  Pure
+      // non-traced commands (nav cube, axis cross, transparent shells) that
+      // were never traced have no matching entry and are ignored here.
+      const uint64_t signal = hashGeometrySignal(geometry, vertexStride, indexed);
+      const auto found = this->commandToCache.find(&command);
+      if (found != this->commandToCache.end()) {
+        RTXCachedGeometry & e = this->geometryCache[found->second];
+        e.cacheGeneration = frame;
+        e.commandKey = &command;
+        if (e.blas != VK_NULL_HANDLE && e.changeSignal != signal) {
+          e.changeSignal = signal;
+          e.contentHash = hashGeometry(geometry, vertexStride, indexed);
+        }
+      }
+      else {
+        for (RTXCachedGeometry & e : this->geometryCache) {
+          if (e.blas != VK_NULL_HANDLE && e.changeSignal == signal &&
+              e.vertexCount == geometry.vertexCount &&
+              e.indexCount == geometry.indexCount &&
+              e.vertexStride == vertexStride &&
+              ((e.idxKey != nullptr) == indexed)) {
+            e.cacheGeneration = frame;
+            e.commandKey = &command;
+            this->commandToCache[&command] =
+              static_cast<size_t>(&e - this->geometryCache.data());
+            break;
+          }
+        }
+      }
+      continue;
+    }
+
+    // A singular (degenerate) model matrix means the command collapses to a
+    // point or line -- e.g. the view's hidden anchor cube, which FreeCAD
+    // hides by scaling it to (0,0,0) (see View3DInventorViewer::construct*).
+    // In the GL/raster path a zero-determinant transform simply renders no
+    // visible pixels; in the path-traced backend it would still be built into
+    // the TLAS, producing a phantom/degenerate block that shadows the NEE
+    // light and shows up from the top view as a faint rectangle.  The picking
+    // path already excludes these (SoPickStyle::UNPICKABLE); mirror that here
+    // by skipping any command whose model matrix is non-invertible.  Leaving
+    // the generation stamp stale for an existing entry evicts it below.
+    {
+      const SbMatrix & m = command.modelMatrix;
+      // Determinant of the linear 3x3 part.  A near-zero determinant (any
+      // axis flattened) makes the geometry non-renderable.
+      const double det =
+        static_cast<double>(m[0][0]) * (static_cast<double>(m[1][1]) * m[2][2] -
+                                        static_cast<double>(m[1][2]) * m[2][1]) -
+        static_cast<double>(m[0][1]) * (static_cast<double>(m[1][0]) * m[2][2] -
+                                        static_cast<double>(m[1][2]) * m[2][0]) +
+        static_cast<double>(m[0][2]) * (static_cast<double>(m[1][0]) * m[2][1] -
+                                        static_cast<double>(m[1][1]) * m[2][0]);
+      if (det < 1e-9 && det > -1e-9) {
+        continue;
+      }
+    }
 
     // Cheap probe first: only run the full index hash when the change signal
     // disagrees with the cache entry.  The sampled signal costs a fraction of
@@ -943,6 +1010,21 @@ SoRTXRenderBackend::buildTlas(const SoDrawList & drawlist, VkCommandBuffer cmd)
     if (found == this->commandToCache.end()) continue;
     const RTXCachedGeometry & entry = this->geometryCache[found->second];
     if (entry.blas == VK_NULL_HANDLE) continue;
+    // Skip singular model matrices (see updateGeometryCache): a degenerate
+    // command must never enter the TLAS or it shadows/traces as a phantom.
+    {
+      const SbMatrix & m = command.modelMatrix;
+      const double det =
+        static_cast<double>(m[0][0]) * (static_cast<double>(m[1][1]) * m[2][2] -
+                                        static_cast<double>(m[1][2]) * m[2][1]) -
+        static_cast<double>(m[0][1]) * (static_cast<double>(m[1][0]) * m[2][2] -
+                                        static_cast<double>(m[1][2]) * m[2][0]) +
+        static_cast<double>(m[0][2]) * (static_cast<double>(m[1][0]) * m[2][1] -
+                                        static_cast<double>(m[1][1]) * m[2][0]);
+      if (det > -1e-9 && det < 1e-9) {
+        continue;
+      }
+    }
 
     VkAccelerationStructureInstanceKHR instance {};
     // SbMatrix is row-major; VkTransformMatrixKHR is row-major 3x4.

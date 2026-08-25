@@ -41,6 +41,10 @@ SoRTXRenderBackend::setPathTracingEnabled(SbBool enabled)
   this->ptStartLatch = FALSE;
   this->ptFrameIndex = 0;
   this->ptIdleFrames = 0;
+  this->ptWasMoving = FALSE;
+  this->ptDenoisePending = FALSE;
+  this->ptConverged = FALSE;
+  this->denoiseResultReady = FALSE;
   this->haveLastView = FALSE;
   this->haveLastCameraVersion = FALSE;
   this->lastCameraVersion = 0;
@@ -50,6 +54,31 @@ SbBool
 SoRTXRenderBackend::getPathTracingEnabled(void) const
 {
   return this->ptEnabled;
+}
+
+void
+SoRTXRenderBackend::setViewMode(RtxViewMode mode)
+{
+  if (this->rtxViewMode == mode) return;
+  this->rtxViewMode = mode;
+  // A view-mode change invalidates any in-flight progressive run.
+  this->ptAccumulating = FALSE;
+  this->ptStartLatch = FALSE;
+  this->ptFrameIndex = 0;
+  this->ptIdleFrames = 0;
+  this->ptWasMoving = FALSE;
+  this->ptDenoisePending = FALSE;
+  this->ptConverged = FALSE;
+  this->denoiseResultReady = FALSE;
+  this->haveLastView = FALSE;
+  this->haveLastCameraVersion = FALSE;
+  this->lastCameraVersion = 0;
+}
+
+SoRTXRenderBackend::RtxViewMode
+SoRTXRenderBackend::getViewMode(void) const
+{
+  return this->rtxViewMode;
 }
 
 void
@@ -85,6 +114,10 @@ SoRTXRenderBackend::getPathTracingRefining(void) const
   // below the settle threshold) so the auto-restart has frames to count.
   // After convergence ptIdleFrames is saturated at ptSettleFrames, so this
   // reads FALSE and the viewport can go idle.
+  // The single-sample AO preview never accumulates: it updates on demand
+  // (camera/scene sensors) like the raster viewport, so it must NOT keep the
+  // surface busy-looping.
+  if (this->rtxViewMode == RtxViewMode::RtxModeAmbientOcclusion) return FALSE;
   return this->ptEnabled &&
     (this->ptAccumulating || this->ptIdleFrames < this->ptSettleFrames);
 }
@@ -164,6 +197,28 @@ SoRTXRenderBackend::initialize(const SoRenderBackendInitParams & params)
   this->queueFamilyIndex = deviceContext->graphicsQueueFamilyIndex;
   this->allocator = deviceContext->allocator;
 
+  // Cache the physical-device identity so the denoiser selection can gate the
+  // CUDA/OptiX path on NVIDIA hardware (see SoRTXRenderBackend.h).
+  VkPhysicalDeviceProperties devProps {};
+  vkGetPhysicalDeviceProperties(this->physicalDevice, &devProps);
+  this->deviceVendorID = devProps.vendorID;
+  this->deviceID = devProps.deviceID;
+  this->deviceIsNvidia = (devProps.vendorID == 0x10DE /* NVIDIA */);
+
+  // Query the device UUID (Vulkan 1.1 VkPhysicalDeviceIDProperties) so the
+  // CUDA context can be bound to the same GPU on multi-GPU machines.
+  this->haveDeviceUUID = false;
+  VkPhysicalDeviceIDProperties idProps {};
+  idProps.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ID_PROPERTIES;
+  VkPhysicalDeviceProperties2 idProps2 {};
+  idProps2.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2;
+  idProps2.pNext = &idProps;
+  vkGetPhysicalDeviceProperties2(this->physicalDevice, &idProps2);
+  // VkPhysicalDeviceIDProperties always carries the deviceUUID array (filled
+  // by the driver once the struct is chained); retain it for CUDA matching.
+  std::memcpy(this->deviceUUID, idProps.deviceUUID, sizeof(this->deviceUUID));
+  this->haveDeviceUUID = true;
+
   // The system loader only exports core entry points; resolve the ray
   // tracing KHR functions per-device.  Failing here means the device is
   // missing the acceleration-structure/ray-query extensions (or the loader
@@ -240,10 +295,10 @@ SoRTXRenderBackend::initialize(const SoRenderBackendInitParams & params)
   asProps.sType =
     VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ACCELERATION_STRUCTURE_PROPERTIES_KHR;
   rtProps.pNext = &asProps;
-  VkPhysicalDeviceProperties2 props2 {};
-  props2.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2;
-  props2.pNext = &rtProps;
-  vkGetPhysicalDeviceProperties2(this->physicalDevice, &props2);
+  VkPhysicalDeviceProperties2 rtProps2 {};
+  rtProps2.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2;
+  rtProps2.pNext = &rtProps;
+  vkGetPhysicalDeviceProperties2(this->physicalDevice, &rtProps2);
   this->asScratchAlignment =
     std::max<VkDeviceSize>(asProps.minAccelerationStructureScratchOffsetAlignment, 1u);
   this->sbtGroupHandleSize = rtProps.shaderGroupHandleSize;
@@ -329,7 +384,8 @@ SoRTXRenderBackend::initialize(const SoRenderBackendInitParams & params)
   }
   // Firefly rejection: replace samples far brighter than the pixel's running
   // mean (outlier spikes) with that mean.  FC_VULKAN_PT_FIREFLY is the
-  // standard-deviation multiplier; 0 (default) disables it.
+  // standard-deviation multiplier; 0 disables it (on by default at 5.0, the
+  // member default) so the override only needs to set 0 to turn it off.
   if (const char * firefly = getenv("FC_VULKAN_PT_FIREFLY")) {
     const float value = static_cast<float>(std::atof(firefly));
     if (value >= 0.0f) {
@@ -699,6 +755,7 @@ SoRTXRenderBackend::render(const SoDrawList & drawlist,
     this->emitError("render called before backend initialization");
     return FALSE;
   }
+  this->ptLastFrame = params.frame;
   if (!params.renderTarget) {
     this->emitError(
       "render called without a SoVulkanRenderTarget in "
@@ -915,6 +972,7 @@ SoRTXRenderBackend::renderExternal(const SoDrawList & drawlist,
     this->emitError("renderExternal called before backend initialization");
     return FALSE;
   }
+  this->ptLastFrame = params.frame;
   if (!params.renderTarget) {
     this->emitError(
       "renderExternal called without a SoVulkanRenderTarget in "

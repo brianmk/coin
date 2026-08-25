@@ -173,6 +173,12 @@ public:
   //! comparison cannot see a rotation/pan/zoom that mutates the node.
   uint32_t cameraPoseFingerprint = 0;
 
+  //! 1-based ordinal of the last presented frame.  Bumped exactly once per
+  //! render()/renderExternal() call and copied into SoRenderParams::frame,
+  //! so backends, frame dumps and probe phase markers can correlate on one
+  //! monotonic key independent of stream ordering.
+  uint32_t frameOrdinal = 0;
+
   //! Resolve the camera that will render this frame.  The scene graph is the
   //! single camera authority (FreeCAD's navigation mutates the camera node
   //! inside the scene it passes to setSceneGraph), so the camera is found
@@ -221,6 +227,10 @@ public:
   SbBool backendInitialized = FALSE;
   SbBool rtxBackendInitialized = FALSE;
   SbBool rayTracing = FALSE;
+  // Device context borrowed at initialize(); retained (not owned) so the RT
+  // backend can be brought up lazily by ensureRayTracing() after a startup
+  // that skipped it.  Cleared in shutdown().
+  SoVulkanDeviceContext * initContext = nullptr;
 
   // Re-compute the camera near/far clipping planes from the scene bounding
   // box in camera coordinates.  Mirrors SoRenderManagerP::setClippingPlanes()
@@ -461,6 +471,22 @@ SoVulkanRenderManager::getClearEnabled(SbBool & clearwindow,
 SbBool
 SoVulkanRenderManager::initialize(SoVulkanDeviceContext * context)
 {
+  // QVulkanWindow invokes renderer::initResources() on every Expose/Hide/
+  // Resize/Move event, which re-enters this method.  Those events only
+  // recreate the swapchain (a separate initSwapChainResources() call for the
+  // frame-level resources); the Vulkan instance/device/queue survive.  When
+  // the device context is unchanged this is NOT a device reset, so tearing
+  // down and rebuilding both backends -- and every cached BLAS/acceleration
+  // structure and RT pipeline -- again would be pure waste and the dominant
+  // cost while navigating in the raster path.  Keep the live backends and
+  // their caches alive; just refresh the retained context (a new stack-allocated
+  // context points at the same window-owned device handles).
+  if (this->pimpl->backendInitialized && this->pimpl->initContext
+      && this->pimpl->initContext->device == context->device) {
+    this->pimpl->initContext = context;
+    return TRUE;
+  }
+
   SoRenderBackendInitParams params;
   params.userData = context;
   if (!this->pimpl->backend.initialize(params)) {
@@ -469,6 +495,9 @@ SoVulkanRenderManager::initialize(SoVulkanDeviceContext * context)
     return FALSE;
   }
   this->pimpl->backendInitialized = TRUE;
+  // Retain the borrowed context so ensureRayTracing() can bring the RT
+  // backend up later if it was skipped at startup (path tracing off).
+  this->pimpl->initContext = context;
 
   // Ray tracing is best-effort and only attempted when it was requested
   // (setRayTracing(TRUE)).  A device created without the KHR extensions
@@ -500,22 +529,83 @@ SoVulkanRenderManager::shutdown(void)
     this->pimpl->rtxBackend.shutdown();
     this->pimpl->rtxBackendInitialized = FALSE;
   }
+  // The retained context is only valid for the window's device/queue
+  // lifetime, which ends around releaseResources(); do not reuse it after.
+  this->pimpl->initContext = nullptr;
 }
 
 void
 SoVulkanRenderManager::setRayTracing(SbBool enabled)
 {
+  // Pure request, honored by initialize() when it runs afterwards, or followed
+  // by ensureRayTracing()/requestRayTracing() when the backend was skipped at
+  // startup.  This method deliberately does NOT observe the current backend
+  // state: converting "the RTX backend is not up yet" into "ray tracing can
+  // never work" here is what broke a runtime raster -> path-tracing toggle
+  // (setRayTracing(TRUE) after a raster-first initialize() used to warn and
+  // clear the very flag the caller just raised, so the lazy build never ran).
+  // Whether ray tracing actually came up is reported by getRayTracingActive();
+  // the callers use that (or requestRayTracing()) to decide.
   this->pimpl->rayTracing = enabled;
-  // Called before initialize() the flag is a request honored by
-  // initialize().  Called after an initialize() that could not bring up
-  // the RTX backend, ray tracing cannot work: fall back to raster.
-  if (enabled && this->pimpl->backendInitialized
-      && !this->pimpl->rtxBackendInitialized) {
-    SoDebugError::postWarning("SoVulkanRenderManager::setRayTracing",
-                              "ray-tracing backend is not initialized; "
-                              "keeping the raster backend");
-    this->pimpl->rayTracing = FALSE;
+}
+
+SbBool
+SoVulkanRenderManager::requestRayTracing(SbBool enabled)
+{
+  this->pimpl->rayTracing = enabled;
+  if (!enabled) {
+    if (this->pimpl->rtxBackendInitialized) {
+      this->pimpl->rtxBackend.setPathTracingEnabled(FALSE);
+    }
+    return this->getRayTracingActive();
   }
+  // enabled == TRUE: bring the RTX backend up if it is not already.
+  if (this->pimpl->initContext) {
+    // The lazy build (initialize the RT backend, warn on failure) lives in
+    // ensureRayTracing(); reuse it rather than duplicating its "already
+    // initialized / no context / build failed" branches.  The TRUE request
+    // set above satisfies ensureRayTracing()'s requirement that the backend
+    // was actually requested.
+    if (!this->ensureRayTracing()) {
+      // Build failed (device lacks ray tracing): clear the request so we keep
+      // the raster backend -- the hard fall-back.
+      this->pimpl->rayTracing = FALSE;
+      return FALSE;
+    }
+  }
+  else {
+    // Before initialize(): no context yet, so the request is honored later by
+    // initialize(); nothing is active.
+    return FALSE;
+  }
+  // If a prior requestRayTracing(FALSE) disabled path tracing, re-enable it.
+  this->pimpl->rtxBackend.setPathTracingEnabled(TRUE);
+  return this->getRayTracingActive();
+}
+
+SbBool
+SoVulkanRenderManager::ensureRayTracing(void)
+{
+  if (this->pimpl->rtxBackendInitialized) {
+    return TRUE;
+  }
+  // Only bring the RT backend up when it was actually requested (setRayTracing
+  // honored it) and a device context is available to initialize against.
+  if (!this->pimpl->rayTracing) {
+    return FALSE;
+  }
+  if (!this->pimpl->initContext) {
+    SoDebugError::postWarning("SoVulkanRenderManager::ensureRayTracing",
+                              "no device context available");
+    return FALSE;
+  }
+  SoRenderBackendInitParams params;
+  params.userData = this->pimpl->initContext;
+  if (this->pimpl->rtxBackend.initialize(params)) {
+    this->pimpl->rtxBackendInitialized = TRUE;
+    return TRUE;
+  }
+  return FALSE;
 }
 
 void
@@ -540,6 +630,26 @@ SoVulkanRenderManager::setPathTracingEnabled(SbBool enabled)
     return;
   }
   this->pimpl->rtxBackend.setPathTracingEnabled(enabled);
+}
+
+void
+SoVulkanRenderManager::setViewMode(int mode)
+{
+  if (!this->pimpl->rtxBackendInitialized) {
+    SoDebugError::postWarning("SoVulkanRenderManager::setViewMode",
+                              "ray-tracing backend is not initialized; "
+                              "view mode is unavailable");
+    return;
+  }
+  this->pimpl->rtxBackend.setViewMode(
+    static_cast<SoRTXRenderBackend::RtxViewMode>(mode));
+}
+
+int
+SoVulkanRenderManager::getViewMode(void) const
+{
+  if (!this->pimpl->rtxBackendInitialized) return 0;
+  return static_cast<int>(this->pimpl->rtxBackend.getViewMode());
 }
 
 SbBool
@@ -663,6 +773,7 @@ SoVulkanRenderManager::render(SbBool clearwindow, SbBool clearzbuffer)
                                         params)) {
     return FALSE;
   }
+  params.frame = ++this->pimpl->frameOrdinal;
   if (this->getRayTracingActive()) {
     if (!this->pimpl->rtxBackend.render(*drawlist, params)) {
       SoDebugError::postWarning("SoVulkanRenderManager::render",
@@ -701,6 +812,7 @@ SoVulkanRenderManager::renderExternal(SbBool clearwindow,
                                         params)) {
     return FALSE;
   }
+  params.frame = ++this->pimpl->frameOrdinal;
   if (this->getRayTracingActive()) {
     if (!this->pimpl->rtxBackend.renderExternal(*drawlist, params,
                                                 commandBuffer, renderPass)) {
@@ -1564,4 +1676,10 @@ SoVulkanRenderManager::getRayTracingBackend(void) const
 {
   return this->pimpl->rtxBackendInitialized ? &this->pimpl->rtxBackend
                                             : nullptr;
+}
+
+uint32_t
+SoVulkanRenderManager::getRenderFrameCount(void) const
+{
+  return this->pimpl->frameOrdinal;
 }

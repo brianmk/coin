@@ -103,20 +103,16 @@ SoRTXRenderBackend::updatePathTracingState(const SoDrawList & drawlist,
     prevView.getValue(prevVpValue);
     std::memcpy(this->prevViewProj, &prevVpValue[0][0], sizeof(float) * 16);
   }
-  // Camera-only changes keep accumulating: the shader reprojects the
-  // previous frame's history through the old camera instead of discarding
-  // the converged samples.
-  const bool canReproject =
-    this->ptTemporalEnabled && !this->useSbtPipeline && this->ptHistoryValid &&
-    this->accumHistoryBuffer != VK_NULL_HANDLE &&
-    this->ptBufferWidth == static_cast<uint32_t>(vpSize[0]) &&
-    this->ptBufferHeight == static_cast<uint32_t>(vpSize[1]);
 
-  if (!this->ptEnabled) {
+  if (!this->ptEnabled || this->rtxViewMode == RtxViewMode::RtxModeAmbientOcclusion) {
+    // Disabled, or the single-sample AO preview: never accumulate, so the
+    // live AO image is recomputed fresh every redraw.
     this->ptAccumulating = FALSE;
     this->ptFrameIndex = 0;
     this->ptIdleFrames = 0;
     this->ptConverged = FALSE;
+    this->ptWasMoving = FALSE;
+    this->ptDenoisePending = FALSE;
   }
   else if (this->ptStartLatch) {
     // The start flag: reset the accumulation and begin a fresh progressive
@@ -126,6 +122,9 @@ SoRTXRenderBackend::updatePathTracingState(const SoDrawList & drawlist,
     this->ptFrameIndex = 0;
     this->ptIdleFrames = 0;
     this->ptConverged = FALSE;
+    this->ptWasMoving = FALSE;
+    this->ptDenoisePending = FALSE;
+    this->denoiseResultReady = FALSE;
   }
   else if (sceneChanged || (viewChanged && !this->haveLastView)) {
     // A scene edit invalidates the history (surface colors may be stale
@@ -137,79 +136,98 @@ SoRTXRenderBackend::updatePathTracingState(const SoDrawList & drawlist,
     this->ptFrameIndex = 0;
     this->ptIdleFrames = 0;
     this->ptConverged = FALSE;
+    this->ptWasMoving = FALSE;
+    this->ptDenoisePending = FALSE;
+    this->denoiseResultReady = FALSE;
   }
   else if (viewChanged) {
-    // Camera-only change with valid history: stay accumulating and carry
-    // the previous frame's samples across the move (temporal
-    // reprojection).  Without history support, keep the legacy preview
-    // drop so the viewport stays responsive while orbiting.
-    if (canReproject) {
-      // Frame-by-frame TAA across the move: keep reprojecting the previous
-      // frame's history AND advance the per-frame jitter seed.  Do not reset
-      // ptFrameIndex to 0 -- that would reseed the jitter to the same value
-      // every frame, so every orbit sample lands at the identical sub-pixel
-      // point; reprojecting that constant-jitter average through a shifting
-      // camera produces coherent aliasing that reads as 5px of vibrating
-      // noise.  Incrementing keeps the sample positions decorrelated.
-      this->ptAccumulating = TRUE;
-      ++this->ptFrameIndex;
-      this->ptIdleFrames = 0;
-      this->ptConverged = FALSE;
-      this->ptReprojectFrame = TRUE;
-    }
-    else {
-      this->ptAccumulating = FALSE;
-      this->ptFrameIndex = 0;
-      this->ptIdleFrames = 0;
-      this->ptConverged = FALSE;
-    }
+    // --- Reset-on-move ---------------------------------------------------
+    // A camera move invalidates the accumulated history: per-pixel positions
+    // and normals are stale, and the adaptive sampler's per-pixel variance
+    // estimate no longer corresponds to the pixels a static view would see.
+    // Carrying that history forward (temporal reprojection) lets the adaptive
+    // early-out freeze pixels at mutually-inconsistent partial values, which
+    // reads as "the image gets grainy after I move the camera and never
+    // cleans up."  So a move resets the run to a fresh 1-spp preview; the
+    // settle counter below auto-restarts a clean accumulation against the new
+    // camera once it has been static for a short window.
+    this->ptAccumulating = FALSE;
+    this->ptFrameIndex = 0;
+    this->ptIdleFrames = 0;
+    this->ptConverged = FALSE;
+    this->ptWasMoving = FALSE;
+    this->ptDenoisePending = FALSE;
+    this->denoiseResultReady = FALSE;
   }
   else if (this->ptAccumulating) {
+    // --- Accumulate-while-static -----------------------------------------
+    // Static camera/scene: keep adding one jittered sample per frame.  The
+    // present pass shows the in-shader edge-stopped running mean, which
+    // monotonically cleans up as samples accumulate (no denoiser churn).
     ++this->ptFrameIndex;
-    // Converged: stop accumulating so the viewport can go idle instead of
-    // tracing the same converged image forever.  Two stop conditions: the
-    // hard sample cap, and the adaptive-sampling active-pixel fraction
-    // (read back from the previous frame): once almost every pixel's
-    // variance fell below the threshold, tracing more samples wastes GPU
-    // time.  Saturate the idle counter so getPathTracingRefining() turns
-    // the continuous-update request off.
-    // Adaptive convergence only exists on the compute tracer (the SBT
-    // raygen does not maintain the active-pixel counter).
+    // Convergence: stop accumulating once the sample cap is reached or the
+    // adaptive active-pixel fraction fell below the stop threshold.  On the
+    // frame the target is reached, KEEP accumulating (don't drop to preview)
+    // so the G-buffer readback for the final image is still recorded and the
+    // denoiser runs exactly once (denoise-at-target).  The idle/settle
+    // transition is driven from updateDenoise after it publishes the result.
     const bool adaptivelyConverged =
       !this->useSbtPipeline && this->ptAdaptiveEnabled &&
       this->ptFrameIndex >= this->ptAdaptiveMinSamples &&
       this->ptLastActiveFraction < this->ptAdaptiveStopFraction;
     if (this->ptFrameIndex >= this->ptMaxSamples || adaptivelyConverged) {
-      this->ptAccumulating = FALSE;
-      this->ptIdleFrames = this->ptSettleFrames;
-      this->ptConverged = TRUE;
+      if (this->denoiserActive && this->denoisedBuffer != VK_NULL_HANDLE) {
+        // Denoise-at-target: keep accumulating the final frame (so the
+        // G-buffer readback is recorded) and let updateDenoise run once,
+        // then transition to converged-idle from there.
+        this->ptDenoisePending = TRUE;
+      }
+      else {
+        // No denoiser: converge directly to the raw accumulated image.  The
+        // settle window keeps refining TRUE for a few frames so the final
+        // edge-stopped mean is presented, then saturates to idle.
+        this->ptConverged = TRUE;
+        this->ptAccumulating = FALSE;
+        this->ptIdleFrames = 0;
+      }
     }
     else {
       this->ptConverged = FALSE;
     }
   }
   else if (this->ptIdleFrames < this->ptSettleFrames) {
-    // Static but not accumulating (a move just stopped): count idle frames
-    // and, once the camera has settled for a short window, auto-restart a
-    // fresh accumulation so the view refines itself without an explicit
-    // startPathTracing() call.  With valid history the restart reprojects
-    // it (the camera is static, so the test reduces to a per-pixel surface
-    // match) instead of clearing the accumulated samples.
+    // Static but not accumulating.  Two distinct cases:
+    //  - Converged (denoise-at-target published the final image): the
+    //    denoised result is already ready and was presented; do NOT
+    //    auto-restart, just finish the settle window so the refresh loop can
+    //    go idle.  ptConverged keeps it from re-accumulating.
+    //  - Post-reset (a camera/scene move dropped the run to preview): count
+    //    idle frames so the auto-restart below starts a fresh accumulation
+    //    against the new camera.
     ++this->ptIdleFrames;
-    if (this->ptIdleFrames >= this->ptSettleFrames) {
+    if (this->ptConverged) {
+      if (this->ptIdleFrames >= this->ptSettleFrames) {
+        this->ptIdleFrames = this->ptSettleFrames;
+      }
+    }
+    else if (this->ptIdleFrames >= this->ptSettleFrames) {
       this->ptIdleFrames = 0;
       this->ptAccumulating = TRUE;
       this->ptFrameIndex = 0;
-      this->ptConverged = FALSE;
-      this->ptReprojectFrame = canReproject;
+      this->ptWasMoving = FALSE;
+      // The reset-on-move architecture restarts a clean accumulation: do not
+      // reproject the (now stale) history across the reset, so the first
+      // frame of the new run clears the buffers and samples fresh.
+      this->ptReprojectFrame = FALSE;
     }
   }
   // else: converged idle -- nothing to do until the camera or scene moves.
 
   if (getenv("FC_VULKAN_RT_DEBUG") && this->ptEnabled) {
     fprintf(stderr,
-            "[RTDBG] ptState viewChanged=%d sceneChanged=%d accum=%d "
-            "frameIndex=%u idle=%u reproject=%d\n",
+            "[RTDBG] ptState frame=%u viewChanged=%d sceneChanged=%d "
+            "accum=%d frameIndex=%u idle=%u reproject=%d\n",
+            params.frame,
             viewChanged ? 1 : 0, sceneChanged ? 1 : 0,
             this->ptAccumulating ? 1 : 0, this->ptFrameIndex,
             this->ptIdleFrames, this->ptReprojectFrame ? 1 : 0);
@@ -347,9 +365,10 @@ SoRTXRenderBackend::updateAdaptiveStats()
       ? static_cast<float>(active) / static_cast<float>(total) : 1.0f;
   if (getenv("FC_VULKAN_RT_DEBUG") && this->ptEnabled) {
     fprintf(stderr,
-            "[RTDBG] adaptive active=%u/%llu fraction=%.4f frameIndex=%u "
-            "accum=%d self=%p buf=%ux%u reprojected=%u\n",
-            active, static_cast<unsigned long long>(total),
+            "[RTDBG] adaptive frame=%u active=%u/%llu fraction=%.4f "
+            "frameIndex=%u accum=%d self=%p buf=%ux%u reprojected=%u\n",
+            this->ptLastFrame, active,
+            static_cast<unsigned long long>(total),
             this->ptLastActiveFraction, this->ptFrameIndex,
             this->ptAccumulating ? 1 : 0, static_cast<const void *>(this),
             this->ptBufferWidth, this->ptBufferHeight, reprojected);
@@ -446,10 +465,10 @@ SoRTXRenderBackend::recordAccelerationStructures(
     }
   }
   if (getenv("FC_VULKAN_RT_DEBUG")) {
-    fprintf(stderr,
-            "[RTDBG] blas built=%u refit=%u reused=%u cache=%zu\n",
-            this->statBlasBuilt, this->statBlasRefit, this->statBlasReused,
-            this->geometryCache.size());
+      fprintf(stderr,
+              "[RTDBG] blas frame=%u built=%u refit=%u reused=%u cache=%zu\n",
+              params.frame, this->statBlasBuilt, this->statBlasRefit,
+              this->statBlasReused, this->geometryCache.size());
   }
 
   // Emissive-triangle pool for NEE.  Rebuilt every frame so the baked
@@ -525,10 +544,17 @@ SoRTXRenderBackend::recordAccelerationStructures(
     frame.bgBottom[3] = 1.0f;
 
     frame.state[0] = static_cast<float>(this->ptFrameIndex);
-    // 3.0 = debug constant fill (FC_VULKAN_RT_DEBUG_FILL); consumed by the
-    // ray-query compute tracer (u_state.y > 2.5).
+    // u_state.y selects the ray-tracer path in the compute shader:
+    //   0 = single-primary-ray direct-lighting preview (raster/preview)
+    //   1 = multi-bounce path tracing (accumulating)
+    //   2 = real-time ambient occlusion (single sample, occlusion rays)
+    //   3 = debug constant fill (FC_VULKAN_RT_DEBUG_FILL)
+    // AO (mode 2) is a real-time preview: it never accumulates, so it must
+    // also force the accumulate flag off to keep the state machine honest.
     frame.state[1] = envFlagEnabled("FC_VULKAN_RT_DEBUG_FILL")
-      ? 3.0f : (this->ptEnabled ? 1.0f : 0.0f);
+      ? 3.0f
+      : (this->rtxViewMode == RtxViewMode::RtxModeAmbientOcclusion ? 2.0f
+         : (this->ptEnabled ? 1.0f : 0.0f));
     frame.state[2] = this->ptAccumulating ? 1.0f : 0.0f;
     frame.state[3] = static_cast<float>(this->ptMaxBounces);
 
@@ -537,7 +563,17 @@ SoRTXRenderBackend::recordAccelerationStructures(
     frame.adaptive[1] = this->ptAdaptiveEnabled
       ? this->ptAdaptiveThreshold : 0.0f;
     frame.adaptive[2] = this->ptFireflySigma;
-    frame.adaptive[3] = 0.0f;
+    // u_adaptive.w gates the per-pixel freeze.  Zero disables it: while the
+    // camera is reprojecting (ptReprojectFrame), or on the very frame a move
+    // just concluded (ptWasMoving still latched into the run), the history a
+    // pixel's variance is measured against is per-pixel mismatched, so a pixel
+    // could pass the convergence test against a stale mean and freeze at a
+    // value that does not match its neighbors.  Only allow the freeze once the
+    // camera has been static for a frame (neither condition), so converged
+    // pixels from a clean run keep early-outing but no pixel locks during or
+    // immediately after a move.
+    frame.adaptive[3] = (this->ptReprojectFrame || this->ptWasMoving)
+      ? 0.0f : 1.0f;
 
     // Temporal reprojection: the previous frame's camera (world -> clip)
     // and the reproject-this-frame flag.
@@ -633,12 +669,13 @@ SoRTXRenderBackend::recordAccelerationStructures(
                        VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, 0, 1,
                        &traceBarrier, 0, nullptr, 0, nullptr);
 
-  // Denoiser readback: after an accumulating frame (fresh G-buffers) copy the
-  // accumulated radiance, albedo, normal and position buffers into host-
-  // visible staging so the host/GPU denoiser can consume them once this
-  // one-shot submission completes.  The present pass below may still sample
-  // the in-shader edge-stopping result when the denoised result is not ready.
-  if (this->denoiserActive && this->ptEnabled && this->ptAccumulating) {
+  // Denoiser readback: only on the target frame that reached the sample count
+  // (ptDenoisePending).  Every other accumulating frame presents the in-shader
+  // edge-stopped running mean, so it needs no G-buffer readback; copying every
+  // frame only to denoise a changing partial is the churn the denoise-at-target
+  // design removes.
+  if (this->denoiserActive && this->ptEnabled && this->ptAccumulating &&
+      this->ptDenoisePending) {
     this->recordDenoiseReadback(cmd);
   }
   return true;
