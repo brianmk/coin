@@ -62,9 +62,13 @@ struct alignas(16) RTXFrameBlock {
   float temporal[4];      // x = reproject this frame
   float nee[4];           // x = emissive-triangle count, y = NEE enabled,
                           // z = MIS balance enabled
+  float env[4];           // procedural IBL: x = intensity, yzw = sun dir (world)
+  float envColor[4];      // procedural IBL: rgb = sun color, w = sun power / sky
+                          // sky brightness factor
 };
 inline void checkRtlFrameBlockLayout() {
-  static_assert(sizeof(RTXFrameBlock) == 4 * 64 + 8 * 16,
+  // 4 mat4 (view/viewInverse/projInverse/prevViewProj) + 10 vec4.
+  static_assert(sizeof(RTXFrameBlock) == 4 * 64 + 10 * 16,
                 "RTXFrameBlock must match FrameBlock std140 layout");
 }
 

@@ -39,6 +39,8 @@ layout(set = 0, binding = 2, std140) uniform FrameBlock {
     vec4  u_temporal;      // x = reproject the history this frame
     vec4  u_nee;           // x = emissive-triangle count, y = NEE enabled,
                            // z = MIS balance enabled
+    vec4  u_env;           // procedural IBL: x = intensity, yzw = sun dir (world)
+    vec4  u_envColor;      // procedural IBL: rgb = sun color, w = sky brightness
 } frame;
 
 // std430 mirror of the C++ RTMaterial record; one per draw command, indexed
@@ -148,6 +150,75 @@ vec3 sampleCosine(vec2 u)
     float a = sqrt(max(u.x, 0.0));
     float phi = 6.28318530718 * u.y;
     return vec3(a * cos(phi), a * sin(phi), sqrt(max(1.0 - u.x, 0.0)));
+}
+
+// --- Procedural environment / IBL ----------------------------------------
+// The environment is an analytic sky: a vertical gradient between the
+// background bottom (horizon) and top (zenith) colors, plus a sun disk that
+// falls off with a user-set power around the sun direction.  This gives
+// image-based lighting without an HDR cubemap: the radiance at a direction
+// is a closed-form function, so it can be evaluated for the primary-ray miss
+// (background/sky reflections), as a diffuse irradiance term (sky ambient)
+// and as a specular IBL term (polished surfaces picking up the sun/sky).
+vec3 envSkyColor(vec3 dir)
+{
+    // dir.y in [-1,1]; -1 = straight down = horizon color, +1 = zenith.
+    float t = clamp(dir.y * 0.5 + 0.5, 0.0, 1.0);
+    return mix(frame.u_bgBottom.rgb, frame.u_bgTop.rgb, t);
+}
+
+vec3 envSunDir()
+{
+    return normalize(frame.u_env.yzw);
+}
+
+// Environment radiance along a world direction.
+vec3 envRadiance(vec3 dir)
+{
+    vec3 n = normalize(dir);
+    vec3 sky = envSkyColor(n) * frame.u_env.x;
+    float d = max(dot(n, envSunDir()), 0.0);
+    vec3 sun = frame.u_envColor.rgb * pow(d, max(frame.u_envColor.w, 1.0));
+    return sky + sun * frame.u_env.x;
+}
+
+// Diffuse irradiance of the environment at a surface normal (sky ambient).
+// Approximates the cosine-weighted hemisphere integral of envSkyColor by
+// sampling the sky at N fixed cosine-hemisphere directions, deterministic so
+// the single-sample preview does not flicker frame to frame.
+vec3 envIrradiance(vec3 n)
+{
+    vec3 up = (abs(n.y) < 0.999) ? vec3(0.0, 1.0, 0.0) : vec3(1.0, 0.0, 0.0);
+    vec3 tangent = normalize(cross(up, n));
+    vec3 bitangent = cross(n, tangent);
+    const int N = 4;
+    float phase = 0.0;
+    vec3 irr = vec3(0.0);
+    for (int i = 0; i < N; ++i) {
+        float fi = (float(i) + phase) * 2.39996; // golden-angle spiral
+        float cosT = sqrt(max((float(i) + 0.5) / float(N), 0.0));
+        float sinT = sqrt(max(1.0 - cosT * cosT, 0.0));
+        vec3 dir = tangent * (cos(fi) * sinT) + bitangent * (sin(fi) * sinT) +
+                   n * cosT;
+        irr += envSkyColor(dir);
+    }
+    return (irr / float(N)) * 3.14159265 * frame.u_env.x;
+}
+
+// Specular IBL at a reflection direction with a roughness blur estimate.
+// Samples the sky (and sun) at the reflected direction; a higher roughness
+// darkens and desaturates the sky term while the sun falls off through the
+// reflection (a cheap prefilter-free approximation).
+vec3 envSpecular(vec3 r, float roughness)
+{
+    vec3 rn = normalize(r);
+    float rough = clamp(roughness, 0.0, 1.0);
+    vec3 radiance = envRadiance(rn);
+    // Sky term softens and fades with roughness; the sun stays only for
+    // glossy reflections (low roughness) so it reads as a hot spot.
+    float sunAlign = max(dot(rn, envSunDir()), 0.0);
+    radiance *= mix(1.0, (0.3 + 0.7 * sunAlign), rough);
+    return radiance;
 }
 
 // --- PBR (metallic-roughness) BRDF helpers --------------------------------
@@ -589,6 +660,67 @@ void main()
             rgb = mix(frame.u_bgTop.rgb, frame.u_bgBottom.rgb, t);
         }
         imageStore(storageImage, ivec2(px), clamp(vec4(rgb, 1.0), 0.0, 1.0));
+        return;
+    }
+
+    // --- Environment / IBL preview (u_state.y == 3) ----------------------
+    // Single primary ray, one sample, no accumulation: a real-time preview
+    // lit by the procedural environment (sky gradient + sun).  The surface
+    // receives the sky as a diffuse irradiance term (replacing the constant
+    // material ambient) plus a specular reflection of the sun/sky, and the
+    // analytic lights still contribute so the view reads like a shaded CAD
+    // view.  On miss the environment radiance is shown in the direction of
+    // the ray, so the sky/sun is visible *through* the scene, giving the
+    // polished-surface reflections something to sample.
+    if (ptEnabled > 2.5 && ptEnabled < 3.5) {
+        HitInfo h = traceClosest(origin, dir, 1e30);
+        vec3 rgb;
+        if (h.hit) {
+            RTMaterial mat = matBuffer.materials[h.materialIndex];
+            vec3 N = normalize(h.normal);
+            vec3 V = -dir;
+            vec3 diffuse = mat.diffuse.rgb;
+            // Diffuse IBL: sky irradiance, softly tinting the surface toward
+            // the sky at its normal.  PBR materials keep their metallic tint.
+            vec3 kd = (mat.pbr.z > 0.5)
+              ? (vec3(1.0) - pbrF0(mat)) * (1.0 - clamp(mat.pbr.x, 0.0, 1.0))
+              : vec3(1.0);
+            vec3 iblDiffuse = kd * diffuse * envIrradiance(N) / 3.14159265;
+            // Specular IBL: reflect the view about the normal and sample the
+            // environment (sun disk + sky).  Only glossy/mirror surfaces get
+            // a strong response.
+            float roughness = (mat.pbr.z > 0.5)
+              ? clamp(mat.pbr.y, 0.0, 1.0) : 1.0;
+            vec3 R = normalize(reflect(V, N));
+            vec3 F0 = (mat.pbr.z > 0.5) ? pbrF0(mat)
+                                        : mix(vec3(0.04), mat.specular.rgb, 0.5);
+            float NdotV = max(dot(N, V), 0.0);
+            vec3 Fres = F0 + (vec3(1.0) - F0) * pow(1.0 - NdotV, 5.0);
+            vec3 iblSpec = Fres * envSpecular(R, roughness);
+            rgb = iblDiffuse + iblSpec;
+            // Analytic lights (direct, shadowed) + emissive on top, matching
+            // the shading-model conventions used everywhere else.
+            if (mat.pbr.z > 0.5) {
+                rgb += coin_rtx_directLighting(h.pos, h.normal, dir, mat);
+            }
+            else if (mat.params.w > 0.5) {
+                vec3 eyePos = (frame.u_view * vec4(h.pos, 1.0)).xyz;
+                vec3 eyeN = normalize(mat3(frame.u_view) * h.normal);
+                rgb += coin_rtx_gouraud(eyePos, eyeN, mat.diffuse.rgb, mat);
+            }
+            rgb += mat.emissive.rgb;
+            normals[index] = vec4(h.normal, 1.0);
+            positions[index] = vec4(h.pos, h.t);
+            albedos[index] = vec4(mat.diffuse.rgb, 1.0);
+        }
+        else {
+            rgb = envRadiance(dir);
+        }
+        imageStore(storageImage, ivec2(px), clamp(vec4(rgb, 1.0), 0.0, 1.0));
+        // Mirror into the accumulation G-buffer so the edge-stopping present
+        // path (which reads accum when the denoise toggle is up) shows the
+        // environment image too instead of stale/empty accumulation data.
+        accum[index] = vec4(clamp(rgb, 0.0, 1.0), 1.0);
         return;
     }
 

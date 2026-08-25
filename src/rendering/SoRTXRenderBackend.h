@@ -152,7 +152,7 @@ public:
     the full accumulating path tracer (u_state.y == 1).  RtxModeOff leaves
     ptEnabled untouched (callers that want raster set ptEnabled false instead).
   */
-  enum class RtxViewMode { RtxModeOff = 0, RtxModeAmbientOcclusion, RtxModePathTrace };
+  enum class RtxViewMode { RtxModeOff = 0, RtxModeAmbientOcclusion, RtxModePathTrace, RtxModeEnvironment };
 
   const char * getName() const override;
   SbBool initialize(const SoRenderBackendInitParams & params) override;
@@ -175,6 +175,15 @@ public:
   void setViewMode(RtxViewMode mode);
   //! Current ray-traced view mode (see RtxViewMode).
   RtxViewMode getViewMode(void) const;
+
+  //! Configure the procedural environment/IBL params used by
+  //! RtxModeEnvironment (sky intensity, world-space sun direction, sun color
+  //! and the sky-lighting scale) plus a per-mode enable.
+  void setEnvIntensity(float intensity);
+  void setEnvSunDir(float x, float y, float z);
+  void setEnvSunColor(float r, float g, float b);
+  void setEnvSunPower(float power);
+  void setEnvSkyBrightness(float brightness);
 
   //! True when path tracing is enabled (see setPathTracingEnabled()).
   SbBool getPathTracingEnabled(void) const;
@@ -680,6 +689,17 @@ private:
 
   //! Current ray-traced view mode (see the public RtxViewMode enum).
   RtxViewMode rtxViewMode = RtxViewMode::RtxModeOff;
+
+  //! Procedural IBL / environment-lit params (mirrored into the frame UBO's
+  //! u_env / u_envColor).  Used by RtxModeEnvironment to shade with a
+  //! procedural sky (vertical gradient + sun disk) instead of constant
+  //! per-material ambient, and to write a matching environment radiance for
+  //! the primary-ray miss so polished/specular surfaces pick up the sky.
+  float envIntensity = 0.35f;
+  float envSunDir[3] = {0.35f, 0.8f, 0.25f};
+  float envSunColor[3] = {1.0f, 0.94f, 0.82f};
+  float envSunPower = 12.0f;
+  float envSkyBrightness = 1.0f;
 
   //! Backend selected (resolved) by FC_VULKAN_PT_DENOISER or, when set via
   //! setDenoiserFilter(), by the stored preference name so a runtime choice

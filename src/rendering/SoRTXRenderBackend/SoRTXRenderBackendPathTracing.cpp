@@ -104,9 +104,11 @@ SoRTXRenderBackend::updatePathTracingState(const SoDrawList & drawlist,
     std::memcpy(this->prevViewProj, &prevVpValue[0][0], sizeof(float) * 16);
   }
 
-  if (!this->ptEnabled || this->rtxViewMode == RtxViewMode::RtxModeAmbientOcclusion) {
-    // Disabled, or the single-sample AO preview: never accumulate, so the
-    // live AO image is recomputed fresh every redraw.
+  if (!this->ptEnabled ||
+      this->rtxViewMode == RtxViewMode::RtxModeAmbientOcclusion ||
+      this->rtxViewMode == RtxViewMode::RtxModeEnvironment) {
+    // Disabled, or the single-sample AO / Environment previews: never
+    // accumulate, so the live image is recomputed fresh every redraw.
     this->ptAccumulating = FALSE;
     this->ptFrameIndex = 0;
     this->ptIdleFrames = 0;
@@ -551,13 +553,16 @@ SoRTXRenderBackend::recordAccelerationStructures(
     //   0 = single-primary-ray direct-lighting preview (raster/preview)
     //   1 = multi-bounce path tracing (accumulating)
     //   2 = real-time ambient occlusion (single sample, occlusion rays)
-    //   3 = debug constant fill (FC_VULKAN_RT_DEBUG_FILL)
-    // AO (mode 2) is a real-time preview: it never accumulates, so it must
-    // also force the accumulate flag off to keep the state machine honest.
+    //   3 = environment / IBL preview (single sample, sky-lit)
+    //   4 = debug constant fill (FC_VULKAN_RT_DEBUG_FILL)
+    // AO (mode 2) and the Environment preview (mode 3) are real-time
+    // previews: they never accumulate, so they must also force the
+    // accumulate flag off to keep the state machine honest.
     frame.state[1] = envFlagEnabled("FC_VULKAN_RT_DEBUG_FILL")
-      ? 3.0f
+      ? 4.0f
       : (this->rtxViewMode == RtxViewMode::RtxModeAmbientOcclusion ? 2.0f
-         : (this->ptEnabled ? 1.0f : 0.0f));
+         : (this->rtxViewMode == RtxViewMode::RtxModeEnvironment ? 3.0f
+            : (this->ptEnabled ? 1.0f : 0.0f)));
     frame.state[2] = this->ptAccumulating ? 1.0f : 0.0f;
     frame.state[3] = static_cast<float>(this->ptMaxBounces);
 
@@ -594,6 +599,23 @@ SoRTXRenderBackend::recordAccelerationStructures(
     frame.nee[1] = this->rtNeeEnabled ? 1.0f : 0.0f;
     frame.nee[2] = this->rtMisEnabled ? 1.0f : 0.0f;
     frame.nee[3] = 0.0f;
+
+    // Procedural IBL environment params (RtxModeEnvironment): normalized
+    // world-space sun direction plus the sky/sun shading scales.  The sky
+    // brightness folds into u_env.x so no extra block field is needed.
+    frame.env[0] = this->envIntensity * this->envSkyBrightness;
+    float sdx = this->envSunDir[0];
+    float sdy = this->envSunDir[1];
+    float sdz = this->envSunDir[2];
+    float sunLen = std::sqrt(sdx * sdx + sdy * sdy + sdz * sdz);
+    if (sunLen > 1e-6f) { sdx /= sunLen; sdy /= sunLen; sdz /= sunLen; }
+    frame.env[1] = sdx;
+    frame.env[2] = sdy;
+    frame.env[3] = sdz;
+    frame.envColor[0] = this->envSunColor[0];
+    frame.envColor[1] = this->envSunColor[1];
+    frame.envColor[2] = this->envSunColor[2];
+    frame.envColor[3] = this->envSunPower;
 
     std::memcpy(this->frameMapped, &frame, sizeof(frame));
 

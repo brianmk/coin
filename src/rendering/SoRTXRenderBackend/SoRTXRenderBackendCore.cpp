@@ -82,6 +82,40 @@ SoRTXRenderBackend::getViewMode(void) const
 }
 
 void
+SoRTXRenderBackend::setEnvIntensity(const float intensity)
+{
+  this->envIntensity = intensity;
+}
+
+void
+SoRTXRenderBackend::setEnvSunDir(const float x, const float y, const float z)
+{
+  this->envSunDir[0] = x;
+  this->envSunDir[1] = y;
+  this->envSunDir[2] = z;
+}
+
+void
+SoRTXRenderBackend::setEnvSunColor(const float r, const float g, const float b)
+{
+  this->envSunColor[0] = r;
+  this->envSunColor[1] = g;
+  this->envSunColor[2] = b;
+}
+
+void
+SoRTXRenderBackend::setEnvSunPower(const float power)
+{
+  this->envSunPower = power;
+}
+
+void
+SoRTXRenderBackend::setEnvSkyBrightness(const float brightness)
+{
+  this->envSkyBrightness = brightness;
+}
+
+void
 SoRTXRenderBackend::setPathTracingStart(SbBool start)
 {
   if (!this->ptEnabled) {
@@ -114,10 +148,11 @@ SoRTXRenderBackend::getPathTracingRefining(void) const
   // below the settle threshold) so the auto-restart has frames to count.
   // After convergence ptIdleFrames is saturated at ptSettleFrames, so this
   // reads FALSE and the viewport can go idle.
-  // The single-sample AO preview never accumulates: it updates on demand
-  // (camera/scene sensors) like the raster viewport, so it must NOT keep the
-  // surface busy-looping.
-  if (this->rtxViewMode == RtxViewMode::RtxModeAmbientOcclusion) return FALSE;
+  // The single-sample AO and Environment previews never accumulate: they
+  // update on demand (camera/scene sensors) like the raster viewport, so
+  // they must NOT keep the surface busy-looping.
+  if (this->rtxViewMode == RtxViewMode::RtxModeAmbientOcclusion ||
+      this->rtxViewMode == RtxViewMode::RtxModeEnvironment) return FALSE;
   return this->ptEnabled &&
     (this->ptAccumulating || this->ptIdleFrames < this->ptSettleFrames);
 }
