@@ -23,6 +23,16 @@ layout(set = 0, binding = 3, std430) readonly buffer NormalBuffer { vec4 normals
 layout(set = 0, binding = 4, std430) readonly buffer PositionBuffer { vec4 positions[]; };
 layout(set = 0, binding = 5, std430) readonly buffer DenoisedBuffer { vec4 denoised[]; };
 
+// View -> clip projection (forward) of the traced camera.  The present
+// pass writes the scene depth from the first-bounce hit position so the
+// raster composite overlay (BRep edge lines / point markers) can be depth
+// tested against the traced surface, occluding hidden edges like the raster
+// pipeline does.  The compound is std140: two mat4 at offsets 0 and 64.
+layout(set = 0, binding = 6, std140) uniform PresentFrame {
+    mat4 u_view;  // world -> view (offset 0)
+    mat4 u_proj;  // view -> clip (offset 64)
+} frame;
+
 layout(push_constant) uniform PresentPush {
     vec4 u_present;  // x = width, y = height, z = denoiseOn, w = frameIndex
     vec4 u_origin;   // x = viewport origin x, y = viewport origin y (pixels)
@@ -31,19 +41,41 @@ layout(push_constant) uniform PresentPush {
 
 layout(location = 0) out vec4 fragColor;
 
+// Scene depth (Vulkan [0,1]) of the first-bounce hit at the current pixel.
+// The raygen stores the hit world position in positions[].xyz with the ray
+// distance in .w (a 1e7 sentinel means "miss", i.e. background).  Project it
+// through the traced camera exactly like the visual vertex shader
+// (clip.y is flipped but that does not affect Z), then apply the same
+// OpenGL->Vulkan depth remap: z_ndc = 0.5*(z_clip/w + 1).  The raster
+// composite draws BRep edge lines / point markers at *their own* clip depth,
+// so a front face's edge matches this value and passes LEQUAL, while an
+// edge of a hidden back face is farther and is culled -- the silhouette
+// edge look the raster pipeline produces.
+float sceneDepth(ivec2 px, int idx)
+{
+    vec4 wpos = positions[idx];
+    if (wpos.w > 1.0e6) {
+        return 1.0; // no hit: background, edge geometry is unoccluded
+    }
+    vec4 eye = frame.u_view * vec4(wpos.xyz, 1.0);
+    vec4 clip = frame.u_proj * eye;
+    return clamp(0.5 * (clip.z / clip.w + 1.0), 0.0, 1.0);
+}
+
 void main()
 {
     vec2 viewportCoord = gl_FragCoord.xy - pc.u_origin.xy;
+    ivec2 px = ivec2(viewportCoord);
+    const int width = int(max(pc.u_present.x, 1.0));
+    const int height = int(max(pc.u_present.y, 1.0));
+    const int idx = px.y * width + px.x;
+    gl_FragDepth = sceneDepth(px, idx);
+
     if (pc.u_present.z < 0.5) {
         fragColor =
           texture(u_rtImage, viewportCoord / textureSize(u_rtImage, 0));
         return;
     }
-
-    ivec2 px = ivec2(viewportCoord);
-    const int width = int(max(pc.u_present.x, 1.0));
-    const int height = int(max(pc.u_present.y, 1.0));
-    const int idx = px.y * width + px.x;
 
     // OIDN host-side denoise result: when ready it replaces the raw
     // accumulation entirely (the filter already smoothed the noise).  A

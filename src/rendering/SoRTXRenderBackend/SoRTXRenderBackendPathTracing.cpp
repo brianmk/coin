@@ -520,6 +520,9 @@ SoRTXRenderBackend::recordAccelerationStructures(
     projInverse.getValue(piValue);
     std::memcpy(frame.projInverse, &piValue[0][0], sizeof(float) * 16);
 
+    SbMat pValue;
+    params.projMatrix.getValue(pValue);
+
     frame.cameraPos[0] = frame.viewInverse[12];
     frame.cameraPos[1] = frame.viewInverse[13];
     frame.cameraPos[2] = frame.viewInverse[14];
@@ -593,6 +596,18 @@ SoRTXRenderBackend::recordAccelerationStructures(
     frame.nee[3] = 0.0f;
 
     std::memcpy(this->frameMapped, &frame, sizeof(frame));
+
+    // Present frame UBO: the traced camera's world->view and view->clip
+    // matrices (row-major SbMat copied directly, matching the shader's
+    // column-major interpretation exactly as frame.view/u_view does).  The
+    // present pass projects the first-bounce hit position through these to
+    // write scene depth, letting the composite edge overlay occlude hidden
+    // edges.
+    if (this->presentFrameMapped) {
+      float * pf = static_cast<float *>(this->presentFrameMapped);
+      std::memcpy(pf, &viewValue[0][0], sizeof(float) * 16);
+      std::memcpy(pf + 16, &pValue[0][0], sizeof(float) * 16);
+    }
 
     if (getenv("FC_VULKAN_RT_DEBUG")) {
       static uint32_t debugFrame = 0;
@@ -675,7 +690,7 @@ SoRTXRenderBackend::recordAccelerationStructures(
   // frame only to denoise a changing partial is the churn the denoise-at-target
   // design removes.
   if (this->denoiserActive && this->ptEnabled && this->ptAccumulating &&
-      this->ptDenoisePending) {
+      this->ptDenoisePending && !this->oidnWorkerRunning) {
     this->recordDenoiseReadback(cmd);
   }
   return true;

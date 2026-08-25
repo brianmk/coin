@@ -70,6 +70,30 @@ countOverlayCommands(const SoDrawList & drawlist)
   return draws;
 }
 
+uint32_t
+countCompositeCommands(const SoDrawList & drawlist)
+{
+  // Ray-tracing composite: every OVERLAY command plus every non-triangle
+  // OPAQUE/TRANSPARENT command (the BRep edge/point residue the RT backend
+  // did not trace).  Each is recorded as one draw and consumes one lighting
+  // slot, so the reservation must account for both.
+  uint32_t draws = 0;
+  const int num = drawlist.getNumCommands();
+  for (int i = 0; i < num; ++i) {
+    const SoRenderCommand & command = drawlist.getCommand(i);
+    if (command.pass == SO_RENDERPASS_OVERLAY) {
+      ++draws;
+      continue;
+    }
+    const SoPrimitiveTopology topo = command.geometry.topology;
+    if (topo == SO_TOPOLOGY_TRIANGLES || topo == SO_TOPOLOGY_TRIANGLE_STRIP) {
+      continue;
+    }
+    ++draws;
+  }
+  return draws;
+}
+
 // FNV-1a mixing step.
 inline void
 mix64(uint64_t & hash, uint64_t value)
@@ -2463,10 +2487,17 @@ SoVulkanRenderBackend::updateGeometryCache(const SoDrawList & drawlist,
 
   for (int i = 0; i < drawlist.getNumCommands(); ++i) {
     const SoRenderCommand & command = drawlist.getCommand(i);
-    // Overlay-only renders (ray-tracing compositing) only ever draw
-    // SO_RENDERPASS_OVERLAY commands; uploading the whole scene's geometry
-    // and textures here would waste the frame entirely.
-    if (overlaysOnly && command.pass != SO_RENDERPASS_OVERLAY) {
+    // Overlay-only renders (ray-tracing compositing) draw SO_RENDERPASS_OVERLAY
+    // commands (nav cube, axis cross, selection/hover highlights) plus the
+    // non-triangle residue the RT backend did not trace (BRep edge lines,
+    // point markers, polylines): those must be uploaded so the composite can
+    // rasterize them onto the traced surface.  Pure triangle geometry is
+    // already traced and skipping it here keeps the composite cheap.
+    const bool isResidual =
+      command.geometry.topology != SO_TOPOLOGY_TRIANGLES &&
+      command.pass != SO_RENDERPASS_OVERLAY;
+    if (overlaysOnly && command.pass != SO_RENDERPASS_OVERLAY &&
+        !isResidual) {
       continue;
     }
     const SoGeometryDesc & geometry = command.geometry;
@@ -4468,10 +4499,11 @@ SoVulkanRenderBackend::renderInternal(const SoDrawList & drawlist,
 
   this->updateGeometryCache(drawlist, overlaysOnly);
 
-  // Overlay-only renders skip recordFrame(), so reserve the ring slots here;
-  // beginFrame() above already advanced the frame cursor.
+  // Composite renders skip recordFrame(), so reserve the ring slots here;
+  // beginFrame() above already advanced the frame cursor.  This covers both
+  // the OVERLAY commands and the non-triangle residual geometry.
   if (overlaysOnly &&
-      !this->prepareLightingSlots(countOverlayCommands(drawlist))) {
+      !this->prepareLightingSlots(countCompositeCommands(drawlist))) {
     this->emitError("failed to reserve lighting UBO slots");
     return FALSE;
   }
@@ -4565,6 +4597,7 @@ SoVulkanRenderBackend::renderInternal(const SoDrawList & drawlist,
   this->activeCommandBuffer = this->currentCommandBuffer();
   bool recorded = true;
   if (overlaysOnly) {
+    this->recordTracedComposite(drawlist, params, *target, this->renderPass);
     this->recordOverlayBlock(drawlist, params, *target, this->renderPass);
   }
   else {
@@ -4686,9 +4719,10 @@ SoVulkanRenderBackend::renderExternalOverlay(const SoDrawList & drawlist,
   this->updateGeometryCache(drawlist, true);
 
   // This path never goes through recordFrame(), so reserve the slots it will
-  // consume; otherwise the cursor keeps climbing across frames and
-  // eventually overflows the lighting UBO.
-  if (!this->prepareLightingSlots(countOverlayCommands(drawlist))) {
+  // consume (OVERLAY commands plus the non-triangle residual geometry);
+  // otherwise the cursor keeps climbing across frames and eventually
+  // overflows the lighting UBO.
+  if (!this->prepareLightingSlots(countCompositeCommands(drawlist))) {
     this->emitError("failed to reserve lighting UBO slots");
     return FALSE;
   }
@@ -4698,6 +4732,7 @@ SoVulkanRenderBackend::renderExternalOverlay(const SoDrawList & drawlist,
   }
 
   this->activeCommandBuffer = commandBuffer;
+  this->recordTracedComposite(drawlist, params, *target, renderPass);
   this->recordOverlayBlock(drawlist, params, *target, renderPass);
   this->activeCommandBuffer = VK_NULL_HANDLE;
   return TRUE;
@@ -4866,6 +4901,38 @@ SoVulkanRenderBackend::recordOverlayBlock(const SoDrawList & drawlist,
       lastClearW = raster.scissorWidth;
       lastClearH = raster.scissorHeight;
     }
+    this->recordDrawCommand(drawlist, command, target, params, renderPass,
+                            false, -1, nullptr, true);
+  }
+}
+
+void
+SoVulkanRenderBackend::recordTracedComposite(const SoDrawList & drawlist,
+                                             const SoRenderParams & params,
+                                             const SoVulkanRenderTarget & target,
+                                             VkRenderPass renderPass)
+{
+  // Ray-tracing compositing residue: the RT backend traces only triangles, so
+  // the OPAQUE/TRANSPARENT LINES / POINTS / LINE_STRIP commands (BRep edge
+  // lines, point markers, polylines) are drawn here as a raster layer on top
+  // of the path-traced image.  The present pass wrote the scene depth, so
+  // each fragment is depth tested with the overlay's LESS_OR_EQUAL compare
+  // (recordDrawCommand's overlay path): a front face's edge lies at the
+  // traced surface's depth and passes, while a hidden back-facing edge is
+  // farther and is culled -- matching the raster pipeline's silhouette edge
+  // look.  Depth is not cleared here and depth write stays off.
+  for (int i = 0; i < drawlist.getNumCommands(); ++i) {
+    const SoRenderCommand & command = drawlist.getCommand(i);
+    if (command.pass == SO_RENDERPASS_OVERLAY) continue;
+    const SoPrimitiveTopology topo = command.geometry.topology;
+    if (topo == SO_TOPOLOGY_TRIANGLES) continue;
+    if (topo == SO_TOPOLOGY_TRIANGLE_STRIP) continue;
+
+    const SoRasterState & raster = command.state.raster;
+    // Apply the command's own viewport/scissor if it carries one, else the
+    // whole-surface viewport (the default for scene geometry).
+    this->applyCommandViewport(command, target);
+    this->applyScissor(command, target);
     this->recordDrawCommand(drawlist, command, target, params, renderPass,
                             false, -1, nullptr, true);
   }

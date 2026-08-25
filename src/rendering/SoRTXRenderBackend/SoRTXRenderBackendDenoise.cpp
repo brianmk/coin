@@ -531,6 +531,87 @@ void
 SoRTXRenderBackend::updateDenoise()
 {
   if (!this->denoiserActive || this->denoisedBuffer == VK_NULL_HANDLE) return;
+
+#if COIN_BUILD_OIDN
+  // Async OIDN completion handoff.  The worker owns the staging block and the
+  // OIDN filter from the moment the denoise-at-target launched until it sets
+  // oidnWorkerDone.  These two states are handled here, before the
+  // ptDenoisePending gating below, so the copy-back and converge run exactly
+  // once the worker publishes, independent of whether the target latch is
+  // still set, and the in-flight case does not fall through to the "no
+  // denoiser ran" convergence below.
+  if (this->oidnWorkerDone) {
+    // Worker published the denoised result in the staging output region.
+    // Snap the resolved dimensions (stored at backend creation; the staging
+    // well is stable for the life of the backend).
+    const uint32_t w = this->denoiseWidth;
+    const uint32_t h = this->denoiseHeight;
+    const VkDeviceSize stride = static_cast<VkDeviceSize>(w) * h * 16;
+    if (this->oidnWorker.joinable()) {
+      this->oidnWorker.join();
+    }
+    this->oidnWorkerDone = FALSE;
+    this->oidnWorkerRunning = FALSE;
+    if (w > 0 && h > 0 && this->denoiseOutBuf != VK_NULL_HANDLE) {
+      // Copy the denoiser output back to the device-local denoisedBuffer
+      // (present binding 5) on a one-shot command buffer, then publish the
+      // result.  The frame's own submission has already been waited on, and
+      // the staging is HOST_COHERENT so the worker's writes are visible here.
+      VkCommandBuffer cmd = this->beginTransientCommandBuffer();
+      if (cmd != VK_NULL_HANDLE) {
+        VkMemoryBarrier hostBar {};
+        hostBar.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
+        hostBar.srcAccessMask = VK_ACCESS_HOST_WRITE_BIT;
+        hostBar.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
+        vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_HOST_BIT,
+                             VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 1, &hostBar, 0,
+                             nullptr, 0, nullptr);
+        VkBufferCopy cOut {3 * stride, 0, stride};
+        vkCmdCopyBuffer(cmd, this->denoiseOutBuf, this->denoisedBuffer, 1,
+                        &cOut);
+        VkMemoryBarrier outBar {};
+        outBar.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
+        outBar.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+        outBar.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+        vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_TRANSFER_BIT,
+                             VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, 0, 1,
+                             &outBar, 0, nullptr, 0, nullptr);
+        vkEndCommandBuffer(cmd);
+        VkSubmitInfo si {};
+        si.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
+        si.commandBufferCount = 1;
+        si.pCommandBuffers = &cmd;
+        vkQueueSubmit(this->queue, 1, &si, VK_NULL_HANDLE);
+        vkQueueWaitIdle(this->queue);
+        this->denoiseResultReady = TRUE;
+        this->convergeAfterDenoise();
+      }
+      else {
+        this->denoiseResultReady = FALSE;
+        this->convergeAfterDenoise();
+      }
+      if (getenv("FC_VULKAN_PT_DENOISE_TIMING")) {
+        fprintf(stderr, "[DENOISE] OIDN async worker published (%ux%u)\n",
+                w, h);
+      }
+    }
+    else {
+      this->denoiseResultReady = FALSE;
+      this->convergeAfterDenoise();
+    }
+    return;
+  }
+  if (this->oidnWorkerRunning) {
+    // Worker still in flight: keep the run alive (do not accumulate further or
+    // converge) so the refresh loop keeps pulling frames and the present shows
+    // the fresh in-shader edge-stopped mean until the result is published.
+    // The readback was already recorded once; the gating in
+    // recordTraceAndPresent (!oidnWorkerRunning) prevents a new readback from
+    // overwriting the staging block the worker is reading.
+    return;
+  }
+#endif
+
   // Denoise-at-target: the denoiser runs exactly once, when the accumulation
   // reaches the target sample count (ptDenoisePending, set by the state
   // machine in updatePathTracingState).  Re-denoising a changing partial
@@ -622,8 +703,6 @@ SoRTXRenderBackend::updateDenoise()
     this->convergeAfterDenoise();
     return;
   }
-  const double t0 = std::chrono::duration<double>(
-    std::chrono::steady_clock::now().time_since_epoch()).count();
   const uint32_t w = this->denoiseWidth;
   const uint32_t h = this->denoiseHeight;
   const VkDeviceSize stride =
@@ -636,49 +715,89 @@ SoRTXRenderBackend::updateDenoise()
     static_cast<uint8_t *>(this->denoiseStagingPtr) + 2 * stride);
   float * out = reinterpret_cast<float *>(
     static_cast<uint8_t *>(this->denoiseStagingPtr) + 3 * stride);
-
-  // The accum buffer stores a sum of radiance with the sample count in w;
-  // convert to the average color the denoiser wants.  The guide (position
-  // region) carries the per-pixel validity; the sample count in color[3]
-  // already distinguishes empty pixels, so only the color region is touched
-  // here and the present shader rejects denoised pixels with no primary hit.
-  const uint64_t pixels = static_cast<uint64_t>(w) * h;
-  for (uint64_t i = 0; i < pixels; ++i) {
-    float * base = color + i * 4;
-    const float count = std::fabs(base[3]) > 1e-5f ? base[3] : 0.0f;
-    if (count > 0.0f) {
-      base[0] /= count;
-      base[1] /= count;
-      base[2] /= count;
-      base[3] = 1.0f;
-    }
-    else {
-      base[3] = 0.0f;
-    }
-  }
-
-  bool ran = false;
 #if COIN_BUILD_OIDN
   if (this->denoiseKind == DenoiseOidn && this->oidnFilter) {
     // Confirm the readback request was actually issued (it is recorded on the
     // one-shot command buffer and only set when the copy is recorded).
     if (this->oidnReadbackPending) {
-      oidnSetSharedFilterImage(this->oidnFilter, "color", color,
-                               OIDN_FORMAT_FLOAT4, w, h, 0, 16,
-                               static_cast<size_t>(w) * 16);
-      oidnSetSharedFilterImage(this->oidnFilter, "albedo", albedo,
-                               OIDN_FORMAT_FLOAT4, w, h, 0, 16,
-                               static_cast<size_t>(w) * 16);
-      oidnSetSharedFilterImage(this->oidnFilter, "normal", normal,
-                               OIDN_FORMAT_FLOAT4, w, h, 0, 16,
-                               static_cast<size_t>(w) * 16);
-      oidnSetSharedFilterImage(this->oidnFilter, "output", out,
-                               OIDN_FORMAT_FLOAT4, w, h, 0, 16,
-                               static_cast<size_t>(w) * 16);
-      oidnCommitFilter(this->oidnFilter);
-      oidnExecuteFilter(this->oidnFilter);
-      ran = true;
+      // Offload the CPU-side OIDN work (normalize the accum average, run the
+      // filter, stamp the validity mask) to a worker thread so the GUI thread
+      // is not blocked for the tens of milliseconds OIDN's CPU device takes.
+      // The staging block is HOST_VISIBLE|HOST_COHERENT, so the worker's
+      // writes to the output region are visible to the device-side copy-back
+      // below without an explicit flush.  The OIDN filter is owned by the
+      // worker for the duration of oidnWorkerRunning; the render thread must
+      // not submit to it while the worker holds it.
+      if (this->oidnWorkerRunning) {
+        // A worker is already in flight (a previous frame's launch).  It owns
+        // the staging block: do not run another denoise, and keep the run in
+        // progress so the present keeps the (fresh) in-shader edge-stopped
+        // image for this frame instead of publishing a stale denoise result.
+        return;
+      }
+      // Snapshot the dims the worker needs; the staging pointer is stable for
+      // the life of the backend (mapped once in createDenoiseBackend()).
+      const uint64_t pixels = static_cast<uint64_t>(w) * h;
       this->oidnReadbackPending = FALSE;
+      this->oidnWorkerRunning = TRUE;
+      this->oidnWorkerDone = FALSE;
+      if (this->oidnWorker.joinable()) {
+        this->oidnWorker.join();
+      }
+      this->oidnWorker = std::thread([this, color, albedo, normal, out, w,
+                                      h, pixels]() {
+        // Normalize the accum sum -> average: the sample count sits in the
+        // w channel of each color texel and is consumed here; the present
+        // shader's denoised-alpha test uses the normalized w (1.0 = hit) to
+        // reject denoised pixels with no primary hit.
+        for (uint64_t i = 0; i < pixels; ++i) {
+          float * base = color + i * 4;
+          const float count = std::fabs(base[3]) > 1e-5f ? base[3] : 0.0f;
+          if (count > 0.0f) {
+            base[0] /= count;
+            base[1] /= count;
+            base[2] /= count;
+            base[3] = 1.0f;
+          }
+          else {
+            base[3] = 0.0f;
+          }
+        }
+        oidnSetSharedFilterImage(this->oidnFilter, "color", color,
+                                 OIDN_FORMAT_FLOAT4, w, h, 0, 16,
+                                 static_cast<size_t>(w) * 16);
+        oidnSetSharedFilterImage(this->oidnFilter, "albedo", albedo,
+                                 OIDN_FORMAT_FLOAT4, w, h, 0, 16,
+                                 static_cast<size_t>(w) * 16);
+        oidnSetSharedFilterImage(this->oidnFilter, "normal", normal,
+                                 OIDN_FORMAT_FLOAT4, w, h, 0, 16,
+                                 static_cast<size_t>(w) * 16);
+        oidnSetSharedFilterImage(this->oidnFilter, "output", out,
+                                 OIDN_FORMAT_FLOAT4, w, h, 0, 16,
+                                 static_cast<size_t>(w) * 16);
+        oidnCommitFilter(this->oidnFilter);
+        oidnExecuteFilter(this->oidnFilter);
+        // OIDN executes asynchronously on the device's internal threads;
+        // sync so the output region and the validity stamp below are fully
+        // written before the render thread reads them.
+        oidnSyncDevice(this->oidnDevice);
+        // Stamp the per-pixel validity mask from the (already normalized)
+        // color region so the present shader can reject denoised pixels with
+        // no primary hit (its DenoisedBuffer alpha test).
+        for (uint64_t i = 0; i < pixels; ++i) {
+          out[i * 4 + 3] = color[i * 4 + 3];
+        }
+        this->oidnWorkerRunning = FALSE;
+        this->oidnWorkerDone = TRUE;
+      });
+      // The worker owns the staging block and the filter now; do not block
+      // here.  The present pass for THIS frame already shows the fresh
+      // in-shader edge-stopped mean; the denoised result is published on the
+      // frame that observes oidnWorkerDone (copy-back + converge below).
+      if (getenv("FC_VULKAN_PT_DENOISE_TIMING")) {
+        fprintf(stderr, "[DENOISE] OIDN async worker launched (%ux%u)\n", w, h);
+      }
+      return;
     }
   }
 #endif
@@ -686,58 +805,12 @@ SoRTXRenderBackend::updateDenoise()
   // (RTX denoising is handled by the interop path returned above; the host
   // OIDN path below is the only host-side denoiser.)
 
-  if (!ran) {
-    this->denoiseResultReady = FALSE;
-    this->convergeAfterDenoise();
-    return;
-  }
-
-  // The denoisers produce color only; stamp the per-pixel validity mask from
-  // the (already normalized) color region so the present shader can reject
-  // denoised pixels with no primary hit (its DenoisedBuffer alpha test).
-  for (uint64_t i = 0; i < pixels; ++i) {
-    out[i * 4 + 3] = color[i * 4 + 3];
-  }
-
-  // Copy the denoiser output back to the device-local denoisedBuffer (present
-  // binding 5) on a one-shot command buffer, then publish the result.  The
-  // copy runs here (not in the frame's transient command buffer) because the
-  // frame's submission has already been waited on.
-  VkCommandBuffer cmd = this->beginTransientCommandBuffer();
-  if (cmd != VK_NULL_HANDLE) {
-    VkMemoryBarrier hostBar {};
-    hostBar.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
-    hostBar.srcAccessMask = VK_ACCESS_HOST_WRITE_BIT;
-    hostBar.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
-    vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_HOST_BIT,
-                         VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 1, &hostBar, 0,
-                         nullptr, 0, nullptr);
-    VkBufferCopy cOut {3 * stride, 0, stride};
-    vkCmdCopyBuffer(cmd, this->denoiseOutBuf, this->denoisedBuffer, 1, &cOut);
-    VkMemoryBarrier outBar {};
-    outBar.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
-    outBar.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
-    outBar.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
-    vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_TRANSFER_BIT,
-                         VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, 0, 1, &outBar,
-                         0, nullptr, 0, nullptr);
-    vkEndCommandBuffer(cmd);
-    VkSubmitInfo si {};
-    si.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
-    si.commandBufferCount = 1;
-    si.pCommandBuffers = &cmd;
-    vkQueueSubmit(this->queue, 1, &si, VK_NULL_HANDLE);
-    vkQueueWaitIdle(this->queue);
-    this->denoiseResultReady = TRUE;
-    this->convergeAfterDenoise();
-  }
-  if (getenv("FC_VULKAN_PT_DENOISE_TIMING")) {
-    const double t1 = std::chrono::duration<double>(
-      std::chrono::steady_clock::now().time_since_epoch()).count();
-    fprintf(stderr, "[DENOISE] kind=%d frame %s took %.1f ms (%ux%u)\n",
-            static_cast<int>(this->denoiseKind), "denoise", (t1 - t0) * 1000.0,
-            w, h);
-  }
+  // Reaching here means no denoiser actually produced a result this frame
+  // (OIDN was not pending/active, or the async worker was launched above and
+  // this is reached only when there was nothing to denoise).  Simulate a
+  // converged-no-result transition so the run does not retry forever.
+  this->denoiseResultReady = FALSE;
+  this->convergeAfterDenoise();
 }
 
 void
@@ -760,6 +833,18 @@ SoRTXRenderBackend::convergeAfterDenoise()
 void
 SoRTXRenderBackend::releaseDenoiseStaging()
 {
+#if COIN_BUILD_OIDN
+  // A resize/denoiser-swap can tear the staging block down while the async
+  // worker is still reading/writing it and the OIDN filter.  The worker owns
+  // both for the duration of oidnWorkerRunning (and sets oidnWorkerDone when
+  // it is finished), so wait on it before unmapping/freeing the host staging
+  // and releasing the OIDN filter/device in destroyDenoiser().
+  if (this->oidnWorker.joinable()) {
+    this->oidnWorker.join();
+  }
+  this->oidnWorkerRunning = FALSE;
+  this->oidnWorkerDone = FALSE;
+#endif
   if (this->denoiseColorBuf != VK_NULL_HANDLE) {
     if (this->denoiseStagingPtr) {
       vkUnmapMemory(this->device, this->denoiseColorMem);

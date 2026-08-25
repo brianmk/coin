@@ -118,8 +118,10 @@ SoRTXRenderBackend::createDescriptorSetLayout()
   // traced image for the preview mode) plus the accumulation and G-buffer
   // storage buffers at bindings 2-4 (the denoising path tracing path) and
   // the denoiser output at binding 5 (sampled when a denoiser backend has
-  // produced a result for the current frame).
-  VkDescriptorSetLayoutBinding presentBindings[5] {};
+  // produced a result for the current frame).  Binding 6 is the traced
+  // camera's view/projection (world->view->clip) so the present pass can
+  // write scene depth for the raster composite overlay's edge occlusion.
+  VkDescriptorSetLayoutBinding presentBindings[6] {};
   presentBindings[0].binding = 1;
   presentBindings[0].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
   presentBindings[0].descriptorCount = 1;
@@ -130,10 +132,14 @@ SoRTXRenderBackend::createDescriptorSetLayout()
     presentBindings[b - 1].descriptorCount = 1;
     presentBindings[b - 1].stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
   }
+  presentBindings[5].binding = 6;
+  presentBindings[5].descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
+  presentBindings[5].descriptorCount = 1;
+  presentBindings[5].stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
 
   VkDescriptorSetLayoutCreateInfo pci {};
   pci.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
-  pci.bindingCount = 5;
+  pci.bindingCount = 6;
   pci.pBindings = presentBindings;
   return vkCreateDescriptorSetLayout(this->device, &pci, this->allocator,
                                      &this->presentSetLayout) == VK_SUCCESS;
@@ -216,14 +222,31 @@ SoRTXRenderBackend::createShaderModules()
 bool
 SoRTXRenderBackend::createFrameBuffer()
 {
-  if (this->frameBuffer != VK_NULL_HANDLE) return true;
+  if (this->presentFrameBuffer != VK_NULL_HANDLE) {
+    return this->frameBuffer != VK_NULL_HANDLE;
+  }
+  if (this->frameBuffer == VK_NULL_HANDLE) {
+    if (!this->createHostVisibleBuffer(
+          sizeof(RTXFrameBlock), VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT,
+          this->frameBuffer, this->frameMemory)) {
+      return false;
+    }
+    if (vkMapMemory(this->device, this->frameMemory, 0,
+                    sizeof(RTXFrameBlock), 0, &this->frameMapped) !=
+        VK_SUCCESS) {
+      return false;
+    }
+  }
+  // Compact present frame block: world->view (mat4) followed by view->clip
+  // (mat4), exactly matching the PresentFrame std140 block in
+  // PresentFragment.glsl (two mat4, offsets 0 and 64).
   if (!this->createHostVisibleBuffer(
-        sizeof(RTXFrameBlock), VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT,
-        this->frameBuffer, this->frameMemory)) {
+        2 * sizeof(float) * 16, VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT,
+        this->presentFrameBuffer, this->presentFrameMemory)) {
     return false;
   }
-  return vkMapMemory(this->device, this->frameMemory, 0,
-                     sizeof(RTXFrameBlock), 0, &this->frameMapped) ==
+  return vkMapMemory(this->device, this->presentFrameMemory, 0,
+                     2 * sizeof(float) * 16, 0, &this->presentFrameMapped) ==
     VK_SUCCESS;
 }
 
@@ -557,6 +580,20 @@ SoRTXRenderBackend::updateDescriptors()
     presentDenoisedWrite.pBufferInfo = &denoisedInfo;
     writes.push_back(presentDenoisedWrite);
   }
+  if (this->presentFrameBuffer != VK_NULL_HANDLE) {
+    VkDescriptorBufferInfo presentFrameInfo {};
+    presentFrameInfo.buffer = this->presentFrameBuffer;
+    presentFrameInfo.offset = 0;
+    presentFrameInfo.range = 2 * sizeof(float) * 16;
+    VkWriteDescriptorSet presentFrameWrite {};
+    presentFrameWrite.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+    presentFrameWrite.dstSet = presentSet;
+    presentFrameWrite.dstBinding = 6;
+    presentFrameWrite.descriptorCount = 1;
+    presentFrameWrite.descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
+    presentFrameWrite.pBufferInfo = &presentFrameInfo;
+    writes.push_back(presentFrameWrite);
+  }
 
   vkUpdateDescriptorSets(this->device,
                          static_cast<uint32_t>(writes.size()), writes.data(),
@@ -782,8 +819,14 @@ SoRTXRenderBackend::createPresentPipeline(VkRenderPass renderPass,
   VkPipelineDepthStencilStateCreateInfo depthStencil {};
   depthStencil.sType =
     VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO;
+  // The present pass writes the scene depth from the first-bounce hit
+  // position (PresentFragment.glsl) so the raster composite overlay can
+  // depth-test BRep edge lines against the traced surface, occluding hidden
+  // edges.  Depth test stays off (it is a fullscreen present), but depth
+  // write is enabled for the composite to see.
   depthStencil.depthTestEnable = VK_FALSE;
-  depthStencil.depthWriteEnable = VK_FALSE;
+  depthStencil.depthWriteEnable = VK_TRUE;
+  depthStencil.depthCompareOp = VK_COMPARE_OP_ALWAYS;
   VkPipelineColorBlendAttachmentState blendAttachment {};
   blendAttachment.colorWriteMask = VK_COLOR_COMPONENT_R_BIT |
     VK_COLOR_COMPONENT_G_BIT | VK_COLOR_COMPONENT_B_BIT |

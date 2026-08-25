@@ -7,9 +7,12 @@
 
 #include <Inventor/rendering/SoVulkanRenderTarget.h>
 
+#include <atomic>
 #include <cstddef>
 #include <cstdint>
 #include <functional>
+#include <mutex>
+#include <thread>
 #include <unordered_map>
 #include <vector>
 
@@ -589,6 +592,13 @@ private:
   VkDeviceMemory frameMemory = VK_NULL_HANDLE;
   void * frameMapped = nullptr;
 
+  // Host-visible present frame UBO (set 0, binding 6 of the present set):
+  // the traced camera's world->view and view->clip matrices, used by the
+  // present pass to write scene depth for the raster composite edge overlay.
+  VkBuffer presentFrameBuffer = VK_NULL_HANDLE;
+  VkDeviceMemory presentFrameMemory = VK_NULL_HANDLE;
+  void * presentFrameMapped = nullptr;
+
   // Reusable scratch for updateMaterials(), grown on demand instead of
   // allocating a fresh std::vector<RTMaterial> every frame.
   std::vector<RTMaterial> materialScratch;
@@ -745,6 +755,30 @@ private:
   void setupOidnDevice();
   bool configureOidnFilter();
 #endif
+
+  // Async OIDN execution.  OIDN's oidnExecuteFilter() on the CPU device can
+  // take tens of milliseconds and, because the render (and denoise) run on the
+  // GUI thread during startNextFrame(), blocks the UI for its whole duration.
+  // To keep the viewport responsive the host-side OIDN work (normalize the
+  // accum average, execute the filter, stamp the validity mask) runs on a
+  // dedicated worker thread that owns the OIDN filter for its lifetime; the
+  // Vulkan copy-back of the published result stays on the render thread once
+  // the worker signals completion.  The staging block is HOST_VISIBLE|
+  // HOST_COHERENT, so the worker's writes are visible to the copy-back without
+  // an explicit flush, and the filter is only used by the worker while the
+  // render thread is not submitting to it (guarded by the running latch).
+  // The single staging well is safe to reuse because the denoiser only fires
+  // once per accumulation run (denoise-at-target): after the target is reached
+  // the backend is converged-idle, so no readback overwrites the staging until
+  // the next camera/scene move, which cannot happen concurrently with the
+  // at-target denoise in the same run.
+  std::atomic<bool> oidnWorkerRunning {false};
+  //! Set by the worker after it published the denoised result in the staging
+  //! output region; the render thread copies it device-ward and converges.
+  std::atomic<bool> oidnWorkerDone {false};
+  //! The worker joinable handle (one shot per denoise-at-target).
+  std::thread oidnWorker;
+
 
   // --- RTX (OptiX + CUDA) backend -----------------------------------------
 #if COIN_BUILD_RTX_DENOISER

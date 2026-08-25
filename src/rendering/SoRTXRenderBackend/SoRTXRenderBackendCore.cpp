@@ -615,6 +615,13 @@ SoRTXRenderBackend::shutdown()
     this->frameMemory = VK_NULL_HANDLE;
     this->frameMapped = nullptr;
   }
+  if (this->presentFrameBuffer != VK_NULL_HANDLE) {
+    vkDestroyBuffer(this->device, this->presentFrameBuffer, this->allocator);
+    vkFreeMemory(this->device, this->presentFrameMemory, this->allocator);
+    this->presentFrameBuffer = VK_NULL_HANDLE;
+    this->presentFrameMemory = VK_NULL_HANDLE;
+    this->presentFrameMapped = nullptr;
+  }
   if (this->presentPipeline != VK_NULL_HANDLE) {
     vkDestroyPipeline(this->device, this->presentPipeline, this->allocator);
     this->presentPipeline = VK_NULL_HANDLE;

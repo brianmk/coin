@@ -294,6 +294,10 @@ private:
                           const SoRenderParams & params,
                           const SoVulkanRenderTarget & target,
                           VkRenderPass renderPass);
+  void recordTracedComposite(const SoDrawList & drawlist,
+                             const SoRenderParams & params,
+                             const SoVulkanRenderTarget & target,
+                             VkRenderPass renderPass);
   SbBool renderInternal(const SoDrawList & drawlist,
                         const SoRenderParams & params,
                         bool overlaysOnly);
