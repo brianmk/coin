@@ -1027,11 +1027,18 @@ SoRTXRenderBackend::buildTlas(const SoDrawList & drawlist, VkCommandBuffer cmd)
     }
 
     VkAccelerationStructureInstanceKHR instance {};
-    // SbMatrix is row-major; VkTransformMatrixKHR is row-major 3x4.
+    // SbMatrix uses the row-vector convention (translation in row 3,
+    // v*M), while VkTransformMatrixKHR applies to a column vector
+    // (M*v, translation in column 3).  The transform must be
+    // transposed so the instance's object-to-world matrix matches the
+    // matrix the producer baked.  Copying r,c (not c,r) drops every
+    // translation: m[3][0..2] (row 3) would land in matrix[0..2][3] as 0,
+    // tracing every offset instance at the origin (the displaced
+    // emissive-cube phantom).
     const SbMatrix & m = command.modelMatrix;
     for (int r = 0; r < 3; ++r) {
       for (int c = 0; c < 4; ++c) {
-        instance.transform.matrix[r][c] = m[r][c];
+        instance.transform.matrix[r][c] = m[c][r];
       }
     }
     instance.instanceCustomIndex = static_cast<uint32_t>(i);
