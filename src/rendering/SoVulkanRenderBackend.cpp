@@ -4933,7 +4933,13 @@ SoVulkanRenderBackend::recordTracedComposite(const SoDrawList & drawlist,
     // whole-surface viewport (the default for scene geometry).
     this->applyCommandViewport(command, target);
     this->applyScissor(command, target);
+    // overlayPass=false: these are scene-geometry edge/point commands, so
+    // they must draw with the FRAME camera (params.projMatrix), not the
+    // command's own projection matrix.  Passing overlayPass=true made them
+    // use a stale per-command proj, displacing them off the traced surface
+    // (the offset "phantom box").  They inherit the raster depth compare so
+    // the present-pass depth occludes hidden edges.
     this->recordDrawCommand(drawlist, command, target, params, renderPass,
-                            false, -1, nullptr, true);
+                            false, -1, nullptr, false);
   }
 }
