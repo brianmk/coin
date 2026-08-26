@@ -339,7 +339,6 @@ private:
   void releaseFrameResources();
 
   // --- Owned device ------------------------------------------------------
-  VkInstance instance = VK_NULL_HANDLE;
   VkPhysicalDevice physicalDevice = VK_NULL_HANDLE;
   VkDevice device = VK_NULL_HANDLE;
   VkQueue queue = VK_NULL_HANDLE;
@@ -419,7 +418,6 @@ private:
   VkImageView whiteImageView = VK_NULL_HANDLE;
   VkSampler whiteSampler = VK_NULL_HANDLE;
   VkDescriptorSet whiteDescriptorSet = VK_NULL_HANDLE;
-  VkDescriptorPool whiteDescriptorPool = VK_NULL_HANDLE;
 
   VkShaderModule vertexModule = VK_NULL_HANDLE;
   VkShaderModule fragmentModule = VK_NULL_HANDLE;

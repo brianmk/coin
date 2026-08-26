@@ -13,7 +13,13 @@ set(COIN_RENDERING_FILES
 
 if(COIN_BUILD_VULKAN_RENDERER)
 	list(APPEND COIN_RENDERING_FILES
-		SoVulkanRenderBackend.cpp
+		SoVulkanRenderBackend/SoVulkanRenderBackendCore.cpp
+		SoVulkanRenderBackend/SoVulkanRenderBackendPipeline.cpp
+		SoVulkanRenderBackend/SoVulkanRenderBackendGeometry.cpp
+		SoVulkanRenderBackend/SoVulkanRenderBackendTexture.cpp
+		SoVulkanRenderBackend/SoVulkanRenderBackendCommand.cpp
+		SoVulkanRenderBackend/SoVulkanRenderBackendWideLine.cpp
+		SoVulkanRenderBackend/SoVulkanRenderBackendFrame.cpp
 		SoVulkanRenderManager.cpp
 		SoRTXRenderBackend/SoRTXRenderBackendCore.cpp
 		SoRTXRenderBackend/SoRTXRenderBackendPipeline.cpp
@@ -66,6 +72,7 @@ set(COIN_RENDERING_INTERNAL_FILES
 	SoRenderBackend.h
 	SoGLRenderBackend.h
 	SoVulkanRenderBackend.h
+	SoVulkanRenderBackend/SoVulkanRenderBackendP.h
 	SoVulkanRenderManager.h
 	SoRTXRenderBackend.h
 	SoRTXRenderBackend/SoRTXRenderBackendP.h
