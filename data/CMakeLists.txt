@@ -83,6 +83,11 @@ coin_embed_gl_shader(gl_pixel_fragment data/shaders/gl/pixel/Fragment.glsl)
 # runtime shader compiler.  Regeneration is an explicit, offline step driven
 # by the `coin_regenerate_vulkan_spirv` target; it is intentionally not part
 # of the default build so glslangValidator is never a build dependency.
+#
+# Regenerate with a single, pinned glslangValidator version and rebuild every
+# header in one run.  A different toolchain version can emit equivalent-but-
+# different SPIR-V, churning the vendored headers the next time they are
+# regenerated; treat the committed headers as the reference.
 if(COIN_BUILD_VULKAN_RENDERER)
   find_program(COIN_GLSLANG_VALIDATOR glslangValidator DOC
     "Path to glslangValidator for offline Vulkan SPIR-V regeneration")

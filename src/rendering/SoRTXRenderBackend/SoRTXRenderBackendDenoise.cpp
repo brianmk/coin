@@ -1191,7 +1191,7 @@ SoRTXRenderBackend::createRtxInteropBuffer(size_t bytes,
                                            CUdeviceptr & devPtr)
 {
   if (!this->vkGetMemoryFdKHR) {
-    this->vkGetMemoryFdKHR = reinterpret_cast<PFN_vkGetMemoryFdKHR>(
+    this->vkGetMemoryFdKHR = loadDispatch<PFN_vkGetMemoryFdKHR>(
       vkGetDeviceProcAddr(this->device, "vkGetMemoryFdKHR"));
     if (!this->vkGetMemoryFdKHR) {
       this->emitError("RTX denoiser: vkGetMemoryFdKHR unavailable; the "

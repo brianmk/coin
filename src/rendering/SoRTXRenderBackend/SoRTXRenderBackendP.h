@@ -35,6 +35,24 @@ envFlagEnabled(const char * name)
          std::strcmp(value, "off") != 0;
 }
 
+// Resolve a device entry point into its concrete dispatch type.
+// vkGetDeviceProcAddr returns a generic PFN_vkVoidFunction; converting it to
+// the real PFN_vk* type with a direct reinterpret_cast between incompatible
+// function-pointer types is conditionally-supported and trips pedantic/strict
+// (and 32-bit) compilers.  Bit-copying through memcpy is the shim the Vulkan
+// loader documentation recommends.  The static_assert guards against any ABI
+// where the two pointer widths ever differ rather than silently truncating.
+template <typename Fn>
+inline Fn
+loadDispatch(PFN_vkVoidFunction fn)
+{
+  static_assert(sizeof(Fn) == sizeof(fn),
+                "Vulkan dispatch function pointer size mismatch");
+  Fn result{};
+  std::memcpy(&result, &fn, sizeof(result));
+  return result;
+}
+
 // std430 mirror of the RTMaterial struct in PathTrace.glsl.  One record per
 // draw command, indexed by the instance custom index (the command index).
 // C++ packs the float arrays without padding, which matches std430: 5 vec4

@@ -16,6 +16,14 @@
 #   TARGET_ENV         Vulkan target environment (default vulkan1.0).  Ray
 #                      tracing shaders (GL_EXT_ray_tracing) require SPIR-V
 #                      1.4+, so the RT entries pass vulkan1.2.
+#
+# Version pinning: the generated .spv.h headers are checked in, so the exact
+# SPIR-V does not depend on the host glslangValidator.  Regeneration with a
+# different glslangValidator version can emit different (though equivalent)
+# SPIR-V and create diff churn on the vendored headers.  Pin a known-good
+# version for the coin_regenerate_vulkan_spirv target and regenerate all
+# headers in one run so they stay uniform; treat the check-in headers as the
+# reference and only rebuild them on an intentional shader change.
 
 if(NOT DEFINED GLSLANG_VALIDATOR)
   message(FATAL_ERROR "GLSLANG_VALIDATOR is not defined")

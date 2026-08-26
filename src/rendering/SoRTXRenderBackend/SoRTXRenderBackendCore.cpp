@@ -398,19 +398,19 @@ SoRTXRenderBackend::initialize(const SoRenderBackendInitParams & params)
   // missing the acceleration-structure/ray-query extensions (or the loader
   // version cannot reach them), and the RT backend cannot function.
   this->vkDestroyAccelerationStructureKHR =
-    reinterpret_cast<PFN_vkDestroyAccelerationStructureKHR>(
+    loadDispatch<PFN_vkDestroyAccelerationStructureKHR>(
       vkGetDeviceProcAddr(this->device, "vkDestroyAccelerationStructureKHR"));
   this->vkGetAccelerationStructureBuildSizesKHR =
-    reinterpret_cast<PFN_vkGetAccelerationStructureBuildSizesKHR>(
+    loadDispatch<PFN_vkGetAccelerationStructureBuildSizesKHR>(
       vkGetDeviceProcAddr(this->device, "vkGetAccelerationStructureBuildSizesKHR"));
   this->vkCreateAccelerationStructureKHR =
-    reinterpret_cast<PFN_vkCreateAccelerationStructureKHR>(
+    loadDispatch<PFN_vkCreateAccelerationStructureKHR>(
       vkGetDeviceProcAddr(this->device, "vkCreateAccelerationStructureKHR"));
   this->vkCmdBuildAccelerationStructuresKHR =
-    reinterpret_cast<PFN_vkCmdBuildAccelerationStructuresKHR>(
+    loadDispatch<PFN_vkCmdBuildAccelerationStructuresKHR>(
       vkGetDeviceProcAddr(this->device, "vkCmdBuildAccelerationStructuresKHR"));
   this->vkGetAccelerationStructureDeviceAddressKHR =
-    reinterpret_cast<PFN_vkGetAccelerationStructureDeviceAddressKHR>(
+    loadDispatch<PFN_vkGetAccelerationStructureDeviceAddressKHR>(
       vkGetDeviceProcAddr(this->device, "vkGetAccelerationStructureDeviceAddressKHR"));
   if (!this->vkDestroyAccelerationStructureKHR ||
       !this->vkGetAccelerationStructureBuildSizesKHR ||
@@ -427,13 +427,13 @@ SoRTXRenderBackend::initialize(const SoRenderBackendInitParams & params)
   // The ray tracing pipeline (VK_KHR_ray_tracing_pipeline) entry points
   // power the shader binding table dispatch.
   this->vkCreateRayTracingPipelinesKHR =
-    reinterpret_cast<PFN_vkCreateRayTracingPipelinesKHR>(
+    loadDispatch<PFN_vkCreateRayTracingPipelinesKHR>(
       vkGetDeviceProcAddr(this->device, "vkCreateRayTracingPipelinesKHR"));
   this->vkGetRayTracingShaderGroupHandlesKHR =
-    reinterpret_cast<PFN_vkGetRayTracingShaderGroupHandlesKHR>(
+    loadDispatch<PFN_vkGetRayTracingShaderGroupHandlesKHR>(
       vkGetDeviceProcAddr(this->device, "vkGetRayTracingShaderGroupHandlesKHR"));
   this->vkCmdTraceRaysKHR =
-    reinterpret_cast<PFN_vkCmdTraceRaysKHR>(
+    loadDispatch<PFN_vkCmdTraceRaysKHR>(
       vkGetDeviceProcAddr(this->device, "vkCmdTraceRaysKHR"));
   if (!this->vkCreateRayTracingPipelinesKHR ||
       !this->vkGetRayTracingShaderGroupHandlesKHR ||
