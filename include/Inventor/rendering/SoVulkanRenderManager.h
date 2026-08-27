@@ -110,6 +110,12 @@ public:
   void setBackgroundColor(const SbColor4f & color);
   const SbColor4f & getBackgroundColor(void) const;
 
+  //! Device-pixel ratio of the Vulkan surface.  The swapchain is in device
+  //! pixels, so the renderer scales logical line widths / point sizes by
+  //! this (see SoRenderParams::devicePixelRatio).
+  void setDevicePixelRatio(float ratio);
+  float getDevicePixelRatio(void) const;
+
   /*!
     \brief Configure a vertical screen-space background gradient.
 

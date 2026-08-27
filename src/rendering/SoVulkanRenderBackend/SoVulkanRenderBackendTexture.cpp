@@ -1,4 +1,15 @@
-// src/rendering/SoVulkanRenderBackendTexture.cpp
+// src/rendering/SoVulkanRenderBackend/SoVulkanRenderBackendTexture.cpp
+//
+// Texture cache and upload path.  Provides:
+//
+//   - createSampler()
+//   - prepare/record/finalize staging-to-image uploads for changed textures
+//     (prepareTextureUpload, recordTextureUpload, finalizeTexture,
+//     recordPendingTextureUploads, finalizePendingTextureUploads)
+//   - flushPendingTextureUploadsExternal() on the external-command-buffer path
+//   - ensureDescriptorPoolSpace(): grow the descriptor pool
+//   - allocateTextureDescriptorSet() / resolveTextureSet(): bind the
+//     descriptor set a draw uses
 
 #include "rendering/SoVulkanRenderBackend.h"
 #include "rendering/SoVulkanRenderBackend/SoVulkanRenderBackendP.h"

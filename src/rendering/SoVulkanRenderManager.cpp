@@ -155,6 +155,11 @@ public:
   SbBool clearWindow = TRUE;
   SbBool clearDepth = TRUE;
   void * renderTarget = nullptr;
+  //! Device-pixel ratio of the Vulkan surface.  The swapchain/viewport region
+  //! is in device pixels, so renderer widths/sizes (logical SoDrawStyle
+  //! points) must be scaled by this; kept in the render params for the
+  //! backends and also exposed to the SoDevicePixelRatio element.
+  float devicePixelRatio = 1.0f;
 
   SoVulkanRenderManager::AutoClippingStrategy autoClipping =
     SoVulkanRenderManager::NO_AUTO_CLIPPING;
@@ -332,6 +337,13 @@ SoVulkanRenderManager::getDecorationSceneGraph(void) const
 void
 SoVulkanRenderManager::setCamera(SoCamera * camera)
 {
+  // The scene graph is the single camera authority and stays that way: this
+  // retained pointer is only a fallback/hint for scenes that carry no camera
+  // (overlay-only or off-screen render setups).  When the scene DOES contain a
+  // camera, refreshActiveCamera() re-resolves it from the scene graph each
+  // frame, overrides this pointer, and owns that node's lifetime -- so the
+  // GL viewer and every Vulkan backend (raster and path tracing) all render
+  // from the same camera node with no sync between them.
   // FreeCAD replaces the camera node when the user toggles between the
   // perspective and orthographic views.  Without a reference the old node is
   // destroyed and this raw pointer dangles, crashing the next render
@@ -402,6 +414,18 @@ const SbColor4f &
 SoVulkanRenderManager::getBackgroundColor(void) const
 {
   return this->pimpl->backgroundColor;
+}
+
+void
+SoVulkanRenderManager::setDevicePixelRatio(float ratio)
+{
+  this->pimpl->devicePixelRatio = ratio;
+}
+
+float
+SoVulkanRenderManager::getDevicePixelRatio(void) const
+{
+  return this->pimpl->devicePixelRatio;
 }
 
 void
@@ -1179,6 +1203,12 @@ SoVulkanRenderManagerP::prepareRenderParams(SbBool clearwindow,
   action.setViewportRegion(this->viewportRegion);
 
   params.viewport = this->viewportRegion;
+  // The viewport region is in device pixels, so carry the device-pixel ratio
+  // into the render params.  The GL and Vulkan backends scale logical line
+  // widths / point sizes by this (SoDrawStyle values are logical points);
+  // without it the ratio stayed 1.0 and, on a fractional-scaling display,
+  // lines/dots rendered 1/dpr too thin.
+  params.devicePixelRatio = this->devicePixelRatio;
   params.viewMatrix.makeIdentity();
   params.projMatrix.makeIdentity();
   {

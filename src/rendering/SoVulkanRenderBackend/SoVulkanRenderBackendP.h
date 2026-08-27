@@ -1,4 +1,18 @@
-// src/rendering/SoVulkanRenderBackendP.h
+// src/rendering/SoVulkanRenderBackend/SoVulkanRenderBackendP.h
+//
+// Private internal header for the Vulkan render backend.  Holds the helper
+// code that was formerly the file-local anonymous namespace, lifted here so
+// it can be shared across the split SoVulkanRenderBackend*.cpp translation
+// units (in the CoinVulkanDetail namespace).  Provides:
+//
+//   - Debug counters + env-flag cache (envFlagEnabled)
+//   - Push-constant / lighting-UBO structs (VulkanPushConstants,
+//     VulkanBackgroundPush, VulkanVisualUbo)
+//   - Vulkan enum-conversion helpers
+//   - FNV content-hash helpers (hashFloats, hashUint32, hashGeometryContent,
+//     hashTextureContent)
+//   - Draw/overlay/composite command counters
+//   - createImageView()
 
 #ifndef COIN_SOVULKANRENDERBACKENDP_H
 #define COIN_SOVULKANRENDERBACKENDP_H

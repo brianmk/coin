@@ -1,4 +1,13 @@
-// src/rendering/SoVulkanRenderBackendPipeline.cpp
+// src/rendering/SoVulkanRenderBackend/SoVulkanRenderBackendPipeline.cpp
+//
+// Graphics pipeline and render-pass management.  Provides:
+//
+//   - getOrCreatePipeline(): build + cache an immutable VkPipeline per unique
+//     retained state (topology, fill/cull, depth, blend, stencil, sample
+//     count, wide-line) and translate it into the Vulkan state structs
+//   - Background-gradient pipeline + recordBackground()
+//   - Render-pass create/cache path (createRenderPass, renderPassIdentity,
+//     getOrCreateRenderPass)
 
 #include "rendering/SoVulkanRenderBackend.h"
 #include "rendering/SoVulkanRenderBackend/SoVulkanRenderBackendP.h"

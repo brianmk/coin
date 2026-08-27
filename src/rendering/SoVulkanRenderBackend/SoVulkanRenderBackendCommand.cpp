@@ -1,4 +1,15 @@
-// src/rendering/SoVulkanRenderBackendCommand.cpp
+// src/rendering/SoVulkanRenderBackend/SoVulkanRenderBackendCommand.cpp
+//
+// Per-draw command recording.  Provides:
+//
+//   - applyViewport()/applyCommandViewport()/applyScissor(): dynamic state
+//     (with the Coin bottom-left -> Vulkan top-left Y-flip)
+//   - recordClear()/recordOverlayDepthClear(): emit clears
+//   - updateLightingUniforms(): fill a lighting/material UBO slot
+//   - recordDrawCommand(): bind the pipeline, descriptor set and viewports,
+//     pack the push constants, and issue the draw (plain, indexed or
+//     wide-line)
+//   - beginCommandBuffer()/endAndSubmit()
 
 #include "rendering/SoVulkanRenderBackend.h"
 #include "rendering/SoVulkanRenderBackend/SoVulkanRenderBackendP.h"

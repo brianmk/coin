@@ -1,4 +1,14 @@
-// src/rendering/SoVulkanRenderBackendWideLine.cpp
+// src/rendering/SoVulkanRenderBackend/SoVulkanRenderBackendWideLine.cpp
+//
+// CPU expansion of wide and/or stippled lines into triangle-list quads.
+// expandWideLines() walks each segment and:
+//
+//   - transforms the endpoints to clip space
+//   - near-plane clips, interpolating the hidden endpoint onto the plane
+//   - accumulates the screen-space polyline distance (in pixels, for the
+//     glLineStipple pattern)
+//   - emits 2 triangles / 6 vertices per segment into one host-visible quad
+//     buffer per in-flight frame slot (drawn by the wide-line pipeline)
 
 #include "rendering/SoVulkanRenderBackend.h"
 #include "rendering/SoVulkanRenderBackend/SoVulkanRenderBackendP.h"

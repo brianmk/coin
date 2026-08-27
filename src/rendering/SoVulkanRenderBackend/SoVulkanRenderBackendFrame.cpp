@@ -1,4 +1,16 @@
-// src/rendering/SoVulkanRenderBackendFrame.cpp
+// src/rendering/SoVulkanRenderBackend/SoVulkanRenderBackendFrame.cpp
+//
+// Frame orchestration and teardown.  Provides:
+//
+//   - shutdown(): release every owned Vulkan object (flush deferred destroys,
+//     pipelines, render passes/framebuffers, shaders, buffers, descriptor
+//     pools)
+//   - renderInternal(): drive the render()/renderOverlaysOnly() entry points
+//   - renderExternal()/renderExternalOverlay(): record into a caller-owned
+//     command buffer
+//   - recordFrame(): opaque/transparent passes + wireframe/point overlay
+//     redraws + on-top annotations
+//   - recordOverlayBlock() and recordTracedComposite()
 
 #include "rendering/SoVulkanRenderBackend.h"
 #include "rendering/SoVulkanRenderBackend/SoVulkanRenderBackendP.h"

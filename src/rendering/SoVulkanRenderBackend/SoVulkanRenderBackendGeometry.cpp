@@ -1,4 +1,15 @@
-// src/rendering/SoVulkanRenderBackendGeometry.cpp
+// src/rendering/SoVulkanRenderBackend/SoVulkanRenderBackendGeometry.cpp
+//
+// Retained geometry cache.  Provides:
+//
+//   - createBuffer()/createBufferDeviceLocal(): host-visible or device-local
+//     Vulkan buffers (the latter via a transient staging copy + one-shot
+//     transfer)
+//   - uploadGeometry(): repack the interleaved vertex layout (position +
+//     normal + color + texcoord) into the reusable uploadScratch vector
+//   - getOrCreateCache(), invalidateCache(), updateGeometryCache(): drive the
+//     per-command GPU cache, re-uploading on a content-key/content-hash change
+//     and evicting stale entries each frame
 
 #include "rendering/SoVulkanRenderBackend.h"
 #include "rendering/SoVulkanRenderBackend/SoVulkanRenderBackendP.h"

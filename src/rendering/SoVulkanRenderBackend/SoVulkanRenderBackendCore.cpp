@@ -1,4 +1,17 @@
-// src/rendering/SoVulkanRenderBackendCore.cpp
+// src/rendering/SoVulkanRenderBackend/SoVulkanRenderBackendCore.cpp
+//
+// SoVulkanRenderBackend initialization and lifecycle.  Provides:
+//
+//   - Constructor/destructor, getName() and the overlay setters
+//   - setMaxFramesInFlight(): ring + lighting-UBO resize with a queue-wide
+//     wait
+//   - initialize() and its resource-create helpers: command pool, descriptor
+//     set layout/pool, per-frame command buffers/fences, the lighting uniform
+//     ring buffer (create/grow/swap), the white fallback texture, the
+//     pipeline layout, and the visual / wide-line / background shader modules
+//   - Frame-slot + deferred-destroy bookkeeping (beginFrame,
+//     flushPendingDestroys, flushAllPendingDestroys,
+//     deferDestroy[Cache|Texture]Entry, waitForInFlightFrames)
 
 #include "rendering/SoVulkanRenderBackend.h"
 #include "rendering/SoVulkanRenderBackend/SoVulkanRenderBackendP.h"
