@@ -290,6 +290,9 @@ SoVulkanRenderBackend::updateLightingUniforms(const SoDrawList & drawlist,
   else {
     params.viewMatrix.getValue(m);
   }
+  // Keep the view matrix for the light-direction transform below, before `m`
+  // is reused for the model matrix.
+  SbMat viewM = m;
   std::memcpy(ubo.view, &m[0][0], sizeof(float) * 16);
   command.modelMatrix.getValue(m);
   std::memcpy(ubo.model, &m[0][0], sizeof(float) * 16);
@@ -388,16 +391,31 @@ SoVulkanRenderBackend::updateLightingUniforms(const SoDrawList & drawlist,
     color[2] = light.color[2];
     color[3] = 1.0f;
 
+    // Light directions arrive in WORLD space (SoLightData::direction, from the
+    // light's world matrix), but the vertex stage outputs the normal and eye
+    // position in EYE space.  Transform the direction into eye space with the
+    // view matrix so the fragment's dot(normal, lightDir) and the half-vector
+    // are computed in one space; otherwise directional lights stop surrounding
+    // the model and appear to cluster on one side as the camera turns.
+    const float wd0 = light.direction[0];
+    const float wd1 = light.direction[1];
+    const float wd2 = light.direction[2];
     float * direction = ubo.lightDirection + i * 4;
-    direction[0] = light.direction[0];
-    direction[1] = light.direction[1];
-    direction[2] = light.direction[2];
+    direction[0] = viewM[0][0] * wd0 + viewM[0][1] * wd1 + viewM[0][2] * wd2;
+    direction[1] = viewM[1][0] * wd0 + viewM[1][1] * wd1 + viewM[1][2] * wd2;
+    direction[2] = viewM[2][0] * wd0 + viewM[2][1] * wd1 + viewM[2][2] * wd2;
     direction[3] = 1.0f;
 
+    // Point/spot light POSITION is world-space too; move it into eye space with
+    // the full view matrix so `lightPosition - eyePos` in the fragment is
+    // consistent (eyePos is eye-space).
+    const float lp0 = light.position[0];
+    const float lp1 = light.position[1];
+    const float lp2 = light.position[2];
     float * position = ubo.lightPosition + i * 4;
-    position[0] = light.position[0];
-    position[1] = light.position[1];
-    position[2] = light.position[2];
+    position[0] = viewM[0][0] * lp0 + viewM[0][1] * lp1 + viewM[0][2] * lp2 + viewM[0][3];
+    position[1] = viewM[1][0] * lp0 + viewM[1][1] * lp1 + viewM[1][2] * lp2 + viewM[1][3];
+    position[2] = viewM[2][0] * lp0 + viewM[2][1] * lp1 + viewM[2][2] * lp2 + viewM[2][3];
     position[3] = 1.0f;
 
     float * attenuation = ubo.lightAttenuation + i * 4;
