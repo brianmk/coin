@@ -283,8 +283,21 @@ SoVulkanRenderBackend::updateLightingUniforms(const SoDrawList & drawlist,
   VulkanVisualUbo ubo {};
 
   SbMat m;
+  // Overlay-pass geometry that spans the whole frame viewport (the
+  // selection/preselection highlight) is frame-camera geometry: it must be
+  // projected with the frame camera matrices, not with the scene camera's
+  // own recorded matrices (whose near/far fields are stale and which lag
+  // one frame behind during navigation, making the highlight rotate at a
+  // different speed and z-fight the coplanar base).  Overlays that carry
+  // their own viewport (the navigation cube sub-scene) keep their own
+  // camera.
+  const SbVec2s frameSize = params.viewport.getViewportSizePixels();
+  const bool frameCameraOverlay =
+    command.pass == SO_RENDERPASS_OVERLAY
+    && command.state.raster.viewportWidth == frameSize[0]
+    && command.state.raster.viewportHeight == frameSize[1];
   if (command.state.raster.scissorEnabled
-      && command.pass == SO_RENDERPASS_OVERLAY) {
+      && command.pass == SO_RENDERPASS_OVERLAY && !frameCameraOverlay) {
     command.viewMatrix.getValue(m);
   }
   else {
@@ -636,13 +649,71 @@ SoVulkanRenderBackend::recordDrawCommand(const SoDrawList & drawlist,
 
   VulkanPushConstants push {};
   SbMat projValue;
-  // Overlay-pass geometry carries its own camera (view/projection) matrices;
-  // regular geometry shares the frame camera in params.
-  if (overlayPass) {
+  // Overlay-pass geometry that carries its own camera and viewport (the
+  // navigation cube sub-scene) uses its own projection; overlay geometry
+  // that spans the whole frame viewport (the selection/preselection
+  // highlight) is frame-camera geometry and must share the frame projection
+  // in params, otherwise it is projected through the scene camera's stale
+  // near/far fields and lags behind navigation (see updateLightingUniforms).
+  const SbVec2s frameSize = params.viewport.getViewportSizePixels();
+  const bool frameCameraOverlay =
+    command.pass == SO_RENDERPASS_OVERLAY
+    && command.state.raster.viewportWidth == frameSize[0]
+    && command.state.raster.viewportHeight == frameSize[1];
+  if (overlayPass && !frameCameraOverlay) {
     command.projMatrix.getValue(projValue);
   }
   else {
     params.projMatrix.getValue(projValue);
+  }
+  if (envFlagEnabled("FC_VULKAN_OVERLAY_CAM_DEBUG")
+      && command.pass == SO_RENDERPASS_OVERLAY
+      && command.state.raster.scissorEnabled
+      && command.state.raster.scissorWidth > 800) {
+    SbMat cv, pv, cp, pp;
+    command.viewMatrix.getValue(cv);
+    params.viewMatrix.getValue(pv);
+    command.projMatrix.getValue(cp);
+    params.projMatrix.getValue(pp);
+    static int ovcamLog = 0;
+    if (ovcamLog++ < 6) {
+      fprintf(stderr,
+              "[OVCAM-FULL] pass=%d frameCam=%d scissor=%d,%d %dx%d viewport=%d,%d %dx%d\n"
+              "  cmdView:\n"
+              "    [%.4f %.4f %.4f %.4f]\n    [%.4f %.4f %.4f %.4f]\n"
+              "    [%.4f %.4f %.4f %.4f]\n    [%.4f %.4f %.4f %.4f]\n"
+              "  parView:\n"
+              "    [%.4f %.4f %.4f %.4f]\n    [%.4f %.4f %.4f %.4f]\n"
+              "    [%.4f %.4f %.4f %.4f]\n    [%.4f %.4f %.4f %.4f]\n"
+              "  cmdProj:\n"
+              "    [%.4f %.4f %.4f %.4f]\n    [%.4f %.4f %.4f %.4f]\n"
+              "    [%.4f %.4f %.4f %.4f]\n    [%.4f %.4f %.4f %.4f]\n"
+              "  parProj:\n"
+              "    [%.4f %.4f %.4f %.4f]\n    [%.4f %.4f %.4f %.4f]\n"
+              "    [%.4f %.4f %.4f %.4f]\n    [%.4f %.4f %.4f %.4f]\n",
+              static_cast<int>(command.pass),
+              frameCameraOverlay ? 1 : 0,
+              command.state.raster.scissorX, command.state.raster.scissorY,
+              command.state.raster.scissorWidth, command.state.raster.scissorHeight,
+              command.state.raster.viewportX, command.state.raster.viewportY,
+              command.state.raster.viewportWidth, command.state.raster.viewportHeight,
+              cv[0][0], cv[0][1], cv[0][2], cv[0][3],
+              cv[1][0], cv[1][1], cv[1][2], cv[1][3],
+              cv[2][0], cv[2][1], cv[2][2], cv[2][3],
+              cv[3][0], cv[3][1], cv[3][2], cv[3][3],
+              pv[0][0], pv[0][1], pv[0][2], pv[0][3],
+              pv[1][0], pv[1][1], pv[1][2], pv[1][3],
+              pv[2][0], pv[2][1], pv[2][2], pv[2][3],
+              pv[3][0], pv[3][1], pv[3][2], pv[3][3],
+              cp[0][0], cp[0][1], cp[0][2], cp[0][3],
+              cp[1][0], cp[1][1], cp[1][2], cp[1][3],
+              cp[2][0], cp[2][1], cp[2][2], cp[2][3],
+              cp[3][0], cp[3][1], cp[3][2], cp[3][3],
+              pp[0][0], pp[0][1], pp[0][2], pp[0][3],
+              pp[1][0], pp[1][1], pp[1][2], pp[1][3],
+              pp[2][0], pp[2][1], pp[2][2], pp[2][3],
+              pp[3][0], pp[3][1], pp[3][2], pp[3][3]);
+    }
   }
   std::memcpy(push.proj, &projValue[0][0], sizeof(float) * 16);
   const SbVec4f & color = command.material.diffuse;
