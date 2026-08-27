@@ -292,7 +292,8 @@ SoVulkanRenderBackend::updateLightingUniforms(const SoDrawList & drawlist,
   }
   // Keep the view matrix for the light-direction transform below, before `m`
   // is reused for the model matrix.
-  SbMat viewM = m;
+  SbMat viewM;
+  std::memcpy(viewM, m, sizeof(float) * 16);
   std::memcpy(ubo.view, &m[0][0], sizeof(float) * 16);
   command.modelMatrix.getValue(m);
   std::memcpy(ubo.model, &m[0][0], sizeof(float) * 16);
