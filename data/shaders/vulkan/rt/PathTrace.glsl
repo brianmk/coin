@@ -995,7 +995,13 @@ void main()
         }
     }
 
-    vec4 outColor = vec4(clamp(radiance, 0.0, 1.0), 1.0);
+    // HDR path tracing: the accumulation buffer is float (four x 32-bit), so
+    // radiance is stored unclamped.  Clamping here would destroy the HDR of
+    // emissive/area-light highlights and glass caustics, and would poison the
+    // adaptive-sampling variance test (which needs the real E[x^2] - E[x]^2).
+    // The display clamp happens only in the final imageStore, which writes an
+    // rgba8 storage image.
+    vec4 outColor = vec4(radiance, 1.0);
     if (accumulating > 0.5) {
         vec4 acc = accum[index];
         vec4 s = sq[index];
@@ -1069,5 +1075,7 @@ void main()
     else {
         accum[index] = outColor;
     }
-    imageStore(storageImage, ivec2(px), outColor);
+    // The rgba8 storage image cannot represent HDR; clamp only for display.
+    // The accumulation buffer above keeps the unclamped radiance.
+    imageStore(storageImage, ivec2(px), clamp(outColor, 0.0, 1.0));
 }

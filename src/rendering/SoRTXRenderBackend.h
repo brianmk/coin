@@ -364,6 +364,21 @@ private:
   uint8_t deviceUUID[16] = {0};
   bool haveDeviceUUID = false;
 
+  // Optional device capability flags, self-probed from the physical device at
+  // initialize() via vkEnumerateDeviceExtensionProperties.  Each gates a
+  // feature that improves the path tracer (position fetch for smooth normals
+  // + UVs, opacity micromaps for alpha-tested textures, NV cluster/partitioned
+  // acceleration structures for large assemblies, NV linear swept spheres for
+  // analytic CAD primitives).  The embedding application must already have
+  // requested the extension + feature in its own device creation; a flag here
+  // only records what the created device actually advertises so the shader /
+  // builder paths can be selected at run time without querying every frame.
+  bool hasPositionFetch = false;
+  bool hasOpacityMicromap = false;
+  bool hasNvCluster = false;
+  bool hasNvPartitioned = false;
+  bool hasNvLinearSweptSpheres = false;
+
   // Persistent transient command pool + buffer for the one-shot
   // acceleration-structure phase (BLAS/TLAS builds and buffer copies, which
   // are not allowed inside a render pass).  Allocated once instead of per

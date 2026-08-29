@@ -411,6 +411,45 @@ SoRTXRenderBackend::initialize(const SoRenderBackendInitParams & params)
   }
   this->haveDeviceUUID = deviceUUIDNonZero;
 
+  // Probe the created device's optional capability extensions once, so the
+  // shader/builder paths can select the best available technique at run time
+  // instead of querying the extension list every frame.  Only recordings --
+  // the features themselves must have been requested by the embedding app
+  // (QuarterVulkanWidget) when the device was created.
+  {
+    uint32_t extCount = 0;
+    vkEnumerateDeviceExtensionProperties(this->physicalDevice, nullptr,
+                                         &extCount, nullptr);
+    std::vector<VkExtensionProperties> exts(extCount);
+    if (extCount > 0) {
+      vkEnumerateDeviceExtensionProperties(this->physicalDevice, nullptr,
+                                           &extCount, exts.data());
+    }
+    const auto hasExt = [&exts](const char * name) {
+      for (const auto & e : exts) {
+        if (std::strcmp(e.extensionName, name) == 0) return true;
+      }
+      return false;
+    };
+    this->hasPositionFetch =
+      hasExt("VK_KHR_ray_tracing_position_fetch");
+    this->hasOpacityMicromap = hasExt("VK_EXT_opacity_micromap");
+    this->hasNvCluster = hasExt("VK_NV_cluster_acceleration_structure");
+    this->hasNvPartitioned =
+      hasExt("VK_NV_partitioned_acceleration_structure");
+    this->hasNvLinearSweptSpheres =
+      hasExt("VK_NV_ray_tracing_linear_swept_spheres");
+    char capsBuf[192];
+    std::snprintf(
+      capsBuf, sizeof(capsBuf),
+      "[RTDBG] caps positionFetch=%d opacityMicromap=%d "
+      "nvCluster=%d nvPartitioned=%d nvLinearSweptSpheres=%d",
+      this->hasPositionFetch ? 1 : 0, this->hasOpacityMicromap ? 1 : 0,
+      this->hasNvCluster ? 1 : 0, this->hasNvPartitioned ? 1 : 0,
+      this->hasNvLinearSweptSpheres ? 1 : 0);
+    fprintf(stderr, "%s\n", capsBuf);
+  }
+
   // The system loader only exports core entry points; resolve the ray
   // tracing KHR functions per-device.  Failing here means the device is
   // missing the acceleration-structure/ray-query extensions (or the loader
