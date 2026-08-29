@@ -338,8 +338,10 @@ SoRTXRenderBackend::setDenoiserFilter(const char * denoiser)
   else if (std::strcmp(denoiser, "oidn") == 0) this->denoiseKindPref = DenoiseOidn;
   else if (std::strcmp(denoiser, "fsr") == 0) this->denoiseKindPref = DenoiseFsr;
   else if (std::strcmp(denoiser, "none") == 0) this->denoiseKindPref = DenoiseNone;
+  else return;
   this->denoiseKind = this->denoiseKindPref;
   this->denoiseKindDirty = true;
+  this->denoiseKindExplicit = true;
 }
 
 SbBool
@@ -360,7 +362,14 @@ SoRTXRenderBackend::initialize(const SoRenderBackendInitParams & params)
     return FALSE;
   }
   if (deviceContext->apiVersion < VK_API_VERSION_1_2) {
-    this->emitError("SoRTXRenderBackend requires a Vulkan 1.2+ device");
+    char buf[192];
+    std::snprintf(buf, sizeof(buf),
+                  "SoRTXRenderBackend requires a Vulkan 1.2+ device (device "
+                  "context reports API %u.%u.%u)",
+                  VK_API_VERSION_MAJOR(deviceContext->apiVersion),
+                  VK_API_VERSION_MINOR(deviceContext->apiVersion),
+                  VK_API_VERSION_PATCH(deviceContext->apiVersion));
+    this->emitError(buf);
     return FALSE;
   }
 
@@ -390,8 +399,17 @@ SoRTXRenderBackend::initialize(const SoRenderBackendInitParams & params)
   vkGetPhysicalDeviceProperties2(this->physicalDevice, &idProps2);
   // VkPhysicalDeviceIDProperties always carries the deviceUUID array (filled
   // by the driver once the struct is chained); retain it for CUDA matching.
+  // Some drivers expose the array but leave it zero-filled, so only trust it
+  // when it actually contains a non-zero identifier.
   std::memcpy(this->deviceUUID, idProps.deviceUUID, sizeof(this->deviceUUID));
-  this->haveDeviceUUID = true;
+  bool deviceUUIDNonZero = false;
+  for (const uint8_t byte : this->deviceUUID) {
+    if (byte != 0) {
+      deviceUUIDNonZero = true;
+      break;
+    }
+  }
+  this->haveDeviceUUID = deviceUUIDNonZero;
 
   // The system loader only exports core entry points; resolve the ray
   // tracing KHR functions per-device.  Failing here means the device is
@@ -773,6 +791,8 @@ SoRTXRenderBackend::shutdown()
   this->ptAccumulating = FALSE;
   this->ptFrameIndex = 0;
   this->destroyDenoiser();
+  this->flushPendingDestroys();
+  this->flushPendingDestroys();
   if (this->materialBuffer != VK_NULL_HANDLE) {
     vkDestroyBuffer(this->device, this->materialBuffer, this->allocator);
     vkFreeMemory(this->device, this->materialMemory, this->allocator);
@@ -1165,7 +1185,7 @@ SoRTXRenderBackend::renderExternal(const SoDrawList & drawlist,
     return FALSE;
   }
   this->debugValidateDrawList(drawlist);
-  this->flushPendingDestroys();
+  this->flushPendingDestroys(true);
 
   const auto * target =
     static_cast<const SoVulkanRenderTarget *>(params.renderTarget);

@@ -195,9 +195,10 @@ SoRTXRenderBackend::createDenoiseBackend()
       this->denoiseKind != DenoiseFsr && this->denoiseKind != DenoiseNone) {
     this->denoiseKind = DenoiseOidn;
   }
-  if (this->denoiseKindPref == DenoiseNone) {
+  if (!this->denoiseKindExplicit && this->denoiseKindPref == DenoiseNone) {
     // First resolution, no explicit preference: honour the env var, then fall
-    // back to the default (OIDN).
+    // back to the default (OIDN).  An explicit "none" selection is a real
+    // user choice and must not be overwritten by the env/default fallback.
     if (const char * sel = getenv("FC_VULKAN_PT_DENOISER")) {
       if (std::strcmp(sel, "rtx") == 0) {
         this->denoiseKind = DenoiseRtx;
@@ -220,8 +221,18 @@ SoRTXRenderBackend::createDenoiseBackend()
       this->denoiseKind = DenoiseOidn;
       this->denoiseKindPref = DenoiseOidn;
     }
+    this->denoiseKindExplicit = true;
   }
   this->denoiseKindDirty = false;
+
+  if (getenv("FC_VULKAN_PT_DENOISER_DEBUG")) {
+    fprintf(stderr,
+            "[DENOISE] resolved kind=%d explicit=%d pref=%d ptEnabled=%d\n",
+            static_cast<int>(this->denoiseKind),
+            this->denoiseKindExplicit ? 1 : 0,
+            static_cast<int>(this->denoiseKindPref),
+            this->ptEnabled ? 1 : 0);
+  }
 
   // Compute the denoiser working resolution.  A scale factor >1 lets the
   // denoiser run at reduced resolution (cheaper) and the raster present pass
@@ -652,7 +663,13 @@ SoRTXRenderBackend::updateDenoise()
     const uint32_t h = this->denoiseHeight;
     const double t0 = std::chrono::duration<double>(
       std::chrono::steady_clock::now().time_since_epoch()).count();
-    if (!this->updateRtxDenoise(w, h)) {
+    const bool wantCudaSignal = this->rtxInteropSemaphoresReady &&
+                                this->denoisedBuffer != VK_NULL_HANDLE;
+    if (!this->updateRtxDenoise(w, h, wantCudaSignal)) {
+      if (this->rtxCudaSignalPending) {
+        this->consumeVulkanSemaphore(this->rtxCudaToVkSem);
+        this->rtxCudaSignalPending = false;
+      }
       this->denoiseResultReady = FALSE;
       this->convergeAfterDenoise();
       return;
@@ -660,32 +677,62 @@ SoRTXRenderBackend::updateDenoise()
     // Copy the CUDA output image (interop device buffer) back to the
     // device-local denoisedBuffer bound at present binding 5.
     VkCommandBuffer cmd = this->beginTransientCommandBuffer();
-    if (cmd != VK_NULL_HANDLE) {
-      VkMemoryBarrier hostBar {};
-      hostBar.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
-      hostBar.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
-      hostBar.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
-      vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
-                           VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 1, &hostBar, 0,
-                           nullptr, 0, nullptr);
-      const VkDeviceSize stride = static_cast<VkDeviceSize>(w) * h * 16;
-      VkBufferCopy cOut {0, 0, stride};
-      vkCmdCopyBuffer(cmd, this->rtxOutputVk, this->denoisedBuffer, 1, &cOut);
-      VkMemoryBarrier outBar {};
-      outBar.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
-      outBar.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
-      outBar.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
-      vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_TRANSFER_BIT,
-                           VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, 0, 1,
-                           &outBar, 0, nullptr, 0, nullptr);
-      vkEndCommandBuffer(cmd);
-      VkSubmitInfo si {};
-      si.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
-      si.commandBufferCount = 1;
-      si.pCommandBuffers = &cmd;
-      vkQueueSubmit(this->queue, 1, &si, VK_NULL_HANDLE);
+    if (cmd == VK_NULL_HANDLE) {
+      if (this->rtxCudaSignalPending) {
+        this->consumeVulkanSemaphore(this->rtxCudaToVkSem);
+        this->rtxCudaSignalPending = false;
+      }
       vkQueueWaitIdle(this->queue);
+      this->denoiseResultReady = FALSE;
+      this->convergeAfterDenoise();
+      return;
+    }
+    VkMemoryBarrier hostBar {};
+    hostBar.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
+    hostBar.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
+    hostBar.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
+    vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                         VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 1, &hostBar, 0,
+                         nullptr, 0, nullptr);
+    const VkDeviceSize stride = static_cast<VkDeviceSize>(w) * h * 16;
+    VkBufferCopy cOut {0, 0, stride};
+    vkCmdCopyBuffer(cmd, this->rtxOutputVk, this->denoisedBuffer, 1, &cOut);
+    VkMemoryBarrier outBar {};
+    outBar.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
+    outBar.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+    outBar.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+    vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_TRANSFER_BIT,
+                         VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, 0, 1,
+                         &outBar, 0, nullptr, 0, nullptr);
+    vkEndCommandBuffer(cmd);
+    VkSubmitInfo si {};
+    si.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
+    si.commandBufferCount = 1;
+    si.pCommandBuffers = &cmd;
+    const bool waitCudaSignal =
+      this->rtxInteropSemaphoresReady && this->rtxCudaSignalPending &&
+      this->rtxCudaToVkSem != VK_NULL_HANDLE;
+    VkPipelineStageFlags waitStage = VK_PIPELINE_STAGE_TRANSFER_BIT;
+    if (waitCudaSignal) {
+      si.waitSemaphoreCount = 1;
+      si.pWaitSemaphores = &this->rtxCudaToVkSem;
+      si.pWaitDstStageMask = &waitStage;
+    }
+    const VkResult submitResult = vkQueueSubmit(this->queue, 1, &si, VK_NULL_HANDLE);
+    const VkResult waitResult = submitResult == VK_SUCCESS
+      ? vkQueueWaitIdle(this->queue) : VK_SUCCESS;
+    if (submitResult == VK_SUCCESS && waitResult == VK_SUCCESS) {
+      this->rtxCudaSignalPending = false;
       this->denoiseResultReady = TRUE;
+      this->convergeAfterDenoise();
+    }
+    else {
+      if (this->rtxCudaSignalPending) {
+        this->consumeVulkanSemaphore(this->rtxCudaToVkSem);
+        this->rtxCudaSignalPending = false;
+      }
+      vkQueueWaitIdle(this->queue);
+      this->denoiseResultReady = FALSE;
       this->convergeAfterDenoise();
     }
     if (getenv("FC_VULKAN_PT_DENOISE_TIMING")) {
@@ -846,14 +893,14 @@ SoRTXRenderBackend::releaseDenoiseStaging()
   this->oidnWorkerDone = FALSE;
 #endif
   if (this->denoiseColorBuf != VK_NULL_HANDLE) {
+    const VkBuffer buf = this->denoiseColorBuf;
+    const VkDeviceMemory mem = this->denoiseColorMem;
     if (this->denoiseStagingPtr) {
-      vkUnmapMemory(this->device, this->denoiseColorMem);
+      vkUnmapMemory(this->device, mem);
       this->denoiseStagingPtr = nullptr;
     }
     // denoiseColorBuf is the single allocation; the alias handles do not
     // own it.
-    vkDestroyBuffer(this->device, this->denoiseColorBuf, this->allocator);
-    vkFreeMemory(this->device, this->denoiseColorMem, this->allocator);
     this->denoiseColorBuf = VK_NULL_HANDLE;
     this->denoiseColorMem = VK_NULL_HANDLE;
     this->denoiseAlbedoBuf = VK_NULL_HANDLE;
@@ -864,6 +911,14 @@ SoRTXRenderBackend::releaseDenoiseStaging()
     this->denoiseNormalMem = VK_NULL_HANDLE;
     this->denoiseGuideMem = VK_NULL_HANDLE;
     this->denoiseOutMem = VK_NULL_HANDLE;
+    this->deferDestroy([this, buf, mem]() {
+      if (buf != VK_NULL_HANDLE) {
+        vkDestroyBuffer(this->device, buf, this->allocator);
+      }
+      if (mem != VK_NULL_HANDLE) {
+        vkFreeMemory(this->device, mem, this->allocator);
+      }
+    });
   }
   // The device-local denoised output and albedo G-buffer are kept across a
   // mid-life degrade (they underpin the present shader bindings 5 and 14 and
@@ -882,16 +937,32 @@ SoRTXRenderBackend::destroyDenoiser()
   // (releaseDenoiseStaging above keeps them so the descriptor set stays
   // valid); the whole backend is going away here so it is safe.
   if (this->denoisedBuffer != VK_NULL_HANDLE) {
-    vkDestroyBuffer(this->device, this->denoisedBuffer, this->allocator);
-    vkFreeMemory(this->device, this->denoisedMemory, this->allocator);
+    const VkBuffer buf = this->denoisedBuffer;
+    const VkDeviceMemory mem = this->denoisedMemory;
     this->denoisedBuffer = VK_NULL_HANDLE;
     this->denoisedMemory = VK_NULL_HANDLE;
+    this->deferDestroy([this, buf, mem]() {
+      if (buf != VK_NULL_HANDLE) {
+        vkDestroyBuffer(this->device, buf, this->allocator);
+      }
+      if (mem != VK_NULL_HANDLE) {
+        vkFreeMemory(this->device, mem, this->allocator);
+      }
+    });
   }
   if (this->albedoBuffer != VK_NULL_HANDLE) {
-    vkDestroyBuffer(this->device, this->albedoBuffer, this->allocator);
-    vkFreeMemory(this->device, this->albedoMemory, this->allocator);
+    const VkBuffer buf = this->albedoBuffer;
+    const VkDeviceMemory mem = this->albedoMemory;
     this->albedoBuffer = VK_NULL_HANDLE;
     this->albedoMemory = VK_NULL_HANDLE;
+    this->deferDestroy([this, buf, mem]() {
+      if (buf != VK_NULL_HANDLE) {
+        vkDestroyBuffer(this->device, buf, this->allocator);
+      }
+      if (mem != VK_NULL_HANDLE) {
+        vkFreeMemory(this->device, mem, this->allocator);
+      }
+    });
   }
 
 #if COIN_BUILD_OIDN
@@ -925,6 +996,21 @@ SoRTXRenderBackend::teardownRtxDenoiser()
   // CUDA driver memory operations act on the current context, so make ours
   // current before freeing the denoiser-owned allocations.
   if (this->rtxCudaCtx) cuCtxSetCurrent(this->rtxCudaCtx);
+  if (this->rtxStream) {
+    cuStreamSynchronize(this->rtxStream);
+  }
+  if (this->rtxInteropSemaphoresReady || this->rtxVkToCudaSem != VK_NULL_HANDLE ||
+      this->rtxCudaToVkSem != VK_NULL_HANDLE ||
+      this->rtxVkToCudaCudaSem != nullptr ||
+      this->rtxCudaToVkCudaSem != nullptr) {
+    this->destroyRtxInteropSemaphore(this->rtxVkToCudaSem,
+                                     this->rtxVkToCudaCudaSem, true);
+    this->destroyRtxInteropSemaphore(this->rtxCudaToVkSem,
+                                     this->rtxCudaToVkCudaSem, true);
+  }
+  this->rtxInteropSemaphoresReady = false;
+  this->rtxVkToCudaSignalPending = false;
+  this->rtxCudaSignalPending = false;
   if (this->rtxDenoiser) {
     optixDenoiserDestroy(this->rtxDenoiser);
     this->rtxDenoiser = nullptr;
@@ -951,13 +1037,19 @@ SoRTXRenderBackend::teardownRtxDenoiser()
       cuDestroyExternalMemory(ext);
       ext = nullptr;
     }
-    if (buf != VK_NULL_HANDLE) {
-      vkDestroyBuffer(this->device, buf, this->allocator);
-      buf = VK_NULL_HANDLE;
-    }
-    if (mem != VK_NULL_HANDLE) {
-      vkFreeMemory(this->device, mem, this->allocator);
-      mem = VK_NULL_HANDLE;
+    const VkBuffer vkBuf = buf;
+    const VkDeviceMemory vkMem = mem;
+    buf = VK_NULL_HANDLE;
+    mem = VK_NULL_HANDLE;
+    if (vkBuf != VK_NULL_HANDLE || vkMem != VK_NULL_HANDLE) {
+      this->deferDestroy([this, vkBuf, vkMem]() {
+        if (vkBuf != VK_NULL_HANDLE) {
+          vkDestroyBuffer(this->device, vkBuf, this->allocator);
+        }
+        if (vkMem != VK_NULL_HANDLE) {
+          vkFreeMemory(this->device, vkMem, this->allocator);
+        }
+      });
     }
   };
   releaseInterop(this->rtxColorVk, this->rtxColorMem, this->rtxColorExt);
@@ -1047,6 +1139,19 @@ SoRTXRenderBackend::initRtxCuda()
         }
       }
     }
+  }
+  if (chosenIndex < 0 && this->haveDeviceUUID) {
+    // A UUID was available, but none of the CUDA devices matched it.  Do not
+    // silently fall back to another GPU: importing memory into a different
+    // CUDA context would bind the denoiser to the wrong physical device.
+    if (getenv("FC_VULKAN_PT_DENOISER_DEBUG")) {
+      fprintf(stderr,
+              "[RTX-DENOISER] no CUDA device matches the Vulkan device UUID "
+              "(count=%d)\n",
+              deviceCount);
+    }
+    this->rtxCudaInitFailed = true;
+    return false;
   }
   if (chosenIndex < 0) chosenIndex = fallbackIndex;
   if (chosenIndex < 0) {
@@ -1178,6 +1283,7 @@ SoRTXRenderBackend::initRtxDenoiser()
     return false;
   }
 
+  this->ensureRtxInteropSemaphores();
   this->rtxInteropReady = true;
   return true;
 }
@@ -1201,14 +1307,52 @@ SoRTXRenderBackend::createRtxInteropBuffer(size_t bytes,
     }
   }
 
+  VkExternalMemoryBufferCreateInfo externalBufInfo {};
+  externalBufInfo.sType = VK_STRUCTURE_TYPE_EXTERNAL_MEMORY_BUFFER_CREATE_INFO;
+  externalBufInfo.handleTypes = VK_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_FD_BIT;
   VkBufferCreateInfo ci {};
   ci.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
+  ci.pNext = &externalBufInfo;
   ci.size = bytes;
   ci.usage = usage;
   ci.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
   if (vkCreateBuffer(this->device, &ci, this->allocator, &buffer) != VK_SUCCESS) {
     return false;
   }
+
+  VkPhysicalDeviceExternalBufferInfo externalQuery {};
+  externalQuery.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_EXTERNAL_BUFFER_INFO;
+  externalQuery.flags = 0;
+  externalQuery.usage = usage;
+  externalQuery.handleType = VK_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_FD_BIT;
+  VkExternalBufferProperties externalProps {};
+  vkGetPhysicalDeviceExternalBufferProperties(this->physicalDevice,
+                                              &externalQuery, &externalProps);
+  const VkExternalMemoryProperties & externalMem =
+    externalProps.externalMemoryProperties;
+  const bool exportable =
+    (externalMem.externalMemoryFeatures &
+     VK_EXTERNAL_MEMORY_FEATURE_EXPORTABLE_BIT) != 0;
+  const bool compatibleOpaque =
+    (externalMem.compatibleHandleTypes &
+     VK_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_FD_BIT) != 0;
+  if (!exportable || !compatibleOpaque) {
+    if (getenv("FC_VULKAN_PT_DENOISER_DEBUG")) {
+      fprintf(stderr,
+              "[RTX-DENOISER] CUDA external buffer is not exportable: "
+              "features=0x%x compatible=0x%x usage=0x%x bytes=%zu\n",
+              static_cast<unsigned>(externalMem.externalMemoryFeatures),
+              static_cast<unsigned>(externalMem.compatibleHandleTypes),
+              static_cast<unsigned>(usage), bytes);
+    }
+    vkDestroyBuffer(this->device, buffer, this->allocator);
+    buffer = VK_NULL_HANDLE;
+    return false;
+  }
+
+  const bool dedicatedOnly =
+    (externalMem.externalMemoryFeatures &
+     VK_EXTERNAL_MEMORY_FEATURE_DEDICATED_ONLY_BIT) != 0;
 
   VkMemoryRequirements req;
   vkGetBufferMemoryRequirements(this->device, buffer, &req);
@@ -1217,17 +1361,30 @@ SoRTXRenderBackend::createRtxInteropBuffer(size_t bytes,
   VkExportMemoryAllocateInfo exportInfo {};
   exportInfo.sType = VK_STRUCTURE_TYPE_EXPORT_MEMORY_ALLOCATE_INFO;
   exportInfo.handleTypes = VK_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_FD_BIT;
+  VkMemoryDedicatedAllocateInfo dedicatedInfo {};
+  dedicatedInfo.sType = VK_STRUCTURE_TYPE_MEMORY_DEDICATED_ALLOCATE_INFO;
+  dedicatedInfo.buffer = buffer;
+  dedicatedInfo.image = VK_NULL_HANDLE;
   VkMemoryAllocateFlagsInfo allocFlags {};
   allocFlags.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_FLAGS_INFO;
   allocFlags.flags = VK_MEMORY_ALLOCATE_DEVICE_ADDRESS_BIT;
-  allocFlags.pNext = &exportInfo;
+  allocFlags.pNext = dedicatedOnly ? static_cast<void *>(&dedicatedInfo)
+                                   : static_cast<void *>(&exportInfo);
+  dedicatedInfo.pNext = &exportInfo;
   VkMemoryAllocateInfo ai {};
   ai.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
   ai.allocationSize = req.size;
   ai.memoryTypeIndex = findMemoryType(this->physicalDevice, req,
                                       VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
   ai.pNext = &allocFlags;
-  if (vkAllocateMemory(this->device, &ai, this->allocator, &memory) != VK_SUCCESS) {
+  if (vkAllocateMemory(this->device, &ai, this->allocator, &memory) !=
+      VK_SUCCESS) {
+    if (getenv("FC_VULKAN_PT_DENOISER_DEBUG")) {
+      fprintf(stderr,
+              "[RTX-DENOISER] failed to allocate external CUDA/Vulkan "
+              "buffer: bytes=%zu dedicatedOnly=%d memoryType=%u\n",
+              bytes, dedicatedOnly ? 1 : 0, ai.memoryTypeIndex);
+    }
     vkDestroyBuffer(this->device, buffer, this->allocator);
     buffer = VK_NULL_HANDLE;
     return false;
@@ -1283,14 +1440,246 @@ SoRTXRenderBackend::createRtxInteropBuffer(size_t bytes,
 }
 
 bool
-SoRTXRenderBackend::updateRtxDenoise(uint32_t w, uint32_t h)
+SoRTXRenderBackend::createRtxInteropSemaphore(VkSemaphore & vkSem,
+                                              CUexternalSemaphore & cudaSem)
+{
+  vkSem = VK_NULL_HANDLE;
+  cudaSem = nullptr;
+  if (!this->device) {
+    return false;
+  }
+  if (!this->vkGetSemaphoreFdKHR) {
+    this->vkGetSemaphoreFdKHR = loadDispatch<PFN_vkGetSemaphoreFdKHR>(
+      vkGetDeviceProcAddr(this->device, "vkGetSemaphoreFdKHR"));
+    if (!this->vkGetSemaphoreFdKHR) {
+      return false;
+    }
+  }
+
+  VkExportSemaphoreCreateInfo exportInfo {};
+  exportInfo.sType = VK_STRUCTURE_TYPE_EXPORT_SEMAPHORE_CREATE_INFO;
+  exportInfo.handleTypes = VK_EXTERNAL_SEMAPHORE_HANDLE_TYPE_OPAQUE_FD_BIT;
+  VkSemaphoreCreateInfo ci {};
+  ci.sType = VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO;
+  ci.pNext = &exportInfo;
+  ci.flags = 0;
+  if (vkCreateSemaphore(this->device, &ci, this->allocator, &vkSem) !=
+      VK_SUCCESS) {
+    return false;
+  }
+
+  VkSemaphoreGetFdInfoKHR fdInfo {};
+  fdInfo.sType = VK_STRUCTURE_TYPE_SEMAPHORE_GET_FD_INFO_KHR;
+  fdInfo.semaphore = vkSem;
+  fdInfo.handleType = VK_EXTERNAL_SEMAPHORE_HANDLE_TYPE_OPAQUE_FD_BIT;
+  int fd = -1;
+  if (this->vkGetSemaphoreFdKHR(this->device, &fdInfo, &fd) != VK_SUCCESS ||
+      fd < 0) {
+    vkDestroySemaphore(this->device, vkSem, this->allocator);
+    vkSem = VK_NULL_HANDLE;
+    return false;
+  }
+
+  CUDA_EXTERNAL_SEMAPHORE_HANDLE_DESC hd {};
+  hd.type = CU_EXTERNAL_SEMAPHORE_HANDLE_TYPE_OPAQUE_FD;
+  hd.handle.fd = fd;
+  hd.flags = 0;
+  const CUresult cr = cuImportExternalSemaphore(&cudaSem, &hd);
+  ::close(fd);
+  if (cr != CUDA_SUCCESS) {
+    vkDestroySemaphore(this->device, vkSem, this->allocator);
+    vkSem = VK_NULL_HANDLE;
+    cudaSem = nullptr;
+    return false;
+  }
+  return true;
+}
+
+void
+SoRTXRenderBackend::destroyRtxInteropSemaphore(VkSemaphore & vkSem,
+                                               CUexternalSemaphore & cudaSem,
+                                               bool deferVulkan)
+{
+  if (cudaSem) {
+    cuDestroyExternalSemaphore(cudaSem);
+    cudaSem = nullptr;
+  }
+  if (vkSem != VK_NULL_HANDLE) {
+    const VkSemaphore sem = vkSem;
+    vkSem = VK_NULL_HANDLE;
+    if (deferVulkan) {
+      this->deferDestroy([this, sem]() {
+        if (sem != VK_NULL_HANDLE) {
+          vkDestroySemaphore(this->device, sem, this->allocator);
+        }
+      });
+    }
+    else if (this->device != VK_NULL_HANDLE) {
+      vkDestroySemaphore(this->device, sem, this->allocator);
+    }
+  }
+}
+
+void
+SoRTXRenderBackend::ensureRtxInteropSemaphores()
+{
+  if (this->rtxInteropSemaphoresReady) {
+    return;
+  }
+  if (!this->rtxCudaCtx) {
+    return;
+  }
+  if (cuCtxSetCurrent(this->rtxCudaCtx) != CUDA_SUCCESS) {
+    return;
+  }
+
+  bool ok = false;
+  if (this->createRtxInteropSemaphore(this->rtxVkToCudaSem,
+                                      this->rtxVkToCudaCudaSem) &&
+      this->createRtxInteropSemaphore(this->rtxCudaToVkSem,
+                                      this->rtxCudaToVkCudaSem)) {
+    this->rtxInteropSemaphoresReady = true;
+    ok = true;
+  }
+  if (!ok) {
+    this->destroyRtxInteropSemaphore(this->rtxVkToCudaSem,
+                                     this->rtxVkToCudaCudaSem, false);
+    this->destroyRtxInteropSemaphore(this->rtxCudaToVkSem,
+                                     this->rtxCudaToVkCudaSem, false);
+    this->rtxInteropSemaphoresReady = false;
+  }
+  this->rtxVkToCudaSignalPending = false;
+  this->rtxCudaSignalPending = false;
+  if (getenv("FC_VULKAN_PT_DENOISER_DEBUG")) {
+    fprintf(stderr, "[RTX-DENOISER] CUDA/Vulkan semaphores ready=%s\n",
+            ok ? "yes" : "no");
+  }
+}
+
+static bool
+submitRtxSemaphoreBarrier(VkDevice device, VkCommandPool pool, VkQueue queue,
+                          const VkAllocationCallbacks * allocator,
+                          VkSemaphore semaphore, bool isSignal)
+{
+  (void)allocator;
+  if (device == VK_NULL_HANDLE || pool == VK_NULL_HANDLE ||
+      queue == VK_NULL_HANDLE || semaphore == VK_NULL_HANDLE) {
+    return false;
+  }
+
+  VkCommandBufferAllocateInfo ai {};
+  ai.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
+  ai.commandPool = pool;
+  ai.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+  ai.commandBufferCount = 1;
+  VkCommandBuffer cmd = VK_NULL_HANDLE;
+  if (vkAllocateCommandBuffers(device, &ai, &cmd) != VK_SUCCESS) {
+    return false;
+  }
+
+  VkCommandBufferBeginInfo bi {};
+  bi.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
+  bi.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+  bool ok = vkBeginCommandBuffer(cmd, &bi) == VK_SUCCESS;
+  if (ok) {
+    VkMemoryBarrier noOp {};
+    noOp.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
+    noOp.srcAccessMask = 0;
+    noOp.dstAccessMask = 0;
+    vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
+                         VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, 0, 1, &noOp, 0,
+                         nullptr, 0, nullptr);
+    ok = vkEndCommandBuffer(cmd) == VK_SUCCESS;
+  }
+  if (ok) {
+    VkSubmitInfo si {};
+    si.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
+    si.commandBufferCount = 1;
+    si.pCommandBuffers = &cmd;
+    VkPipelineStageFlags waitStage = VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT;
+    if (isSignal) {
+      si.signalSemaphoreCount = 1;
+      si.pSignalSemaphores = &semaphore;
+    }
+    else {
+      si.waitSemaphoreCount = 1;
+      si.pWaitSemaphores = &semaphore;
+      si.pWaitDstStageMask = &waitStage;
+    }
+    ok = vkQueueSubmit(queue, 1, &si, VK_NULL_HANDLE) == VK_SUCCESS &&
+         vkQueueWaitIdle(queue) == VK_SUCCESS;
+  }
+  vkFreeCommandBuffers(device, pool, 1, &cmd);
+  return ok;
+}
+
+bool
+SoRTXRenderBackend::signalRtxVkToCudaSemaphore()
+{
+  if (this->rtxVkToCudaSignalPending) {
+    return true;
+  }
+  if (!this->rtxInteropSemaphoresReady ||
+      this->rtxVkToCudaSem == VK_NULL_HANDLE) {
+    return false;
+  }
+  if (!submitRtxSemaphoreBarrier(this->device, this->transientPool,
+                                 this->queue, this->allocator,
+                                 this->rtxVkToCudaSem, true)) {
+    return false;
+  }
+  this->rtxVkToCudaSignalPending = true;
+  return true;
+}
+
+bool
+SoRTXRenderBackend::consumeVulkanSemaphore(VkSemaphore semaphore)
+{
+  return submitRtxSemaphoreBarrier(this->device, this->transientPool,
+                                   this->queue, this->allocator, semaphore,
+                                   false);
+}
+
+bool
+SoRTXRenderBackend::updateRtxDenoise(uint32_t w, uint32_t h,
+                                     bool signalCudaToVulkan)
 {
   if (!this->rtxDenoiser || !this->rtxCudaCtx) return false;
   if (!this->rtxInteropReady) return false;
+  this->rtxCudaSignalPending = false;
 
   // The color image holds the accumulated sum (rgb) with the sample count in
   // w; normalize to the average color in place before OptiX runs.
   if (cuCtxSetCurrent(this->rtxCudaCtx) != CUDA_SUCCESS) return false;
+
+  if (this->rtxInteropSemaphoresReady) {
+    if (this->signalRtxVkToCudaSemaphore()) {
+      CUDA_EXTERNAL_SEMAPHORE_WAIT_PARAMS waitParams {};
+      waitParams.flags = 0;
+      if (cuWaitExternalSemaphoresAsync(&this->rtxVkToCudaCudaSem,
+                                        &waitParams, 1,
+                                        this->rtxStream) == CUDA_SUCCESS) {
+        this->rtxVkToCudaSignalPending = false;
+      }
+      else {
+        cuStreamSynchronize(this->rtxStream);
+        if (this->rtxVkToCudaSignalPending) {
+          this->consumeVulkanSemaphore(this->rtxVkToCudaSem);
+          this->rtxVkToCudaSignalPending = false;
+        }
+        if (this->queue != VK_NULL_HANDLE) {
+          vkQueueWaitIdle(this->queue);
+        }
+      }
+    }
+    else if (this->queue != VK_NULL_HANDLE) {
+      vkQueueWaitIdle(this->queue);
+    }
+  }
+  else if (this->queue != VK_NULL_HANDLE) {
+    vkQueueWaitIdle(this->queue);
+  }
+
   {
     unsigned int n = w * h;
     const unsigned int blocks = (n + 255u) / 256u;
@@ -1354,6 +1743,32 @@ SoRTXRenderBackend::updateRtxDenoise(uint32_t w, uint32_t h)
                           this->rtxScratchBytes) != OPTIX_SUCCESS) {
     return false;
   }
-  return cuStreamSynchronize(this->rtxStream) == CUDA_SUCCESS;
+
+  bool signalQueued = false;
+  if (this->rtxInteropSemaphoresReady && signalCudaToVulkan &&
+      this->rtxCudaToVkSem != VK_NULL_HANDLE) {
+    CUDA_EXTERNAL_SEMAPHORE_SIGNAL_PARAMS sig {};
+    sig.flags = 0;
+    signalQueued =
+      cuSignalExternalSemaphoresAsync(&this->rtxCudaToVkCudaSem, &sig, 1,
+                                      this->rtxStream) == CUDA_SUCCESS;
+  }
+
+  if (cuStreamSynchronize(this->rtxStream) != CUDA_SUCCESS) {
+    if (signalQueued) {
+      this->consumeVulkanSemaphore(this->rtxCudaToVkSem);
+    }
+    this->rtxCudaSignalPending = false;
+    if (this->queue != VK_NULL_HANDLE) {
+      vkQueueWaitIdle(this->queue);
+    }
+    return false;
+  }
+
+  this->rtxCudaSignalPending = signalQueued;
+  if (this->queue != VK_NULL_HANDLE) {
+    vkQueueWaitIdle(this->queue);
+  }
+  return true;
 }
 #endif // COIN_BUILD_RTX_DENOISER

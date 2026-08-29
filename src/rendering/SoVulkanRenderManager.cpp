@@ -259,9 +259,13 @@ SoVulkanRenderManager::SoVulkanRenderManager()
 
 SoVulkanRenderManager::~SoVulkanRenderManager()
 {
-  if (this->pimpl->backendInitialized) {
-    this->pimpl->backend.shutdown();
-  }
+  // Shut down through the manager entry point so both the raster and RTX
+  // backends release their resources in the documented order and the shared
+  // init context is invalidated.  Letting only the raster backend shut down
+  // here left the RTX backend's deferred destruction state to its implicit
+  // member destructor, which can run after the manager has already torn down
+  // surrounding state.
+  this->shutdown();
   delete this->pimpl;
 }
 

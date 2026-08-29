@@ -516,6 +516,62 @@ SoRTXRenderBackend::createPathTracingBuffers(uint32_t width, uint32_t height)
   this->denoiseHeight = height;
   if (!this->createDenoiseBackend()) {
     this->emitError("createPathTracingBuffers: failed to create denoiser backend");
+    if (this->queue != VK_NULL_HANDLE) {
+      vkQueueWaitIdle(this->queue);
+    }
+    this->destroyDenoiser();
+
+    if (this->activeCounterMapped != nullptr) {
+      vkUnmapMemory(this->device, this->activeCounterMemory);
+      this->activeCounterMapped = nullptr;
+    }
+    auto freeBuffer = [this](VkBuffer & buffer, VkDeviceMemory & memory) {
+      if (buffer != VK_NULL_HANDLE) {
+        vkDestroyBuffer(this->device, buffer, this->allocator);
+        buffer = VK_NULL_HANDLE;
+      }
+      if (memory != VK_NULL_HANDLE) {
+        vkFreeMemory(this->device, memory, this->allocator);
+        memory = VK_NULL_HANDLE;
+      }
+    };
+    freeBuffer(this->accumBuffer, this->accumMemory);
+    freeBuffer(this->normalBuffer, this->normalMemory);
+    freeBuffer(this->positionBuffer, this->positionMemory);
+    freeBuffer(this->sumSqBuffer, this->sumSqMemory);
+    freeBuffer(this->activeCounterBuffer, this->activeCounterMemory);
+    freeBuffer(this->accumHistoryBuffer, this->accumHistoryMemory);
+    freeBuffer(this->sumSqHistoryBuffer, this->sumSqHistoryMemory);
+    freeBuffer(this->positionHistoryBuffer, this->positionHistoryMemory);
+    this->ptBufferWidth = 0;
+    this->ptBufferHeight = 0;
+    this->ptHistoryValid = FALSE;
+    this->ptReprojectFrame = FALSE;
+
+    const VkDescriptorSet descriptorSets[] = {
+      this->rtDescriptorSets[0], this->rtDescriptorSets[1],
+      this->presentDescriptorSets[0], this->presentDescriptorSets[1]
+    };
+    size_t descriptorSetCount = 0;
+    while (descriptorSetCount < sizeof(descriptorSets) /
+                                  sizeof(descriptorSets[0]) &&
+           descriptorSets[descriptorSetCount] != VK_NULL_HANDLE) {
+      ++descriptorSetCount;
+    }
+    if (this->descriptorPool != VK_NULL_HANDLE && descriptorSetCount > 0) {
+      vkFreeDescriptorSets(this->device, this->descriptorPool,
+                           static_cast<uint32_t>(descriptorSetCount),
+                           descriptorSets);
+    }
+    this->rtDescriptorSets[0] = VK_NULL_HANDLE;
+    this->rtDescriptorSets[1] = VK_NULL_HANDLE;
+    this->presentDescriptorSets[0] = VK_NULL_HANDLE;
+    this->presentDescriptorSets[1] = VK_NULL_HANDLE;
+    if (!this->updateDescriptors()) {
+      this->emitError(
+        "createPathTracingBuffers: failed to refresh descriptors after "
+        "denoiser backend failure");
+    }
     return false;
   }
   return true;

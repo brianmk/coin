@@ -348,7 +348,14 @@ SoRTXRenderBackend::updateDescriptors()
   posHistInfo.offset = 0;
   posHistInfo.range = VK_WHOLE_SIZE;
   VkDescriptorBufferInfo neePoolInfo {};
-  neePoolInfo.buffer = this->neePoolBuffer;
+  // The RT set layout always declares binding 13, but scenes without
+  // emissive geometry never allocate the NEE pool.  Bind a valid zero-count
+  // placeholder instead of leaving the set entry uninitialized; the NEE
+  // shaders only read this buffer when the uniform block reports a non-zero
+  // triangle count.
+  neePoolInfo.buffer = this->neePoolBuffer != VK_NULL_HANDLE
+                         ? this->neePoolBuffer
+                         : this->activeCounterBuffer;
   neePoolInfo.offset = 0;
   neePoolInfo.range = VK_WHOLE_SIZE;
   VkDescriptorBufferInfo albedoInfo {};
@@ -507,7 +514,7 @@ SoRTXRenderBackend::updateDescriptors()
     posHistWrite.pBufferInfo = &posHistInfo;
     writes.push_back(posHistWrite);
   }
-  if (this->neePoolBuffer != VK_NULL_HANDLE) {
+  if (neePoolInfo.buffer != VK_NULL_HANDLE) {
     VkWriteDescriptorSet neePoolWrite {};
     neePoolWrite.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
     neePoolWrite.dstSet = rtSet;

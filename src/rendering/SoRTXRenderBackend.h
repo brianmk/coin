@@ -685,7 +685,7 @@ private:
   // may still reference them have certainly completed.
   std::vector<std::function<void()>> pendingDestroys[2];
   int pendingDestroyIndex = 0;
-  void flushPendingDestroys();
+  void flushPendingDestroys(bool waitForQueue = false);
   void deferDestroy(std::function<void()> && fn);
 
   // --- Denoiser backends (OIDN / RTX-OptiX / FSR) -------------------------
@@ -753,6 +753,10 @@ private:
   //! kind from the stored preference (instead of the env var) on the next
   //! buffer (re)creation.
   bool denoiseKindDirty = false;
+  //! True once an actual denoiser selection was made.  This distinguishes an
+  //! explicit DenoiseNone selection from the initial "unset" DenoiseNone
+  //! sentinel used to apply the env/default fallback.
+  bool denoiseKindExplicit = false;
 
   // Host-visible staging copies of the G-buffers (device-local accum/normal/
   // albedo are copied in after the trace, denoised on the host (OIDN) or on
@@ -882,6 +886,22 @@ private:
   bool rtxInteropReady = false;
   // vkGetMemoryFdKHR resolved per-device (needed to export the FD).
   PFN_vkGetMemoryFdKHR vkGetMemoryFdKHR = nullptr;
+  // Cross-API synchronization for the imported CUDA/Vulkan working buffers.
+  // rtxVkToCudaSem is signaled by Vulkan (an empty submitted command buffer
+  // after the G-buffer queue idle) and waited by CUDA before OptiX reads the
+  // interop images.  rtxCudaToVkSem is signaled by CUDA after OptiX writes
+  // the output image and waited by Vulkan before copying that image back to
+  // the present resource.  Both are binary FD-imported Vulkan semaphores;
+  // if VK_KHR_external_semaphore_fd is unavailable they stay null and the
+  // code falls back to queue/stream synchronization.
+  VkSemaphore rtxVkToCudaSem = VK_NULL_HANDLE;
+  CUexternalSemaphore rtxVkToCudaCudaSem = nullptr;
+  VkSemaphore rtxCudaToVkSem = VK_NULL_HANDLE;
+  CUexternalSemaphore rtxCudaToVkCudaSem = nullptr;
+  bool rtxInteropSemaphoresReady = false;
+  bool rtxVkToCudaSignalPending = false;
+  bool rtxCudaSignalPending = false;
+  PFN_vkGetSemaphoreFdKHR vkGetSemaphoreFdKHR = nullptr;
 #endif
 
   //! Create the per-backend denoiser resources (called by createPathTracingBuffers).
@@ -911,8 +931,25 @@ private:
   bool createRtxInteropBuffer(size_t bytes, VkBufferUsageFlags usage,
                               VkBuffer & buffer, VkDeviceMemory & memory,
                               CUexternalMemory & ext, CUdeviceptr & devPtr);
+  //! Create an FD-exported Vulkan binary semaphore and import it into CUDA.
+  bool createRtxInteropSemaphore(VkSemaphore & vkSem,
+                                 CUexternalSemaphore & cudaSem);
+  //! Destroy one CUDA/Vulkan interop semaphore pair.
+  void destroyRtxInteropSemaphore(VkSemaphore & vkSem,
+                                  CUexternalSemaphore & cudaSem,
+                                  bool deferVulkan);
+  //! Create both cross-API semaphores; failure leaves queue/stream fallback.
+  void ensureRtxInteropSemaphores();
+  //! Signal rtxVkToCudaSem after the Vulkan G-buffer writes are complete.
+  bool signalRtxVkToCudaSemaphore();
+  //! Submit a queue-visible barrier that consumes an unsignaled binary
+  //! Vulkan semaphore whose signal was produced but not otherwise awaited.
+  bool consumeVulkanSemaphore(VkSemaphore semaphore);
   //! Run one OptiX denoiser pass over the interop color/albedo/normal images.
-  bool updateRtxDenoise(uint32_t w, uint32_t h);
+  //! When \a signalCudaToVulkan is true and the CUDA->Vulkan interop
+  //! semaphore is available, signal it before the stream synchronize so the
+  //! caller's Vulkan copy-back can wait on the CUDA writes.
+  bool updateRtxDenoise(uint32_t w, uint32_t h, bool signalCudaToVulkan);
   //! Free the CUDA context + OptiX denoiser state (keeps Vulkan staging).
   void teardownRtxDenoiser();
 #endif
