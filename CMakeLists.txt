@@ -165,6 +165,16 @@ option(COIN_BUILD_VULKAN_RENDERER
   "Build Coin's experimental Vulkan retained-renderer backend."
   OFF)
 
+# Optional NVIDIA NGX DLSS-RR (Ray Reconstruction) denoiser backend.  The
+# closed-source libnvidia-ngx.so.1 runtime is dlopen()'d at runtime and never
+# linked or vendored; this option only gates the on-GPU denoiser code path
+# (self-authored interop declarations, no NVIDIA headers).  It defaults OFF so
+# a plain build has no NVIDIA dependency; the path tracer falls back to OIDN
+# when this is off or when the runtime/App ID is absent.
+option(COIN_BUILD_DLSS_RR_DENOISER
+  "Build the NVIDIA NGX DLSS-RR denoiser backend (runtime dlopen, no vendored NVIDIA headers)."
+  OFF)
+
 # Make the renderer selection explicit for every Coin translation unit and
 # generated public header.  This keeps core-only declarations and definitions
 # in sync even when the build uses separate object-library targets.
@@ -178,6 +188,12 @@ if(COIN_BUILD_VULKAN_RENDERER)
   set(COIN_BUILD_VULKAN_RENDERER_VALUE 1)
 else()
   set(COIN_BUILD_VULKAN_RENDERER_VALUE 0)
+endif()
+
+if(COIN_BUILD_DLSS_RR_DENOISER)
+  set(COIN_BUILD_DLSS_RR_DENOISER_VALUE 1)
+else()
+  set(COIN_BUILD_DLSS_RR_DENOISER_VALUE 0)
 endif()
 
 check_include_file_cxx(thread HAVE_STD_THREAD)
@@ -1106,6 +1122,7 @@ add_compile_definitions(
   COIN_BUILD_OIDN=${COIN_BUILD_OIDN_VALUE}
   COIN_BUILD_RTX_DENOISER=${COIN_BUILD_RTX_DENOISER_VALUE}
   COIN_BUILD_FSR_DENOISER=${COIN_BUILD_FSR_DENOISER_VALUE}
+  COIN_BUILD_DLSS_RR_DENOISER=${COIN_BUILD_DLSS_RR_DENOISER_VALUE}
 )
 
 # ############################################################################

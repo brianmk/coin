@@ -192,7 +192,8 @@ SoRTXRenderBackend::createDenoiseBackend()
   // effect instead of leaving the denoiser inactive (denoiseKind == None).
   this->denoiseKind = this->denoiseKindPref;
   if (this->denoiseKind != DenoiseRtx && this->denoiseKind != DenoiseOidn &&
-      this->denoiseKind != DenoiseFsr && this->denoiseKind != DenoiseNone) {
+      this->denoiseKind != DenoiseFsr && this->denoiseKind != DenoiseNone &&
+      this->denoiseKind != DenoiseDlssRr) {
     this->denoiseKind = DenoiseOidn;
   }
   if (!this->denoiseKindExplicit && this->denoiseKindPref == DenoiseNone) {
@@ -203,6 +204,10 @@ SoRTXRenderBackend::createDenoiseBackend()
       if (std::strcmp(sel, "rtx") == 0) {
         this->denoiseKind = DenoiseRtx;
         this->denoiseKindPref = DenoiseRtx;
+      }
+      else if (std::strcmp(sel, "dlssrr") == 0) {
+        this->denoiseKind = DenoiseDlssRr;
+        this->denoiseKindPref = DenoiseDlssRr;
       }
       else if (std::strcmp(sel, "fsr") == 0) {
         this->denoiseKind = DenoiseFsr;
@@ -261,16 +266,16 @@ SoRTXRenderBackend::createDenoiseBackend()
   // block at 4x imageBytes (not 5x) avoids wasting 20% of the host-visible
   // barrier, which is the constrained resource that fails the allocation.
   //
-  // The RTX path needs no host staging: it copies the G-buffers device-to-
-  // device into CUDA-Vulkan interop images and runs OptiX entirely on the
-  // GPU, so skip the host-coherent block (several image-sized regions is the
-  // exact allocation that can run the driver out of host-visible memory) and
-  // only allocate it for the host-side OIDN/FSR backends.
+  // The RTX and DLSS-RR paths need no host staging: both run the denoiser
+  // on the GPU and hand the device-local G-buffers directly to the runtime,
+  // so skip the host-coherent block (several image-sized regions is the exact
+  // allocation that can run the driver out of host-visible memory) and only
+  // allocate it for the host-side OIDN/FSR backends.
   const VkDeviceSize pixelBytes = 4 * sizeof(float);
   const VkDeviceSize imageBytes =
     static_cast<VkDeviceSize>(this->denoiseWidth) * this->denoiseHeight *
     pixelBytes;
-  if (this->denoiseKind != DenoiseRtx) {
+  if (this->denoiseKind != DenoiseRtx && this->denoiseKind != DenoiseDlssRr) {
     const VkDeviceSize totalBytes = imageBytes * 4; // color+albedo+normal+out
     if (!this->createHostVisibleBuffer(
           totalBytes, VK_BUFFER_USAGE_TRANSFER_DST_BIT |
@@ -397,6 +402,31 @@ SoRTXRenderBackend::createDenoiseBackend()
   }
 #endif
 
+#if COIN_BUILD_DLSS_RR_DENOISER
+  if (this->denoiseKind == DenoiseDlssRr) {
+    // DLSS-RR is NVIDIA-only and gated on a registered App ID
+    // (FC_RTX_DLSS_APPID) plus the runtime library being dlopen-able.  On any
+    // gate failure the backend reports unavailable and we degrade to OIDN so
+    // the path tracer still produces a denoised image.
+    if (this->createDlssRrBackend()) {
+      this->denoiserActive = true;
+    }
+    else {
+      this->teardownDlssRrBackend();
+      this->denoiseKind = DenoiseOidn;
+#if COIN_BUILD_OIDN
+      if (!this->configureOidnFilter()) {
+        this->emitError("OIDN fallback unavailable; disabling denoise");
+        this->denoiseKind = DenoiseNone;
+      }
+#else
+      this->emitError("DLSS-RR unavailable and OIDN not built; disabling denoise");
+      this->denoiseKind = DenoiseNone;
+#endif
+    }
+  }
+#endif
+
   if (this->denoiseKind == DenoiseFsr) {
 #if COIN_BUILD_FSR_DENOISER
     // FSR setup would go here once the AMD FFX SDK is wired into the build.
@@ -427,6 +457,9 @@ SoRTXRenderBackend::createDenoiseBackend()
 #endif
 #if COIN_BUILD_RTX_DENOISER
   if (this->denoiseKind == DenoiseRtx && this->rtxDenoiser) configured = true;
+#endif
+#if COIN_BUILD_DLSS_RR_DENOISER
+  if (this->denoiseKind == DenoiseDlssRr && this->ngxFeature) configured = true;
 #endif
   if (!configured) {
     if (getenv("FC_VULKAN_PT_DENOISER_DEBUG")) {
@@ -492,6 +525,27 @@ SoRTXRenderBackend::recordDenoiseReadback(VkCommandBuffer cmd)
     vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_TRANSFER_BIT,
                          VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, 1,
                          &afterStaging, 0, nullptr, 0, nullptr);
+    this->oidnReadbackPending = TRUE;
+    return;
+  }
+#endif
+
+#if COIN_BUILD_DLSS_RR_DENOISER
+  // DLSS-RR is also a pure on-GPU denoiser like the RTX path: the G-buffers
+  // stay device-local and the NGX runtime reads them directly through the
+  // NgxResourceVk wrappers (no host staging, no transfer copies).  We still
+  // record a barrier so the raygen G-buffer writes are visible to the
+  // compute-stage denoiser, and flag the pending readback so updateDenoise()
+  // runs the Evaluate pass at the target.
+  if (this->denoiseKind == DenoiseDlssRr && this->ngxFeature) {
+    VkMemoryBarrier before {};
+    before.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
+    before.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
+    before.dstAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT;
+    vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_RAY_TRACING_SHADER_BIT_KHR |
+                              VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                         VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, 1, &before,
+                         0, nullptr, 0, nullptr);
     this->oidnReadbackPending = TRUE;
     return;
   }
@@ -745,6 +799,46 @@ SoRTXRenderBackend::updateDenoise()
   }
 #endif
 
+#if COIN_BUILD_DLSS_RR_DENOISER
+  // GPU-side path: the NGX runtime reads the device-local G-buffers directly
+  // (recordDenoiseReadback recorded the visibility barrier), evaluates RR on
+  // a transient command buffer, and writes the denoised RGBA into
+  // denoisedBuffer (present binding 5) in place.
+  if (this->denoiseKind == DenoiseDlssRr && this->ngxFeature) {
+    const double t0 = std::chrono::duration<double>(
+      std::chrono::steady_clock::now().time_since_epoch()).count();
+    VkCommandBuffer cmd = this->beginTransientCommandBuffer();
+    if (cmd == VK_NULL_HANDLE) {
+      this->denoiseResultReady = FALSE;
+      this->convergeAfterDenoise();
+      return;
+    }
+    this->evaluateDlssRr(cmd);
+    vkEndCommandBuffer(cmd);
+    VkSubmitInfo si {};
+    si.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
+    si.commandBufferCount = 1;
+    si.pCommandBuffers = &cmd;
+    const VkResult sr = vkQueueSubmit(this->queue, 1, &si, VK_NULL_HANDLE);
+    const VkResult wr = sr == VK_SUCCESS ? vkQueueWaitIdle(this->queue) : VK_SUCCESS;
+    if (sr == VK_SUCCESS && wr == VK_SUCCESS) {
+      this->denoiseResultReady = TRUE;
+      this->convergeAfterDenoise();
+    }
+    else {
+      this->denoiseResultReady = FALSE;
+      this->convergeAfterDenoise();
+    }
+    if (getenv("FC_VULKAN_PT_DENOISE_TIMING")) {
+      const double t1 = std::chrono::duration<double>(
+        std::chrono::steady_clock::now().time_since_epoch()).count();
+      fprintf(stderr, "[DENOISE] DLSS-RR denoise took %.1f ms (%ux%u)\n",
+              (t1 - t0) * 1000.0, this->denoiseWidth, this->denoiseHeight);
+    }
+    return;
+  }
+#endif
+
   if (this->denoiseColorBuf == VK_NULL_HANDLE || this->denoiseStagingPtr == nullptr) {
     this->denoiseResultReady = FALSE;
     this->convergeAfterDenoise();
@@ -978,6 +1072,10 @@ SoRTXRenderBackend::destroyDenoiser()
 
 #if COIN_BUILD_RTX_DENOISER
   this->teardownRtxDenoiser();
+#endif
+
+#if COIN_BUILD_DLSS_RR_DENOISER
+  this->teardownDlssRrBackend();
 #endif
 
   this->denoiserActive = false;
