@@ -316,10 +316,13 @@ SoRTXRenderBackend::createPathTracingBuffers(uint32_t width, uint32_t height)
     const VkDeviceMemory sumSqHistMem = this->sumSqHistoryMemory;
     const VkBuffer posHist = this->positionHistoryBuffer;
     const VkDeviceMemory posHistMem = this->positionHistoryMemory;
+    const VkBuffer motion = this->motionBuffer;
+    const VkDeviceMemory motionMem = this->motionMemory;
     this->deferDestroy([device, allocator, accum, accumMem, normal,
                         normalMem, position, positionMem, sumSq, sumSqMem,
                         counter, counterMem, accumHist, accumHistMem,
-                        sumSqHist, sumSqHistMem, posHist, posHistMem]() {
+                        sumSqHist, sumSqHistMem, posHist, posHistMem,
+                        motion, motionMem]() {
       vkDestroyBuffer(device, accum, allocator);
       vkFreeMemory(device, accumMem, allocator);
       vkDestroyBuffer(device, normal, allocator);
@@ -336,6 +339,8 @@ SoRTXRenderBackend::createPathTracingBuffers(uint32_t width, uint32_t height)
       vkFreeMemory(device, sumSqHistMem, allocator);
       vkDestroyBuffer(device, posHist, allocator);
       vkFreeMemory(device, posHistMem, allocator);
+      vkDestroyBuffer(device, motion, allocator);
+      vkFreeMemory(device, motionMem, allocator);
     });
     this->accumBuffer = VK_NULL_HANDLE;
     this->accumMemory = VK_NULL_HANDLE;
@@ -354,6 +359,8 @@ SoRTXRenderBackend::createPathTracingBuffers(uint32_t width, uint32_t height)
     this->sumSqHistoryMemory = VK_NULL_HANDLE;
     this->positionHistoryBuffer = VK_NULL_HANDLE;
     this->positionHistoryMemory = VK_NULL_HANDLE;
+    this->motionBuffer = VK_NULL_HANDLE;
+    this->motionMemory = VK_NULL_HANDLE;
     this->ptHistoryValid = FALSE;
     this->ptReprojectFrame = FALSE;
   }
@@ -404,6 +411,28 @@ SoRTXRenderBackend::createPathTracingBuffers(uint32_t width, uint32_t height)
     this->ptBufferHeight = 0;
     return false;
   }
+  // Screen-space motion-vector G-buffer: written by the tracer, read by the
+  // denoiser readback (same TRANSFER_SRC as the other guides).
+  if (!this->createDeviceLocalBuffer(bytes, usage, this->motionBuffer,
+                                     this->motionMemory)) {
+    vkDestroyBuffer(this->device, this->positionBuffer, this->allocator);
+    vkFreeMemory(this->device, this->positionMemory, this->allocator);
+    vkDestroyBuffer(this->device, this->normalBuffer, this->allocator);
+    vkFreeMemory(this->device, this->normalMemory, this->allocator);
+    vkDestroyBuffer(this->device, this->accumBuffer, this->allocator);
+    vkFreeMemory(this->device, this->accumMemory, this->allocator);
+    this->positionBuffer = VK_NULL_HANDLE;
+    this->positionMemory = VK_NULL_HANDLE;
+    this->normalBuffer = VK_NULL_HANDLE;
+    this->normalMemory = VK_NULL_HANDLE;
+    this->motionBuffer = VK_NULL_HANDLE;
+    this->motionMemory = VK_NULL_HANDLE;
+    this->accumBuffer = VK_NULL_HANDLE;
+    this->accumMemory = VK_NULL_HANDLE;
+    this->ptBufferWidth = 0;
+    this->ptBufferHeight = 0;
+    return false;
+  }
   // Sums-of-squares (cleared via vkCmdFillBuffer like the accumulation
   // buffer) and the host-readable active-pixel counter (4 bytes; 16 keeps
   // the buffer comfortably above any minimum-alignment requirement).
@@ -415,10 +444,14 @@ SoRTXRenderBackend::createPathTracingBuffers(uint32_t width, uint32_t height)
     vkFreeMemory(this->device, this->normalMemory, this->allocator);
     vkDestroyBuffer(this->device, this->accumBuffer, this->allocator);
     vkFreeMemory(this->device, this->accumMemory, this->allocator);
+    vkDestroyBuffer(this->device, this->motionBuffer, this->allocator);
+    vkFreeMemory(this->device, this->motionMemory, this->allocator);
     this->positionBuffer = VK_NULL_HANDLE;
     this->positionMemory = VK_NULL_HANDLE;
     this->normalBuffer = VK_NULL_HANDLE;
     this->normalMemory = VK_NULL_HANDLE;
+    this->motionBuffer = VK_NULL_HANDLE;
+    this->motionMemory = VK_NULL_HANDLE;
     this->accumBuffer = VK_NULL_HANDLE;
     this->accumMemory = VK_NULL_HANDLE;
     this->ptBufferWidth = 0;
@@ -480,6 +513,8 @@ SoRTXRenderBackend::createPathTracingBuffers(uint32_t width, uint32_t height)
     vkFreeMemory(this->device, this->positionMemory, this->allocator);
     vkDestroyBuffer(this->device, this->normalBuffer, this->allocator);
     vkFreeMemory(this->device, this->normalMemory, this->allocator);
+    vkDestroyBuffer(this->device, this->motionBuffer, this->allocator);
+    vkFreeMemory(this->device, this->motionMemory, this->allocator);
     vkDestroyBuffer(this->device, this->accumBuffer, this->allocator);
     vkFreeMemory(this->device, this->accumMemory, this->allocator);
     this->accumHistoryBuffer = VK_NULL_HANDLE;
@@ -497,6 +532,8 @@ SoRTXRenderBackend::createPathTracingBuffers(uint32_t width, uint32_t height)
     this->positionMemory = VK_NULL_HANDLE;
     this->normalBuffer = VK_NULL_HANDLE;
     this->normalMemory = VK_NULL_HANDLE;
+    this->motionBuffer = VK_NULL_HANDLE;
+    this->motionMemory = VK_NULL_HANDLE;
     this->accumBuffer = VK_NULL_HANDLE;
     this->accumMemory = VK_NULL_HANDLE;
     this->ptBufferWidth = 0;
@@ -543,6 +580,7 @@ SoRTXRenderBackend::createPathTracingBuffers(uint32_t width, uint32_t height)
     freeBuffer(this->accumHistoryBuffer, this->accumHistoryMemory);
     freeBuffer(this->sumSqHistoryBuffer, this->sumSqHistoryMemory);
     freeBuffer(this->positionHistoryBuffer, this->positionHistoryMemory);
+    freeBuffer(this->motionBuffer, this->motionMemory);
     this->ptBufferWidth = 0;
     this->ptBufferHeight = 0;
     this->ptHistoryValid = FALSE;

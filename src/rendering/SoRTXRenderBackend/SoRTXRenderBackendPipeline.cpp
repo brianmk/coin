@@ -31,7 +31,7 @@ SoRTXRenderBackend::createDescriptorSetLayout()
   // rays and writes the image/accum/G-buffers, the miss shader samples the
   // frame UBO, and the closest-hit shader reads materials, the frame UBO
   // and the triangle-normal pool.
-  VkDescriptorSetLayoutBinding bindings[15] {};
+  VkDescriptorSetLayoutBinding bindings[16] {};
   bindings[0].binding = 0;
   bindings[0].descriptorType = VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR;
   bindings[0].descriptorCount = 1;
@@ -105,9 +105,19 @@ SoRTXRenderBackend::createDescriptorSetLayout()
   bindings[14].stageFlags = VK_SHADER_STAGE_RAYGEN_BIT_KHR |
     VK_SHADER_STAGE_COMPUTE_BIT;
 
+  // Screen-space motion-vector G-buffer (binding 15): written by the
+  // compute tracer and fed to the temporal denoiser (OIDN 'motion' input /
+  // OptiX motion guide).  Raygen+compute write it; the host readback reads
+  // it back for the denoiser.
+  bindings[15].binding = 15;
+  bindings[15].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+  bindings[15].descriptorCount = 1;
+  bindings[15].stageFlags = VK_SHADER_STAGE_RAYGEN_BIT_KHR |
+    VK_SHADER_STAGE_COMPUTE_BIT;
+
   VkDescriptorSetLayoutCreateInfo ci {};
   ci.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
-  ci.bindingCount = 15;
+  ci.bindingCount = 16;
   ci.pBindings = bindings;
   if (vkCreateDescriptorSetLayout(this->device, &ci, this->allocator,
                                   &this->rtSetLayout) != VK_SUCCESS) {
@@ -362,6 +372,10 @@ SoRTXRenderBackend::updateDescriptors()
   albedoInfo.buffer = this->albedoBuffer;
   albedoInfo.offset = 0;
   albedoInfo.range = VK_WHOLE_SIZE;
+  VkDescriptorBufferInfo motionInfo {};
+  motionInfo.buffer = this->motionBuffer;
+  motionInfo.offset = 0;
+  motionInfo.range = VK_WHOLE_SIZE;
   VkDescriptorBufferInfo denoisedInfo {};
   denoisedInfo.buffer = this->denoisedBuffer;
   denoisedInfo.offset = 0;
@@ -533,6 +547,16 @@ SoRTXRenderBackend::updateDescriptors()
     albedoWrite.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
     albedoWrite.pBufferInfo = &albedoInfo;
     writes.push_back(albedoWrite);
+  }
+  if (this->motionBuffer != VK_NULL_HANDLE) {
+    VkWriteDescriptorSet motionWrite {};
+    motionWrite.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+    motionWrite.dstSet = rtSet;
+    motionWrite.dstBinding = 15;
+    motionWrite.descriptorCount = 1;
+    motionWrite.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+    motionWrite.pBufferInfo = &motionInfo;
+    writes.push_back(motionWrite);
   }
 
   VkWriteDescriptorSet presentWrite {};

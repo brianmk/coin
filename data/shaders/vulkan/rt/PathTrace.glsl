@@ -130,6 +130,13 @@ layout(set = 0, binding = 13, std430) readonly buffer NeePool {
 // First-bounce surface albedo G-buffer for the denoiser (rgb = albedo).
 layout(set = 0, binding = 14, std430) buffer AlbedoBuffer { vec4 albedos[]; };
 
+// First-bounce screen-space motion-vector G-buffer for the temporal denoiser.
+// xy = NDC motion (current frame -> previous frame), z = 1.0 when the pixel
+// had a valid reprojected previous hit (else 0), w = unused.  Produced on the
+// path-tracing path and consumed by OIDN's 'motion' input / OptiX motion
+// guide; the previous frame's camera comes from u_prevViewProj.
+layout(set = 0, binding = 15, std430) buffer MotionBuffer { vec4 motions[]; };
+
 const int COIN_MAX_LIGHTS = 8;
 
 // Small xorshift-style hash: pixel + seed -> two values in [0,1)^2.
@@ -842,6 +849,7 @@ void main()
                 normals[index] = vec4(-rayDir, 1.0);
                 positions[index] = vec4(0.0, 0.0, 0.0, 1.0e7);
                 albedos[index] = vec4(0.0);
+                motions[index] = vec4(0.0);
             }
             break;
         }
@@ -850,6 +858,25 @@ void main()
             // G-buffer for the denoiser (visible surface only).
             normals[index] = vec4(h.normal, 1.0);
             positions[index] = vec4(h.pos, h.t);
+            // Screen-space motion vector for the temporal denoiser.  Project
+            // the current hit through the previous frame's camera to find
+            // where it appeared last frame, then subtract the current NDC.
+            // xy = NDC displacement (current -> previous), z = validity flag.
+            vec4 prevClip = frame.u_prevViewProj * vec4(h.pos, 1.0);
+            vec2 move = vec2(0.0);
+            float valid = 0.0;
+            if (prevClip.w > 0.0) {
+                // raw clip -> NDC (y up); negate y to match the tracer's
+                // flipped NDC space (ndc.y = -ndc.y above) so the delta is
+                // in one consistent screen space.
+                vec2 prevNdc = vec2(prevClip.x / prevClip.w,
+                                    -(prevClip.y / prevClip.w));
+                if (abs(prevNdc.x) <= 1.0 && abs(prevNdc.y) <= 1.0) {
+                    move = prevNdc - ndc;
+                    valid = dot(move, move) < 1.0 ? 1.0 : 0.0;
+                }
+            }
+            motions[index] = vec4(move, valid, 0.0);
         }
 
         RTMaterial mat = matBuffer.materials[h.materialIndex];

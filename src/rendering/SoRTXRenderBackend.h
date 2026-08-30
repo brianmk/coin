@@ -503,6 +503,16 @@ private:
   VkDeviceMemory sumSqHistoryMemory = VK_NULL_HANDLE;
   VkBuffer positionHistoryBuffer = VK_NULL_HANDLE;
   VkDeviceMemory positionHistoryMemory = VK_NULL_HANDLE;
+  // Screen-space motion-vector G-buffer (vec4 per pixel: xy = NDC motion
+  // pointing from the current frame to the previous frame, z = prev-hit
+  // flag, w = unused).  Written by the compute tracer on the first bounce
+  // and consumed by the temporal denoisers (OIDN 'motion' input, OptiX
+  // TEMPORAL/AOV motion guide) that were previously fed only static
+  // albedo/normal guides.  Unlike position (which the reprojection shader
+  // samples), the motion vector is derived per-frame from u_prevViewProj,
+  // so no separate history mirror is needed.
+  VkBuffer motionBuffer = VK_NULL_HANDLE;
+  VkDeviceMemory motionMemory = VK_NULL_HANDLE;
   // Set once at least one traced frame has been swapped into history; the
   // reprojection path only runs with valid history (fresh buffers and
   // resizes reset it).
@@ -785,6 +795,8 @@ private:
   VkDeviceMemory denoiseNormalMem = VK_NULL_HANDLE;
   VkBuffer denoiseGuideBuf = VK_NULL_HANDLE;      //!< [validity mask, ...]
   VkDeviceMemory denoiseGuideMem = VK_NULL_HANDLE;
+  VkBuffer denoiseMotionBuf = VK_NULL_HANDLE;     //!< motion-vector guide (xy NDC)
+  VkDeviceMemory denoiseMotionMem = VK_NULL_HANDLE;
   VkBuffer denoiseOutBuf = VK_NULL_HANDLE;        //!< denoiser output (rgba)
   VkDeviceMemory denoiseOutMem = VK_NULL_HANDLE;
   void * denoiseStagingPtr = nullptr;             //!< maps the host buffers
@@ -869,6 +881,7 @@ private:
   CUdeviceptr rtxColorImage = 0;
   CUdeviceptr rtxAlbedoImage = 0;
   CUdeviceptr rtxNormalImage = 0;
+  CUdeviceptr rtxMotionImage = 0;
   CUdeviceptr rtxOutputImage = 0;
   uint64_t rtxImagePitch = 0;
   size_t rtxScratchBytes = 0;
@@ -885,14 +898,17 @@ private:
   VkBuffer rtxColorVk = VK_NULL_HANDLE;
   VkBuffer rtxAlbedoVk = VK_NULL_HANDLE;
   VkBuffer rtxNormalVk = VK_NULL_HANDLE;
+  VkBuffer rtxMotionVk = VK_NULL_HANDLE;
   VkBuffer rtxOutputVk = VK_NULL_HANDLE;
   VkDeviceMemory rtxColorMem = VK_NULL_HANDLE;
   VkDeviceMemory rtxAlbedoMem = VK_NULL_HANDLE;
   VkDeviceMemory rtxNormalMem = VK_NULL_HANDLE;
+  VkDeviceMemory rtxMotionMem = VK_NULL_HANDLE;
   VkDeviceMemory rtxOutputMem = VK_NULL_HANDLE;
   CUexternalMemory rtxColorExt = nullptr;
   CUexternalMemory rtxAlbedoExt = nullptr;
   CUexternalMemory rtxNormalExt = nullptr;
+  CUexternalMemory rtxMotionExt = nullptr;
   CUexternalMemory rtxOutputExt = nullptr;
   // The CUDA kernel that converts the accumulated radiance sum (rgb) /
   // sample-count (w) into the average color the denoiser expects.

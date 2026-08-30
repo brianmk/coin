@@ -271,7 +271,7 @@ SoRTXRenderBackend::createDenoiseBackend()
     static_cast<VkDeviceSize>(this->denoiseWidth) * this->denoiseHeight *
     pixelBytes;
   if (this->denoiseKind != DenoiseRtx) {
-    const VkDeviceSize totalBytes = imageBytes * 4; // color+albedo+normal+out
+    const VkDeviceSize totalBytes = imageBytes * 5; // color+albedo+normal+motion+out
     if (!this->createHostVisibleBuffer(
           totalBytes, VK_BUFFER_USAGE_TRANSFER_DST_BIT |
             VK_BUFFER_USAGE_TRANSFER_SRC_BIT |
@@ -296,10 +296,12 @@ SoRTXRenderBackend::createDenoiseBackend()
       this->denoiseAlbedoBuf = this->denoiseColorBuf;
       this->denoiseNormalBuf = this->denoiseColorBuf;
       this->denoiseGuideBuf = this->denoiseColorBuf;
+      this->denoiseMotionBuf = this->denoiseColorBuf;
       this->denoiseOutBuf = this->denoiseColorBuf;
       this->denoiseAlbedoMem = this->denoiseColorMem;
       this->denoiseNormalMem = this->denoiseColorMem;
       this->denoiseGuideMem = this->denoiseColorMem;
+      this->denoiseMotionMem = this->denoiseColorMem;
       this->denoiseOutMem = this->denoiseColorMem;
       if (vkMapMemory(this->device, this->denoiseColorMem, 0, totalBytes, 0,
                       &this->denoiseStagingPtr) != VK_SUCCESS) {
@@ -481,6 +483,10 @@ SoRTXRenderBackend::recordDenoiseReadback(VkCommandBuffer cmd)
       VkBufferCopy c2 {0, 0, stride};
       vkCmdCopyBuffer(cmd, this->normalBuffer, this->rtxNormalVk, 1, &c2);
     }
+    if (this->motionBuffer != VK_NULL_HANDLE && this->rtxMotionVk != VK_NULL_HANDLE) {
+      VkBufferCopy cM {0, 0, stride};
+      vkCmdCopyBuffer(cmd, this->motionBuffer, this->rtxMotionVk, 1, &cM);
+    }
 
     // Make the copies visible to the CUDA driver (COMPUTE stage) after the
     // Vulkan queue waits idle.
@@ -526,6 +532,10 @@ SoRTXRenderBackend::recordDenoiseReadback(VkCommandBuffer cmd)
   if (this->normalBuffer != VK_NULL_HANDLE) {
     VkBufferCopy c2 {0, 2 * stride, stride};
     vkCmdCopyBuffer(cmd, this->normalBuffer, this->denoiseColorBuf, 1, &c2);
+  }
+  if (this->motionBuffer != VK_NULL_HANDLE) {
+    VkBufferCopy cM {0, 3 * stride, stride};
+    vkCmdCopyBuffer(cmd, this->motionBuffer, this->denoiseColorBuf, 1, &cM);
   }
 
   VkMemoryBarrier afterStaging {};
@@ -577,7 +587,7 @@ SoRTXRenderBackend::updateDenoise()
         vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_HOST_BIT,
                              VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 1, &hostBar, 0,
                              nullptr, 0, nullptr);
-        VkBufferCopy cOut {3 * stride, 0, stride};
+        VkBufferCopy cOut {4 * stride, 0, stride};
         vkCmdCopyBuffer(cmd, this->denoiseOutBuf, this->denoisedBuffer, 1,
                         &cOut);
         VkMemoryBarrier outBar {};
@@ -760,8 +770,10 @@ SoRTXRenderBackend::updateDenoise()
     static_cast<uint8_t *>(this->denoiseStagingPtr) + stride);
   float * normal = reinterpret_cast<float *>(
     static_cast<uint8_t *>(this->denoiseStagingPtr) + 2 * stride);
-  float * out = reinterpret_cast<float *>(
+  float * motion = reinterpret_cast<float *>(
     static_cast<uint8_t *>(this->denoiseStagingPtr) + 3 * stride);
+  float * out = reinterpret_cast<float *>(
+    static_cast<uint8_t *>(this->denoiseStagingPtr) + 4 * stride);
 #if COIN_BUILD_OIDN
   if (this->denoiseKind == DenoiseOidn && this->oidnFilter) {
     // Confirm the readback request was actually issued (it is recorded on the
@@ -791,8 +803,8 @@ SoRTXRenderBackend::updateDenoise()
       if (this->oidnWorker.joinable()) {
         this->oidnWorker.join();
       }
-      this->oidnWorker = std::thread([this, color, albedo, normal, out, w,
-                                      h, pixels]() {
+      this->oidnWorker = std::thread([this, color, albedo, normal, motion, out,
+                                      w, h, pixels]() {
         // Normalize the accum sum -> average: the sample count sits in the
         // w channel of each color texel and is consumed here; the present
         // shader's denoised-alpha test uses the normalized w (1.0 = hit) to
@@ -818,6 +830,15 @@ SoRTXRenderBackend::updateDenoise()
                                  static_cast<size_t>(w) * 16);
         oidnSetSharedFilterImage(this->oidnFilter, "normal", normal,
                                  OIDN_FORMAT_FLOAT4, w, h, 0, 16,
+                                 static_cast<size_t>(w) * 16);
+        // Motion-vector guide: the RT filter's optional 'motion' input is a
+        // FLOAT2 screen-space NDC vector (current -> previous).  Our motion
+        // region stores a vec4 per pixel (x,y = NDC delta, z = validity); the
+        // 16-byte pixel/row stride presents the leading 2 components so OIDN
+        // consumes only x,y.  The validity flag (z) is unused by OIDN 2.x's
+        // motion input; a zero vector means "no motion".
+        oidnSetSharedFilterImage(this->oidnFilter, "motion", motion,
+                                 OIDN_FORMAT_FLOAT2, w, h, 0, 16,
                                  static_cast<size_t>(w) * 16);
         oidnSetSharedFilterImage(this->oidnFilter, "output", out,
                                  OIDN_FORMAT_FLOAT4, w, h, 0, 16,
@@ -906,10 +927,12 @@ SoRTXRenderBackend::releaseDenoiseStaging()
     this->denoiseAlbedoBuf = VK_NULL_HANDLE;
     this->denoiseNormalBuf = VK_NULL_HANDLE;
     this->denoiseGuideBuf = VK_NULL_HANDLE;
+    this->denoiseMotionBuf = VK_NULL_HANDLE;
     this->denoiseOutBuf = VK_NULL_HANDLE;
     this->denoiseAlbedoMem = VK_NULL_HANDLE;
     this->denoiseNormalMem = VK_NULL_HANDLE;
     this->denoiseGuideMem = VK_NULL_HANDLE;
+    this->denoiseMotionMem = VK_NULL_HANDLE;
     this->denoiseOutMem = VK_NULL_HANDLE;
     this->deferDestroy([this, buf, mem]() {
       if (buf != VK_NULL_HANDLE) {
@@ -1055,10 +1078,12 @@ SoRTXRenderBackend::teardownRtxDenoiser()
   releaseInterop(this->rtxColorVk, this->rtxColorMem, this->rtxColorExt);
   releaseInterop(this->rtxAlbedoVk, this->rtxAlbedoMem, this->rtxAlbedoExt);
   releaseInterop(this->rtxNormalVk, this->rtxNormalMem, this->rtxNormalExt);
+  releaseInterop(this->rtxMotionVk, this->rtxMotionMem, this->rtxMotionExt);
   releaseInterop(this->rtxOutputVk, this->rtxOutputMem, this->rtxOutputExt);
   this->rtxColorImage = 0;
   this->rtxAlbedoImage = 0;
   this->rtxNormalImage = 0;
+  this->rtxMotionImage = 0;
   this->rtxOutputImage = 0;
   this->rtxInteropReady = false;
 
@@ -1266,6 +1291,9 @@ SoRTXRenderBackend::initRtxDenoiser()
       !this->createRtxInteropBuffer(imageBytes, inUsage, this->rtxNormalVk,
                                     this->rtxNormalMem, this->rtxNormalExt,
                                     this->rtxNormalImage) ||
+      !this->createRtxInteropBuffer(imageBytes, inUsage, this->rtxMotionVk,
+                                    this->rtxMotionMem, this->rtxMotionExt,
+                                    this->rtxMotionImage) ||
       !this->createRtxInteropBuffer(imageBytes, outUsage, this->rtxOutputVk,
                                     this->rtxOutputMem, this->rtxOutputExt,
                                     this->rtxOutputImage)) {
@@ -1703,12 +1731,22 @@ SoRTXRenderBackend::updateRtxDenoise(uint32_t w, uint32_t h,
   albedoImage.data = this->rtxAlbedoImage;
   OptixImage2D normalImage = colorImage;
   normalImage.data = this->rtxNormalImage;
+  // Motion flow guide.  The flow field is a per-pixel FLOAT2 screen-space
+  // NDC vector; our motion buffer is FLOAT4 (x,y = NDC delta, z = validity),
+  // so a 16-byte pixel stride reads the leading two components.  This guide
+  // is only consumed by the TEMPORAL model kinds; the AOV model ignores it,
+  // so leaving it zero-validated against a real image is harmless.
+  OptixImage2D motionImage = colorImage;
+  motionImage.data = this->rtxMotionImage;
+  motionImage.pixelStrideInBytes = 4 * sizeof(float);
+  motionImage.format = OPTIX_PIXEL_FORMAT_FLOAT2;
   OptixImage2D outputImage = colorImage;
   outputImage.data = this->rtxOutputImage;
 
   OptixDenoiserGuideLayer guide {};
   guide.albedo = albedoImage;
   guide.normal = normalImage;
+  guide.flow = motionImage;
 
   OptixDenoiserLayer layer {};
   layer.input = colorImage;
