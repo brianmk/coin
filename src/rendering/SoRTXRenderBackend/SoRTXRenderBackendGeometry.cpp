@@ -621,6 +621,10 @@ SoRTXRenderBackend::updateGeometryCache(const SoDrawList & drawlist)
     }
   }
   if (anyStale) {
+    // Removing geometry is a scene change: the TLAS must be rebuilt (not
+    // MODE_UPDATE refit) so the instance set reflects the liveness above,
+    // and the accumulation/history reset.
+    this->cacheChanged = true;
     size_t write = 0;
     for (size_t idx = 0; idx < this->geometryCache.size(); ++idx) {
       if (this->geometryCache[idx].cacheGeneration == frame) {
@@ -1136,7 +1140,10 @@ SoRTXRenderBackend::buildTlas(const SoDrawList & drawlist, VkCommandBuffer cmd)
   buildInfo.sType =
     VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_BUILD_GEOMETRY_INFO_KHR;
   buildInfo.type = VK_ACCELERATION_STRUCTURE_TYPE_TOP_LEVEL_KHR;
-  buildInfo.flags = VK_BUILD_ACCELERATION_STRUCTURE_PREFER_FAST_TRACE_BIT_KHR;
+  // The TLAS is rebuilt from a host-visible instance buffer every frame, so
+  // MODE_BUILD on every instance for pre-built BLASes is the common path.
+  buildInfo.flags = VK_BUILD_ACCELERATION_STRUCTURE_PREFER_FAST_TRACE_BIT_KHR |
+                    VK_BUILD_ACCELERATION_STRUCTURE_ALLOW_UPDATE_BIT_KHR;
   buildInfo.mode = VK_BUILD_ACCELERATION_STRUCTURE_MODE_BUILD_KHR;
   buildInfo.geometryCount = 1;
   buildInfo.pGeometries = &geometry;
@@ -1165,6 +1172,11 @@ SoRTXRenderBackend::buildTlas(const SoDrawList & drawlist, VkCommandBuffer cmd)
       this->tlasMemory = VK_NULL_HANDLE;
     }
     this->tlasSize = sizeInfo.accelerationStructureSize;
+    // A freshly created TLAS has no previous instance data to refit, so the
+    // first build into it (this frame) must be a full MODE_BUILD.  The refit
+    // path below only engages on frames after this one.
+    this->tlasBuiltOnce = false;
+    this->previousInstanceCount = 0;
     if (!this->createDeviceLocalBuffer(
           this->tlasSize,
           VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_STORAGE_BIT_KHR |
@@ -1188,6 +1200,22 @@ SoRTXRenderBackend::buildTlas(const SoDrawList & drawlist, VkCommandBuffer cmd)
 
   buildInfo.dstAccelerationStructure = this->tlas;
   buildInfo.scratchData.deviceAddress = this->scratchAddress;
+  // Refit in place when the BLAS set is unchanged (only instance transforms /
+  // the camera moved): the TLAS already exists and the instance count is not
+  // growing.  MODE_UPDATE reads the previous instance data from
+  // srcAccelerationStructure and only re-traces the instance transforms,
+  // which is far cheaper than a full rebuild.  A rebuild is forced when
+  // geometry content changed (cacheChanged), the instance count grew, or the
+  // TLAS was just created this frame.
+  const bool useUpdate = this->tlasBuiltOnce &&
+    !this->cacheChanged &&
+    this->instanceCount <= this->previousInstanceCount;
+  if (useUpdate) {
+    buildInfo.mode = VK_BUILD_ACCELERATION_STRUCTURE_MODE_UPDATE_KHR;
+    buildInfo.srcAccelerationStructure = this->tlas;
+  }
+  this->previousInstanceCount = this->instanceCount;
+  this->tlasBuiltOnce = true;
   VkAccelerationStructureBuildRangeInfoKHR rangeInfo {};
   rangeInfo.primitiveCount = this->instanceCount;
   rangeInfo.primitiveOffset = 0;

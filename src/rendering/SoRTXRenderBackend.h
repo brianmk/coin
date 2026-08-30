@@ -611,6 +611,13 @@ private:
   VkBuffer tlasBuffer = VK_NULL_HANDLE;
   VkDeviceMemory tlasMemory = VK_NULL_HANDLE;
   VkDeviceSize tlasSize = 0;
+  // TLAS refit state: when the BLAS set and instance count are unchanged
+  // (only the camera / instance transform moved) buildTlas() issues a
+  // VK_BUILD_ACCELERATION_STRUCTURE_MODE_UPDATE_KHR refit against the
+  // persistent TLAS instead of a full MODE_BUILD rebuild.  CacheChanged (set
+  // by updateGeometryCache) and an instance-count growth both force a rebuild.
+  bool tlasBuiltOnce = false;
+  uint32_t previousInstanceCount = 0;
   VkBuffer instanceBuffer = VK_NULL_HANDLE;
   VkDeviceMemory instanceMemory = VK_NULL_HANDLE;
   uint32_t instanceCount = 0;
