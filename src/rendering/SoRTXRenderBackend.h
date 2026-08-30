@@ -425,6 +425,8 @@ private:
   VkImageView offscreenColorView = VK_NULL_HANDLE;
   VkFormat offscreenColorFormat = VK_FORMAT_UNDEFINED;
   VkSampleCountFlagBits offscreenSampleCount = VK_SAMPLE_COUNT_1_BIT;
+  VkImage offscreenDepthImage = VK_NULL_HANDLE;
+  VkImageView offscreenDepthView = VK_NULL_HANDLE;
   VkExtent2D offscreenExtent = {};
 
   VkShaderModule pathTraceModule = VK_NULL_HANDLE; //!< ray-query compute tracer

@@ -851,13 +851,17 @@ SoRTXRenderBackend::createPresentPipeline(VkRenderPass renderPass,
   depthStencil.sType =
     VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO;
   // The present pass writes the scene depth from the first-bounce hit
-  // position (PresentFragment.glsl) so the raster composite overlay can
-  // depth-test BRep edge lines against the traced surface, occluding hidden
-  // edges.  Depth test stays off (it is a fullscreen present), but depth
-  // write is enabled for the composite to see.
-  depthStencil.depthTestEnable = VK_FALSE;
+  // position (PresentFragment.glsl sets gl_FragDepth) so the raster
+  // composite overlay that runs afterwards can depth-test BRep edge lines
+  // and the navigation cube against the traced surface, occluding hidden
+  // edges.  The render pass carries a depth attachment (when the target has
+  // one); the fullscreen triangle writes every fragment exactly once, so a
+  // compare of ALWAYS is safe and the depth values land in the buffer the
+  // overlay reads.
+  depthStencil.depthTestEnable = VK_TRUE;
   depthStencil.depthWriteEnable = VK_TRUE;
   depthStencil.depthCompareOp = VK_COMPARE_OP_ALWAYS;
+  depthStencil.stencilTestEnable = VK_FALSE;
   VkPipelineColorBlendAttachmentState blendAttachment {};
   blendAttachment.colorWriteMask = VK_COLOR_COMPONENT_R_BIT |
     VK_COLOR_COMPONENT_G_BIT | VK_COLOR_COMPONENT_B_BIT |

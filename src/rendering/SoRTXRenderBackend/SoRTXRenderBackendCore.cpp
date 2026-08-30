@@ -1026,6 +1026,8 @@ SoRTXRenderBackend::render(const SoDrawList & drawlist,
     this->offscreenColorView != target->colorImageView ||
     this->offscreenColorFormat != target->colorFormat ||
     this->offscreenSampleCount != target->sampleCount ||
+    this->offscreenDepthImage != target->depthImage ||
+    this->offscreenDepthView != target->depthImageView ||
     this->offscreenExtent.width != target->extent.width ||
     this->offscreenExtent.height != target->extent.height;
   if (targetChanged) {
@@ -1055,14 +1057,42 @@ SoRTXRenderBackend::render(const SoDrawList & drawlist,
     VkAttachmentReference colorRef {};
     colorRef.attachment = 0;
     colorRef.layout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+
+    // The traced scene depth is written here (PresentFragment.glsl sets
+    // gl_FragDepth from the first-bounce hit position) so the raster
+    // composite overlay that runs afterwards (BRep edge lines, navigation
+    // cube) can depth-test against it and cull hidden edges.  Without a depth
+    // attachment the write is discarded and overlay edges show through faces.
+    const bool hasDepth = target->depthImageView != VK_NULL_HANDLE &&
+                          target->depthFormat != VK_FORMAT_UNDEFINED;
+    VkAttachmentDescription depthAttachment {};
+    VkAttachmentReference depthRef {};
+    uint32_t attachmentCount = 1;
+    if (hasDepth) {
+      depthAttachment.format = target->depthFormat;
+      depthAttachment.samples = target->sampleCount;
+      depthAttachment.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
+      depthAttachment.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
+      depthAttachment.stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
+      depthAttachment.stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
+      depthAttachment.initialLayout = target->depthLayout;
+      depthAttachment.finalLayout = target->depthLayout;
+      depthRef.attachment = 1;
+      depthRef.layout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
+      attachmentCount = 2;
+    }
+
     VkSubpassDescription subpass {};
     subpass.pipelineBindPoint = VK_PIPELINE_BIND_POINT_GRAPHICS;
     subpass.colorAttachmentCount = 1;
     subpass.pColorAttachments = &colorRef;
+    subpass.pDepthStencilAttachment = hasDepth ? &depthRef : nullptr;
     VkRenderPassCreateInfo rpCI {};
     rpCI.sType = VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO;
-    rpCI.attachmentCount = 1;
-    rpCI.pAttachments = &attachment;
+    rpCI.attachmentCount = attachmentCount;
+    rpCI.pAttachments = hasDepth
+      ? (const VkAttachmentDescription[]){attachment, depthAttachment}
+      : &attachment;
     rpCI.subpassCount = 1;
     rpCI.pSubpasses = &subpass;
     if (vkCreateRenderPass(this->device, &rpCI, this->allocator,
@@ -1074,8 +1104,10 @@ SoRTXRenderBackend::render(const SoDrawList & drawlist,
     VkFramebufferCreateInfo fci {};
     fci.sType = VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO;
     fci.renderPass = this->offscreenRenderPass;
-    fci.attachmentCount = 1;
-    fci.pAttachments = &target->colorImageView;
+    fci.attachmentCount = attachmentCount;
+    const VkImageView attachments[] = {target->colorImageView,
+                                       target->depthImageView};
+    fci.pAttachments = attachments;
     fci.width = target->extent.width;
     fci.height = target->extent.height;
     fci.layers = 1;
@@ -1092,6 +1124,8 @@ SoRTXRenderBackend::render(const SoDrawList & drawlist,
     this->offscreenColorView = target->colorImageView;
     this->offscreenColorFormat = target->colorFormat;
     this->offscreenSampleCount = target->sampleCount;
+    this->offscreenDepthImage = target->depthImage;
+    this->offscreenDepthView = target->depthImageView;
     this->offscreenExtent = target->extent;
   }
   const VkRenderPass renderPass = this->offscreenRenderPass;
@@ -1119,8 +1153,18 @@ SoRTXRenderBackend::render(const SoDrawList & drawlist,
     rpbi.framebuffer = framebuffer;
     rpbi.renderArea.offset = {0, 0};
     rpbi.renderArea.extent = target->extent;
-    rpbi.clearValueCount = 0;
-    rpbi.pClearValues = nullptr;
+    // Depth attachment (when present) is LOAD_OP_CLEAR so the composite
+    // overlay's LESS_OR_EQUAL depth test starts from a clean far plane
+    // (background = 1.0); the present pass then writes the real scene depth
+    // for traced pixels so hidden edges/navcube are culled.
+    const bool hasDepthClear =
+      target->depthImageView != VK_NULL_HANDLE &&
+      target->depthFormat != VK_FORMAT_UNDEFINED;
+    VkClearValue clearValues[2] {};
+    clearValues[0].color = {{0.0f, 0.0f, 0.0f, 0.0f}};
+    clearValues[1].depthStencil = {1.0f, 0};
+    rpbi.clearValueCount = hasDepthClear ? 2u : 1u;
+    rpbi.pClearValues = clearValues;
     vkCmdBeginRenderPass(cmd, &rpbi, VK_SUBPASS_CONTENTS_INLINE);
 
     // The attachment is loaded, not cleared at pass begin: the clear is
