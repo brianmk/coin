@@ -935,7 +935,22 @@ SbBool
 SoText2P::shouldBuildGlyphCache(SoState * state)
 {
   if (this->cache == NULL) return TRUE;
-  return !this->cache->isValid(state);
+  if (!this->cache->isValid(state)) return TRUE;
+
+  // SoGlyphCache::isValid relies on the SoCacheElement stack, which does not
+  // track this node's own expression/string content.  A cache that was built
+  // while the string was empty therefore stays "valid" forever: once a string
+  // is later set the glyphs are never re-fetched and the bounding box is never
+  // computed, so the text produces no quad and silently disappears in the IR
+  // (Vulkan) renderer.  Force a rebuild whenever a non-empty string is present
+  // but was never laid out (empty bbox).
+  if (PUBLIC(this)->string.getNum() > 0
+      && PUBLIC(this)->string[0].getLength() > 0
+      && this->bbox.isEmpty()) {
+    return TRUE;
+  }
+
+  return FALSE;
 }
 
 void
