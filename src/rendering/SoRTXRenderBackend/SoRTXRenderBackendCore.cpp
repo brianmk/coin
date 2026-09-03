@@ -1183,11 +1183,16 @@ SoRTXRenderBackend::render(const SoDrawList & drawlist,
     subpass.pColorAttachments = &colorRef;
     subpass.pDepthStencilAttachment = hasDepth ? &depthRef : nullptr;
     VkRenderPassCreateInfo rpCI {};
+    // C99 compound literals ((Type[]){...}) are invalid in C++, so build the
+    // render-pass attachment array on the stack instead of using one on the
+    // branch (the framebuffer code below reuses the name 'attachments').
+    VkAttachmentDescription renderPassAttachments[2] = {
+      attachment,
+      depthAttachment
+    };
     rpCI.sType = VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO;
     rpCI.attachmentCount = attachmentCount;
-    rpCI.pAttachments = hasDepth
-      ? (const VkAttachmentDescription[]){attachment, depthAttachment}
-      : &attachment;
+    rpCI.pAttachments = hasDepth ? renderPassAttachments : &attachment;
     rpCI.subpassCount = 1;
     rpCI.pSubpasses = &subpass;
     if (vkCreateRenderPass(this->device, &rpCI, this->allocator,
