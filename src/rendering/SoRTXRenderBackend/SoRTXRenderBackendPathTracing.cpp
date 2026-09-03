@@ -72,6 +72,66 @@ SoRTXRenderBackend::updatePathTracingState(const SoDrawList & drawlist,
   }
   const bool sceneChanged = this->cacheChanged;
 
+  // Background / environment change detection.  The viewport gradient, sky and
+  // sun drive the environment radiance but NEVER the acceleration structures,
+  // so a change must restart the tracer while leaving the (skippable) AS phase
+  // unchanged.  Matches the bg values the frame block writes below.
+  float curBgTop[4];
+  float curBgBottom[4];
+  if (this->envMapId >= 0) {
+    curBgTop[0] = this->envSkyTop[0];
+    curBgTop[1] = this->envSkyTop[1];
+    curBgTop[2] = this->envSkyTop[2];
+    curBgBottom[0] = this->envSkyBottom[0];
+    curBgBottom[1] = this->envSkyBottom[1];
+    curBgBottom[2] = this->envSkyBottom[2];
+  }
+  else {
+    curBgTop[0] = params.backgroundTopColor[0];
+    curBgTop[1] = params.backgroundTopColor[1];
+    curBgTop[2] = params.backgroundTopColor[2];
+    curBgBottom[0] = params.backgroundBottomColor[0];
+    curBgBottom[1] = params.backgroundBottomColor[1];
+    curBgBottom[2] = params.backgroundBottomColor[2];
+  }
+  curBgTop[3] = 1.0f;
+  curBgBottom[3] = 1.0f;
+  const float curEnvIntensity = this->envMapId >= 0
+    ? this->envIntensity * this->envSkyBrightness : 0.0f;
+  // Epsilon compare: the viewport gradient colours are stable, but a tiny
+  // re-derivation (e.g. a gradient recomputed per redraw) must not read as a
+  // background change -- that would clear a pending denoise at the sample
+  // ceiling and the run would never publish a denoised frame.
+  const auto fne = [](float a, float b) {
+    const float d = a - b;
+    return (d > 1.0e-4f) || (d < -1.0e-4f);
+  };
+  bool backgroundChanged = !this->haveLastBackground;
+  if (!backgroundChanged) {
+    backgroundChanged =
+      this->envMapId != this->lastEnvMapId ||
+      fne(curEnvIntensity, this->lastEnvIntensity) ||
+      fne(curBgTop[0], this->lastBgTopColors[0]) ||
+      fne(curBgTop[1], this->lastBgTopColors[1]) ||
+      fne(curBgTop[2], this->lastBgTopColors[2]) ||
+      fne(curBgBottom[0], this->lastBgBottomColors[0]) ||
+      fne(curBgBottom[1], this->lastBgBottomColors[1]) ||
+      fne(curBgBottom[2], this->lastBgBottomColors[2]) ||
+      fne(this->envSunDir[0], this->lastSunDir[0]) ||
+      fne(this->envSunDir[1], this->lastSunDir[1]) ||
+      fne(this->envSunDir[2], this->lastSunDir[2]) ||
+      fne(this->envSunColor[0], this->lastSunColor[0]) ||
+      fne(this->envSunColor[1], this->lastSunColor[1]) ||
+      fne(this->envSunColor[2], this->lastSunColor[2]);
+  }
+  std::memcpy(this->lastBgTopColors, curBgTop, sizeof(curBgTop));
+  std::memcpy(this->lastBgBottomColors, curBgBottom, sizeof(curBgBottom));
+  std::memcpy(this->lastSunDir, this->envSunDir, sizeof(this->envSunDir));
+  std::memcpy(this->lastSunColor, this->envSunColor, sizeof(this->envSunColor));
+  this->lastEnvIntensity = curEnvIntensity;
+  this->lastEnvMapId = this->envMapId;
+  this->haveLastBackground = true;
+
   // The temporal-reprojection path starts every frame disabled; only the
   // camera-move and auto-restart branches below re-enable it for exactly
   // one frame.  The previous frame's camera is still in lastViewMatrix /
@@ -127,10 +187,12 @@ SoRTXRenderBackend::updatePathTracingState(const SoDrawList & drawlist,
     this->ptWasMoving = FALSE;
     this->ptDenoisePending = FALSE;
     this->denoiseResultReady = FALSE;
+    this->ptForceFullResolve = TRUE;
   }
-  else if (sceneChanged || (viewChanged && !this->haveLastView)) {
+  else if (backgroundChanged || sceneChanged || (viewChanged && !this->haveLastView)) {
     // A scene edit invalidates the history (surface colors may be stale
-    // even where positions match), and the very first frame has nothing to
+    // even where positions match), a background/environment change changes
+    // the environment radiance, and the very first frame has nothing to
     // reproject: drop to the 1-spp live preview; the settle counter then
     // restarts accumulation.  Camera-only changes fall through to the
     // reprojection branch below.
@@ -141,6 +203,7 @@ SoRTXRenderBackend::updatePathTracingState(const SoDrawList & drawlist,
     this->ptWasMoving = FALSE;
     this->ptDenoisePending = FALSE;
     this->denoiseResultReady = FALSE;
+    this->ptForceFullResolve = TRUE;
   }
   else if (viewChanged) {
     // --- Reset-on-move ---------------------------------------------------
@@ -160,6 +223,7 @@ SoRTXRenderBackend::updatePathTracingState(const SoDrawList & drawlist,
     this->ptWasMoving = FALSE;
     this->ptDenoisePending = FALSE;
     this->denoiseResultReady = FALSE;
+    this->ptForceFullResolve = TRUE;
   }
   else if (this->ptAccumulating) {
     // --- Accumulate-while-static -----------------------------------------
@@ -176,8 +240,14 @@ SoRTXRenderBackend::updatePathTracingState(const SoDrawList & drawlist,
     const bool adaptivelyConverged =
       !this->useSbtPipeline && this->ptAdaptiveEnabled &&
       this->ptFrameIndex >= this->ptAdaptiveMinSamples &&
-      this->ptLastActiveFraction < this->ptAdaptiveStopFraction;
+      this->ptLastActiveFraction < this->ptAdaptiveStopFraction &&
+      !this->ptForceFullResolve;
     if (this->ptFrameIndex >= this->ptMaxSamples || adaptivelyConverged) {
+      // A full-resolve run (after a move or fresh start) only idles once the
+      // hard sample cap is reached, so the tiny/off-centre boxes that the
+      // adaptive sampler would otherwise freeze at a thin background-leaning
+      // mean get solid coverage before the viewport holds a faint frame.
+      this->ptForceFullResolve = FALSE;
       if (this->denoiserActive && this->denoisedBuffer != VK_NULL_HANDLE) {
         // Denoise-at-target: keep accumulating the final frame (so the
         // G-buffer readback is recorded) and let updateDenoise run once,
@@ -368,12 +438,15 @@ SoRTXRenderBackend::updateAdaptiveStats()
   if (getenv("FC_VULKAN_RT_DEBUG") && this->ptEnabled) {
     fprintf(stderr,
             "[RTDBG] adaptive frame=%u active=%u/%llu fraction=%.4f "
-            "frameIndex=%u accum=%d self=%p buf=%ux%u reprojected=%u\n",
+            "frameIndex=%u accum=%d self=%p buf=%ux%u reprojected=%u "
+            "maxSamp=%u minSamp=%u fill=%d\n",
             this->ptLastFrame, active,
             static_cast<unsigned long long>(total),
             this->ptLastActiveFraction, this->ptFrameIndex,
             this->ptAccumulating ? 1 : 0, static_cast<const void *>(this),
-            this->ptBufferWidth, this->ptBufferHeight, reprojected);
+            this->ptBufferWidth, this->ptBufferHeight, reprojected,
+            this->ptMaxSamples, this->ptAdaptiveMinSamples,
+            this->ptForceFullResolve ? 1 : 0);
   }
 }
 
@@ -382,10 +455,6 @@ SoRTXRenderBackend::recordAccelerationStructures(
   const SoDrawList & drawlist, const SoRenderParams & params,
   const SoVulkanRenderTarget & target, VkCommandBuffer cmd)
 {
-  // Alternate the descriptor pair before any descriptor updates this frame:
-  // the previous frame's sets may still be bound to a pending submission.
-  this->descriptorSetIndex = (this->descriptorSetIndex + 1) & 1u;
-
   // The geometry cache update must run first: it computes cacheChanged,
   // which the path tracing state machine consumes as the scene-change
   // signal (see updatePathTracingState()).
@@ -449,10 +518,28 @@ SoRTXRenderBackend::recordAccelerationStructures(
     if (found == this->commandToCache.end()) continue;
     RTXCachedGeometry & entry = this->geometryCache[found->second];
     if (entry.refitPending) {
-      ++this->statBlasRefit;
-      if (!this->refitBlas(entry, command, cmd)) {
-        this->emitError("recordAccelerationStructures: failed to refit BLAS");
-        return false;
+      // A compacted BLAS cannot be MODE_UPDATE'd safely (the compact copy is a
+      // fresh AS); rebuild it instead of refitting in place.
+      if (entry.compacted) {
+        ++this->statBlasBuilt;
+        if (entry.blas != VK_NULL_HANDLE) {
+          this->deferDestroyCacheEntry(entry);
+        }
+        else {
+          entry = RTXCachedGeometry();
+        }
+        if (!this->buildBlas(entry, command, cmd)) {
+          this->emitError("recordAccelerationStructures: failed to rebuild "
+                          "compacted BLAS");
+          return false;
+        }
+      }
+      else {
+        ++this->statBlasRefit;
+        if (!this->refitBlas(entry, command, cmd)) {
+          this->emitError("recordAccelerationStructures: failed to refit BLAS");
+          return false;
+        }
       }
     }
     else if (entry.blas == VK_NULL_HANDLE) {
@@ -473,38 +560,56 @@ SoRTXRenderBackend::recordAccelerationStructures(
               this->statBlasReused, this->geometryCache.size());
   }
 
-  // Emissive-triangle pool for NEE.  Rebuilt every frame so the baked
-  // object-to-world transforms stay fresh on transform-only edits (which
-  // refit BLASes instead of rebuilding geometry).  Runs before
-  // updateMaterials(), which carries the pool offsets into the RTMaterial
-  // records.
-  this->buildNeePool(drawlist);
-  this->updateMaterials(drawlist);
+  // Decide whether the acceleration structures need (re)building this frame.
+  // Geometry content changes (cacheChanged) or an instance-transform change
+  // (asTransformChanged) both require an AS rebuild; a camera-only orbit does
+  // not (the AS is world-space), so the whole buildTlas / NEE-pool / material /
+  // descriptor phase is skipped and the previous frame's AS + descriptors are
+  // reused for the re-trace.  After a camera move of a static scene this drops
+  // the per-frame TLAS build (asGpu) to zero.
+  this->asDirty = this->cacheChanged || this->asTransformChanged;
+  this->asTransformChanged = false;
 
-  // TLAS build (instances reference the BLASes built above).  The TLAS
-  // handle may change here, so refresh the binding-0 descriptor before the
-  // trace phase runs.
-  if (!this->buildTlas(drawlist, cmd)) {
-    this->emitError("recordAccelerationStructures: failed to build TLAS");
-    return false;
-  }
-  if (!this->updateDescriptors()) {
-    this->emitError("recordAccelerationStructures: descriptor update failed");
-    return false;
-  }
+  if (this->asDirty) {
+    // Alternate the descriptor pair so the set we (re)populate below is not
+    // the one the previous, still-in-flight submission bound.  On non-dirty
+    // frames the index is left untouched so the trace keeps binding the set
+    // that was last populated -- the root cause of the alternate-frame black
+    // flash was tracing through a set that had never been updated.
+    this->descriptorSetIndex = (this->descriptorSetIndex + 1) & 1u;
+    // Emissive-triangle pool for NEE.  Rebuilt only when the AS is dirty so
+    // the baked object-to-world transforms stay fresh on transform-only
+    // edits (which refit BLASes instead of rebuilding geometry).  Runs before
+    // updateMaterials(), which carries the pool offsets into the RTMaterial
+    // records.
+    this->buildNeePool(drawlist);
+    this->updateMaterials(drawlist);
 
-  // Barrier: BLAS/TLAS builds -> ray tracing shaders.  Recorded here, still
-  // outside the render pass (acceleration-structure builds and buffer copies
-  // are not allowed inside one).
-  VkMemoryBarrier asBarrier {};
-  asBarrier.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
-  asBarrier.srcAccessMask = VK_ACCESS_ACCELERATION_STRUCTURE_WRITE_BIT_KHR;
-  asBarrier.dstAccessMask = VK_ACCESS_ACCELERATION_STRUCTURE_READ_BIT_KHR;
-  vkCmdPipelineBarrier(cmd,
-                       VK_PIPELINE_STAGE_ACCELERATION_STRUCTURE_BUILD_BIT_KHR,
-                       VK_PIPELINE_STAGE_RAY_TRACING_SHADER_BIT_KHR |
-                         VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
-                       0, 1, &asBarrier, 0, nullptr, 0, nullptr);
+    // TLAS build (instances reference the BLASes built above).  The TLAS
+    // handle may change here, so refresh the binding-0 descriptor before the
+    // trace phase runs.
+    if (!this->buildTlas(drawlist, params, cmd)) {
+      this->emitError("recordAccelerationStructures: failed to build TLAS");
+      return false;
+    }
+    if (!this->updateDescriptors()) {
+      this->emitError("recordAccelerationStructures: descriptor update failed");
+      return false;
+    }
+
+    // Barrier: BLAS/TLAS builds -> ray tracing shaders.  Recorded here, still
+    // outside the render pass (acceleration-structure builds and buffer copies
+    // are not allowed inside one).
+    VkMemoryBarrier asBarrier {};
+    asBarrier.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
+    asBarrier.srcAccessMask = VK_ACCESS_ACCELERATION_STRUCTURE_WRITE_BIT_KHR;
+    asBarrier.dstAccessMask = VK_ACCESS_ACCELERATION_STRUCTURE_READ_BIT_KHR;
+    vkCmdPipelineBarrier(cmd,
+                         VK_PIPELINE_STAGE_ACCELERATION_STRUCTURE_BUILD_BIT_KHR,
+                         VK_PIPELINE_STAGE_RAY_TRACING_SHADER_BIT_KHR |
+                           VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                         0, 1, &asBarrier, 0, nullptr, 0, nullptr);
+  }
 
   // --- Frame uniform data (host-visible; no barrier needed) --------------
   if (this->frameMapped) {
@@ -571,7 +676,7 @@ SoRTXRenderBackend::recordAccelerationStructures(
     // AO (mode 2) and the Environment preview (mode 3) are real-time
     // previews: they never accumulate, so they must also force the
     // accumulate flag off to keep the state machine honest.
-    frame.state[1] = envFlagEnabled("FC_VULKAN_RT_DEBUG_FILL")
+    frame.state[1] = COIN_VULKAN_ENV_FLAG("FC_VULKAN_RT_DEBUG_FILL")
       ? 4.0f
       : (this->rtxViewMode == RtxViewMode::RtxModeAmbientOcclusion ? 2.0f
          : (this->rtxViewMode == RtxViewMode::RtxModeEnvironment ? 3.0f
@@ -593,7 +698,8 @@ SoRTXRenderBackend::recordAccelerationStructures(
     // camera has been static for a frame (neither condition), so converged
     // pixels from a clean run keep early-outing but no pixel locks during or
     // immediately after a move.
-    frame.adaptive[3] = (this->ptReprojectFrame || this->ptWasMoving)
+    frame.adaptive[3] = (this->ptReprojectFrame || this->ptWasMoving ||
+                         this->ptForceFullResolve)
       ? 0.0f : 1.0f;
 
     // Temporal reprojection: the previous frame's camera (world -> clip)
@@ -704,7 +810,7 @@ SoRTXRenderBackend::recordAccelerationStructures(
     raygenPush.frameIndex = this->ptFrameIndex;
     raygenPush.flags = (this->ptEnabled ? 1u : 0u) |
       (this->ptAccumulating ? 2u : 0u) |
-      (envFlagEnabled("FC_VULKAN_RT_DEBUG_FILL") ? 4u : 0u);
+      (COIN_VULKAN_ENV_FLAG("FC_VULKAN_RT_DEBUG_FILL") ? 4u : 0u);
     raygenPush.maxBounces = this->ptMaxBounces;
     vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_RAY_TRACING_KHR,
                       this->rtPipeline);
@@ -812,10 +918,22 @@ SoRTXRenderBackend::recordTraceAndPresent(const SoRenderParams & params,
   // filter, and u_denoise.y as the upscale scale.  u_present.z must remain
   // the path-tracing + denoise toggle (it selects the denoising branch vs
   // the raw-image preview).
+  //
+  // u_present.z selects the present shader branch: >=0.5 reads the
+  // path-traced accumulation buffer (binding 2) with its denoise/edge-stopped
+  // filters; <0.5 samples the storage image (binding 1) directly.  Only the
+  // multi-bounce path-tracing mode writes the accumulation buffer.  The
+  // single-sample AO and Environment previews (and the raster off state)
+  // render straight into the storage image, so presenting them through the
+  // accum branch reads a never-written buffer and shows black.  Gate the
+  // accum branch on the path-traced mode, not on ptEnabled (which is also
+  // true for AO/Environment).
+  const bool pathTraceMode =
+    this->rtxViewMode == RtxViewMode::RtxModePathTrace;
   const float presentPush[12] = {
     static_cast<float>(size[0]),
     static_cast<float>(size[1]),
-    this->ptEnabled && this->ptDenoise ? 1.0f : 0.0f,
+    pathTraceMode && this->ptEnabled && this->ptDenoise ? 1.0f : 0.0f,
     static_cast<float>(this->ptFrameIndex),
     static_cast<float>(origin[0]),
     static_cast<float>(origin[1]),
@@ -828,10 +946,11 @@ SoRTXRenderBackend::recordTraceAndPresent(const SoRenderParams & params,
     0.0f};
   if (getenv("FC_VULKAN_PT_DENOISE_TIMING")) {
     fprintf(stderr,
-            "[DENOISE-STATE] frame=%u accum=%d ready=%d denoise=%d kind=%d\n",
-            this->ptFrameIndex, this->ptAccumulating ? 1 : 0,
-            this->denoiseResultReady ? 1 : 0, this->ptDenoise ? 1 : 0,
-            static_cast<int>(this->denoiseKind));
+            "[DENOISE-STATE] ord=%u frame=%u accum=%d pend=%d ready=%d "
+            "denoise=%d kind=%d\n",
+            params.frame, this->ptFrameIndex, this->ptAccumulating ? 1 : 0,
+            this->ptDenoisePending ? 1 : 0, this->denoiseResultReady ? 1 : 0,
+            this->ptDenoise ? 1 : 0, static_cast<int>(this->denoiseKind));
   }
   vkCmdPushConstants(cmd, this->presentPipelineLayout,
                      VK_SHADER_STAGE_FRAGMENT_BIT, 0,

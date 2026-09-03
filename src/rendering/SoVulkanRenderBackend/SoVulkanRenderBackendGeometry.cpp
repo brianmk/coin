@@ -18,6 +18,7 @@
 #include <Inventor/errors/SoDebugError.h>
 
 #include <algorithm>
+#include <chrono>
 #include <cstddef>
 #include <cstdint>
 #include <cstdio>
@@ -28,6 +29,89 @@
 #include <vector>
 
 using namespace CoinVulkanDetail;
+
+namespace {
+
+long vkGeometryBreadcrumbNowUs()
+{
+  return (long)std::chrono::duration_cast<std::chrono::microseconds>(
+    std::chrono::steady_clock::now().time_since_epoch()).count();
+}
+
+bool vkGeometryBreadcrumbEnabled()
+{
+  static const bool enabled = std::getenv("FC_GUI_OPEN_BREADCRUMB") != nullptr;
+  return enabled;
+}
+
+VkDeviceSize alignGeometryUpload(VkDeviceSize bytes)
+{
+  const VkDeviceSize alignment = 64;
+  return ((bytes + alignment - 1) / alignment) * alignment;
+}
+
+void packInterleavedVertices(const SoGeometryDesc & geometry, float * vertices)
+{
+  const uint32_t vertexCount = geometry.vertexCount;
+  const uint32_t posStride = geometry.vertexStride
+    ? geometry.vertexStride : sizeof(float) * 3;
+  const uint32_t posStrideFloats = posStride / sizeof(float);
+  const uint32_t normalStrideFloats =
+    (geometry.normals ? posStrideFloats : 0);
+  const uint32_t texcoordStride = geometry.texcoordStride
+    ? geometry.texcoordStride : sizeof(float) * 4;
+  const uint32_t texcoordStrideFloats = texcoordStride / sizeof(float);
+
+  for (uint32_t i = 0; i < vertexCount; ++i) {
+    float * out = vertices + static_cast<size_t>(i) * 12;
+
+    const float * pos = geometry.positions +
+      static_cast<size_t>(i) * posStrideFloats;
+    out[0] = pos[0];
+    out[1] = pos[1];
+    out[2] = pos[2];
+
+    if (geometry.normals && i < geometry.normalCount) {
+      const float * normal = geometry.normals +
+        static_cast<size_t>(i) * normalStrideFloats;
+      out[3] = normal[0];
+      out[4] = normal[1];
+      out[5] = normal[2];
+    }
+    else {
+      out[3] = 0.0f;
+      out[4] = 0.0f;
+      out[5] = 1.0f;
+    }
+
+    if (geometry.colors) {
+      const float * color = geometry.colors + static_cast<size_t>(i) * 4;
+      out[6] = color[0];
+      out[7] = color[1];
+      out[8] = color[2];
+      out[9] = color[3];
+    }
+    else {
+      out[6] = 1.0f;
+      out[7] = 1.0f;
+      out[8] = 1.0f;
+      out[9] = 1.0f;
+    }
+
+    if (geometry.texcoords) {
+      const float * uv = geometry.texcoords +
+        static_cast<size_t>(i) * texcoordStrideFloats;
+      out[10] = uv[0];
+      out[11] = uv[1];
+    }
+    else {
+      out[10] = 0.0f;
+      out[11] = 0.0f;
+    }
+  }
+}
+
+} // namespace
 
 // --- Geometry cache -------------------------------------------------------
 
@@ -287,62 +371,13 @@ SoVulkanRenderBackend::uploadGeometry(VulkanCachedCommand & entry,
   // capacity, so the heap is only touched on the first (largest) upload that
   // reaches this size rather than on every geometry change.  The lock spans the
   // packing plus the synchronous uploads below, which read `vertices`.
+  const uint32_t posStride = geometry.vertexStride
+    ? geometry.vertexStride : sizeof(float) * 3;
+
   std::lock_guard<std::mutex> scratchLock(this->uploadScratchMutex);
   this->uploadScratch.resize(static_cast<size_t>(vertexCount) * 12);
   float * const vertices = this->uploadScratch.data();
-  const uint32_t posStride = geometry.vertexStride
-    ? geometry.vertexStride : sizeof(float) * 3;
-  const uint32_t posStrideFloats = posStride / sizeof(float);
-  const uint32_t normalStrideFloats =
-    (geometry.normals ? posStrideFloats : 0);
-  const uint32_t texcoordStride = geometry.texcoordStride
-    ? geometry.texcoordStride : sizeof(float) * 4;
-  const uint32_t texcoordStrideFloats = texcoordStride / sizeof(float);
-
-  for (uint32_t i = 0; i < vertexCount; ++i) {
-    float * out = vertices + static_cast<size_t>(i) * 12;
-
-    const float * pos = geometry.positions + static_cast<size_t>(i) * posStrideFloats;
-    out[0] = pos[0];
-    out[1] = pos[1];
-    out[2] = pos[2];
-
-    if (geometry.normals && i < geometry.normalCount) {
-      const float * normal = geometry.normals + static_cast<size_t>(i) * normalStrideFloats;
-      out[3] = normal[0];
-      out[4] = normal[1];
-      out[5] = normal[2];
-    }
-    else {
-      out[3] = 0.0f;
-      out[4] = 0.0f;
-      out[5] = 1.0f;
-    }
-
-    if (geometry.colors) {
-      const float * color = geometry.colors + static_cast<size_t>(i) * 4;
-      out[6] = color[0];
-      out[7] = color[1];
-      out[8] = color[2];
-      out[9] = color[3];
-    }
-    else {
-      out[6] = 1.0f;
-      out[7] = 1.0f;
-      out[8] = 1.0f;
-      out[9] = 1.0f;
-    }
-
-    if (geometry.texcoords) {
-      const float * uv = geometry.texcoords + static_cast<size_t>(i) * texcoordStrideFloats;
-      out[10] = uv[0];
-      out[11] = uv[1];
-    }
-    else {
-      out[10] = 0.0f;
-      out[11] = 0.0f;
-    }
-  }
+  packInterleavedVertices(geometry, vertices);
 
   const VkDeviceSize vertexBytes =
     static_cast<VkDeviceSize>(vertexCount) * VULKAN_VERTEX_STRIDE;
@@ -403,26 +438,100 @@ SoVulkanRenderBackend::uploadGeometry(VulkanCachedCommand & entry,
   entry.texcoordStride = geometry.texcoordStride;
   entry.normalCount = geometry.normalCount;
   entry.contentHash = hashGeometryContent(geometry);
+  entry.vertexOffset = 0;
+  entry.indexOffset = 0;
+  entry.sharedBlockId = 0;
+}
+
+bool
+SoVulkanRenderBackend::uploadGeometryShared(VulkanCachedCommand & entry,
+                                            const SoRenderCommand & command,
+                                            uint32_t blockId)
+{
+  if (blockId == 0 || blockId > this->geometryBlocks.size()) {
+    return false;
+  }
+  VulkanGeometryBlock & block = this->geometryBlocks[blockId - 1];
+  if (block.buffer == VK_NULL_HANDLE || block.mapped == nullptr) {
+    return false;
+  }
+
+  const SoGeometryDesc & geometry = command.geometry;
+  const uint32_t vertexCount = geometry.vertexCount;
+  const uint32_t posStride = geometry.vertexStride
+    ? geometry.vertexStride : sizeof(float) * 3;
+
+  const VkDeviceSize vertexBytes =
+    static_cast<VkDeviceSize>(vertexCount) * VULKAN_VERTEX_STRIDE;
+  const VkDeviceSize indexBytes =
+    (geometry.indexCount && geometry.indices)
+      ? static_cast<VkDeviceSize>(geometry.indexCount) * sizeof(uint32_t)
+      : 0;
+
+  VkDeviceSize vertexOffset = 0;
+  VkDeviceSize indexOffset = 0;
+  if (!this->allocateGeometryArena(blockId, vertexBytes, vertexOffset)) {
+    return false;
+  }
+  if (indexBytes != 0 &&
+      !this->allocateGeometryArena(blockId, indexBytes, indexOffset)) {
+    return false;
+  }
+
+  char * base = reinterpret_cast<char*>(block.mapped);
+  packInterleavedVertices(geometry,
+    reinterpret_cast<float*>(base + vertexOffset));
+  if (indexBytes != 0) {
+    std::memcpy(base + indexOffset, geometry.indices,
+      static_cast<size_t>(indexBytes));
+  }
+
+  entry.vertexBuffer = block.buffer;
+  entry.vertexMemory = VK_NULL_HANDLE;
+  entry.indexBuffer = indexBytes != 0 ? block.buffer : VK_NULL_HANDLE;
+  entry.indexMemory = VK_NULL_HANDLE;
+  entry.vertexOffset = vertexOffset;
+  entry.indexOffset = indexOffset;
+  entry.sharedBlockId = blockId;
+  ++block.refCount;
+
+  entry.posKey = geometry.positions;
+  entry.normalKey = geometry.normals;
+  entry.colorKey = geometry.colors;
+  entry.texcoordKey = geometry.texcoords;
+  entry.idxKey = geometry.indices;
+  entry.vertexCount = vertexCount;
+  entry.indexCount = geometry.indexCount;
+  entry.vertexStride = posStride;
+  entry.texcoordStride = geometry.texcoordStride;
+  entry.normalCount = geometry.normalCount;
+  entry.contentHash = hashGeometryContent(geometry);
+  return true;
 }
 
 void
 SoVulkanRenderBackend::destroyCacheEntry(VulkanCachedCommand & entry)
 {
-  if (entry.indexBuffer) {
-    vkDestroyBuffer(this->device, entry.indexBuffer, this->allocator);
-    entry.indexBuffer = VK_NULL_HANDLE;
+  if (entry.sharedBlockId != 0) {
+    this->releaseGeometryBlock(entry.sharedBlockId);
   }
-  if (entry.indexMemory) {
-    vkFreeMemory(this->device, entry.indexMemory, this->allocator);
-    entry.indexMemory = VK_NULL_HANDLE;
-  }
-  if (entry.vertexBuffer) {
-    vkDestroyBuffer(this->device, entry.vertexBuffer, this->allocator);
-    entry.vertexBuffer = VK_NULL_HANDLE;
-  }
-  if (entry.vertexMemory) {
-    vkFreeMemory(this->device, entry.vertexMemory, this->allocator);
-    entry.vertexMemory = VK_NULL_HANDLE;
+  else {
+    if (entry.indexBuffer) {
+      vkDestroyBuffer(this->device, entry.indexBuffer, this->allocator);
+      entry.indexBuffer = VK_NULL_HANDLE;
+    }
+    if (entry.indexMemory) {
+      vkFreeMemory(this->device, entry.indexMemory, this->allocator);
+      entry.indexMemory = VK_NULL_HANDLE;
+    }
+    if (entry.vertexBuffer) {
+      vkDestroyBuffer(this->device, entry.vertexBuffer, this->allocator);
+      entry.vertexBuffer = VK_NULL_HANDLE;
+    }
+    if (entry.vertexMemory) {
+      vkFreeMemory(this->device, entry.vertexMemory, this->allocator);
+      entry.vertexMemory = VK_NULL_HANDLE;
+    }
   }
   for (const VulkanCachedCommand::VulkanWideLineBuffer & slot : entry.wideLineBuffers) {
     if (slot.buffer) {
@@ -445,6 +554,172 @@ SoVulkanRenderBackend::invalidateCache()
   this->gpuCache.clear();
   this->commandToCache.clear();
   this->invalidateTextureCache();
+}
+
+uint32_t
+SoVulkanRenderBackend::allocateGeometryBlock(VkDeviceSize capacity)
+{
+  capacity = alignGeometryUpload(std::max<VkDeviceSize>(capacity, 64));
+  if (capacity == 0) {
+    return 0;
+  }
+
+  VkBufferCreateInfo ci {};
+  ci.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
+  ci.size = capacity;
+  ci.usage = VK_BUFFER_USAGE_VERTEX_BUFFER_BIT | VK_BUFFER_USAGE_INDEX_BUFFER_BIT;
+  ci.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+
+  VkBuffer buffer = VK_NULL_HANDLE;
+  if (vkCreateBuffer(this->device, &ci, this->allocator, &buffer) != VK_SUCCESS) {
+    return 0;
+  }
+
+  VkMemoryRequirements requirements {};
+  vkGetBufferMemoryRequirements(this->device, buffer, &requirements);
+
+  this->ensureDeviceMemoryProperties();
+  uint32_t memoryTypeIndex = UINT32_MAX;
+  const VkMemoryPropertyFlags desired =
+    VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT |
+    VK_MEMORY_PROPERTY_HOST_COHERENT_BIT;
+  for (uint32_t i = 0; i < this->deviceMemoryProperties.memoryTypeCount; ++i) {
+    if ((requirements.memoryTypeBits & (1u << i)) &&
+        (this->deviceMemoryProperties.memoryTypes[i].propertyFlags & desired) == desired) {
+      memoryTypeIndex = i;
+      break;
+    }
+  }
+  if (memoryTypeIndex == UINT32_MAX) {
+    vkDestroyBuffer(this->device, buffer, this->allocator);
+    return 0;
+  }
+
+  const VkDeviceSize allocationSize =
+    std::max<VkDeviceSize>(capacity, requirements.size);
+  VkMemoryAllocateInfo ai {};
+  ai.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
+  ai.allocationSize = allocationSize;
+  ai.memoryTypeIndex = memoryTypeIndex;
+  VkDeviceMemory memory = VK_NULL_HANDLE;
+  if (vkAllocateMemory(this->device, &ai, this->allocator, &memory) != VK_SUCCESS) {
+    vkDestroyBuffer(this->device, buffer, this->allocator);
+    return 0;
+  }
+  if (vkBindBufferMemory(this->device, buffer, memory, 0) != VK_SUCCESS) {
+    vkDestroyBuffer(this->device, buffer, this->allocator);
+    vkFreeMemory(this->device, memory, this->allocator);
+    return 0;
+  }
+
+  void * mapped = nullptr;
+  if (vkMapMemory(this->device, memory, 0, allocationSize, 0, &mapped) != VK_SUCCESS ||
+      mapped == nullptr) {
+    vkDestroyBuffer(this->device, buffer, this->allocator);
+    vkFreeMemory(this->device, memory, this->allocator);
+    return 0;
+  }
+
+  VulkanGeometryBlock block {};
+  block.buffer = buffer;
+  block.memory = memory;
+  block.mapped = mapped;
+  block.capacity = allocationSize;
+  block.used = 0;
+  block.refCount = 0;
+  this->geometryBlocks.push_back(block);
+
+  this->nextGeometryBlockCapacity =
+    std::min<VkDeviceSize>(this->nextGeometryBlockCapacity * 2u, 16u * 1024u * 1024u);
+  return static_cast<uint32_t>(this->geometryBlocks.size());
+}
+
+bool
+SoVulkanRenderBackend::allocateGeometryArena(uint32_t blockId, VkDeviceSize size,
+                                             VkDeviceSize & offset)
+{
+  offset = 0;
+  if (blockId == 0 || blockId > this->geometryBlocks.size() || size == 0) {
+    return false;
+  }
+  VulkanGeometryBlock & block = this->geometryBlocks[blockId - 1];
+  if (block.buffer == VK_NULL_HANDLE || block.mapped == nullptr) {
+    return false;
+  }
+  const VkDeviceSize aligned = alignGeometryUpload(size);
+  if (block.used + aligned > block.capacity) {
+    return false;
+  }
+  offset = block.used;
+  block.used += aligned;
+  return true;
+}
+
+void
+SoVulkanRenderBackend::releaseGeometryBlock(uint32_t blockId)
+{
+  if (blockId == 0 || blockId > this->geometryBlocks.size()) {
+    return;
+  }
+  VulkanGeometryBlock & block = this->geometryBlocks[blockId - 1];
+  if (block.buffer == VK_NULL_HANDLE) {
+    return;
+  }
+  if (block.refCount > 0) {
+    --block.refCount;
+  }
+  if (block.refCount > 0) {
+    return;
+  }
+  if (block.mapped != nullptr) {
+    vkUnmapMemory(this->device, block.memory);
+    block.mapped = nullptr;
+  }
+  if (block.buffer != VK_NULL_HANDLE) {
+    vkDestroyBuffer(this->device, block.buffer, this->allocator);
+    block.buffer = VK_NULL_HANDLE;
+  }
+  if (block.memory != VK_NULL_HANDLE) {
+    vkFreeMemory(this->device, block.memory, this->allocator);
+    block.memory = VK_NULL_HANDLE;
+  }
+  block.capacity = 0;
+  block.used = 0;
+}
+
+void
+SoVulkanRenderBackend::deferReleaseGeometryBlock(uint32_t blockId)
+{
+  if (blockId == 0) {
+    return;
+  }
+  this->deferDestroy([this, blockId]() {
+    this->releaseGeometryBlock(blockId);
+  });
+}
+
+void
+SoVulkanRenderBackend::destroyAllGeometryBlocks()
+{
+  for (VulkanGeometryBlock & block : this->geometryBlocks) {
+    if (block.mapped != nullptr) {
+      vkUnmapMemory(this->device, block.memory);
+      block.mapped = nullptr;
+    }
+    if (block.buffer != VK_NULL_HANDLE) {
+      vkDestroyBuffer(this->device, block.buffer, this->allocator);
+      block.buffer = VK_NULL_HANDLE;
+    }
+    if (block.memory != VK_NULL_HANDLE) {
+      vkFreeMemory(this->device, block.memory, this->allocator);
+      block.memory = VK_NULL_HANDLE;
+    }
+    block.capacity = 0;
+    block.used = 0;
+    block.refCount = 0;
+  }
+  this->geometryBlocks.clear();
+  this->nextGeometryBlockCapacity = 256u * 1024u;
 }
 
 void
@@ -474,7 +749,75 @@ SoVulkanRenderBackend::updateGeometryCache(const SoDrawList & drawlist,
   }
   this->pendingUploads.clear();
 
+  const long cacheBcStart = vkGeometryBreadcrumbEnabled() ? vkGeometryBreadcrumbNowUs() : 0;
+  int bcCommands = 0;
+  int bcGeometryUploads = 0;
+  int bcTexturePrepares = 0;
+  size_t bcVertices = 0;
+  size_t bcIndices = 0;
+
   const uint32_t generation = drawlist.getGeneration();
+
+  std::vector<uint8_t> needsGeometry(
+    static_cast<size_t>(std::max(0, drawlist.getNumCommands())), 0);
+  int retainedUploads = 0;
+  VkDeviceSize retainedUploadBytes = 0;
+  for (int i = 0; i < drawlist.getNumCommands(); ++i) {
+    const SoRenderCommand & command = drawlist.getCommand(i);
+    const bool isResidual =
+      command.geometry.topology != SO_TOPOLOGY_TRIANGLES &&
+      command.pass != SO_RENDERPASS_OVERLAY;
+    if (overlaysOnly && command.pass != SO_RENDERPASS_OVERLAY &&
+        !isResidual) {
+      continue;
+    }
+    const SoGeometryDesc & geometry = command.geometry;
+    if (!geometry.positions || geometry.vertexCount == 0 ||
+        geometry.vertexCount > MAX_VERTEX_COUNT) {
+      continue;
+    }
+
+    VulkanCachedCommand & entry = this->getOrCreateCache(&command);
+    const uint32_t vertexStride = geometry.vertexStride
+      ? geometry.vertexStride : sizeof(float) * 3;
+    const bool identityMatches = entry.vertexBuffer != VK_NULL_HANDLE &&
+      entry.posKey == geometry.positions &&
+      entry.normalKey == geometry.normals &&
+      entry.colorKey == geometry.colors &&
+      entry.texcoordKey == geometry.texcoords &&
+      entry.idxKey == geometry.indices &&
+      entry.vertexCount == geometry.vertexCount &&
+      entry.indexCount == geometry.indexCount &&
+      entry.normalCount == geometry.normalCount &&
+      entry.vertexStride == vertexStride &&
+      entry.texcoordStride == geometry.texcoordStride;
+    const bool geometryMatches = identityMatches &&
+      (geometry.retained ||
+       entry.contentHash == hashGeometryContent(geometry));
+    if (!geometryMatches) {
+      needsGeometry[static_cast<size_t>(i)] = 1;
+      if (geometry.retained) {
+        ++retainedUploads;
+        retainedUploadBytes += alignGeometryUpload(
+          static_cast<VkDeviceSize>(geometry.vertexCount) *
+            VULKAN_VERTEX_STRIDE);
+        if (geometry.indexCount && geometry.indices) {
+          retainedUploadBytes += alignGeometryUpload(
+            static_cast<VkDeviceSize>(geometry.indexCount) *
+              sizeof(uint32_t));
+        }
+      }
+    }
+  }
+
+  uint32_t sharedBlockId = 0;
+  int sharedUploads = 0;
+  constexpr VkDeviceSize VK_GEOMETRY_BATCH_HOST_LIMIT =
+    static_cast<VkDeviceSize>(8u * 1024u * 1024u);
+  if (retainedUploads > 1 && retainedUploadBytes > 0 &&
+      retainedUploadBytes <= VK_GEOMETRY_BATCH_HOST_LIMIT) {
+    sharedBlockId = this->allocateGeometryBlock(retainedUploadBytes + 4096u);
+  }
 
   // Make sure the descriptor pool can hold one set per distinct texture in
   // this frame before any allocation happens.  Pool growth never
@@ -508,6 +851,9 @@ SoVulkanRenderBackend::updateGeometryCache(const SoDrawList & drawlist,
         geometry.vertexCount > MAX_VERTEX_COUNT) {
       continue;
     }
+    ++bcCommands;
+    bcVertices += geometry.vertexCount;
+    bcIndices += geometry.indexCount;
 
     VulkanCachedCommand & entry = this->getOrCreateCache(&command);
     const uint32_t vertexStride = geometry.vertexStride
@@ -541,8 +887,19 @@ SoVulkanRenderBackend::updateGeometryCache(const SoDrawList & drawlist,
       (geometry.retained ||
        entry.contentHash == hashGeometryContent(geometry));
     if (!geometryMatches) {
+      ++bcGeometryUploads;
       this->deferDestroyCacheEntry(entry);
-      this->uploadGeometry(entry, command);
+      bool uploadedShared = false;
+      if (geometry.retained && sharedBlockId != 0) {
+        uploadedShared =
+          this->uploadGeometryShared(entry, command, sharedBlockId);
+        if (uploadedShared) {
+          ++sharedUploads;
+        }
+      }
+      if (!uploadedShared) {
+        this->uploadGeometry(entry, command);
+      }
     }
     entry.commandKey = &command;
     entry.cacheGeneration = generation;
@@ -581,6 +938,7 @@ SoVulkanRenderBackend::updateGeometryCache(const SoDrawList & drawlist,
           upload.command = &command;
           upload.index = this->commandToTexture[&command];
           upload.texture = &texture;
+          ++bcTexturePrepares;
           if (this->prepareTextureUpload(texEntry, texture, upload.staging,
                                          upload.stagingMemory)) {
             this->pendingUploads.push_back(upload);
@@ -592,6 +950,10 @@ SoVulkanRenderBackend::updateGeometryCache(const SoDrawList & drawlist,
       texEntry.commandKey = &command;
       texEntry.cacheGeneration = generation;
     }
+  }
+
+  if (sharedBlockId != 0 && sharedUploads == 0) {
+    this->releaseGeometryBlock(sharedBlockId);
   }
 
   // Evict entries that were not visited this frame: their command has
@@ -650,6 +1012,21 @@ SoVulkanRenderBackend::updateGeometryCache(const SoDrawList & drawlist,
       else {
         upload.index = std::numeric_limits<size_t>::max();
       }
+    }
+  }
+
+  if (cacheBcStart) {
+    static int logged = 0;
+    const long now = vkGeometryBreadcrumbNowUs();
+    const long dur = now - cacheBcStart;
+    if (logged < 20 && (dur >= 5000 || bcGeometryUploads > 0)) {
+      ++logged;
+      std::fprintf(stderr,
+                   "[VKGEOMCACHE] %ld updateGeometryCache dur_us=%ld commands=%d "
+                   "uploads=%d textures=%d vertices=%zu indices=%zu\n",
+                   cacheBcStart, dur, bcCommands, bcGeometryUploads,
+                   bcTexturePrepares, bcVertices, bcIndices);
+      std::fflush(stderr);
     }
   }
 }

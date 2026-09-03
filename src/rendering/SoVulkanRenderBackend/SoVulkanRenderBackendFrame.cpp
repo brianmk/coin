@@ -19,6 +19,7 @@
 #include <Inventor/errors/SoDebugError.h>
 
 #include <algorithm>
+#include <chrono>
 #include <cstddef>
 #include <cstdint>
 #include <cstdio>
@@ -29,6 +30,36 @@
 #include <vector>
 
 using namespace CoinVulkanDetail;
+
+namespace {
+
+long vkBackendRenderNowUs()
+{
+  return (long)std::chrono::duration_cast<std::chrono::microseconds>(
+    std::chrono::steady_clock::now().time_since_epoch()).count();
+}
+
+bool vkBackendRenderBreadcrumbEnabled()
+{
+  static const bool enabled = std::getenv("FC_GUI_OPEN_BREADCRUMB") != nullptr;
+  return enabled;
+}
+
+void vkBackendRenderBreadcrumbSince(long startUs, long thresholdUs, const char* phase)
+{
+  if (!vkBackendRenderBreadcrumbEnabled()) {
+    return;
+  }
+  static int logged = 0;
+  const long now = vkBackendRenderNowUs();
+  if (logged < 30 && now - startUs >= thresholdUs) {
+    ++logged;
+    std::fprintf(stderr, "[VKBACKEND] %ld %s dur_us=%ld\n", startUs, phase, now - startUs);
+    std::fflush(stderr);
+  }
+}
+
+} // namespace
 
 // --- Lifecycle ------------------------------------------------------------
 
@@ -57,6 +88,7 @@ SoVulkanRenderBackend::shutdown()
   this->pendingUploads.clear();
 
   this->invalidateCache();
+  this->destroyAllGeometryBlocks();
 
   for (auto & entry : this->pipelineCache) {
     if (entry.second != VK_NULL_HANDLE) {
@@ -192,6 +224,34 @@ SoVulkanRenderBackend::renderInternal(const SoDrawList & drawlist,
   }
 
   this->debugValidateDrawList(drawlist);
+
+  if (COIN_VULKAN_ENV_FLAG("FC_VULKAN_BLACK_DEBUG")) {
+    static int blackFrame = 0;
+    int nTri = 0, nLine = 0, nOverlay = 0, nTrans = 0, nTriLit = 0;
+    int nTriUnlit = 0;
+    for (int i = 0; i < drawlist.getNumCommands(); ++i) {
+      const SoRenderCommand & c = drawlist.getCommand(i);
+      if (c.pass == SO_RENDERPASS_OVERLAY) nOverlay++;
+      else if (c.pass == SO_RENDERPASS_TRANSPARENT) nTrans++;
+      if (c.geometry.topology == SO_TOPOLOGY_TRIANGLES) {
+        nTri++;
+        if (c.material.shadingModel == SO_SHADING_LEGACY_GOURAUD) nTriLit++;
+        else nTriUnlit++;
+      }
+      if (c.geometry.topology == SO_TOPOLOGY_LINES ||
+          c.geometry.topology == SO_TOPOLOGY_LINE_STRIP) {
+        nLine++;
+      }
+    }
+    fprintf(stderr,
+            "[BLACK] frame=%d overlaysOnly=%d flags=0x%x clear=(%.2f,%.2f,%.2f,%.2f) "
+            "cmds=%d tri=%d(lit=%d unlit=%d) line=%d overlay=%d trans=%d\n",
+            blackFrame++, static_cast<int>(overlaysOnly),
+            static_cast<unsigned>(params.flags), params.clearColor[0],
+            params.clearColor[1], params.clearColor[2], params.clearColor[3],
+            drawlist.getNumCommands(), nTri, nTriLit, nTriUnlit, nLine,
+            nOverlay, nTrans);
+  }
 
   const auto * target =
     static_cast<const SoVulkanRenderTarget *>(params.renderTarget);
@@ -389,6 +449,10 @@ SoVulkanRenderBackend::renderExternal(const SoDrawList & drawlist,
     return FALSE;
   }
 
+  if (COIN_VULKAN_ENV_FLAG("FC_VULKAN_BLACK_DEBUG"))
+    fprintf(stderr, "[BLACK] renderExternal ENTER frame=%d cmds=%d\n",
+            this->uboFrameIndex, drawlist.getNumCommands());
+
   this->debugValidateDrawList(drawlist);
 
   const auto * target =
@@ -400,16 +464,24 @@ SoVulkanRenderBackend::renderExternal(const SoDrawList & drawlist,
     return FALSE;
   }
 
+  const long externalBcStart = vkBackendRenderBreadcrumbEnabled() ? vkBackendRenderNowUs() : 0;
   this->beginFrame();
+  const long geometryBcStart = vkBackendRenderBreadcrumbEnabled() ? vkBackendRenderNowUs() : 0;
   this->updateGeometryCache(drawlist);
+  vkBackendRenderBreadcrumbSince(geometryBcStart, 5000, "renderExternal updateGeometryCache end");
+  const long textureBcStart = vkBackendRenderBreadcrumbEnabled() ? vkBackendRenderNowUs() : 0;
   if (!this->flushPendingTextureUploadsExternal()) {
     this->emitError("renderExternal: texture upload failed");
     return FALSE;
   }
+  vkBackendRenderBreadcrumbSince(textureBcStart, 5000, "renderExternal flushPendingTextureUploadsExternal end");
 
+  const long recordBcStart = vkBackendRenderBreadcrumbEnabled() ? vkBackendRenderNowUs() : 0;
   this->activeCommandBuffer = commandBuffer;
   const bool recorded = this->recordFrame(drawlist, params, *target, renderPass);
+  vkBackendRenderBreadcrumbSince(recordBcStart, 5000, "renderExternal recordFrame end");
   this->activeCommandBuffer = VK_NULL_HANDLE;
+  vkBackendRenderBreadcrumbSince(externalBcStart, 5000, "renderExternal end");
   return recorded ? TRUE : FALSE;
 }
 
@@ -437,6 +509,10 @@ SoVulkanRenderBackend::renderExternalOverlay(const SoDrawList & drawlist,
     return FALSE;
   }
 
+  if (COIN_VULKAN_ENV_FLAG("FC_VULKAN_BLACK_DEBUG"))
+    fprintf(stderr, "[BLACK] renderExternalOverlay ENTER frame=%d cmds=%d\n",
+            this->uboFrameIndex, drawlist.getNumCommands());
+
   const auto * target =
     static_cast<const SoVulkanRenderTarget *>(params.renderTarget);
   if (target->colorImageView == VK_NULL_HANDLE ||
@@ -450,7 +526,6 @@ SoVulkanRenderBackend::renderExternalOverlay(const SoDrawList & drawlist,
   this->updateGeometryCache(drawlist, true);
 
   // This path never goes through recordFrame(), so reserve the slots it will
-  // consume (OVERLAY commands plus the non-triangle residual geometry);
   // otherwise the cursor keeps climbing across frames and eventually
   // overflows the lighting UBO.
   if (!this->prepareLightingSlots(countCompositeCommands(drawlist))) {
@@ -475,9 +550,35 @@ SoVulkanRenderBackend::recordFrame(const SoDrawList & drawlist,
                                    const SoVulkanRenderTarget & target,
                                    VkRenderPass renderPass)
 {
-  if (envFlagEnabled("FC_VULKAN_MATRIX_DUMP")) {
+  if (COIN_VULKAN_ENV_FLAG("FC_VULKAN_MATRIX_DUMP")) {
     s_debugFrame++;
     s_dumpCmdCount = 0;
+  }
+  if (COIN_VULKAN_ENV_FLAG("FC_VULKAN_BLACK_DEBUG")) {
+    static int blackFrame = 0;
+    int nTri = 0, nLine = 0, nOverlay = 0, nTrans = 0, nTriLit = 0;
+    int nTriUnlit = 0;
+    for (int i = 0; i < drawlist.getNumCommands(); ++i) {
+      const SoRenderCommand & c = drawlist.getCommand(i);
+      if (c.pass == SO_RENDERPASS_OVERLAY) nOverlay++;
+      else if (c.pass == SO_RENDERPASS_TRANSPARENT) nTrans++;
+      if (c.geometry.topology == SO_TOPOLOGY_TRIANGLES) {
+        nTri++;
+        if (c.material.shadingModel == SO_SHADING_LEGACY_GOURAUD) nTriLit++;
+        else nTriUnlit++;
+      }
+      if (c.geometry.topology == SO_TOPOLOGY_LINES ||
+          c.geometry.topology == SO_TOPOLOGY_LINE_STRIP) {
+        nLine++;
+      }
+    }
+    fprintf(stderr,
+            "[BLACK] recordFrame frame=%d flags=0x%x clear=(%.2f,%.2f,%.2f,%.2f) "
+            "cmds=%d tri=%d(lit=%d unlit=%d) line=%d overlay=%d trans=%d\n",
+            blackFrame++, static_cast<unsigned>(params.flags),
+            params.clearColor[0], params.clearColor[1], params.clearColor[2],
+            params.clearColor[3], drawlist.getNumCommands(), nTri, nTriLit,
+            nTriUnlit, nLine, nOverlay, nTrans);
   }
   this->applyViewport(params, target);
   this->recordClear(params, target);
@@ -491,9 +592,9 @@ SoVulkanRenderBackend::recordFrame(const SoDrawList & drawlist,
   // setPointsOverlay()/setEdgeColor().  Environment variables act as a
   // diagnostic fallback for the command line.
   const bool wireframeOverlay =
-    this->wireframeOverlay || envFlagEnabled("FC_VULKAN_WIREFRAME");
+    this->wireframeOverlay || COIN_VULKAN_ENV_FLAG("FC_VULKAN_WIREFRAME");
   const bool pointsOverlay =
-    this->pointsOverlay || envFlagEnabled("FC_VULKAN_POINTS");
+    this->pointsOverlay || COIN_VULKAN_ENV_FLAG("FC_VULKAN_POINTS");
   float overlayColor[4] = {
     this->edgeColor[0], this->edgeColor[1], this->edgeColor[2],
     this->edgeColor[3]
@@ -528,7 +629,7 @@ SoVulkanRenderBackend::recordFrame(const SoDrawList & drawlist,
   const int overlayFillMode = wireframeOverlay
     ? SoDrawStyleElement::LINES
     : (pointsOverlay ? SoDrawStyleElement::POINTS : -1);
-  if (envFlagEnabled("FC_VULKAN_BACKEND_DEBUG")) {
+  if (COIN_VULKAN_ENV_FLAG("FC_VULKAN_BACKEND_DEBUG")) {
     static int overlayLog = 0;
     if (overlayLog++ < 3) {
       fprintf(stderr,

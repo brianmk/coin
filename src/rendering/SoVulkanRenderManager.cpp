@@ -23,7 +23,9 @@
 #include "rendering/SoVulkanRenderBackend.h"
 #include "rendering/SoRTXRenderBackend.h"
 
+#include <chrono>
 #include <cmath>
+#include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <limits>
@@ -45,6 +47,41 @@ bool breadcrumbsEnabled()
 {
   static const bool enabled = std::getenv("FC_VULKAN_BREADCRUMBS") != nullptr;
   return enabled;
+}
+
+long vkRenderBreadcrumbNowUs()
+{
+  return (long)std::chrono::duration_cast<std::chrono::microseconds>(
+    std::chrono::steady_clock::now().time_since_epoch()).count();
+}
+
+bool vkRenderBreadcrumbEnabled()
+{
+  static const bool enabled = std::getenv("FC_GUI_OPEN_BREADCRUMB") != nullptr;
+  return enabled;
+}
+
+void vkRenderBreadcrumb(const char* phase)
+{
+  if (!vkRenderBreadcrumbEnabled()) {
+    return;
+  }
+  std::fprintf(stderr, "[VKRENDER] %ld %s\n", vkRenderBreadcrumbNowUs(), phase);
+  std::fflush(stderr);
+}
+
+void vkRenderBreadcrumbSince(long startUs, long thresholdUs, const char* phase)
+{
+  if (!vkRenderBreadcrumbEnabled()) {
+    return;
+  }
+  static int logged = 0;
+  const long now = vkRenderBreadcrumbNowUs();
+  if (logged < 30 && now - startUs >= thresholdUs) {
+    ++logged;
+    std::fprintf(stderr, "[VKRENDER] %ld %s dur_us=%ld\n", startUs, phase, now - startUs);
+    std::fflush(stderr);
+  }
 }
 
 // When FC_VULKAN_CLIP_VERBOSE is set, the near/far probe below logs every
@@ -102,6 +139,49 @@ uint64_t computeSceneFingerprint(const SoIRRenderAction & action)
          (h << 6) + (h >> 2);
   }
   return h;
+}
+
+// IR replay kill switch: retained-drawlist replay is on by default; set
+// FC_VULKAN_IR_REPLAY=0 to force a full scene re-traversal every frame.
+bool irReplayEnabled()
+{
+  static const bool enabled = []() {
+    const char * value = std::getenv("FC_VULKAN_IR_REPLAY");
+    return !(value && value[0] == '0');
+  }();
+  return enabled;
+}
+
+void mixHash(uint64_t & h, uint64_t v)
+{
+  h ^= v + 0x9E3779B97F4A7C15ULL + (h << 6) + (h >> 2);
+}
+
+// Recursively fold (node pointer, SoNode::getNodeId()) of every reachable
+// node into \a h.  Any change that can alter the IR draw list -- a field
+// write, a child-list edit, a geometry rebuild -- notifies through the node,
+// and SoNode::notify() bumps its unique id, so matching ids mean every
+// retained command was produced from exactly the current graph.  Group
+// children are folded via SoGroup; non-group child containers would have to
+// route through SoChildList notifications, which bump the owning node's id
+// and are caught by its own entry.  The active camera is skipped: its pose
+// is the camera-only change replay exists for (its eye-space lighting
+// entries are re-derived via SoDrawList::restrikeLighting).
+void graphFingerprintWalk(SoNode * node, const SoNode * skip, uint64_t & h)
+{
+  if (!node || node == skip) {
+    return;
+  }
+  mixHash(h, reinterpret_cast<uintptr_t>(node));
+  mixHash(h, static_cast<uint64_t>(node->getNodeId()));
+  if (node->isOfType(SoGroup::getClassTypeId())) {
+    const SoGroup * group = static_cast<const SoGroup *>(node);
+    const int num = group->getNumChildren();
+    mixHash(h, static_cast<uint64_t>(num));
+    for (int i = 0; i < num; ++i) {
+      graphFingerprintWalk(group->getChild(i), skip, h);
+    }
+  }
 }
 
 } // namespace
@@ -183,6 +263,27 @@ public:
   //! so backends, frame dumps and probe phase markers can correlate on one
   //! monotonic key independent of stream ordering.
   uint32_t frameOrdinal = 0;
+
+  //! --- Retained-IR replay state (camera-only frame fast path) ----------
+  //! Fold of the render-affecting graph (see graphFingerprintWalk) from the
+  //! last full traversal; a match means the retained IR draw list (and the
+  //! geometry/texture caches keyed on it) is still exactly reproducible.
+  uint64_t graphFingerprint = 0;
+  SbBool graphFingerprintValid = FALSE;
+  //! Caller-published revision of state the graph walk cannot see (the
+  //! selection model behind FreeCAD's highlight roots); mixed in verbatim.
+  uint64_t externalRevision = 0;
+  //! Viewing matrix (SoViewingMatrixElement bits) stamped into the commands
+  //! of the last full traversal; the replay restrike key.
+  SbMatrix lastFrameView;
+  SbBool lastFrameViewValid = FALSE;
+  //! Child pointers last installed in frameRoot, so navigation frames stop
+  //! churning the separator's child list (and its notifications).
+  SoNode * rootChildren[4] = {nullptr, nullptr, nullptr, nullptr};
+  SbBool rootChildrenValid = FALSE;
+
+  //! Current render-affecting graph fingerprint (see graphFingerprintWalk).
+  uint64_t computeGraphFingerprint() const;
 
   //! Resolve the camera that will render this frame.  The scene graph is the
   //! single camera authority (FreeCAD's navigation mutates the camera node
@@ -430,6 +531,12 @@ float
 SoVulkanRenderManager::getDevicePixelRatio(void) const
 {
   return this->pimpl->devicePixelRatio;
+}
+
+void
+SoVulkanRenderManager::setExternalRevision(uint64_t revision)
+{
+  this->pimpl->externalRevision = revision;
 }
 
 void
@@ -865,13 +972,18 @@ SoVulkanRenderManager::renderExternal(SbBool clearwindow,
                                       VkCommandBuffer commandBuffer,
                                       VkRenderPass renderPass)
 {
+  const long renderBcStart = vkRenderBreadcrumbEnabled() ? vkRenderBreadcrumbNowUs() : 0;
   SoRenderParams params;
   SoDrawList * drawlist = nullptr;
   if (!this->pimpl->prepareRenderParams(clearwindow, clearzbuffer, drawlist,
                                         params)) {
     return FALSE;
   }
+  if (renderBcStart) {
+    vkRenderBreadcrumbSince(renderBcStart, 5000, "renderExternal prepareRenderParams end");
+  }
   params.frame = ++this->pimpl->frameOrdinal;
+  const long backendBcStart = vkRenderBreadcrumbEnabled() ? vkRenderBreadcrumbNowUs() : 0;
   if (this->getRayTracingActive()) {
     if (!this->pimpl->rtxBackend.renderExternal(*drawlist, params,
                                                 commandBuffer, renderPass)) {
@@ -890,6 +1002,9 @@ SoVulkanRenderManager::renderExternal(SbBool clearwindow,
                                 drawlist->getNumCommands());
       return FALSE;
     }
+    if (backendBcStart) {
+      vkRenderBreadcrumbSince(backendBcStart, 5000, "renderExternal rtxBackend end");
+    }
     return TRUE;
   }
   if (!this->pimpl->backend.renderExternal(*drawlist, params, commandBuffer,
@@ -899,7 +1014,32 @@ SoVulkanRenderManager::renderExternal(SbBool clearwindow,
                               drawlist->getNumCommands());
     return FALSE;
   }
+  if (backendBcStart) {
+    vkRenderBreadcrumbSince(backendBcStart, 5000, "renderExternal rasterBackend end");
+  }
   return TRUE;
+}
+
+uint64_t
+SoVulkanRenderManagerP::computeGraphFingerprint() const
+{
+  uint64_t h = 0xcbf29ce484222325ULL;
+  mixHash(h, reinterpret_cast<uintptr_t>(this->camera));
+  mixHash(h, reinterpret_cast<uintptr_t>(this->scene));
+  mixHash(h, reinterpret_cast<uintptr_t>(this->overlayScene));
+  mixHash(h, reinterpret_cast<uintptr_t>(this->decorationScene));
+  graphFingerprintWalk(this->scene, this->camera, h);
+  graphFingerprintWalk(this->overlayScene, this->camera, h);
+  graphFingerprintWalk(this->decorationScene, this->camera, h);
+  const SbVec2s size = this->viewportRegion.getViewportSizePixels();
+  mixHash(h, static_cast<uint32_t>(size[0]));
+  mixHash(h, static_cast<uint32_t>(size[1]));
+  uint32_t dprBits = 0;
+  std::memcpy(&dprBits, &this->devicePixelRatio, sizeof(dprBits));
+  mixHash(h, dprBits);
+  mixHash(h, static_cast<uint32_t>(this->autoClipping));
+  mixHash(h, this->externalRevision);
+  return h;
 }
 
 SoCamera *
@@ -1187,11 +1327,15 @@ SoVulkanRenderManagerP::prepareRenderParams(SbBool clearwindow,
     return FALSE;
   }
 
+  const long prepBcStart = vkRenderBreadcrumbEnabled() ? vkRenderBreadcrumbNowUs() : 0;
   // The scene graph is the single camera authority.  Refresh the retained
   // camera pointer (and the generation counter) from the camera node inside
   // the scene every frame so auto-clipping and the matrix build always track
   // the node navigation actually mutates, never a stale snapshot.
   this->refreshActiveCamera();
+  if (prepBcStart) {
+    vkRenderBreadcrumbSince(prepBcStart, 2000, "prepare refreshActiveCamera end");
+  }
 
   // Keep the near/far planes tight around the scene so zooming and orbiting
   // never push geometry outside the view volume.  The GL SoRenderManager does
@@ -1199,10 +1343,15 @@ SoVulkanRenderManagerP::prepareRenderParams(SbBool clearwindow,
   // the Vulkan viewport clips near faces when the camera is close and far
   // faces when the camera is far (FreeCAD's hidden GL viewer never renders,
   // so its auto-clipping never runs).
+  const long clipBcStart = vkRenderBreadcrumbEnabled() ? vkRenderBreadcrumbNowUs() : 0;
   if (this->autoClipping != SoVulkanRenderManager::NO_AUTO_CLIPPING) {
     this->setClippingPlanes();
   }
+  if (clipBcStart) {
+    vkRenderBreadcrumbSince(clipBcStart, 2000, "prepare setClippingPlanes end");
+  }
 
+  const long applyBcStart = vkRenderBreadcrumbEnabled() ? vkRenderBreadcrumbNowUs() : 0;
   SoIRRenderAction & action = this->irAction;
   action.setViewportRegion(this->viewportRegion);
 
@@ -1274,34 +1423,62 @@ SoVulkanRenderManagerP::prepareRenderParams(SbBool clearwindow,
   // (blank/wrong view, invisible geometry, and a camera that appears not to
   // follow navigation).  The overlay scene is traversed last so its commands
   // record after the main scene and render in the overlay pass.
+  SbBool irReplayed = FALSE;
+  const uint64_t graphFp = this->computeGraphFingerprint();
   if (this->scene || this->camera || this->overlayScene
       || this->decorationScene) {
-    // Reuse the persistent traversal root: clear last frame's children and
-    // re-add them so the refcount stays balanced and the node (and any
-    // transient storage it touches in the IR action) is not reallocated.
-    SoSeparator * root = this->frameRoot;
-    root->removeAllChildren();
-    if (this->camera) {
-      root->addChild(this->camera);
+    if (irReplayEnabled() && this->graphFingerprintValid &&
+        graphFp == this->graphFingerprint) {
+      // Camera-only frame: every graph node, the viewport, and the
+      // caller-published revision are unchanged, so the retained IR draw
+      // list is exactly what a full traversal would produce -- keep it (and
+      // the geometry/texture caches keyed on it) and restamp the frame view
+      // after the matrices are built below.
+      irReplayed = TRUE;
     }
-    if (this->scene) {
-      root->addChild(this->scene);
+    else {
+      // Reuse the persistent traversal root: clear its children only when
+      // the child set actually changes so the refcount stays balanced and
+      // navigation frames stop re-triggering child-list notifications.
+      SoSeparator * root = this->frameRoot;
+      SoNode * const want[4] = { this->camera, this->scene,
+                                 this->overlayScene, this->decorationScene };
+      const SbBool sameChildren = this->rootChildrenValid &&
+        this->rootChildren[0] == want[0] &&
+        this->rootChildren[1] == want[1] &&
+        this->rootChildren[2] == want[2] &&
+        this->rootChildren[3] == want[3];
+      if (!sameChildren) {
+        root->removeAllChildren();
+        // Decorations (axis cross) record after the overlay scene so their
+        // overlay-pass commands draw on top of the navigation cube, matching
+        // GL's foreground/decoration render order.
+        for (int i = 0; i < 4; ++i) {
+          if (want[i]) {
+            root->addChild(want[i]);
+          }
+        }
+        for (int i = 0; i < 4; ++i) {
+          this->rootChildren[i] = want[i];
+        }
+        this->rootChildrenValid = TRUE;
+      }
+      action.apply(root);
+      this->graphFingerprint = graphFp;
+      this->graphFingerprintValid = TRUE;
+      this->lastFrameViewValid = FALSE;
     }
-    if (this->overlayScene) {
-      root->addChild(this->overlayScene);
-    }
-    // Decorations (axis cross) record after the overlay scene so their
-    // overlay-pass commands draw on top of the navigation cube, matching
-    // GL's foreground/decoration render order.
-    if (this->decorationScene) {
-      root->addChild(this->decorationScene);
-    }
-    action.apply(root);
   }
   else {
     action.beginFrame();
+    this->graphFingerprintValid = FALSE;
+    this->rootChildrenValid = FALSE;
+  }
+  if (applyBcStart) {
+    vkRenderBreadcrumbSince(applyBcStart, 2000, "prepare action.apply end");
   }
 
+  const long matricesBcStart = vkRenderBreadcrumbEnabled() ? vkRenderBreadcrumbNowUs() : 0;
   SoDrawList & list = action.getMutableDrawList();
 
   // The frame view/projection matrices drive every non-overlay command, so
@@ -1501,14 +1678,56 @@ SoVulkanRenderManagerP::prepareRenderParams(SbBool clearwindow,
     }
   }
 
+  if (matricesBcStart) {
+    vkRenderBreadcrumbSince(matricesBcStart, 2000, "prepare matrix build end");
+  }
+
+  if (irReplayed) {
+    // Camera-only frame: restamp the frame viewing matrix into every
+    // non-overlay command that carried the previous traversal's viewing
+    // element (commands stamped by a sub-camera keep their own matrix), and
+    // re-derive the eye-space lighting entries that were filled with it.
+    if (this->lastFrameViewValid) {
+      SbMat lastView;
+      this->lastFrameView.getValue(lastView);
+      const int numCommands = list.getNumCommands();
+      for (int i = 0; i < numCommands; ++i) {
+        SoRenderCommand & command = list.getCommand(i);
+        if (command.pass == SO_RENDERPASS_OVERLAY) {
+          continue;
+        }
+        SbMat cmdView;
+        command.viewMatrix.getValue(cmdView);
+        if (std::memcmp(&cmdView[0][0], &lastView[0][0], sizeof(cmdView)) == 0) {
+          command.viewMatrix = params.viewMatrix;
+        }
+      }
+      list.restrikeLighting(this->lastFrameView, params.viewMatrix);
+    }
+  }
+  else if (!this->lastFrameViewValid) {
+    // Remember the exact viewing-element bits the current traversal stamped
+    // so the next replay (if any) can identify restrikable entries.
+    const int numCommands = list.getNumCommands();
+    for (int i = 0; i < numCommands; ++i) {
+      const SoRenderCommand & command = list.getCommand(i);
+      if (command.pass != SO_RENDERPASS_OVERLAY) {
+        this->lastFrameView = command.viewMatrix;
+        this->lastFrameViewValid = TRUE;
+        break;
+      }
+    }
+  }
+  const long sortBcStart = vkRenderBreadcrumbEnabled() ? vkRenderBreadcrumbNowUs() : 0;
   list.buildSortedOrder(params.viewMatrix);
+  vkRenderBreadcrumbSince(sortBcStart, 2000, "prepare buildSortedOrder end");
   drawlist = &list;
 
   // Dump the draw list when COIN_DEBUG_RENDER_IR is set so the overlay
   // commands recorded by the highlight/selection paths can be inspected
   // (pass, depth state, diffuse color, vertex count).
   static int dumpCount = 0;
-  if (coin_render_ir_trace_enabled() && dumpCount++ < 8) {
+  if (coin_render_ir_trace_enabled() && dumpCount++ < 300) {
     SoIRDumpSummary(list);
     SoIRDumpFirstN(list, list.getNumCommands());
   }

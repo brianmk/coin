@@ -35,6 +35,12 @@ envFlagEnabled(const char * name)
          std::strcmp(value, "off") != 0;
 }
 
+// Literal-name fast path: the per-call-site static resolves the flag once,
+// so per-frame hot paths pay no getenv() at all.
+#define COIN_VULKAN_ENV_FLAG(name) \
+  ([] { static const bool coin_env_flag_cached = envFlagEnabled(name); \
+        return coin_env_flag_cached; }())
+
 // Resolve a device entry point into its concrete dispatch type.
 // vkGetDeviceProcAddr returns a generic PFN_vkVoidFunction; converting it to
 // the real PFN_vk* type with a direct reinterpret_cast between incompatible
@@ -272,6 +278,27 @@ hashPositions(const SoGeometryDesc & geometry, uint32_t vertexStride)
     mix(std::bit_cast<uint32_t>(p[0]));
     mix(std::bit_cast<uint32_t>(p[1]));
     mix(std::bit_cast<uint32_t>(p[2]));
+  }
+  return h;
+}
+
+// FNV-1a of a command's model matrix (object-to-world).  Used to detect
+// instance-transform changes that require a TLAS rebuild without any geometry
+// content change.  The camera (view/proj) is intentionally NOT part of this:
+// the AS lives in world space, so an orbit of a static scene never dirties the
+// TLAS.
+inline uint64_t
+hashTransformSignal(const SbMatrix & m)
+{
+  uint64_t h = 1469598103934665603ull;
+  const auto mix = [&h](uint64_t v) {
+    h ^= v;
+    h *= 1099511628211ull;
+  };
+  for (int i = 0; i < 4; ++i) {
+    for (int j = 0; j < 4; ++j) {
+      mix(std::bit_cast<uint32_t>(m[i][j]));
+    }
   }
   return h;
 }

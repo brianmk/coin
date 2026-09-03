@@ -464,6 +464,33 @@ struct SoLightingData {
 };
 
 /*!
+  \struct SoLightingRaw
+  \brief Scene-space inputs behind one SoLightingData entry.
+
+  The view-space fields of SoLightingData are derived during traversal and
+  go stale when the camera moves.  Retaining the scene-space vectors plus
+  each light's model matrix (and the viewing matrix used at fill time) lets
+  a draw list kept across a camera-only frame re-derive the eye-space data
+  with SoDrawList::restrikeLighting() instead of re-traversing the scene.
+*/
+struct SoLightingRaw {
+  struct RawLight {
+    SoLightType type = SO_LIGHT_DIRECTIONAL;
+    SbVec3f color = SbVec3f(1.0f, 1.0f, 1.0f);       // color * intensity
+    SbVec3f sceneDirection = SbVec3f(0.0f, 0.0f, -1.0f); // negated for directional
+    SbVec3f scenePosition = SbVec3f(0.0f, 0.0f, 0.0f);
+    SbVec3f attenuation = SbVec3f(0.0f, 0.0f, 0.0f);
+    float spotCutoffCos = -1.0f;
+    float spotExponent = 0.0f;
+    SbMatrix sceneMatrix; //!< light model matrix (world <- light local)
+  };
+  bool hasRaw = false;
+  SbVec3f ambient = SbVec3f(0.2f, 0.2f, 0.2f);
+  std::vector<RawLight> lights;
+  SbMatrix viewUsed; //!< SoViewingMatrixElement value at fill time
+};
+
+/*!
   \struct SoRenderCommand
   \brief Complete description of a single draw call in the IR.
 */
@@ -517,9 +544,24 @@ public:
   //! Add or reuse a lighting setup and return its stable 1-based handle.
   SoLightingHandle addLightingSetup(const SoLightingData & lighting);
 
+  //! Variant carrying the scene-space inputs (SoLightingRaw) alongside the
+  //! view-space setup so the entry can be restriked after a camera move.
+  //! The raw entry participates in deduplication (two setups equal in eye
+  //! space but derived from different cameras must stay separate).
+  SoLightingHandle addLightingSetup(const SoLightingData & lighting,
+                                    const SoLightingRaw & raw);
+
   //! Resolve a lighting handle previously returned by addLightingSetup().
   //! Returns NULL for handle 0 or an invalid handle.
   const SoLightingData * getLighting(SoLightingHandle handle) const;
+
+  //! Re-derive the eye-space fields of every retained lighting setup whose
+  //! fill-time viewing matrix equals \a prevView, using the scene-space
+  //! raw inputs transformed by \a newView.  Entries filled without raw data
+  //! (or from a different camera) are left untouched.  Called by the Vulkan
+  //! render manager on camera-only frames that replay a retained draw list
+  //! instead of re-traversing the scene graph.
+  void restrikeLighting(const SbMatrix & prevView, const SbMatrix & newView);
 
   SoRenderCommand * begin();
   SoRenderCommand * end();
@@ -536,6 +578,7 @@ public:
 private:
   std::vector<SoRenderCommand> commands;
   std::vector<SoLightingData> lightingSetups;
+  std::vector<SoLightingRaw> lightingRaws;
   std::vector<int> sortedOrder;
   uint32_t generation = 0;
 };

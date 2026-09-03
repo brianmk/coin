@@ -117,6 +117,18 @@ public:
   float getDevicePixelRatio(void) const;
 
   /*!
+    \brief Publish a revision counter for state the scene graph cannot show.
+
+    The camera-only-frame replay compares a fingerprint of the traversal-
+    relevant scene graph against the last full traversal.  Changes made
+    purely through application side models (FreeCAD's selection/preselection
+    state rendered by SoFCSelectionRoot without touching node fields) do not
+    move that fingerprint, so the embedding widget must bump \a revision
+    whenever such state changes; any change forces a full re-traversal.
+  */
+  void setExternalRevision(uint64_t revision);
+
+  /*!
     \brief Configure a vertical screen-space background gradient.
 
     When \a enabled is TRUE, render()/renderExternal() fills the viewport

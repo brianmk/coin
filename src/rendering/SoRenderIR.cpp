@@ -240,6 +240,7 @@ SoDrawList::clear()
 {
   this->commands.clear();
   this->lightingSetups.clear();
+  this->lightingRaws.clear();
   this->sortedOrder.clear();
   this->generation++;
 }
@@ -291,16 +292,114 @@ SoDrawList::getCommand(int i) const
   return this->commands[static_cast<size_t>(i)];
 }
 
+namespace {
+
+// Bitwise matrix equality: both sides are copies of the same element value,
+// so identical bit patterns are the right identity test (no epsilon).
+bool matrixBitsEqual(const SbMatrix & a, const SbMatrix & b)
+{
+  SbMat av, bv;
+  a.getValue(av);
+  b.getValue(bv);
+  return std::memcmp(&av[0][0], &bv[0][0], sizeof(av)) == 0;
+}
+
+bool rawLightEqual(const SoLightingRaw::RawLight & a,
+                   const SoLightingRaw::RawLight & b)
+{
+  return a.type == b.type &&
+    std::memcmp(&a.sceneDirection[0], &b.sceneDirection[0],
+                sizeof(float) * 3) == 0 &&
+    std::memcmp(&a.scenePosition[0], &b.scenePosition[0],
+                sizeof(float) * 3) == 0 &&
+    matrixBitsEqual(a.sceneMatrix, b.sceneMatrix);
+}
+
+bool rawEqual(const SoLightingRaw & a, const SoLightingRaw & b)
+{
+  if (a.hasRaw != b.hasRaw) return false;
+  if (!a.hasRaw) return true;
+  if (a.lights.size() != b.lights.size()) return false;
+  if (!matrixBitsEqual(a.viewUsed, b.viewUsed)) return false;
+  for (size_t i = 0; i < a.lights.size(); ++i) {
+    if (!rawLightEqual(a.lights[i], b.lights[i])) return false;
+  }
+  return true;
+}
+
+} // namespace
+
 SoLightingHandle
 SoDrawList::addLightingSetup(const SoLightingData & lighting)
 {
   for (size_t i = 0; i < this->lightingSetups.size(); ++i) {
-    if (lightingEqual(this->lightingSetups[i], lighting)) {
+    if (lightingEqual(this->lightingSetups[i], lighting) &&
+        rawEqual(this->lightingRaws[i], SoLightingRaw())) {
       return static_cast<SoLightingHandle>(i + 1);
     }
   }
   this->lightingSetups.push_back(lighting);
+  this->lightingRaws.emplace_back();
   return static_cast<SoLightingHandle>(this->lightingSetups.size());
+}
+
+SoLightingHandle
+SoDrawList::addLightingSetup(const SoLightingData & lighting,
+                             const SoLightingRaw & raw)
+{
+  for (size_t i = 0; i < this->lightingSetups.size(); ++i) {
+    if (lightingEqual(this->lightingSetups[i], lighting) &&
+        rawEqual(this->lightingRaws[i], raw)) {
+      return static_cast<SoLightingHandle>(i + 1);
+    }
+  }
+  this->lightingSetups.push_back(lighting);
+  this->lightingRaws.push_back(raw);
+  return static_cast<SoLightingHandle>(this->lightingSetups.size());
+}
+
+void
+SoDrawList::restrikeLighting(const SbMatrix & prevView, const SbMatrix & newView)
+{
+  if (matrixBitsEqual(prevView, newView)) {
+    return;
+  }
+  for (size_t e = 0; e < this->lightingRaws.size(); ++e) {
+    const SoLightingRaw & raw = this->lightingRaws[e];
+    if (!raw.hasRaw || !matrixBitsEqual(raw.viewUsed, prevView)) {
+      continue;
+    }
+    SoLightingData & setup = this->lightingSetups[e];
+    setup.ambient = raw.ambient;
+    setup.lights.clear();
+    setup.lights.reserve(raw.lights.size());
+    for (const SoLightingRaw::RawLight & rl : raw.lights) {
+      SoLightData light;
+      light.type = rl.type;
+      light.color = rl.color;
+      light.attenuation = rl.attenuation;
+      light.spotCutoffCos = rl.spotCutoffCos;
+      light.spotExponent = rl.spotExponent;
+      const SbMatrix eye = rl.sceneMatrix * newView;
+      if (rl.type == SO_LIGHT_DIRECTIONAL) {
+        eye.multDirMatrix(rl.sceneDirection, light.direction);
+        if (light.direction.normalize() == 0.0f) {
+          light.direction.setValue(0.0f, 0.0f, 1.0f);
+        }
+      }
+      else if (rl.type == SO_LIGHT_POINT) {
+        eye.multVecMatrix(rl.scenePosition, light.position);
+      }
+      else {
+        eye.multVecMatrix(rl.scenePosition, light.position);
+        eye.multDirMatrix(rl.sceneDirection, light.direction);
+        if (light.direction.normalize() == 0.0f) {
+          light.direction.setValue(0.0f, 0.0f, -1.0f);
+        }
+      }
+      setup.lights.push_back(light);
+    }
+  }
 }
 
 const SoLightingData *
@@ -701,6 +800,14 @@ fillLightingFromState(SoState * state, SoDrawList & drawlist)
 {
   SoLightingData lighting;
 
+  // Scene-space inputs kept alongside the view-space setup so a camera-only
+  // frame can re-derive this entry (SoDrawList::restrikeLighting) instead of
+  // re-traversing the scene.
+  SoLightingRaw raw;
+  raw.hasRaw = true;
+  raw.viewUsed = SoViewingMatrixElement::get(state);
+  const SbMatrix viewInverse = raw.viewUsed.inverse();
+
   const SbColor & ambientColor = SoEnvironmentElement::getAmbientColor(state);
   const float ambientIntensity = SoEnvironmentElement::getAmbientIntensity(state);
   lighting.ambient.setValue(ambientColor[0] * ambientIntensity,
@@ -726,9 +833,17 @@ fillLightingFromState(SoState * state, SoDrawList & drawlist)
 
     const SbMatrix & lightMatrix = SoLightElement::getMatrix(state, i);
 
+    SoLightingRaw::RawLight rawLight;
+    rawLight.color = lightData.color;
+    rawLight.attenuation = attenuation;
+    // lightMatrix == model * view, so the scene-space model matrix follows.
+    rawLight.sceneMatrix = lightMatrix * viewInverse;
+
     if (light->isOfType(SoDirectionalLight::getClassTypeId())) {
       SoDirectionalLight * directional = static_cast<SoDirectionalLight *>(light);
       lightData.type = SO_LIGHT_DIRECTIONAL;
+      rawLight.type = SO_LIGHT_DIRECTIONAL;
+      rawLight.sceneDirection = -(directional->direction.getValue());
       lightMatrix.multDirMatrix(-(directional->direction.getValue()), lightData.direction);
       if (lightData.direction.normalize() == 0.0f) {
         lightData.direction.setValue(0.0f, 0.0f, 1.0f);
@@ -737,12 +852,17 @@ fillLightingFromState(SoState * state, SoDrawList & drawlist)
     else if (light->isOfType(SoPointLight::getClassTypeId())) {
       SoPointLight * point = static_cast<SoPointLight *>(light);
       lightData.type = SO_LIGHT_POINT;
+      rawLight.type = SO_LIGHT_POINT;
+      rawLight.scenePosition = point->location.getValue();
       lightData.attenuation = attenuation;
       lightMatrix.multVecMatrix(point->location.getValue(), lightData.position);
     }
     else if (light->isOfType(SoSpotLight::getClassTypeId())) {
       SoSpotLight * spot = static_cast<SoSpotLight *>(light);
       lightData.type = SO_LIGHT_SPOT;
+      rawLight.type = SO_LIGHT_SPOT;
+      rawLight.scenePosition = spot->location.getValue();
+      rawLight.sceneDirection = spot->direction.getValue();
       lightData.attenuation = attenuation;
       lightMatrix.multVecMatrix(spot->location.getValue(), lightData.position);
       lightMatrix.multDirMatrix(spot->direction.getValue(), lightData.direction);
@@ -757,15 +877,19 @@ fillLightingFromState(SoState * state, SoDrawList & drawlist)
       if (dropoff < 0.0f) dropoff = 0.0f;
       if (dropoff > 1.0f) dropoff = 1.0f;
       lightData.spotExponent = dropoff * 128.0f;
+      rawLight.spotCutoffCos = lightData.spotCutoffCos;
+      rawLight.spotExponent = lightData.spotExponent;
     }
     else {
       continue;
     }
 
     lighting.lights.push_back(lightData);
+    raw.lights.push_back(rawLight);
   }
 
-  return drawlist.addLightingSetup(lighting);
+  raw.ambient = lighting.ambient;
+  return drawlist.addLightingSetup(lighting, raw);
 }
 
 bool

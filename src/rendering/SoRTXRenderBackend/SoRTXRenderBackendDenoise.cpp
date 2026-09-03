@@ -451,6 +451,116 @@ SoRTXRenderBackend::createDenoiseBackend()
 }
 
 void
+SoRTXRenderBackend::submitDenoiseCopy(VkCommandBuffer cmd)
+{
+  const bool async = getenv("FC_VULKAN_ASYNC_COMPUTE") != nullptr &&
+    this->hasComputeQueue && this->computeQueue != VK_NULL_HANDLE;
+  VkQueue q = async ? this->computeQueue : this->queue;
+  VkSubmitInfo si {};
+  si.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
+  si.commandBufferCount = 1;
+  si.pCommandBuffers = &cmd;
+  if (async) {
+    // Submit on the compute queue so the graphics queue stays free to process
+    // other submits while the denoiser output copy runs.  When the timeline
+    // semaphore is available the completion is signalled as a timeline value
+    // and the host waits on that exact value with vkWaitSemaphores; otherwise
+    // fall back to a binary fence wait.
+    if (this->ensureAsyncComputeTimeline() && this->vkWaitSemaphores) {
+      const uint64_t value = ++this->asyncComputeTimelineValue;
+      VkSemaphoreSubmitInfo signal {};
+      signal.sType = VK_STRUCTURE_TYPE_SEMAPHORE_SUBMIT_INFO;
+      signal.semaphore = this->asyncComputeTimeline;
+      signal.stageMask = VK_PIPELINE_STAGE_ALL_COMMANDS_BIT;
+      signal.value = value;
+      VkTimelineSemaphoreSubmitInfo tls {};
+      tls.sType = VK_STRUCTURE_TYPE_TIMELINE_SEMAPHORE_SUBMIT_INFO;
+      tls.signalSemaphoreValueCount = 1;
+      tls.pSignalSemaphoreValues = &value;
+      VkSemaphore sem = this->asyncComputeTimeline;
+      si.signalSemaphoreCount = 1;
+      si.pSignalSemaphores = &sem;
+      si.pNext = &tls;
+      vkQueueSubmit(q, 1, &si, VK_NULL_HANDLE);
+      VkSemaphoreWaitInfo wi {};
+      wi.sType = VK_STRUCTURE_TYPE_SEMAPHORE_WAIT_INFO;
+      wi.semaphoreCount = 1;
+      wi.pSemaphores = &this->asyncComputeTimeline;
+      wi.pValues = &value;
+      vkWaitSemaphores(this->device, &wi, UINT64_MAX);
+      if (getenv("FC_VULKAN_ASYNC_COMPUTE_TIMING")) {
+        fprintf(stderr, "[ASYNC] compute copy signalled timeline value=%llu\n",
+                static_cast<unsigned long long>(value));
+      }
+      return;
+    }
+    // Timeline semaphore unavailable: block on a fence (the graphics queue is
+    // still left free); a missing fence falls back to a blocking submit.
+    VkFence fence = VK_NULL_HANDLE;
+    VkFenceCreateInfo fci {};
+    fci.sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO;
+    if (vkCreateFence(this->device, &fci, this->allocator, &fence) !=
+          VK_SUCCESS ||
+        fence == VK_NULL_HANDLE) {
+      vkQueueSubmit(q, 1, &si, VK_NULL_HANDLE);
+      vkQueueWaitIdle(q);
+      return;
+    }
+    vkQueueSubmit(q, 1, &si, fence);
+    vkWaitForFences(this->device, 1, &fence, VK_TRUE, UINT64_MAX);
+    vkDestroyFence(this->device, fence, this->allocator);
+  }
+  else {
+    vkQueueSubmit(q, 1, &si, VK_NULL_HANDLE);
+    vkQueueWaitIdle(q);
+  }
+}
+
+bool
+SoRTXRenderBackend::ensureAsyncComputeTimeline()
+{
+  if (this->asyncComputeTimeline != VK_NULL_HANDLE) {
+    return this->vkWaitSemaphores != nullptr;
+  }
+  if (this->device == VK_NULL_HANDLE) return false;
+  // vkWaitSemaphores is a Vulkan 1.2 core device function; resolve it the
+  // same way the KHR entry points are (the loader only exports core 1.0).
+  PFN_vkVoidFunction fn = vkGetDeviceProcAddr(this->device, "vkWaitSemaphores");
+  if (fn == nullptr) return false;
+  this->vkWaitSemaphores = loadDispatch<PFN_vkWaitSemaphores>(fn);
+  VkSemaphoreTypeCreateInfo typeInfo {};
+  typeInfo.sType = VK_STRUCTURE_TYPE_SEMAPHORE_TYPE_CREATE_INFO;
+  typeInfo.semaphoreType = VK_SEMAPHORE_TYPE_TIMELINE;
+  typeInfo.initialValue = 0;
+  VkSemaphoreCreateInfo sci {};
+  sci.sType = VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO;
+  sci.pNext = &typeInfo;
+  if (vkCreateSemaphore(this->device, &sci, this->allocator,
+                        &this->asyncComputeTimeline) != VK_SUCCESS) {
+    this->asyncComputeTimeline = VK_NULL_HANDLE;
+    this->vkWaitSemaphores = nullptr;
+    return false;
+  }
+  this->asyncComputeTimelineValue = 0;
+  if (getenv("FC_VULKAN_ASYNC_COMPUTE_TIMING")) {
+    fprintf(stderr, "[ASYNC] created compute timeline semaphore\n");
+  }
+  return true;
+}
+
+void
+SoRTXRenderBackend::destroyAsyncComputeTimeline()
+{
+  if (this->asyncComputeTimeline != VK_NULL_HANDLE) {
+    vkDestroySemaphore(this->device, this->asyncComputeTimeline,
+                       this->allocator);
+    this->asyncComputeTimeline = VK_NULL_HANDLE;
+  }
+  this->vkWaitSemaphores = nullptr;
+  this->asyncComputeTimelineValue = 0;
+}
+
+void
 SoRTXRenderBackend::recordDenoiseReadback(VkCommandBuffer cmd)
 {
   if (!this->denoiserActive) return;
@@ -598,13 +708,44 @@ SoRTXRenderBackend::updateDenoise()
                              VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, 0, 1,
                              &outBar, 0, nullptr, 0, nullptr);
         vkEndCommandBuffer(cmd);
-        VkSubmitInfo si {};
-        si.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
-        si.commandBufferCount = 1;
-        si.pCommandBuffers = &cmd;
-        vkQueueSubmit(this->queue, 1, &si, VK_NULL_HANDLE);
-        vkQueueWaitIdle(this->queue);
+        // Run the denoiser-output copy on the compute queue when the async
+        // path is available, so the graphics queue stays free (see
+        // submitDenoiseCopy()).
+        this->submitDenoiseCopy(cmd);
         this->denoiseResultReady = TRUE;
+
+        if (COIN_VULKAN_ENV_FLAG("FC_VULKAN_BLACK_DEBUG")) {
+          float * dbg = static_cast<float *>(this->denoiseStagingPtr);
+          float * albR = dbg + stride / 4;
+          float * nrmR = dbg + 2 * stride / 4;
+          const int mid = ((h / 2) * w + w / 2) * 4;
+          // scan a horizontal strip at mid-height for lit (alpha>0) color runs
+          int litPixels = 0;
+          for (int x = 0; x < w; ++x) {
+            if (dbg[((h / 2) * w + x) * 4 + 3] > 0.0f) { litPixels++; }
+          }
+          // vertical extent of lit pixels
+          int litTop = -1, litBottom = -1;
+          for (int y = 0; y < h; ++y) {
+            int rowLit = 0;
+            for (int x = 0; x < w; x += 8) {
+              if (dbg[(y * w + x) * 4 + 3] > 0.0f) { rowLit++; }
+            }
+            if (rowLit > 0) { if (litTop < 0) litTop = y; litBottom = y; }
+          }
+          fprintf(stderr,
+                  "[BLACKOIDN] %ux%u accumMid=(%.3f,%.3f,%.3f,%.1f) "
+                  "albedoMid=(%.3f,%.3f,%.3f,%.1f) litRow=%d/%u litTop=%d litBottom=%d outMid=(%.3f,%.3f,%.3f,%.1f)\n",
+                  w, h,
+                  dbg[mid], dbg[mid + 1], dbg[mid + 2], dbg[mid + 3],
+                  albR[mid], albR[mid + 1], albR[mid + 2], albR[mid + 3],
+                  litPixels, w, litTop, litBottom,
+                  (dbg + 4 * stride / 4)[mid],
+                  (dbg + 4 * stride / 4)[mid + 1],
+                  (dbg + 4 * stride / 4)[mid + 2],
+                  (dbg + 4 * stride / 4)[mid + 3]);
+        }
+
         this->convergeAfterDenoise();
       }
       else {
@@ -822,14 +963,20 @@ SoRTXRenderBackend::updateDenoise()
             base[3] = 0.0f;
           }
         }
+        // OIDN 2.x's "RT" filter rejects OIDN_FORMAT_FLOAT4 for these inputs
+        // (oidnErr=3 "unsupported input image format" -> black output).  The
+        // buffers are packed vec4 (w = sample count / validity) with a 16-byte
+        // pixel stride; presenting the leading 3 components as FLOAT3 with the
+        // same stride makes OIDN read only RGB and skip the packed alpha, so
+        // the downstream float4 indexing below is still valid.
         oidnSetSharedFilterImage(this->oidnFilter, "color", color,
-                                 OIDN_FORMAT_FLOAT4, w, h, 0, 16,
+                                 OIDN_FORMAT_FLOAT3, w, h, 0, 16,
                                  static_cast<size_t>(w) * 16);
         oidnSetSharedFilterImage(this->oidnFilter, "albedo", albedo,
-                                 OIDN_FORMAT_FLOAT4, w, h, 0, 16,
+                                 OIDN_FORMAT_FLOAT3, w, h, 0, 16,
                                  static_cast<size_t>(w) * 16);
         oidnSetSharedFilterImage(this->oidnFilter, "normal", normal,
-                                 OIDN_FORMAT_FLOAT4, w, h, 0, 16,
+                                 OIDN_FORMAT_FLOAT3, w, h, 0, 16,
                                  static_cast<size_t>(w) * 16);
         // Motion-vector guide: the RT filter's optional 'motion' input is a
         // FLOAT2 screen-space NDC vector (current -> previous).  Our motion
@@ -841,7 +988,7 @@ SoRTXRenderBackend::updateDenoise()
                                  OIDN_FORMAT_FLOAT2, w, h, 0, 16,
                                  static_cast<size_t>(w) * 16);
         oidnSetSharedFilterImage(this->oidnFilter, "output", out,
-                                 OIDN_FORMAT_FLOAT4, w, h, 0, 16,
+                                 OIDN_FORMAT_FLOAT3, w, h, 0, 16,
                                  static_cast<size_t>(w) * 16);
         oidnCommitFilter(this->oidnFilter);
         oidnExecuteFilter(this->oidnFilter);
@@ -849,6 +996,18 @@ SoRTXRenderBackend::updateDenoise()
         // sync so the output region and the validity stamp below are fully
         // written before the render thread reads them.
         oidnSyncDevice(this->oidnDevice);
+        // OIDN can fail silently and leave the output region black (e.g. an
+        // unsupported input image format).  Surface the first such failure as
+        // a warning; the worker is a background thread so this cannot corrupt
+        // the render state, and the in-shader edge-stopped mean still shows.
+        if (getenv("FC_VULKAN_PT_DENOISER_DEBUG")) {
+          const char * omsg = nullptr;
+          const OIDNError oerr = oidnGetDeviceError(this->oidnDevice, &omsg);
+          if (oerr != OIDN_ERROR_NONE) {
+            fprintf(stderr, "[DENOISE] OIDN error %d: %s\n",
+                    static_cast<int>(oerr), omsg ? omsg : "(null)");
+          }
+        }
         // Stamp the per-pixel validity mask from the (already normalized)
         // color region so the present shader can reject denoised pixels with
         // no primary hit (its DenoisedBuffer alpha test).
@@ -953,6 +1112,7 @@ SoRTXRenderBackend::releaseDenoiseStaging()
 void
 SoRTXRenderBackend::destroyDenoiser()
 {
+  this->destroyAsyncComputeTimeline();
   this->releaseDenoiseStaging();
 
   // Device-local denoised output (present binding 5) and albedo G-buffer
@@ -1354,6 +1514,7 @@ SoRTXRenderBackend::createRtxInteropBuffer(size_t bytes,
   externalQuery.usage = usage;
   externalQuery.handleType = VK_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_FD_BIT;
   VkExternalBufferProperties externalProps {};
+  externalProps.sType = VK_STRUCTURE_TYPE_EXTERNAL_BUFFER_PROPERTIES;
   vkGetPhysicalDeviceExternalBufferProperties(this->physicalDevice,
                                               &externalQuery, &externalProps);
   const VkExternalMemoryProperties & externalMem =

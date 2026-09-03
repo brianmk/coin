@@ -192,7 +192,8 @@ SoRTXRenderBackend::createStorageImage(uint32_t width, uint32_t height)
   ci.arrayLayers = 1;
   ci.samples = VK_SAMPLE_COUNT_1_BIT;
   ci.tiling = VK_IMAGE_TILING_OPTIMAL;
-  ci.usage = VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
+  ci.usage = VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_SAMPLED_BIT |
+             VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
   ci.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
   ci.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
   if (vkCreateImage(this->device, &ci, this->allocator,

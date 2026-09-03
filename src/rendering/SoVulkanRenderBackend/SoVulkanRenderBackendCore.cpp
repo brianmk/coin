@@ -159,6 +159,26 @@ SoVulkanRenderBackend::initialize(const SoRenderBackendInitParams & params)
   this->queueFamilyIndex = deviceContext->graphicsQueueFamilyIndex;
   this->allocator = deviceContext->allocator;
 
+  // Cache the device capabilities the backend relies on.  Vulkan has no API
+  // to read back which features an already-created device enabled, so query
+  // what the physical device *supports* and rely on the embedding
+  // application enabling exactly the supported ones (see
+  // QuarterVulkanWidget::configureDeviceFeatures).  This gates the
+  // VK_POLYGON_MODE_LINE/POINT pipelines (fillModeNonSolid) and the 1/2-
+  // component texture upload formats (optional sampled formats).
+  VkPhysicalDeviceFeatures supportedFeatures {};
+  vkGetPhysicalDeviceFeatures(this->physicalDevice, &supportedFeatures);
+  this->fillModeNonSolid = supportedFeatures.fillModeNonSolid ? true : false;
+
+  const auto sampledOptimal = [this](const VkFormat fmt) {
+    VkFormatProperties props {};
+    vkGetPhysicalDeviceFormatProperties(this->physicalDevice, fmt, &props);
+    return (props.optimalTilingFeatures & VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT)
+      ? true : false;
+  };
+  this->sampledR8 = sampledOptimal(VK_FORMAT_R8_UNORM);
+  this->sampledR8G8 = sampledOptimal(VK_FORMAT_R8G8_UNORM);
+
   // Mark initialized before creating resources so that a failure in any
   // create*() below runs the full (null-tolerant) shutdown() cleanup
   // instead of leaking every handle created so far.
@@ -521,6 +541,14 @@ SoVulkanRenderBackend::swapLightingBuffer(VkBuffer newBuffer,
   this->waitForInFlightFrames();
   std::vector<VkWriteDescriptorSet> writes;
   std::vector<VkDescriptorBufferInfo> bufferInfos;
+  // Reserve up front: collect() stores &bufferInfos.back() into each write's
+  // pBufferInfo.  Without a reservation a later push_back reallocates the
+  // vector and turns those earlier pointers into dangling memory, so
+  // vkUpdateDescriptorSets would read a garbage VkBuffer handle and fault in
+  // the driver.  The max set count is the white set plus one per texture.
+  const size_t maxSets = this->textureCache.size() + 1;
+  writes.reserve(maxSets);
+  bufferInfos.reserve(maxSets);
   const auto collect = [&](const VkDescriptorSet set) {
     if (set == VK_NULL_HANDLE) return;
     VkDescriptorBufferInfo info {};
@@ -621,7 +649,28 @@ SoVulkanRenderBackend::deferDestroyCacheEntry(VulkanCachedCommand & entry)
 {
   if (entry.vertexBuffer == VK_NULL_HANDLE &&
       entry.indexBuffer == VK_NULL_HANDLE &&
+      entry.sharedBlockId == 0 &&
       entry.wideLineBuffers.empty()) {
+    entry = VulkanCachedCommand();
+    return;
+  }
+  if (entry.sharedBlockId != 0) {
+    const uint32_t sharedBlockId = entry.sharedBlockId;
+    std::vector<VulkanCachedCommand::VulkanWideLineBuffer> wideLine =
+      std::move(entry.wideLineBuffers);
+    VkDevice device = this->device;
+    const VkAllocationCallbacks * allocator = this->allocator;
+    this->deferDestroy([device, allocator, wideLine]() {
+      for (const VulkanCachedCommand::VulkanWideLineBuffer & slot : wideLine) {
+        if (slot.buffer != VK_NULL_HANDLE) {
+          vkDestroyBuffer(device, slot.buffer, allocator);
+        }
+        if (slot.memory != VK_NULL_HANDLE) {
+          vkFreeMemory(device, slot.memory, allocator);
+        }
+      }
+    });
+    this->deferReleaseGeometryBlock(sharedBlockId);
     entry = VulkanCachedCommand();
     return;
   }

@@ -45,6 +45,7 @@ struct RTXCachedGeometry {
   VkAccelerationStructureKHR blas = VK_NULL_HANDLE;
   VkBuffer blasBuffer = VK_NULL_HANDLE;
   VkDeviceMemory blasMemory = VK_NULL_HANDLE;
+  VkDeviceSize blasSize = 0;
   uint32_t vertexCount = 0;
   uint32_t indexCount = 0;
   // Device address of the BLAS, captured once at build time.  It never changes
@@ -64,6 +65,11 @@ struct RTXCachedGeometry {
   // Cheap per-frame change signal (hashGeometrySignal).  When it matches
   // contentHash is reused; only a mismatch triggers the full hashGeometry().
   uint64_t changeSignal = 0;
+  // Signal of the command's modelMatrix, used to decide whether the TLAS
+  // instance set (and the NEE/material world transforms) changed even though
+  // the geometry content did not.  Camera movement does NOT touch this (the
+  // AS is world-space), so an orbit of a static scene can skip the TLAS build.
+  uint64_t transformSignal = 0;
   // Command that last touched this entry (per-frame arena pointer; used
   // only as an identity key for map rebuilds after cache eviction).
   const SoRenderCommand * commandKey = nullptr;
@@ -85,6 +91,24 @@ struct RTXCachedGeometry {
   bool refitPending = false;
   uint64_t vertexHash = 0;
   uint64_t indexHash = 0;
+  // Object-space axis-aligned bounds (min/max), computed at BLAS build/refit
+  // time from the tightly packed positions.  buildTlas() projects the
+  // model-transformed corners into the camera frustum to cull sub-pixel
+  // instances instead of tracing off-screen grain.  Zero for an empty clip.
+  float objectMin[3] = {0.0f, 0.0f, 0.0f};
+  float objectMax[3] = {0.0f, 0.0f, 0.0f};
+  // BLAS input vertex format chosen at build time: R32G32B32_SFLOAT (default)
+  // or R16G16B16_SFLOAT when the FC_VULKAN_AS_PACK gate is on and the object
+  // positions fit the half range.  refitBlas() must upload the SAME format so
+  // the in-place MODE_UPDATE matches the original build.
+  VkFormat blasVertexFormat = VK_FORMAT_R32G32B32_SFLOAT;
+  // Bytes per tightly-packed BLAS vertex (12 for fp32, 6 for fp16).
+  uint32_t blasVertexStride = 12;
+  // AS compaction (FC_VULKAN_AS_COMPACT): set when the initial build was
+  // compiled with ALLOW_COMPACTION and the AS has not yet been compacted.
+  // The compacted AS replaces this entry after the owning frame completes.
+  bool wantsCompact = false;
+  bool compacted = false;
 };
 
 /*!
@@ -315,7 +339,8 @@ private:
   bool refitBlas(RTXCachedGeometry & entry, const SoRenderCommand & command,
                  VkCommandBuffer cmd);
   void destroyCacheEntry(RTXCachedGeometry & entry);
-  bool buildTlas(const SoDrawList & drawlist, VkCommandBuffer cmd);
+  bool buildTlas(const SoDrawList & drawlist, const SoRenderParams & params,
+                 VkCommandBuffer cmd);
 
   // --- Material buffer --------------------------------------------------
   void updateMaterials(const SoDrawList & drawlist);
@@ -335,6 +360,12 @@ private:
                              VkRenderPass renderPass);
   VkCommandBuffer beginTransientCommandBuffer();
   void releaseTransientCommandBuffer();
+  // Submit a one-shot command buffer for the denoiser output copy.  When the
+  // async-compute path is available (a second compute-capable queue from the
+  // same family) and FC_VULKAN_ASYNC_COMPUTE is set, the copy runs on that
+  // queue so the graphics queue is free to process other submits; a fence is
+  // blocked on so the result is published before the present that samples it.
+  void submitDenoiseCopy(VkCommandBuffer cmd);
 
   // --- Device handles ----------------------------------------------------
   VkInstance instance = VK_NULL_HANDLE;
@@ -342,6 +373,31 @@ private:
   VkDevice device = VK_NULL_HANDLE;
   VkQueue queue = VK_NULL_HANDLE;
   uint32_t queueFamilyIndex = 0;
+  // Optional compute queue acquired at device creation (the embedding app
+  // requests it via QVulkanWindow::setQueueCreateInfoModifier, typically a
+  // dedicated compute-only family, and reports the family + queue index here).
+  // Used by the FC_VULKAN_ASYNC_COMPUTE path to overlap GPU work (e.g. the
+  // denoiser copy) with graphics.  Falls back to the single graphics queue
+  // (hasComputeQueue = false) when no compute queue was created.
+  VkQueue computeQueue = VK_NULL_HANDLE;
+  uint32_t computeQueueFamilyIndex = 0;
+  uint32_t computeQueueIndex = 0;
+  uint32_t computeQueueCount = 0;
+  bool hasComputeQueue = false;
+  bool probeComputeQueue();
+  // Timeline semaphore for the async-compute denoiser copy: the compute queue
+  // signals a monotonically increasing value when the copy completes, and the
+  // host waits on that exact value with vkWaitSemaphores (no per-frame
+  // vkQueueWaitIdle on the graphics queue).  Created lazily and destroyed with
+  // the denoiser.  Vulkan 1.2 core (the backend already requires 1.2).
+  VkSemaphore asyncComputeTimeline = VK_NULL_HANDLE;
+  uint64_t asyncComputeTimelineValue = 0;
+  PFN_vkWaitSemaphores vkWaitSemaphores = nullptr;
+  bool ensureAsyncComputeTimeline();
+  void destroyAsyncComputeTimeline();
+  // Host frame pacing for the FC_VULKAN_FRAME_TIMING breakdown (renderExternal
+  // logs interval/AS/denoise per frame).
+  double lastFrameStartMs = 0.0;
   const VkAllocationCallbacks * allocator = nullptr;
 
   // Cached physical-device identity used to gate the NVIDIA-only CUDA/OptiX
@@ -464,6 +520,8 @@ private:
   PFN_vkCreateAccelerationStructureKHR vkCreateAccelerationStructureKHR = nullptr;
   PFN_vkCmdBuildAccelerationStructuresKHR vkCmdBuildAccelerationStructuresKHR = nullptr;
   PFN_vkGetAccelerationStructureDeviceAddressKHR vkGetAccelerationStructureDeviceAddressKHR = nullptr;
+  PFN_vkCmdWriteAccelerationStructuresPropertiesKHR vkCmdWriteAccelerationStructuresPropertiesKHR = nullptr;
+  PFN_vkCmdCopyAccelerationStructureKHR vkCmdCopyAccelerationStructureKHR = nullptr;
   PFN_vkCreateRayTracingPipelinesKHR vkCreateRayTracingPipelinesKHR = nullptr;
   PFN_vkGetRayTracingShaderGroupHandlesKHR vkGetRayTracingShaderGroupHandlesKHR = nullptr;
   PFN_vkCmdTraceRaysKHR vkCmdTraceRaysKHR = nullptr;
@@ -566,6 +624,18 @@ private:
   // above the plateau hands the last residual to the guide-based denoiser
   // instead of tracing to the cap.  FC_VULKAN_PT_STOP_FRACTION overrides.
   float ptAdaptiveStopFraction = 0.05f;
+  // Latched by a camera/scene move so the FIRST fresh accumulation after the
+  // move must run to ptMaxSamples before the adaptive stop may idle the run.
+  // Without this, the adaptive sampler lets mostly-background pixels (small /
+  // off-centre boxes) freeze at their thin sample floor, the active-pixel
+  // fraction collapses below ptAdaptiveStopFraction, and the viewport idles on
+  // a faint/edge-only image of those boxes.  Forcing a full-resolve pass after
+  // every move guarantees solid coverage; only an already-warm STATIC run may
+  // use the fast adaptive stop.
+  SbBool ptForceFullResolve = FALSE;
+  // One-shot diagnostic: dump the final path-traced storage image to a PPM
+  // (FC_VULKAN_PT_DUMP=<path>) once, after the frame's GPU work is idle.
+  SbBool ptDumpDone = FALSE;
   // Firefly rejection: standard-deviation multiplier under which a sample
   // far brighter than the pixel's running mean is replaced by that mean.
   // 0 disables it.  Default 5.0 clamps extreme outliers so the stubborn
@@ -695,6 +765,26 @@ private:
   //! Set by updateGeometryCache() when any cached command's geometry
   //! identity changed and a BLAS rebuild is pending this frame.
   bool cacheChanged = false;
+  //! Set by updateGeometryCache() when any cached traced command's model
+  //! matrix changed (object moved) while the geometry content did not.
+  bool asTransformChanged = false;
+  //! Computed each frame in recordAccelerationStructures(): true when the
+  //! acceleration structures must be (re)built this frame (geometry content
+  //! OR an instance transform changed).  When false the TLAS/NEE/material
+  //! rebuilds are skipped entirely, so an orbit of a static scene records no
+  //! AS work.  Camera movement never sets it (the AS is world-space).
+  bool asDirty = true;
+
+  // Background / environment change detection: the path tracer restarts its
+  // accumulation when the viewport gradient or the IBL environment changes,
+  // even though that never affects the acceleration structures.
+  bool haveLastBackground = false;
+  float lastBgTopColors[4] = {};
+  float lastBgBottomColors[4] = {};
+  float lastSunDir[3] = {};
+  float lastEnvIntensity = -1.0f;
+  float lastSunColor[3] = {};
+  int lastEnvMapId = -0x7fffffff;
 
   // Monotonic frame counter used to stamp visited cache entries; entries
   // not stamped by the end of updateGeometryCache() are evicted.
@@ -706,6 +796,14 @@ private:
   uint32_t statBlasBuilt = 0;
   uint32_t statBlasRefit = 0;
   uint32_t statBlasReused = 0;
+  // Instances skipped this frame by the sub-pixel TLAS cull (FC_VULKAN_TLAS_CULL).
+  // A count > 0 means the TLAS instance set differs from last frame, so the
+  // MODE_UPDATE refit path is suppressed in favour of a full MODE_BUILD.
+  uint32_t statTlasCulled = 0;
+  // Change-detection for the [RTDBG] buildTlas line (log only on a change).
+  bool lastTlasDebugLogged = false;
+  size_t lastTlasTotal = 0;
+  uint32_t lastTlasCulled = 0;
 
   // Staging buffers destroyed by buildBlas() are released only after the
   // owning command buffer finished executing (destroying a bound buffer
@@ -721,6 +819,17 @@ private:
   int pendingDestroyIndex = 0;
   void flushPendingDestroys(bool waitForQueue = false);
   void deferDestroy(std::function<void()> && fn);
+
+  // --- AS compaction (FC_VULKAN_AS_COMPACT) ---------------------------------
+  // After the frame that built a BLAS completes, its compacted size is read
+  // back via a query pool and the AS is copied into a smaller buffer (see
+  // compactPendingBlases()).  The original AS/buffer is deferred-destroyed a
+  // couple of frames later so the TLAS that referenced it this frame is safe.
+  VkQueryPool compactQueryPool = VK_NULL_HANDLE;
+  VkFence compactFence = VK_NULL_HANDLE;
+  bool ensureCompactQueryPool();
+  void compactPendingBlases();
+  bool compactBlas(RTXCachedGeometry & entry);
 
   // --- Denoiser backends (OIDN / RTX-OptiX / FSR) -------------------------
   // The path tracer writes G-buffers (accumulated radiance, albedo, world
@@ -950,6 +1059,8 @@ private:
   void recordDenoiseReadback(VkCommandBuffer cmd);
   //! Run the denoiser on the staged G-buffers and publish denoiseResultReady.
   void updateDenoise();
+  //! Read the already-traced storage image back to a PPM (FC_VULKAN_PT_DUMP).
+  void dumpStorageImageIfRequested();
   //! After publishing a denoised result at target: clear the denoise latch and
   //! transition to converged-idle so the viewport keeps the denoised image and
   //! stops the continuous-update loop.  Also used on the failure paths (with a

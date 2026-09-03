@@ -49,6 +49,12 @@ struct SoVulkanDeviceContext {
   VkDevice device = VK_NULL_HANDLE;                   //!< Logical device.
   VkQueue graphicsQueue = VK_NULL_HANDLE;             //!< Submission queue.
   uint32_t graphicsQueueFamilyIndex = 0;              //!< Queue family index.
+  // Optional async-compute queue.  The embedding app requests it at device
+  // creation (e.g. via QVulkanWindow::setQueueCreateInfoModifier) and the
+  // backend retrieves the handle with vkGetDeviceQueue() using the family +
+  // index below.  computeQueueFamilyIndex is UINT32_MAX when none was created.
+  uint32_t computeQueueFamilyIndex = ~0u;             //!< Compute family index.
+  uint32_t computeQueueIndex = 0;                     //!< Queue index (default 0).
   uint32_t apiVersion = VK_API_VERSION_1_0;           //!< Negotiated API version.
   const VkAllocationCallbacks * allocator = nullptr;  //!< Optional host allocator.
 };

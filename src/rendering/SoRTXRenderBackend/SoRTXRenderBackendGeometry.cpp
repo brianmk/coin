@@ -405,6 +405,190 @@ SoRTXRenderBackend::deferDestroy(std::function<void()> && fn)
   this->pendingDestroys[this->pendingDestroyIndex].push_back(std::move(fn));
 }
 
+bool
+SoRTXRenderBackend::ensureCompactQueryPool()
+{
+  if (this->compactFence == VK_NULL_HANDLE) {
+    VkFenceCreateInfo fci {};
+    fci.sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO;
+    if (vkCreateFence(this->device, &fci, this->allocator,
+                      &this->compactFence) != VK_SUCCESS) {
+      return false;
+    }
+  }
+  if (this->compactQueryPool == VK_NULL_HANDLE) {
+    VkQueryPoolCreateInfo qpci {};
+    qpci.sType = VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO;
+    qpci.queryType = VK_QUERY_TYPE_ACCELERATION_STRUCTURE_COMPACTED_SIZE_KHR;
+    qpci.queryCount = 1;
+    if (vkCreateQueryPool(this->device, &qpci, this->allocator,
+                          &this->compactQueryPool) != VK_SUCCESS) {
+      return false;
+    }
+  }
+  return true;
+}
+
+// Copy a BLAS into a freshly sized buffer that holds only its compacted
+// footprint, then swap the entry to the compacted AS and defer-destroy the
+// original (a pending TLAS may still reference the original address this
+// frame).  Returns true when compaction ran (including when it determined
+// there was nothing to save).
+bool
+SoRTXRenderBackend::compactBlas(RTXCachedGeometry & entry)
+{
+  if (entry.blas == VK_NULL_HANDLE) return true;
+  if (!this->ensureCompactQueryPool()) return false;
+
+  VkCommandBuffer cmd = this->beginTransientCommandBuffer();
+  if (cmd == VK_NULL_HANDLE) return false;
+  vkCmdResetQueryPool(cmd, this->compactQueryPool, 0, 1);
+  const VkAccelerationStructureKHR ases[] = {entry.blas};
+  this->vkCmdWriteAccelerationStructuresPropertiesKHR(
+    cmd, 1, ases, VK_QUERY_TYPE_ACCELERATION_STRUCTURE_COMPACTED_SIZE_KHR,
+    this->compactQueryPool, 0);
+  vkEndCommandBuffer(cmd);
+  VkSubmitInfo si {};
+  si.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
+  si.commandBufferCount = 1;
+  si.pCommandBuffers = &cmd;
+  if (vkQueueSubmit(this->queue, 1, &si, this->compactFence) != VK_SUCCESS) {
+    return false;
+  }
+  if (vkWaitForFences(this->device, 1, &this->compactFence, VK_TRUE,
+                      UINT64_MAX) != VK_SUCCESS) {
+    return false;
+  }
+  vkResetFences(this->device, 1, &this->compactFence);
+  const VkDeviceSize origSize = entry.blasSize;
+  VkDeviceSize compactSize = 0;
+  if (vkGetQueryPoolResults(this->device, this->compactQueryPool, 0, 1,
+                            sizeof(compactSize), &compactSize, sizeof(compactSize),
+                            VK_QUERY_RESULT_WAIT_BIT) != VK_SUCCESS) {
+    return false;
+  }
+  if (compactSize == 0 || entry.blasSize == 0 ||
+      compactSize >= entry.blasSize) {
+    entry.compacted = true;  // nothing to save; stop asking
+    entry.wantsCompact = false;
+    if (getenv("FC_VULKAN_RT_DEBUG")) {
+      fprintf(stderr, "[RTDBG] compact size=%llu -> %llu saved=0\n",
+              static_cast<unsigned long long>(origSize),
+              static_cast<unsigned long long>(compactSize));
+    }
+    return true;
+  }
+
+  VkBuffer cBuf = VK_NULL_HANDLE;
+  VkDeviceMemory cMem = VK_NULL_HANDLE;
+  if (!this->createDeviceLocalBuffer(
+        compactSize,
+        VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_STORAGE_BIT_KHR |
+          VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT,
+        cBuf, cMem)) {
+    return false;
+  }
+  VkAccelerationStructureCreateInfoKHR asCI {};
+  asCI.sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_CREATE_INFO_KHR;
+  asCI.buffer = cBuf;
+  asCI.size = compactSize;
+  asCI.type = VK_ACCELERATION_STRUCTURE_TYPE_BOTTOM_LEVEL_KHR;
+  VkAccelerationStructureKHR cAs = VK_NULL_HANDLE;
+  if (vkCreateAccelerationStructureKHR(this->device, &asCI, this->allocator,
+                                       &cAs) != VK_SUCCESS ||
+      cAs == VK_NULL_HANDLE) {
+    vkDestroyBuffer(this->device, cBuf, this->allocator);
+    vkFreeMemory(this->device, cMem, this->allocator);
+    return false;
+  }
+
+  VkCommandBuffer cmd2 = this->beginTransientCommandBuffer();
+  bool ok = false;
+  if (cmd2 != VK_NULL_HANDLE) {
+    VkCopyAccelerationStructureInfoKHR copyInfo {};
+    copyInfo.sType = VK_STRUCTURE_TYPE_COPY_ACCELERATION_STRUCTURE_INFO_KHR;
+    copyInfo.src = entry.blas;
+    copyInfo.dst = cAs;
+    copyInfo.mode = VK_COPY_ACCELERATION_STRUCTURE_MODE_COMPACT_KHR;
+    this->vkCmdCopyAccelerationStructureKHR(cmd2, &copyInfo);
+    vkEndCommandBuffer(cmd2);
+    VkSubmitInfo si2 {};
+    si2.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
+    si2.commandBufferCount = 1;
+    si2.pCommandBuffers = &cmd2;
+    if (vkQueueSubmit(this->queue, 1, &si2, this->compactFence) == VK_SUCCESS) {
+      ok = vkWaitForFences(this->device, 1, &this->compactFence, VK_TRUE,
+                           UINT64_MAX) == VK_SUCCESS;
+      if (ok) {
+        vkResetFences(this->device, 1, &this->compactFence);
+      }
+    }
+  }
+
+  if (!ok) {
+    vkDestroyAccelerationStructureKHR(this->device, cAs, this->allocator);
+    vkDestroyBuffer(this->device, cBuf, this->allocator);
+    vkFreeMemory(this->device, cMem, this->allocator);
+    return false;
+  }
+
+  // Swap to the compacted AS; defer-destroy the original (a pending TLAS may
+  // reference the old address until the frame that used it completes).
+  VkAccelerationStructureKHR oldAs = entry.blas;
+  VkBuffer oldBuf = entry.blasBuffer;
+  VkDeviceMemory oldMem = entry.blasMemory;
+  entry.blas = cAs;
+  entry.blasBuffer = cBuf;
+  entry.blasMemory = cMem;
+  entry.blasSize = compactSize;
+  VkAccelerationStructureDeviceAddressInfoKHR ai {};
+  ai.sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_DEVICE_ADDRESS_INFO_KHR;
+  ai.accelerationStructure = entry.blas;
+  entry.devAddr = vkGetAccelerationStructureDeviceAddressKHR(this->device, &ai);
+  entry.compacted = true;
+  entry.wantsCompact = false;
+  if (getenv("FC_VULKAN_RT_DEBUG")) {
+    fprintf(stderr, "[RTDBG] compact size=%llu -> %llu saved=1\n",
+            static_cast<unsigned long long>(origSize),
+            static_cast<unsigned long long>(compactSize));
+  }
+  VkDevice device = this->device;
+  const VkAllocationCallbacks * alloc = this->allocator;
+  const PFN_vkDestroyAccelerationStructureKHR vkDestroyAS =
+    this->vkDestroyAccelerationStructureKHR;
+  this->deferDestroy([device, alloc, vkDestroyAS, oldAs, oldBuf, oldMem]() {
+    if (oldAs != VK_NULL_HANDLE) {
+      vkDestroyAS(device, oldAs, alloc);
+    }
+    if (oldBuf != VK_NULL_HANDLE) {
+      vkDestroyBuffer(device, oldBuf, alloc);
+    }
+    if (oldMem != VK_NULL_HANDLE) {
+      vkFreeMemory(device, oldMem, alloc);
+    }
+  });
+  return true;
+}
+
+// Compact every cached BLAS that was built with ALLOW_COMPACTION and has not
+// been compacted yet.  Called after the owning frame has fully completed (the
+// geometry is quiescent, so the AS contents are stable to copy-shrink).
+void
+SoRTXRenderBackend::compactPendingBlases()
+{
+  uint32_t candidates = 0;
+  for (RTXCachedGeometry & entry : this->geometryCache) {
+    if (entry.wantsCompact && !entry.compacted && entry.blas != VK_NULL_HANDLE) {
+      ++candidates;
+      this->compactBlas(entry);
+    }
+  }
+  if (getenv("FC_VULKAN_RT_DEBUG")) {
+    fprintf(stderr, "[RTDBG] compactSweep cache=%zu candidates=%u\n",
+            this->geometryCache.size(), candidates);
+  }
+}
+
 void
 SoRTXRenderBackend::invalidateCache()
 {
@@ -604,6 +788,17 @@ SoRTXRenderBackend::updateGeometryCache(const SoDrawList & drawlist)
         entryPtr = &entry;
       }
     }
+    // Instance-transform change detection: a moved object (same geometry)
+    // must rebuild the TLAS, but the camera never does.  Only the traced
+    // opaque commands reach here, so a selection pass-flip (OPAQUE<->OVERLAY)
+    // of an unchanged object does not dirty the TLAS.
+    {
+      const uint64_t tsig = hashTransformSignal(command.modelMatrix);
+      if (entryPtr->transformSignal != tsig) {
+        this->asTransformChanged = true;
+        entryPtr->transformSignal = tsig;
+      }
+    }
     entryPtr->commandKey = &command;
     entryPtr->cacheGeneration = frame;
   }
@@ -640,6 +835,79 @@ SoRTXRenderBackend::updateGeometryCache(const SoDrawList & drawlist)
       this->commandToCache[this->geometryCache[idx].commandKey] = idx;
     }
   }
+
+  if (COIN_VULKAN_ENV_FLAG("FC_VULKAN_BLACK_DEBUG")) {
+    static int geoFrame = 0;
+    int tri = 0, triTraced = 0, triOverlay = 0, triTrans = 0;
+    uint64_t vertsTraced = 0, vertsAll = 0;
+    for (int i = 0; i < drawlist.getNumCommands(); ++i) {
+      const SoRenderCommand & c = drawlist.getCommand(i);
+      if (c.geometry.topology != SO_TOPOLOGY_TRIANGLES) continue;
+      tri++;
+      if (c.geometry.vertexCount) vertsAll += c.geometry.vertexCount;
+      const bool traced = (c.pass != SO_RENDERPASS_TRANSPARENT &&
+                           c.pass != SO_RENDERPASS_OVERLAY);
+      if (traced) { triTraced++; vertsTraced += c.geometry.vertexCount; }
+      else if (c.pass == SO_RENDERPASS_OVERLAY) triOverlay++;
+      else if (c.pass == SO_RENDERPASS_TRANSPARENT) triTrans++;
+    }
+    int live = 0, blasLive = 0;
+    for (const RTXCachedGeometry & e : this->geometryCache) {
+      if (e.cacheGeneration == frame) live++;
+      if (e.blas != VK_NULL_HANDLE) blasLive++;
+    }
+    fprintf(stderr,
+            "[GEOC] frame=%d cmds=%d tri=%d traced=%d(verts=%llu) "
+            "overlay=%d trans=%d allVerts=%llu cache=%d blas=%d cacheChanged=%d\n",
+            geoFrame++, drawlist.getNumCommands(), tri, triTraced,
+            static_cast<unsigned long long>(vertsTraced), triOverlay, triTrans,
+            static_cast<unsigned long long>(vertsAll), live, blasLive,
+            static_cast<int>(this->cacheChanged));
+  }
+}
+
+// IEEE 754 single -> binary16, round-to-nearest-even.  Used to pack BLAS
+// positions to R16G16B16_SFLOAT (FC_VULKAN_AS_PACK).  Positions are finite
+// object-space coordinates; NaN/Inf are clamped to the half Inf sentinel.
+static uint16_t
+floatToHalf(float f)
+{
+  uint32_t bits = 0;
+  std::memcpy(&bits, &f, sizeof(bits));
+  const uint32_t sign = (bits >> 16) & 0x8000u;
+  const uint32_t expField = (bits >> 23) & 0xffu;
+  uint32_t mant = bits & 0x7fffffu;
+  if (expField == 0xffu) {
+    return static_cast<uint16_t>(sign | 0x7c00u);  // NaN/Inf
+  }
+  int32_t exp = static_cast<int32_t>(expField) - 127 + 15;
+  if (exp >= 31) {
+    return static_cast<uint16_t>(sign | 0x7c00u);  // overflow to Inf
+  }
+  if (exp <= 0) {
+    if (exp < -10) return static_cast<uint16_t>(sign);  // underflow to 0
+    mant |= 0x800000u;
+    const uint32_t shift = static_cast<uint32_t>(14 - exp);
+    uint32_t halfMant = mant >> shift;
+    const uint32_t rem = mant & ((1u << shift) - 1u);
+    const uint32_t halfway = 0x400u >> (shift - 1u);
+    if (rem > halfway || (rem == halfway && (halfMant & 1u))) {
+      ++halfMant;
+    }
+    return static_cast<uint16_t>(sign | halfMant);
+  }
+  uint32_t halfMant = mant >> 13;
+  const uint32_t rem = mant & 0x1fffu;
+  if (rem > 0x1000u || (rem == 0x1000u && (halfMant & 1u))) {
+    ++halfMant;
+  }
+  if (halfMant == 0x400u) {
+    halfMant = 0;
+    ++exp;
+    if (exp >= 31) return static_cast<uint16_t>(sign | 0x7c00u);
+  }
+  return static_cast<uint16_t>(sign | (static_cast<uint32_t>(exp) << 10u) |
+                               halfMant);
 }
 
 bool
@@ -666,17 +934,61 @@ SoRTXRenderBackend::buildBlas(RTXCachedGeometry & entry,
   // records pick up the offset afterwards in updateMaterials()).
   this->appendTriangleNormals(command, entry);
 
-  // Position-only vertex buffer (tightly packed vec3) for the BLAS.
+  // Position-only vertex buffer for the BLAS.  Optionally packed to 16-bit
+  // half floats (FC_VULKAN_AS_PACK) when the object positions fit the half
+  // range: halves AS memory and traversal cost on static geometry.  The 32-bit
+  // path is the default and is used whenever the gate is off or coords would
+  // overflow half precision.
+  const bool packEnabled = getenv("FC_VULKAN_AS_PACK") != nullptr;
   std::vector<float> positions(static_cast<size_t>(entry.vertexCount) * 3);
+  float pMin[3] = {1e30f, 1e30f, 1e30f};
+  float pMax[3] = {-1e30f, -1e30f, -1e30f};
   for (uint32_t i = 0; i < entry.vertexCount; ++i) {
     const float * p =
       geometry.positions + static_cast<size_t>(i) * posStrideFloats;
     positions[static_cast<size_t>(i) * 3 + 0] = p[0];
     positions[static_cast<size_t>(i) * 3 + 1] = p[1];
     positions[static_cast<size_t>(i) * 3 + 2] = p[2];
+    if (p[0] < pMin[0]) pMin[0] = p[0];
+    if (p[1] < pMin[1]) pMin[1] = p[1];
+    if (p[2] < pMin[2]) pMin[2] = p[2];
+    if (p[0] > pMax[0]) pMax[0] = p[0];
+    if (p[1] > pMax[1]) pMax[1] = p[1];
+    if (p[2] > pMax[2]) pMax[2] = p[2];
+  }
+  for (int a = 0; a < 3; ++a) {
+    entry.objectMin[a] = pMin[a];
+    entry.objectMax[a] = pMax[a];
+  }
+  bool fitHalf = true;
+  for (int a = 0; a < 3; ++a) {
+    if (std::fabs(pMin[a]) > 60000.0f || std::fabs(pMax[a]) > 60000.0f) {
+      fitHalf = false;
+    }
+  }
+  const bool useHalf = packEnabled && fitHalf;
+  entry.blasVertexFormat =
+    useHalf ? VK_FORMAT_R16G16B16_SFLOAT : VK_FORMAT_R32G32B32_SFLOAT;
+  entry.blasVertexStride = useHalf ? 6 : 12;
+  std::vector<uint16_t> packedHalf;
+  const void * vertexSrc = nullptr;
+  if (useHalf) {
+    packedHalf.resize(static_cast<size_t>(entry.vertexCount) * 3);
+    for (size_t i = 0; i < positions.size(); ++i) {
+      packedHalf[i] = floatToHalf(positions[i]);
+    }
+    vertexSrc = packedHalf.data();
+  }
+  else {
+    vertexSrc = positions.data();
+  }
+  if (getenv("FC_VULKAN_RT_DEBUG")) {
+    fprintf(stderr, "[RTDBG] blasFmt build=1 packed=%d stride=%u fmt=0x%x\n",
+            useHalf ? 1 : 0, entry.blasVertexStride,
+            static_cast<unsigned>(entry.blasVertexFormat));
   }
   const VkDeviceSize vertexBytes =
-    static_cast<VkDeviceSize>(entry.vertexCount) * 3 * sizeof(float);
+    static_cast<VkDeviceSize>(entry.vertexCount) * entry.blasVertexStride;
   if (!this->createDeviceLocalBuffer(
         vertexBytes,
         VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT_KHR |
@@ -702,7 +1014,7 @@ SoRTXRenderBackend::buildBlas(RTXCachedGeometry & entry,
     vkFreeMemory(this->device, stagingMemory, this->allocator);
     return false;
   }
-  std::memcpy(mapped, positions.data(), static_cast<size_t>(vertexBytes));
+  std::memcpy(mapped, vertexSrc, static_cast<size_t>(vertexBytes));
   vkUnmapMemory(this->device, stagingMemory);
 
   VkBuffer indexStaging = VK_NULL_HANDLE;
@@ -772,10 +1084,10 @@ SoRTXRenderBackend::buildBlas(RTXCachedGeometry & entry,
   VkAccelerationStructureGeometryTrianglesDataKHR triangles {};
   triangles.sType =
     VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_TRIANGLES_DATA_KHR;
-  triangles.vertexFormat = VK_FORMAT_R32G32B32_SFLOAT;
+  triangles.vertexFormat = entry.blasVertexFormat;
   triangles.vertexData.deviceAddress =
     this->getDeviceAddress(entry.vertexBuffer);
-  triangles.vertexStride = 3 * sizeof(float);
+  triangles.vertexStride = entry.blasVertexStride;
   triangles.maxVertex = entry.vertexCount - 1;
   triangles.indexType =
     indexed ? VK_INDEX_TYPE_UINT32 : VK_INDEX_TYPE_NONE_KHR;
@@ -797,9 +1109,16 @@ SoRTXRenderBackend::buildBlas(RTXCachedGeometry & entry,
     VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_BUILD_GEOMETRY_INFO_KHR;
   buildInfo.type = VK_ACCELERATION_STRUCTURE_TYPE_BOTTOM_LEVEL_KHR;
   // ALLOW_UPDATE: lets position-only edits refit this BLAS in place (see
-  // refitBlas()) instead of destroying and rebuilding it.
+  // refitBlas()) instead of destroying and rebuilding it.  ALLOW_COMPACTION
+  // (FC_VULKAN_AS_COMPACT) lets a later pass shrink the AS residency copy.
+  const bool compactGate = getenv("FC_VULKAN_AS_COMPACT") != nullptr;
   buildInfo.flags = VK_BUILD_ACCELERATION_STRUCTURE_PREFER_FAST_TRACE_BIT_KHR |
                     VK_BUILD_ACCELERATION_STRUCTURE_ALLOW_UPDATE_BIT_KHR;
+  if (compactGate) {
+    buildInfo.flags |= VK_BUILD_ACCELERATION_STRUCTURE_ALLOW_COMPACTION_BIT_KHR;
+    entry.wantsCompact = true;
+    entry.compacted = false;
+  }
   buildInfo.mode = VK_BUILD_ACCELERATION_STRUCTURE_MODE_BUILD_KHR;
   buildInfo.geometryCount = 1;
   buildInfo.pGeometries = &asGeometry;
@@ -821,6 +1140,7 @@ SoRTXRenderBackend::buildBlas(RTXCachedGeometry & entry,
         entry.blasBuffer, entry.blasMemory)) {
     return false;
   }
+  entry.blasSize = sizeInfo.accelerationStructureSize;
   VkAccelerationStructureCreateInfoKHR asCI {};
   asCI.sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_CREATE_INFO_KHR;
   asCI.buffer = entry.blasBuffer;
@@ -879,21 +1199,47 @@ SoRTXRenderBackend::refitBlas(RTXCachedGeometry & entry,
 
   // Upload the new vertex positions into the EXISTING device buffers; the
   // index buffer and topology are unchanged (the refit precondition checked
-  // in updateGeometryCache()).
+  // in updateGeometryCache()).  The byte size and packing must match the
+  // format the BLAS was originally built with (entry.blasVertexFormat).
   const VkDeviceSize vertexBytes =
-    static_cast<VkDeviceSize>(entry.vertexCount) * 3 * sizeof(float);
+    static_cast<VkDeviceSize>(entry.vertexCount) * entry.blasVertexStride;
 
   // Moved vertices change the object-space flat normals: append a fresh
   // normal-pool record and let updateMaterials() pick up the new offset
   // (the pool is grow-only, matching the rebuild path).
   this->appendTriangleNormals(command, entry);
   std::vector<float> positions(static_cast<size_t>(entry.vertexCount) * 3);
+  float pMin[3] = {1e30f, 1e30f, 1e30f};
+  float pMax[3] = {-1e30f, -1e30f, -1e30f};
   for (uint32_t i = 0; i < entry.vertexCount; ++i) {
     const float * p =
       geometry.positions + static_cast<size_t>(i) * posStrideFloats;
-    positions[static_cast<size_t>(i) * 3 + 0] = p[0];
-    positions[static_cast<size_t>(i) * 3 + 1] = p[1];
-    positions[static_cast<size_t>(i) * 3 + 2] = p[2];
+    const float px = p[0], py = p[1], pz = p[2];
+    positions[static_cast<size_t>(i) * 3 + 0] = px;
+    positions[static_cast<size_t>(i) * 3 + 1] = py;
+    positions[static_cast<size_t>(i) * 3 + 2] = pz;
+    if (px < pMin[0]) pMin[0] = px;
+    if (py < pMin[1]) pMin[1] = py;
+    if (pz < pMin[2]) pMin[2] = pz;
+    if (px > pMax[0]) pMax[0] = px;
+    if (py > pMax[1]) pMax[1] = py;
+    if (pz > pMax[2]) pMax[2] = pz;
+  }
+  for (int a = 0; a < 3; ++a) {
+    entry.objectMin[a] = pMin[a];
+    entry.objectMax[a] = pMax[a];
+  }
+  std::vector<uint16_t> packedHalf;
+  const void * vertexSrc = nullptr;
+  if (entry.blasVertexFormat == VK_FORMAT_R16G16B16_SFLOAT) {
+    packedHalf.resize(static_cast<size_t>(entry.vertexCount) * 3);
+    for (size_t i = 0; i < positions.size(); ++i) {
+      packedHalf[i] = floatToHalf(positions[i]);
+    }
+    vertexSrc = packedHalf.data();
+  }
+  else {
+    vertexSrc = positions.data();
   }
 
   VkBuffer staging = VK_NULL_HANDLE;
@@ -912,7 +1258,7 @@ SoRTXRenderBackend::refitBlas(RTXCachedGeometry & entry,
     vkFreeMemory(this->device, stagingMemory, this->allocator);
     return false;
   }
-  std::memcpy(mapped, positions.data(), static_cast<size_t>(vertexBytes));
+  std::memcpy(mapped, vertexSrc, static_cast<size_t>(vertexBytes));
   vkUnmapMemory(this->device, stagingMemory);
 
   VkBufferCopy vertexCopy {};
@@ -932,10 +1278,10 @@ SoRTXRenderBackend::refitBlas(RTXCachedGeometry & entry,
   VkAccelerationStructureGeometryTrianglesDataKHR triangles {};
   triangles.sType =
     VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_TRIANGLES_DATA_KHR;
-  triangles.vertexFormat = VK_FORMAT_R32G32B32_SFLOAT;
+  triangles.vertexFormat = entry.blasVertexFormat;
   triangles.vertexData.deviceAddress =
     this->getDeviceAddress(entry.vertexBuffer);
-  triangles.vertexStride = 3 * sizeof(float);
+  triangles.vertexStride = entry.blasVertexStride;
   triangles.maxVertex = entry.vertexCount - 1;
   const bool indexed = entry.indexCount > 0;
   triangles.indexType =
@@ -999,8 +1345,56 @@ SoRTXRenderBackend::refitBlas(RTXCachedGeometry & entry,
   return true;
 }
 
+// A world-space AABB projects to a sub-N-pixel footprint exactly when the
+// whole box is in front of the camera and its clip-space extent (in pixels)
+// is below the cull threshold.  A box straddling the near plane (any corner
+// behind the camera) is never culled: it is either adjacent to / crossing
+// the camera, so assuming it is visible is the conservative choice and avoids
+// a pop-in.  Uses the same row-vector "p * (viewMatrix * projMatrix)" clip
+// the frame block and ray shaders derive from, so the NDC bounds match the
+// pixels the object would actually cover.
+namespace {
+bool projectFootprintSubPixel(const float mn[3], const float mx[3],
+                              const SbMatrix & viewProj, float vw, float vh,
+                              float cullPixels)
+{
+  const float corners[8][3] = {
+    {mn[0], mn[1], mn[2]}, {mn[0], mn[1], mx[2]},
+    {mn[0], mx[1], mn[2]}, {mn[0], mx[1], mx[2]},
+    {mx[0], mn[1], mn[2]}, {mx[0], mn[1], mx[2]},
+    {mx[0], mx[1], mn[2]}, {mx[0], mx[1], mx[2]},
+  };
+  float minNx = 1e30f, maxNx = -1e30f, minNy = 1e30f, maxNy = -1e30f;
+  for (int k = 0; k < 8; ++k) {
+    const float x = corners[k][0], y = corners[k][1], z = corners[k][2];
+    // Row-vector: out[j] = sum_r v[r] * M[r][j]  (v[3] == 1).
+    const float cw =
+      x * viewProj[0][3] + y * viewProj[1][3] + z * viewProj[2][3] +
+      viewProj[3][3];
+    if (cw <= 1e-6f) return false;  // behind / on the near plane -> keep
+    const float cx =
+      x * viewProj[0][0] + y * viewProj[1][0] + z * viewProj[2][0] +
+      viewProj[3][0];
+    const float cy =
+      x * viewProj[0][1] + y * viewProj[1][1] + z * viewProj[2][1] +
+      viewProj[3][1];
+    const float nx = cx / cw;
+    const float ny = cy / cw;
+    if (nx < minNx) minNx = nx;
+    if (nx > maxNx) maxNx = nx;
+    if (ny < minNy) minNy = ny;
+    if (ny > maxNy) maxNy = ny;
+  }
+  const float px = (maxNx - minNx) * vw * 0.5f;
+  const float py = (maxNy - minNy) * vh * 0.5f;
+  return px < cullPixels && py < cullPixels;
+}
+} // namespace
+
 bool
-SoRTXRenderBackend::buildTlas(const SoDrawList & drawlist, VkCommandBuffer cmd)
+SoRTXRenderBackend::buildTlas(const SoDrawList & drawlist,
+                              const SoRenderParams & params,
+                              VkCommandBuffer cmd)
 {
   // Collect instance data for every cached geometry command (opaque only).
   // instanceCustomIndex is the draw-list command index so the closest-hit
@@ -1009,6 +1403,29 @@ SoRTXRenderBackend::buildTlas(const SoDrawList & drawlist, VkCommandBuffer cmd)
   std::vector<VkAccelerationStructureInstanceKHR> & instances =
     this->instanceScratch;
   instances.clear();
+
+  // Sub-pixel instance culling (FC_VULKAN_TLAS_CULL, off unless requested so
+  // the default trace path is unchanged).  Culling drops instances whose
+  // projected footprint is below FC_VULKAN_TLAS_PIX pixels, which for a CAD
+  // viewport dominated by far/small meshes grades the TLAS traversal cost.
+  // The instance set changing is tracked so the refit/UPDATE path is never
+  // reused across a differing set (a MODE_UPDATE TLAS keeps stale instances).
+  this->statTlasCulled = 0;
+  const bool cullEnabled = getenv("FC_VULKAN_TLAS_CULL") != nullptr;
+  float cullPixels = 1.0f;
+  if (const char * s = getenv("FC_VULKAN_TLAS_PIX")) {
+    cullPixels = static_cast<float>(std::atof(s));
+  }
+  if (cullPixels <= 0.0f) cullPixels = 1.0f;
+  float vw = 0.0f, vh = 0.0f;
+  SbMatrix viewProj;
+  if (cullEnabled) {
+    const SbVec2s & vpSize = params.viewport.getViewportSizePixels();
+    vw = static_cast<float>(vpSize[0]);
+    vh = static_cast<float>(vpSize[1]);
+    // viewMatrix (world->view) then projMatrix, composing row-vector style.
+    viewProj = params.viewMatrix * params.projMatrix;
+  }
   for (int i = 0; i < drawlist.getNumCommands(); ++i) {
     const SoRenderCommand & command = drawlist.getCommand(i);
     if (command.pass == SO_RENDERPASS_TRANSPARENT ||
@@ -1029,6 +1446,40 @@ SoRTXRenderBackend::buildTlas(const SoDrawList & drawlist, VkCommandBuffer cmd)
         static_cast<double>(m[0][2]) * (static_cast<double>(m[1][0]) * m[2][1] -
                                         static_cast<double>(m[1][1]) * m[2][0]);
       if (det > -1e-9 && det < 1e-9) {
+        continue;
+      }
+    }
+
+    // Sub-pixel cull: transform the object-space AABB into world space and
+    // project it; skip the instance if it cannot cover a full pixel.  This
+    // runs before the instance struct is built, and a culled instance is
+    // simply absent from the TLAS (the material buffer / custom index for the
+    // surviving instances is untouched, so ray hits stay correctly indexed).
+    if (cullEnabled) {
+      const SbMatrix & wm = command.modelMatrix;
+      const float mn[3] = {entry.objectMin[0], entry.objectMin[1],
+                           entry.objectMin[2]};
+      const float mx[3] = {entry.objectMax[0], entry.objectMax[1],
+                           entry.objectMax[2]};
+      float wmin[3] = {1e30f, 1e30f, 1e30f};
+      float wmax[3] = {-1e30f, -1e30f, -1e30f};
+      for (int k = 0; k < 8; ++k) {
+        const float x = (k & 1) ? mx[0] : mn[0];
+        const float y = (k & 2) ? mx[1] : mn[1];
+        const float z = (k & 4) ? mx[2] : mn[2];
+        // Row-vector: world = (x,y,z,1) * modelMatrix.
+        const float wx = x * wm[0][0] + y * wm[1][0] + z * wm[2][0] + wm[3][0];
+        const float wy = x * wm[0][1] + y * wm[1][1] + z * wm[2][1] + wm[3][1];
+        const float wz = x * wm[0][2] + y * wm[1][2] + z * wm[2][2] + wm[3][2];
+        if (wx < wmin[0]) wmin[0] = wx;
+        if (wy < wmin[1]) wmin[1] = wy;
+        if (wz < wmin[2]) wmin[2] = wz;
+        if (wx > wmax[0]) wmax[0] = wx;
+        if (wy > wmax[1]) wmax[1] = wy;
+        if (wz > wmax[2]) wmax[2] = wz;
+      }
+      if (projectFootprintSubPixel(wmin, wmax, viewProj, vw, vh, cullPixels)) {
+        ++this->statTlasCulled;
         continue;
       }
     }
@@ -1071,13 +1522,17 @@ SoRTXRenderBackend::buildTlas(const SoDrawList & drawlist, VkCommandBuffer cmd)
   this->instanceCount = static_cast<uint32_t>(instances.size());
 
   if (getenv("FC_VULKAN_RT_DEBUG")) {
-    static uint32_t debugFrame = 0;
-    if ((debugFrame++ % 120) == 0) {
+    if (!this->lastTlasDebugLogged || this->lastTlasTotal != instances.size() ||
+        this->lastTlasCulled != this->statTlasCulled) {
       fprintf(stderr,
               "[RTDBG] buildTlas: drawlist commands=%d instances=%zu "
-              "cacheEntries=%zu mapEntries=%zu\n",
+              "culled=%u cacheEntries=%zu mapEntries=%zu\n",
               drawlist.getNumCommands(), instances.size(),
-              this->geometryCache.size(), this->commandToCache.size());
+              this->statTlasCulled, this->geometryCache.size(),
+              this->commandToCache.size());
+      this->lastTlasTotal = instances.size();
+      this->lastTlasCulled = this->statTlasCulled;
+      this->lastTlasDebugLogged = true;
     }
   }
 
@@ -1209,7 +1664,8 @@ SoRTXRenderBackend::buildTlas(const SoDrawList & drawlist, VkCommandBuffer cmd)
   // TLAS was just created this frame.
   const bool useUpdate = this->tlasBuiltOnce &&
     !this->cacheChanged &&
-    this->instanceCount <= this->previousInstanceCount;
+    this->statTlasCulled == 0 &&
+    this->instanceCount == this->previousInstanceCount;
   if (useUpdate) {
     buildInfo.mode = VK_BUILD_ACCELERATION_STRUCTURE_MODE_UPDATE_KHR;
     buildInfo.srcAccelerationStructure = this->tlas;
@@ -1277,14 +1733,14 @@ SoRTXRenderBackend::updateMaterials(const SoDrawList & drawlist)
   // calling envFlagEnabled()/getenv() inside the per-command loop below.
   // These flags never change mid-frame; they were recomputed identically for
   // every command on every frame.
-  this->rtPbrEnabled = envFlagEnabled("FC_VULKAN_RT_PBR");
+  this->rtPbrEnabled = COIN_VULKAN_ENV_FLAG("FC_VULKAN_RT_PBR");
   {
     const char * neeEnv = getenv("FC_VULKAN_PT_NEE");
     this->rtNeeEnabled =
-      (neeEnv == nullptr) ? true : envFlagEnabled("FC_VULKAN_PT_NEE");
+      (neeEnv == nullptr) ? true : COIN_VULKAN_ENV_FLAG("FC_VULKAN_PT_NEE");
     const char * misEnv = getenv("FC_VULKAN_PT_MIS");
     this->rtMisEnabled =
-      (misEnv == nullptr) ? true : envFlagEnabled("FC_VULKAN_PT_MIS");
+      (misEnv == nullptr) ? true : COIN_VULKAN_ENV_FLAG("FC_VULKAN_PT_MIS");
   }
   this->rtMetalOverride = false;
   this->rtRoughOverride = false;

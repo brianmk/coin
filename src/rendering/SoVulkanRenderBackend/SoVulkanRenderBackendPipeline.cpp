@@ -349,7 +349,7 @@ SoVulkanRenderBackend::getOrCreatePipeline(const SoRenderCommand & command,
   // decisively; the slope factor keeps it from detaching at grazing,
   // silhouette edges.
   constexpr float kDecalScale = 512.0f;
-  const float kUseDecal = envFlagEnabled("FC_VULKAN_RASTER_DECAL")
+  const float kUseDecal = COIN_VULKAN_ENV_FLAG("FC_VULKAN_RASTER_DECAL")
     ? kDecalScale : 1.0f;
   const float depthBiasConstant = polygonOffset
     ? command.state.raster.polygonOffsetUnits * kUseDecal
@@ -412,10 +412,98 @@ SoVulkanRenderBackend::getOrCreatePipeline(const SoRenderCommand & command,
     key.stencilZPassOp = stencil.zpassOp;
   }
 
+  // Per-command fast path: an unchanged command (same retained state -> the
+  // same PipelineKey) re-resolves to the same VkPipeline without paying the
+  // unordered_map lookup every frame.  A 64-bit fingerprint of every key
+  // field stands in for full equality here; a collision would require two
+  // pipelines to alias with probability ~2^-64, and the authoritative
+  // exact-key lookup below still decides the non-fast path.  The backing
+  // geometry-cache entry is destroyed together with the pipeline cache in
+  // invalidateCache(), so the cached handle can never dangle.
+  const auto mixFp = [](uint64_t h, uint64_t v) {
+    return h ^ (v + 0x9E3779B97F4A7C15ULL + (h << 6) + (h >> 2));
+  };
+  const auto fbits = [](float f) {
+    uint32_t b = 0;
+    std::memcpy(&b, &f, sizeof(b));
+    return static_cast<uint64_t>(b);
+  };
+  uint64_t fingerprint = 0;
+  fingerprint = mixFp(fingerprint,
+                      reinterpret_cast<uintptr_t>(key.renderPass));
+  fingerprint = mixFp(fingerprint, key.topology);
+  fingerprint = mixFp(fingerprint, key.fillMode);
+  fingerprint = mixFp(fingerprint, key.cullMode);
+  fingerprint = mixFp(fingerprint, key.ccwFrontFace);
+  fingerprint = mixFp(fingerprint, key.depthTestEnable);
+  fingerprint = mixFp(fingerprint, key.depthWriteEnable);
+  fingerprint = mixFp(fingerprint, key.depthFunction);
+  fingerprint = mixFp(fingerprint, key.depthBiasEnable);
+  fingerprint = mixFp(fingerprint, fbits(key.depthBiasConstantFactor));
+  fingerprint = mixFp(fingerprint, fbits(key.depthBiasSlopeFactor));
+  fingerprint = mixFp(fingerprint, key.blendEnable);
+  fingerprint = mixFp(fingerprint, key.blendSrcRGB);
+  fingerprint = mixFp(fingerprint, key.blendDstRGB);
+  fingerprint = mixFp(fingerprint, key.blendSrcAlpha);
+  fingerprint = mixFp(fingerprint, key.blendDstAlpha);
+  fingerprint = mixFp(fingerprint, key.blendEquationRGB);
+  fingerprint = mixFp(fingerprint, key.blendEquationAlpha);
+  fingerprint = mixFp(fingerprint, key.stencilEnable);
+  fingerprint = mixFp(fingerprint, key.stencilFunction);
+  fingerprint = mixFp(fingerprint, key.stencilReference);
+  fingerprint = mixFp(fingerprint, key.stencilCompareMask);
+  fingerprint = mixFp(fingerprint, key.stencilWriteMask);
+  fingerprint = mixFp(fingerprint, key.stencilFailOp);
+  fingerprint = mixFp(fingerprint, key.stencilZFailOp);
+  fingerprint = mixFp(fingerprint, key.stencilZPassOp);
+  fingerprint = mixFp(fingerprint, key.sampleCount);
+  fingerprint = mixFp(fingerprint, key.wideLine);
+
+  VulkanCachedCommand * cacheEntry = nullptr;
+  const auto cmdEntry = this->commandToCache.find(&command);
+  if (cmdEntry != this->commandToCache.end()) {
+    cacheEntry = &this->gpuCache[cmdEntry->second];
+    if (cacheEntry->hasResolvedPipeline &&
+        cacheEntry->pipelineFingerprint == fingerprint) {
+      pipeline = cacheEntry->resolvedPipeline;
+      return pipeline != VK_NULL_HANDLE;
+    }
+  }
+
   const auto found = this->pipelineCache.find(key);
   if (found != this->pipelineCache.end()) {
+    if (cacheEntry) {
+      cacheEntry->pipelineFingerprint = fingerprint;
+      cacheEntry->resolvedPipeline = found->second;
+      cacheEntry->hasResolvedPipeline = true;
+    }
     pipeline = found->second;
     return pipeline != VK_NULL_HANDLE;
+  }
+
+  // VK_POLYGON_MODE_LINE and VK_POLYGON_MODE_POINT require the
+  // fillModeNonSolid feature to be enabled at device creation.  The
+  // embedding application enables it only when the hardware advertises it,
+  // so creating such a pipeline without the feature is a spec violation
+  // (VUID-VkPipelineRasterizationStateCreateInfo-polygonMode-01507) and can
+  // make vkCreateGraphicsPipelines fail or hang drivers.  Refuse the
+  // pipeline instead; the failure is cached under the key so the warning is
+  // emitted once and every later lookup of the same state cheaply returns
+  // false.
+  if (!this->fillModeNonSolid && !key.wideLine &&
+      (key.fillMode == SoDrawStyleElement::LINES ||
+       key.fillMode == SoDrawStyleElement::POINTS)) {
+    this->emitError(
+      "Vulkan backend: the device does not support the fillModeNonSolid "
+      "feature; wireframe and point fill modes cannot be rendered");
+    this->pipelineCache[key] = VK_NULL_HANDLE;
+    if (cacheEntry) {
+      cacheEntry->pipelineFingerprint = fingerprint;
+      cacheEntry->resolvedPipeline = VK_NULL_HANDLE;
+      cacheEntry->hasResolvedPipeline = true;
+    }
+    pipeline = VK_NULL_HANDLE;
+    return false;
   }
 
   VkPipelineShaderStageCreateInfo stages[2] {};
@@ -635,10 +723,20 @@ SoVulkanRenderBackend::getOrCreatePipeline(const SoRenderCommand & command,
   if (result != VK_SUCCESS) {
     this->emitError("failed to create Vulkan graphics pipeline");
     this->pipelineCache[key] = VK_NULL_HANDLE;
+    if (cacheEntry) {
+      cacheEntry->pipelineFingerprint = fingerprint;
+      cacheEntry->resolvedPipeline = VK_NULL_HANDLE;
+      cacheEntry->hasResolvedPipeline = true;
+    }
     pipeline = VK_NULL_HANDLE;
     return false;
   }
   this->pipelineCache[key] = created;
+  if (cacheEntry) {
+    cacheEntry->pipelineFingerprint = fingerprint;
+    cacheEntry->resolvedPipeline = created;
+    cacheEntry->hasResolvedPipeline = true;
+  }
   pipeline = created;
   return true;
 }

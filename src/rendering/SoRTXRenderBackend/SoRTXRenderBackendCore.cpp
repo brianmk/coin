@@ -9,11 +9,20 @@
 #include <array>
 #include <chrono>
 #include <cmath>
+#include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <string>
 #include <rendering/SoRTXRenderBackend/SoRTXRenderBackendP.h>
 
 using namespace SoRTXBackend;
+
+// Wall-clock milliseconds for the FC_VULKAN_FRAME_TIMING breakdown.
+static double vkNowMs()
+{
+  return std::chrono::duration<double, std::milli>(
+    std::chrono::steady_clock::now().time_since_epoch()).count();
+}
 
 SoRTXRenderBackend::SoRTXRenderBackend()
 {
@@ -228,7 +237,32 @@ SoRTXRenderBackend::setEnvMap(const int index)
   this->ptConverged = FALSE;
   this->denoiseResultReady = FALSE;
   this->envMapId = index;
-  if (index < 0 || index >= getEnvMapCount()) return;
+  if (index < 0 || index >= getEnvMapCount()) {
+    // No (or an invalid) environment preset: the environment is disabled and
+    // the viewport gradient is used.  The env member fields must be cleared
+    // here -- they are read in updatePathTracingState()'s background-change
+    // test alongside the viewport gradient, so a stale intensity/sun/sky from
+    // a previously selected preset would keep comparing non-equal to the
+    // cleared values and fire backgroundChanged on every frame, resetting a
+    // converged progressive run back to the raw preview after every denoise.
+    this->envIntensity = 0.0f;
+    this->envSunPower = 1.0f;
+    this->envSkyBrightness = 1.0f;
+    for (int i = 0; i < 3; ++i) {
+      this->envSunDir[i] = 0.0f;
+      this->envSunColor[i] = 0.0f;
+      this->envSkyTop[i] = 0.0f;
+      this->envSkyBottom[i] = 0.0f;
+      this->envWallColor[i] = 0.0f;
+      this->envFloorColor[i] = 0.0f;
+      this->envCeilColor[i] = 0.0f;
+    }
+    this->envMapMode = 0;
+    this->envRoomHalfExtent = 0.0f;
+    this->envRoomFloorY = 0.0f;
+    this->envRoomCeilY = 0.0f;
+    return;
+  }
   const RtxEnvPreset & p = kRtxEnvPresets[index];
   this->envIntensity = p.intensity;
   this->envSunPower = p.sunPower;
@@ -344,6 +378,49 @@ SoRTXRenderBackend::setDenoiserFilter(const char * denoiser)
   this->denoiseKindExplicit = true;
 }
 
+bool
+SoRTXRenderBackend::probeComputeQueue(void)
+{
+  this->computeQueue = VK_NULL_HANDLE;
+  this->computeQueueCount = 0;
+  this->hasComputeQueue = false;
+  if (this->device == VK_NULL_HANDLE || this->physicalDevice == VK_NULL_HANDLE) {
+    return false;
+  }
+  uint32_t familyCount = 0;
+  vkGetPhysicalDeviceQueueFamilyProperties(this->physicalDevice, &familyCount,
+                                            nullptr);
+  if (familyCount == 0) return false;
+  std::vector<VkQueueFamilyProperties> fams(familyCount);
+  vkGetPhysicalDeviceQueueFamilyProperties(this->physicalDevice, &familyCount,
+                                            fams.data());
+  // A dedicated compute family (or an extended graphics-family entry) was
+  // requested at device creation via setQueueCreateInfoModifier; the family +
+  // queue index selected there come through the device context.  UINT32_MAX
+  // means none was requested: report unavailable.
+  if (this->computeQueueFamilyIndex < static_cast<uint32_t>(fams.size())) {
+    const VkQueueFamilyProperties & fp = fams[this->computeQueueFamilyIndex];
+    this->computeQueueCount = fp.queueCount;
+    if (fp.queueFlags & VK_QUEUE_COMPUTE_BIT) {
+      this->computeQueue = VK_NULL_HANDLE;
+      vkGetDeviceQueue(this->device, this->computeQueueFamilyIndex,
+                       this->computeQueueIndex, &this->computeQueue);
+      this->hasComputeQueue = (this->computeQueue != VK_NULL_HANDLE);
+    }
+  }
+  if (getenv("FC_VULKAN_RT_DEBUG")) {
+    fprintf(stderr,
+            "[RTDBG] computeCaps family=%u idx=%u req=%d computeQueue=%d "
+            "computeCount=%u flags=0x%x\n",
+            this->computeQueueFamilyIndex, this->computeQueueIndex,
+            this->computeQueueFamilyIndex != ~0u ? 1 : 0,
+            this->hasComputeQueue ? 1 : 0, this->computeQueueCount,
+            this->computeQueueFamilyIndex < static_cast<uint32_t>(fams.size())
+              ? fams[this->computeQueueFamilyIndex].queueFlags : 0u);
+  }
+  return this->hasComputeQueue;
+}
+
 SbBool
 SoRTXRenderBackend::initialize(const SoRenderBackendInitParams & params)
 {
@@ -379,6 +456,16 @@ SoRTXRenderBackend::initialize(const SoRenderBackendInitParams & params)
   this->queue = deviceContext->graphicsQueue;
   this->queueFamilyIndex = deviceContext->graphicsQueueFamilyIndex;
   this->allocator = deviceContext->allocator;
+
+  // The async-compute queue requested at device creation (see the widget's
+  // setQueueCreateInfoModifier).  probeComputeQueue() retrieves the handle
+  // from this family + queue index.  UINT32_MAX family = none requested.
+  this->computeQueueFamilyIndex = deviceContext->computeQueueFamilyIndex;
+  this->computeQueueIndex = deviceContext->computeQueueIndex;
+
+  // Acquire a compute queue for the optional async-compute path, and report
+  // the capability so a probe/check can verify.
+  this->probeComputeQueue();
 
   // Cache the physical-device identity so the denoiser selection can gate the
   // CUDA/OptiX path on NVIDIA hardware (see SoRTXRenderBackend.h).
@@ -469,11 +556,19 @@ SoRTXRenderBackend::initialize(const SoRenderBackendInitParams & params)
   this->vkGetAccelerationStructureDeviceAddressKHR =
     loadDispatch<PFN_vkGetAccelerationStructureDeviceAddressKHR>(
       vkGetDeviceProcAddr(this->device, "vkGetAccelerationStructureDeviceAddressKHR"));
+  this->vkCmdWriteAccelerationStructuresPropertiesKHR =
+    loadDispatch<PFN_vkCmdWriteAccelerationStructuresPropertiesKHR>(
+      vkGetDeviceProcAddr(this->device, "vkCmdWriteAccelerationStructuresPropertiesKHR"));
+  this->vkCmdCopyAccelerationStructureKHR =
+    loadDispatch<PFN_vkCmdCopyAccelerationStructureKHR>(
+      vkGetDeviceProcAddr(this->device, "vkCmdCopyAccelerationStructureKHR"));
   if (!this->vkDestroyAccelerationStructureKHR ||
       !this->vkGetAccelerationStructureBuildSizesKHR ||
       !this->vkCreateAccelerationStructureKHR ||
       !this->vkCmdBuildAccelerationStructuresKHR ||
-      !this->vkGetAccelerationStructureDeviceAddressKHR) {
+      !this->vkGetAccelerationStructureDeviceAddressKHR ||
+      !this->vkCmdWriteAccelerationStructuresPropertiesKHR ||
+      !this->vkCmdCopyAccelerationStructureKHR) {
     this->emitError(
       "failed to resolve ray tracing KHR entry points; the device or "
       "loader does not provide VK_KHR_acceleration_structure");
@@ -505,7 +600,7 @@ SoRTXRenderBackend::initialize(const SoRenderBackendInitParams & params)
   // Dispatch mode: the SBT pipeline is opt-in (FC_VULKAN_RT_SBT=1); the
   // default ray-query compute path avoids a hang in NVIDIA driver 610.x
   // where triangle hit-group execution stalls the GPU.
-  this->useSbtPipeline = envFlagEnabled("FC_VULKAN_RT_SBT");
+  this->useSbtPipeline = COIN_VULKAN_ENV_FLAG("FC_VULKAN_RT_SBT");
 
   // All entry points are resolved from here on.  Mark the backend
   // initialized before creating resources so that a failure in any
@@ -1222,8 +1317,10 @@ SoRTXRenderBackend::render(const SoDrawList & drawlist,
     ? vkQueueWaitIdle(this->queue) : VK_SUCCESS;
   if (submitResult == VK_SUCCESS && waitResult == VK_SUCCESS) {
     this->updateAdaptiveStats();
-    this->swapPathTracingHistory();
+    // Denoise must read the just-written accumBuffer before the ping-pong
+    // swap for the next frame's reprojection (see renderExternal).
     this->updateDenoise();
+    this->swapPathTracingHistory();
   }
   if (getenv("FC_VULKAN_RT_DEBUG")) {
     fprintf(stderr, "[RTDBG] submit=%d wait=%d asOk=%d traceOk=%d\n",
@@ -1237,6 +1334,9 @@ SoRTXRenderBackend::render(const SoDrawList & drawlist,
   // buffer stays pooled for the next frame.
   if (submitted) {
     this->freePendingStagingDestroys();
+    // The frame is fully complete here: shrink any BLAS that was built with
+    // ALLOW_COMPACTION and has not yet been compacted (FC_VULKAN_AS_COMPACT).
+    this->compactPendingBlases();
   }
 
   if (!asOk || !traceOk || !submitted) {
@@ -1246,17 +1346,159 @@ SoRTXRenderBackend::render(const SoDrawList & drawlist,
   return TRUE;
 }
 
+void
+SoRTXRenderBackend::dumpStorageImageIfRequested()
+{
+  const char * path = getenv("FC_VULKAN_PT_DUMP");
+  if (!path) return;
+  if (this->storageImage == VK_NULL_HANDLE ||
+      this->storageWidth == 0 || this->storageHeight == 0) return;
+
+  // FC_VULKAN_PT_DUMP_EVERY=N: dump every N frames (frame-index-suffixed),
+  // letting one run capture the whole progressive sequence.  Otherwise dump
+  // one frame at FC_VULKAN_PT_DUMP_FRAME (default = the sample cap).
+  const char * everystr = getenv("FC_VULKAN_PT_DUMP_EVERY");
+  const char * atstr = getenv("FC_VULKAN_PT_DUMP_FRAME");
+  const uint32_t dumpAt =
+    atstr ? static_cast<uint32_t>(std::atoi(atstr)) : this->ptMaxSamples;
+  bool ok = false;
+  if (everystr) {
+    const uint32_t every = static_cast<uint32_t>(std::atoi(everystr));
+    if (every == 0 || this->ptFrameIndex % every != 0) return;
+    ok = true;
+  } else if (this->ptFrameIndex != dumpAt || this->ptDumpDone) {
+    return;
+  }
+  if (ok) this->ptDumpDone = TRUE;
+
+  char fullpath[4096];
+  if (everystr) {
+    std::snprintf(fullpath, sizeof(fullpath), "%s.%03u.ppm", path,
+                  this->ptFrameIndex);
+  } else {
+    std::snprintf(fullpath, sizeof(fullpath), "%s", path);
+  }
+
+  const uint32_t w = this->storageWidth;
+  const uint32_t h = this->storageHeight;
+  const VkDeviceSize size = static_cast<VkDeviceSize>(w) * h * 4;
+
+  VkBuffer staging = VK_NULL_HANDLE;
+  VkDeviceMemory stagingMem = VK_NULL_HANDLE;
+  if (!this->createHostVisibleBuffer(
+        size, VK_BUFFER_USAGE_TRANSFER_DST_BIT, staging, stagingMem)) {
+    fprintf(stderr, "[RTDBG] dumpStorageImage: createHostVisibleBuffer failed\n");
+    return;
+  }
+
+  VkCommandBuffer cmd = this->beginTransientCommandBuffer();
+  if (cmd == VK_NULL_HANDLE) {
+    vkDestroyBuffer(this->device, staging, this->allocator);
+    vkFreeMemory(this->device, stagingMem, this->allocator);
+    return;
+  }
+
+  VkImageMemoryBarrier toTfr {};
+  toTfr.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+  toTfr.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
+  toTfr.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
+  toTfr.oldLayout = VK_IMAGE_LAYOUT_GENERAL;
+  toTfr.newLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+  toTfr.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+  toTfr.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+  toTfr.image = this->storageImage;
+  toTfr.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+  toTfr.subresourceRange.levelCount = 1;
+  toTfr.subresourceRange.layerCount = 1;
+  vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,
+                       VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, nullptr, 0,
+                       nullptr, 1, &toTfr);
+
+  VkBufferImageCopy region {};
+  region.bufferOffset = 0;
+  region.bufferRowLength = 0;
+  region.bufferImageHeight = 0;
+  region.imageSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+  region.imageSubresource.layerCount = 1;
+  region.imageExtent = {w, h, 1};
+  vkCmdCopyImageToBuffer(cmd, this->storageImage,
+                         VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, staging, 1,
+                         &region);
+
+  VkImageMemoryBarrier toGeneral {};
+  toGeneral.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+  toGeneral.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+  toGeneral.dstAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
+  toGeneral.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+  toGeneral.newLayout = VK_IMAGE_LAYOUT_GENERAL;
+  toGeneral.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+  toGeneral.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+  toGeneral.image = this->storageImage;
+  toGeneral.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+  toGeneral.subresourceRange.levelCount = 1;
+  toGeneral.subresourceRange.layerCount = 1;
+  vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_TRANSFER_BIT,
+                       VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, 0, 0, nullptr, 0,
+                       nullptr, 1, &toGeneral);
+
+  if (vkEndCommandBuffer(cmd) == VK_SUCCESS) {
+    VkSubmitInfo si {};
+    si.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
+    si.commandBufferCount = 1;
+    si.pCommandBuffers = &cmd;
+    if (vkQueueSubmit(this->queue, 1, &si, VK_NULL_HANDLE) == VK_SUCCESS &&
+        vkQueueWaitIdle(this->queue) == VK_SUCCESS) {
+      void * mapped = nullptr;
+      if (vkMapMemory(this->device, stagingMem, 0, size, 0, &mapped) !=
+            VK_SUCCESS ||
+          mapped == nullptr) {
+        fprintf(stderr, "[RTDBG] dumpStorageImage: vkMapMemory failed\n");
+      } else {
+        const unsigned char * src = static_cast<const unsigned char *>(mapped);
+        FILE * f = fopen(fullpath, "wb");
+        if (f) {
+          fprintf(f, "P6\n%u %u\n255\n", w, h);
+          const size_t rowbytes = static_cast<size_t>(w) * 4;
+          for (uint32_t y = 0; y < h; ++y) {
+            const unsigned char * r = src + (static_cast<size_t>(y) * rowbytes);
+            fwrite(r, 1, static_cast<size_t>(w) * 3, f);
+          }
+          fclose(f);
+          fprintf(stderr, "[RTDBG] dumpStorageImage: wrote %s %ux%u\n",
+                  fullpath, w, h);
+        } else {
+          fprintf(stderr, "[RTDBG] dumpStorageImage: fopen %s failed\n",
+                  fullpath);
+        }
+        vkUnmapMemory(this->device, stagingMem);
+      }
+    }
+  }
+
+  vkDestroyBuffer(this->device, staging, this->allocator);
+  vkFreeMemory(this->device, stagingMem, this->allocator);
+}
+
 SbBool
-SoRTXRenderBackend::renderExternal(const SoDrawList & drawlist,
-                                   const SoRenderParams & params,
-                                   VkCommandBuffer commandBuffer,
-                                   VkRenderPass renderPass)
+  SoRTXRenderBackend::renderExternal(const SoDrawList & drawlist,
+                                     const SoRenderParams & params,
+                                     VkCommandBuffer commandBuffer,
+                                     VkRenderPass renderPass)
 {
   if (!this->isInitialized()) {
     this->emitError("renderExternal called before backend initialization");
     return FALSE;
   }
   this->ptLastFrame = params.frame;
+  if (COIN_VULKAN_ENV_FLAG("FC_VULKAN_BLACK_DEBUG")) {
+    fprintf(stderr,
+            "[BLACKRT] rtx renderExternal frame=%d acc=%d frameIndex=%u "
+            "idleFrames=%u settle=%u enabled=%d samples=%u\n",
+            params.frame, static_cast<int>(this->ptAccumulating),
+            this->ptFrameIndex, this->ptIdleFrames, this->ptSettleFrames,
+            static_cast<int>(this->ptEnabled),
+            this->getPathTracingSampleCount());
+  }
   if (!params.renderTarget) {
     this->emitError(
       "renderExternal called without a SoVulkanRenderTarget in "
@@ -1285,6 +1527,8 @@ SoRTXRenderBackend::renderExternal(const SoDrawList & drawlist,
   // and waited on here.  Queue submission is strictly ordered and the wait
   // makes the AS writes visible to the trace recorded below, so no explicit
   // synchronization with the caller's buffer is required.
+  const bool wantTiming = getenv("FC_VULKAN_FRAME_TIMING") != nullptr;
+  const double t0 = wantTiming ? vkNowMs() : 0.0;
   VkCommandBuffer cmd = this->beginTransientCommandBuffer();
   if (cmd == VK_NULL_HANDLE) {
     this->emitError("renderExternal: failed to allocate AS command buffer");
@@ -1293,6 +1537,7 @@ SoRTXRenderBackend::renderExternal(const SoDrawList & drawlist,
   const bool asOk =
     this->recordAccelerationStructures(drawlist, params, *target, cmd);
   vkEndCommandBuffer(cmd);
+  const double t1 = wantTiming ? vkNowMs() : 0.0;
   bool submitted = FALSE;
   if (asOk) {
     VkSubmitInfo si {};
@@ -1302,16 +1547,26 @@ SoRTXRenderBackend::renderExternal(const SoDrawList & drawlist,
     submitted = vkQueueSubmit(this->queue, 1, &si, VK_NULL_HANDLE) ==
       VK_SUCCESS && vkQueueWaitIdle(this->queue) == VK_SUCCESS;
   }
+  const double t2 = wantTiming ? vkNowMs() : 0.0;
   if (submitted) {
     this->updateAdaptiveStats();
-    this->swapPathTracingHistory();
+    // The denoiser readback (recordDenoiseReadback) reads this->accumBuffer,
+    // which the raygen wrote this frame.  swapPathTracingHistory() below
+    // swaps accumBuffer<->accumHistoryBuffer for the next frame's
+    // reprojection, so the denoise must read the just-written data BEFORE the
+    // swap; otherwise it denoises the stale/empty history buffer.
     this->updateDenoise();
+    this->swapPathTracingHistory();
   }
+  const double t3 = wantTiming ? vkNowMs() : 0.0;
   // Staging buffers are only referenced by the private submission; release
   // them after it provably completed (or never ran).  The command buffer
   // and pool are released in either case.
   if (submitted) {
     this->freePendingStagingDestroys();
+    // The AS phase submission is complete here: shrink any BLAS built with
+    // ALLOW_COMPACTION that has not yet been compacted (FC_VULKAN_AS_COMPACT).
+    this->compactPendingBlases();
   }
 
   if (!asOk || !submitted) {
@@ -1319,10 +1574,29 @@ SoRTXRenderBackend::renderExternal(const SoDrawList & drawlist,
     return FALSE;
   }
 
+  // The trace ran in the AS phase above and the queue is idle, so storageImage
+  // holds the current ray-traced result (if the tracer is accumulating).
+  this->dumpStorageImageIfRequested();
+
   // The present pass is recorded into the caller's buffer (inside its
   // render pass); the trace ran in the AS phase above.  The descriptor set
   // was refreshed by recordAccelerationStructures() after the TLAS
   // (re)build, so binding 0 references the current TLAS.
-  return this->recordTraceAndPresent(params, *target, commandBuffer,
-                                     renderPass) ? TRUE : FALSE;
+  const bool presentOk =
+    this->recordTraceAndPresent(params, *target, commandBuffer, renderPass);
+  if (wantTiming) {
+    // interval = host frame pacing (1/FPS, includes the Qt-submitted trace +
+    // present + vsync).  asRecord = CPU time to record the AS builds;
+    // asGpu = AS-phase GPU time (the submit+waitIdle blocks until it is done);
+    // denoise = updateDenoise; traceRecord = present-pass record (CPU).
+    const double t4 = vkNowMs();
+    const double interval = this->lastFrameStartMs > 0.0
+      ? t0 - this->lastFrameStartMs : 0.0;
+    this->lastFrameStartMs = t4;
+    fprintf(stderr,
+            "[RTDBG] frameTiming interval=%.2f asRecord=%.2f asGpu=%.2f "
+            "denoise=%.2f traceRecord=%.2f\n",
+            interval, t1 - t0, t2 - t1, t3 - t2, t4 - t3);
+  }
+  return presentOk ? TRUE : FALSE;
 }

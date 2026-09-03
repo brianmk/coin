@@ -35,6 +35,9 @@ struct VulkanCachedCommand {
   VkDeviceMemory vertexMemory = VK_NULL_HANDLE;
   VkBuffer indexBuffer = VK_NULL_HANDLE;
   VkDeviceMemory indexMemory = VK_NULL_HANDLE;
+  VkDeviceSize vertexOffset = 0;
+  VkDeviceSize indexOffset = 0;
+  uint32_t sharedBlockId = 0;
   uint32_t vertexCount = 0;
   uint32_t indexCount = 0;
 
@@ -71,6 +74,17 @@ struct VulkanCachedCommand {
   // detect in-place edits (the per-frame arena hands out the same pointers
   // for unchanged layouts), which would otherwise serve stale geometry.
   uint64_t contentHash = 0;
+
+  // Pipeline-resolution fast path (getOrCreatePipeline()): fingerprint of
+  // the PipelineKey resolved for this command last, plus the handle it
+  // produced.  A match skips the per-frame pipelineCache unordered_map
+  // lookup (wide key hash + bucket walk + equality) for unchanged
+  // commands.  The entry lives and dies with the geometry cache, which
+  // invalidateCache() clears together with the pipeline cache, so these
+  // fields never outlive the handles they name.
+  uint64_t pipelineFingerprint = 0;
+  VkPipeline resolvedPipeline = VK_NULL_HANDLE;
+  bool hasResolvedPipeline = false;
 };
 
 /*! \brief Cached GPU texture for one retained command's SoTextureData. */
@@ -220,7 +234,26 @@ private:
   VulkanCachedCommand & getOrCreateCache(const SoRenderCommand * command);
   void uploadGeometry(VulkanCachedCommand & entry,
                       const SoRenderCommand & command);
+  bool uploadGeometryShared(VulkanCachedCommand & entry,
+                            const SoRenderCommand & command,
+                            uint32_t blockId);
   void destroyCacheEntry(VulkanCachedCommand & entry);
+
+  struct VulkanGeometryBlock {
+    VkBuffer buffer = VK_NULL_HANDLE;
+    VkDeviceMemory memory = VK_NULL_HANDLE;
+    void * mapped = nullptr;
+    VkDeviceSize capacity = 0;
+    VkDeviceSize used = 0;
+    uint32_t refCount = 0;
+  };
+
+  uint32_t allocateGeometryBlock(VkDeviceSize capacity);
+  bool allocateGeometryArena(uint32_t blockId, VkDeviceSize size,
+                             VkDeviceSize & offset);
+  void releaseGeometryBlock(uint32_t blockId);
+  void deferReleaseGeometryBlock(uint32_t blockId);
+  void destroyAllGeometryBlocks();
 
   // --- Texture cache ----------------------------------------------------
   bool createWhiteTexture();
@@ -257,6 +290,12 @@ private:
   void finalizePendingTextureUploads();
   bool flushPendingTextureUploadsExternal();
   bool createSampler(const SoTextureData & texture, VkSampler & sampler);
+  // Format actually used for an N-component SoTextureData image.  VK_FORMAT_
+  // R8_UNORM / R8G8_UNORM / R8G8B8_UNORM are not guaranteed to be sampleable
+  // (they are optional formats), so when the device lacks SAMPLED_IMAGE
+  // support the upload is expanded to R8G8B8A8_UNORM on the host with the
+  // per-channel values matching the native sampling semantics.
+  VkFormat effectiveTextureFormat(const int numComponents) const;
   bool allocateTextureDescriptorSet(VkImageView view, VkSampler sampler,
                                     VkDescriptorSet & set);
   bool ensureDescriptorPoolSpace();
@@ -344,6 +383,21 @@ private:
   VkQueue queue = VK_NULL_HANDLE;
   uint32_t queueFamilyIndex = 0;
   const VkAllocationCallbacks * allocator = nullptr;
+
+  // --- Device capabilities (probed once in initialize()) -----------------
+  // VkPhysicalDeviceFeatures::fillModeNonSolid gates the wireframe/points
+  // overlay and the LINES/POINTS draw-style pipelines, which use
+  // VK_POLYGON_MODE_LINE/POINT.  The embedding application enables the
+  // feature only when the hardware supports it (see
+  // QuarterVulkanWidget::configureDeviceFeatures), so without it creating
+  // those pipelines would violate the spec; getOrCreatePipeline() refuses
+  // them instead.
+  bool fillModeNonSolid = false;
+  // SAMPLED_IMAGE support for the two optional texture formats the 1- and
+  // 2-component upload paths pick (VK_FORMAT_R8_UNORM / VK_FORMAT_R8G8_
+  // UNORM).  VK_FORMAT_R8G8B8A8_UNORM (the fallback) is a required format.
+  bool sampledR8 = false;
+  bool sampledR8G8 = false;
 
   VkCommandPool commandPool = VK_NULL_HANDLE;
   // One command buffer and fence per in-flight frame slot.  The own-queue
@@ -623,6 +677,9 @@ private:
   std::unordered_map<const SoRenderCommand *, size_t> commandToCache;
   std::vector<VulkanCachedTexture> textureCache;
   std::unordered_map<const SoRenderCommand *, size_t> commandToTexture;
+
+  std::vector<VulkanGeometryBlock> geometryBlocks;
+  VkDeviceSize nextGeometryBlockCapacity = 256u * 1024u;
 
   // Reusable scratch packing buffer for uploadGeometry().  Resized but never
   // reallocated across successive uploads, so the interleaved repack does not

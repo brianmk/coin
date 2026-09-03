@@ -36,7 +36,7 @@ SoVulkanRenderBackend::applyViewport(const SoRenderParams & params,
   const SbVec2s & origin = params.viewport.getViewportOriginPixels();
   const SbVec2s & size = params.viewport.getViewportSizePixels();
 
-  if (envFlagEnabled("FC_VULKAN_MATRIX_DUMP") && s_debugFrame > 0
+  if (COIN_VULKAN_ENV_FLAG("FC_VULKAN_MATRIX_DUMP") && s_debugFrame > 0
       && (s_debugFrame % 100 == 0)) {
     fprintf(stderr,
             "[VPRT] frame=%d origin=(%d,%d) size=(%d,%d) target=(%u,%u)\n",
@@ -306,7 +306,7 @@ SoVulkanRenderBackend::updateLightingUniforms(const SoDrawList & drawlist,
   std::memcpy(ubo.view, &m[0][0], sizeof(float) * 16);
   command.modelMatrix.getValue(m);
   std::memcpy(ubo.model, &m[0][0], sizeof(float) * 16);
-  if (envFlagEnabled("FC_VULKAN_CLIP_DEBUG")) {
+  if (COIN_VULKAN_ENV_FLAG("FC_VULKAN_CLIP_DEBUG")) {
     static int uboLog = 0;
     if (uboLog++ < 6) {
       fprintf(stderr, "[UBO] cmd pass=%d verts=%u model00=%.3f m11=%.3f m22=%.3f "
@@ -320,7 +320,7 @@ SoVulkanRenderBackend::updateLightingUniforms(const SoDrawList & drawlist,
   }
 
   const SoMaterialData & material = command.material;
-  if (envFlagEnabled("FC_VULKAN_BACKEND_DEBUG") &&
+  if (COIN_VULKAN_ENV_FLAG("FC_VULKAN_BACKEND_DEBUG") &&
       (command.geometry.topology == SO_TOPOLOGY_LINES ||
        command.geometry.topology == SO_TOPOLOGY_LINE_STRIP ||
        command.geometry.topology == SO_TOPOLOGY_POINTS)) {
@@ -435,7 +435,7 @@ SoVulkanRenderBackend::updateLightingUniforms(const SoDrawList & drawlist,
     spot[3] = 1.0f;
   }
 
-  if (envFlagEnabled("FC_VULKAN_LIGHT_DEBUG") && count > 0 &&
+  if (COIN_VULKAN_ENV_FLAG("FC_VULKAN_LIGHT_DEBUG") && count > 0 &&
       s_lightLog++ < 6) {
     fprintf(stderr,
             "[LIT] cmd=%p pass=%d topo=%d verts=%u lightCount=%d "
@@ -463,7 +463,7 @@ SoVulkanRenderBackend::updateLightingUniforms(const SoDrawList & drawlist,
                 &ubo, sizeof(ubo));
   }
 
-  if (envFlagEnabled("FC_VULKAN_MATRIX_DUMP") && s_debugFrame > 0
+  if (COIN_VULKAN_ENV_FLAG("FC_VULKAN_MATRIX_DUMP") && s_debugFrame > 0
       && (s_debugFrame % 100 == 0) && s_dumpCmdCount <= 4) {
     fprintf(stderr,
             "[LGT] frame=%d cmd#%d ambient=(%.2f,%.2f,%.2f) lights=%d\n",
@@ -494,7 +494,7 @@ SoVulkanRenderBackend::recordDrawCommand(const SoDrawList & drawlist,
                                          const bool overlayPass)
 {
   if (!command.geometry.positions || command.geometry.vertexCount == 0) {
-    if (envFlagEnabled("FC_VULKAN_BACKEND_DEBUG")) {
+    if (COIN_VULKAN_ENV_FLAG("FC_VULKAN_BACKEND_DEBUG")) {
       fprintf(stderr, "[VKBE] cmd %p pass=%d skip: no positions/verts\n",
               (const void*)&command, static_cast<int>(command.pass));
     }
@@ -502,13 +502,13 @@ SoVulkanRenderBackend::recordDrawCommand(const SoDrawList & drawlist,
   }
   const auto found = this->commandToCache.find(&command);
   if (found == this->commandToCache.end()) {
-    if (envFlagEnabled("FC_VULKAN_BACKEND_DEBUG")) {
+    if (COIN_VULKAN_ENV_FLAG("FC_VULKAN_BACKEND_DEBUG")) {
       fprintf(stderr, "[VKBE] cmd %p pass=%d skip: no gpu cache entry\n",
               (const void*)&command, static_cast<int>(command.pass));
     }
     return;
   }
-  if (envFlagEnabled("FC_VULKAN_BACKEND_DEBUG") &&
+  if (COIN_VULKAN_ENV_FLAG("FC_VULKAN_BACKEND_DEBUG") &&
       (command.geometry.topology == SO_TOPOLOGY_LINES ||
        command.geometry.topology == SO_TOPOLOGY_LINE_STRIP ||
        command.geometry.topology == SO_TOPOLOGY_POINTS)) {
@@ -530,7 +530,7 @@ SoVulkanRenderBackend::recordDrawCommand(const SoDrawList & drawlist,
   }
   VulkanCachedCommand & entry = this->gpuCache[found->second];
   if (entry.vertexBuffer == VK_NULL_HANDLE) {
-    if (envFlagEnabled("FC_VULKAN_BACKEND_DEBUG")) {
+    if (COIN_VULKAN_ENV_FLAG("FC_VULKAN_BACKEND_DEBUG")) {
       fprintf(stderr, "[VKBE] cmd %p pass=%d skip: vertexBuffer null\n",
               (const void*)&command, static_cast<int>(command.pass));
     }
@@ -565,7 +565,7 @@ SoVulkanRenderBackend::recordDrawCommand(const SoDrawList & drawlist,
   if (!this->getOrCreatePipeline(command, target, pass, pipeline, transparent,
                                  fillModeOverride, overlayPass) ||
       pipeline == VK_NULL_HANDLE) {
-    if (envFlagEnabled("FC_VULKAN_BACKEND_DEBUG")) {
+    if (COIN_VULKAN_ENV_FLAG("FC_VULKAN_BACKEND_DEBUG")) {
       fprintf(stderr, "[VKBE] cmd %p pass=%d skip: pipeline creation failed "
                       "(transparent=%d fillOverride=%d overlay=%d)\n",
               (const void*)&command, static_cast<int>(command.pass),
@@ -573,7 +573,7 @@ SoVulkanRenderBackend::recordDrawCommand(const SoDrawList & drawlist,
     }
     return;
   }
-  if (envFlagEnabled("FC_VULKAN_BACKEND_DEBUG")) {
+  if (COIN_VULKAN_ENV_FLAG("FC_VULKAN_BACKEND_DEBUG")) {
     static int drawn = 0;
     static int logged = 0;
     drawn++;
@@ -623,15 +623,15 @@ SoVulkanRenderBackend::recordDrawCommand(const SoDrawList & drawlist,
                             &uboDynamicOffset);
   }
 
-  VkDeviceSize offset = 0;
+  const VkDeviceSize vertexOffset = entry.vertexOffset;
   vkCmdBindVertexBuffers(this->activeCommandBuffer, 0, 1, &entry.vertexBuffer,
-                         &offset);
+                         &vertexOffset);
   const bool indexed =
     entry.indexBuffer != VK_NULL_HANDLE && command.geometry.indexCount &&
     command.geometry.indices;
   if (indexed && !useWideLine) {
-    vkCmdBindIndexBuffer(this->activeCommandBuffer, entry.indexBuffer, 0,
-                         VK_INDEX_TYPE_UINT32);
+    vkCmdBindIndexBuffer(this->activeCommandBuffer, entry.indexBuffer,
+                         entry.indexOffset, VK_INDEX_TYPE_UINT32);
   }
 
   this->updateLightingUniforms(drawlist, command, params, uboOffset,
@@ -656,7 +656,7 @@ SoVulkanRenderBackend::recordDrawCommand(const SoDrawList & drawlist,
   else {
     params.projMatrix.getValue(projValue);
   }
-  if (envFlagEnabled("FC_VULKAN_OVERLAY_CAM_DEBUG")
+  if (COIN_VULKAN_ENV_FLAG("FC_VULKAN_OVERLAY_CAM_DEBUG")
       && command.pass == SO_RENDERPASS_OVERLAY
       && command.state.raster.scissorEnabled
       && command.state.raster.scissorWidth > 800) {
@@ -756,10 +756,14 @@ SoVulkanRenderBackend::recordDrawCommand(const SoDrawList & drawlist,
   push.lineParams[1] = (useWideLine && patternedLine)
     ? stipplePatternBits
     : (command.state.raster.pointShape == SO_POINT_SHAPE_ROUND ? 1.0f : 0.0f);
-  // Debug override: no scene-side element sets SO_POINT_SHAPE_ROUND yet;
-  // this exercises the round-glyph discard path for testing.
-  if (envFlagEnabled("FC_VULKAN_ROUND_POINTS") &&
-      command.geometry.topology == SO_TOPOLOGY_POINTS) {
+  // Point primitives (e.g. Sketcher vertex "dots" via SoMarkerSet, whose
+  // CIRCLE_FILLED marker is the intended glyph) render as round dots: the
+  // IR/Vulkan path has no marker-bitmap rasterization, so a filled round
+  // point (fragment-shader round discard) reproduces the dot appearance
+  // instead of a featureless (often sub-pixel) square.  Nothing scene-side
+  // sets SO_POINT_SHAPE_ROUND (SoRenderIR forces SQUARE in the blend state),
+  // so default every point primitive to round.
+  if (command.geometry.topology == SO_TOPOLOGY_POINTS) {
     push.lineParams[1] = 1.0f;
   }
   push.lineParams[2] = useWideLine ? 1.0f : 0.0f;
@@ -771,7 +775,7 @@ SoVulkanRenderBackend::recordDrawCommand(const SoDrawList & drawlist,
                        VK_SHADER_STAGE_FRAGMENT_BIT,
                      0, sizeof(push), &push);
 
-  if (envFlagEnabled("FC_VULKAN_BACKEND_DEBUG") &&
+  if (COIN_VULKAN_ENV_FLAG("FC_VULKAN_BACKEND_DEBUG") &&
       (command.geometry.topology == SO_TOPOLOGY_LINES ||
        command.geometry.topology == SO_TOPOLOGY_LINE_STRIP ||
        command.geometry.topology == SO_TOPOLOGY_POINTS ||
@@ -781,7 +785,7 @@ SoVulkanRenderBackend::recordDrawCommand(const SoDrawList & drawlist,
     fprintf(stderr,
             "[PUSH] cmd=%p pass=%d topo=%d srcDiffuse=(%.2f,%.2f,%.2f,%.2f) "
             "override=%d pushColor=(%.2f,%.2f,%.2f,%.2f) flags=(%.0f,%.0f,%.0f,%.0f) "
-            "lineParams=(%.2f,%.2f,%.2f,%.2f) wideLine=%d stippleFactor=%.1f pattern=0x%04x patternRaw=0x%08x "
+            "lineParams=(%.2f,%.2f,%.2f,%.2f) pointSize=%.2f wideLine=%d stippleFactor=%.1f pattern=0x%04x patternRaw=0x%08x "
             "fillMode=%d fillModeOverride=%d overlayPass=%d transparent=%d vbuf=%p vertexCount=%u\n",
             (const void*)&command, static_cast<int>(command.pass),
             static_cast<int>(command.geometry.topology),
@@ -790,7 +794,7 @@ SoVulkanRenderBackend::recordDrawCommand(const SoDrawList & drawlist,
             push.color[0], push.color[1], push.color[2], push.color[3],
             push.flags[0], push.flags[1], push.flags[2], push.flags[3],
             push.lineParams[0], push.lineParams[1], push.lineParams[2],
-            push.lineParams[3],
+            push.lineParams[3], static_cast<double>(push.pointSize),
             useWideLine ? 1 : 0, stippleFactor,
             static_cast<unsigned>(command.state.raster.linePattern), patternRaw,
             static_cast<int>(command.state.raster.fillMode),
@@ -799,7 +803,7 @@ SoVulkanRenderBackend::recordDrawCommand(const SoDrawList & drawlist,
             static_cast<unsigned>(command.geometry.vertexCount));
   }
 
-  if (envFlagEnabled("FC_VULKAN_MATRIX_DUMP") && s_debugFrame > 0
+  if (COIN_VULKAN_ENV_FLAG("FC_VULKAN_MATRIX_DUMP") && s_debugFrame > 0
       && (s_debugFrame % 100 == 0) && s_dumpCmdCount < 12) {
     s_dumpCmdCount++;
     SbMat mm;
@@ -864,7 +868,7 @@ SoVulkanRenderBackend::recordDrawCommand(const SoDrawList & drawlist,
 
   if (useWideLine) {
     static int wldrawDiag = 0;
-    if (envFlagEnabled("FC_VULKAN_BACKEND_DEBUG") && wldrawDiag++ < 40) {
+    if (COIN_VULKAN_ENV_FLAG("FC_VULKAN_BACKEND_DEBUG") && wldrawDiag++ < 40) {
       fprintf(stderr, "[WLINE2] DRAW cmd=%p wideLineVertexCount=%u pass=%d\n",
               (const void*)&command, entry.wideLineVertexCount,
               static_cast<int>(command.pass));

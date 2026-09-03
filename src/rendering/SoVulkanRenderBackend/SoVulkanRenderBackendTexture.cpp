@@ -109,36 +109,53 @@ SoVulkanRenderBackend::createSampler(const SoTextureData & texture,
          VK_SUCCESS;
 }
 
+VkFormat
+SoVulkanRenderBackend::effectiveTextureFormat(const int numComponents) const
+{
+  // VK_FORMAT_R8_UNORM and VK_FORMAT_R8G8_UNORM are not core-required
+  // sampled formats, so expand 1- and 2-component textures to
+  // VK_FORMAT_R8G8B8A8_UNORM (a required format) when the device lacks
+  // SAMPLED_IMAGE support; the same host-side expansion the 3-component
+  // path always applies for the optional VK_FORMAT_R8G8B8_UNORM.  Component
+  // counts that map directly are unchanged.
+  if (numComponents == 3) return VK_FORMAT_R8G8B8A8_UNORM;
+  if (numComponents == 1 && !this->sampledR8) return VK_FORMAT_R8G8B8A8_UNORM;
+  if (numComponents == 2 && !this->sampledR8G8) return VK_FORMAT_R8G8B8A8_UNORM;
+  return textureFormatToVk(numComponents);
+}
+
 bool
 SoVulkanRenderBackend::prepareTextureUpload(VulkanCachedTexture & entry,
                                             const SoTextureData & texture,
                                             VkBuffer & staging,
                                             VkDeviceMemory & stagingMemory)
 {
-  // VK_FORMAT_R8G8B8_UNORM is not guaranteed to be sampleable, so expand
-  // 3-component (RGB) textures to 4-component RGBA on the host.  Other
-  // component counts map directly.
-  const int components =
-    (texture.numComponents == 3) ? 4 : texture.numComponents;
-  if (components < 1 || components > 4) {
+  if (texture.numComponents < 1 || texture.numComponents > 4) {
     this->emitError("prepareTextureUpload: unsupported component count");
     return false;
   }
-  const VkFormat format = (texture.numComponents == 3)
-    ? VK_FORMAT_R8G8B8A8_UNORM : textureFormatToVk(texture.numComponents);
+  const VkFormat format = this->effectiveTextureFormat(texture.numComponents);
+  const bool expandToRgba = (format == VK_FORMAT_R8G8B8A8_UNORM &&
+                             texture.numComponents < 4);
+  const int components = expandToRgba ? 4 : texture.numComponents;
   const VkDeviceSize byteSize =
     static_cast<VkDeviceSize>(texture.width) * texture.height * components;
 
+  // The expanded upload must sample identically to the native format it
+  // replaces, so the extra channels take the values the hardware would have
+  // produced: R8 -> (r,0,0,1), R8G8 -> (r,g,0,1), RGB -> (r,g,b,1).
   std::vector<unsigned char> converted;
   const unsigned char * uploadPixels = texture.pixels;
-  if (texture.numComponents == 3) {
+  if (expandToRgba) {
     const size_t pixelCount =
       static_cast<size_t>(texture.width) * texture.height;
     converted.resize(pixelCount * 4);
     for (size_t i = 0; i < pixelCount; ++i) {
-      converted[i * 4 + 0] = texture.pixels[i * 3 + 0];
-      converted[i * 4 + 1] = texture.pixels[i * 3 + 1];
-      converted[i * 4 + 2] = texture.pixels[i * 3 + 2];
+      const unsigned char * src =
+        texture.pixels + i * static_cast<size_t>(texture.numComponents);
+      converted[i * 4 + 0] = src[0];
+      converted[i * 4 + 1] = texture.numComponents >= 2 ? src[1] : 0;
+      converted[i * 4 + 2] = texture.numComponents == 3 ? src[2] : 0;
       converted[i * 4 + 3] = 255;
     }
     uploadPixels = converted.data();
@@ -255,10 +272,9 @@ bool
 SoVulkanRenderBackend::finalizeTexture(VulkanCachedTexture & entry,
                                        const SoTextureData & texture)
 {
-  // The image format matches what prepareTextureUpload() created (RGB
-  // textures are expanded to RGBA there).
-  const VkFormat format = (texture.numComponents == 3)
-    ? VK_FORMAT_R8G8B8A8_UNORM : textureFormatToVk(texture.numComponents);
+  // The image format matches what prepareTextureUpload() created (RGB and
+  // unsupported R/RG textures are expanded to RGBA there).
+  const VkFormat format = this->effectiveTextureFormat(texture.numComponents);
   entry.view = createImageView(this->device, entry.image, format,
                                VK_IMAGE_ASPECT_COLOR_BIT, this->allocator);
   if (entry.view == VK_NULL_HANDLE ||

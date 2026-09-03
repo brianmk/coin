@@ -51,7 +51,7 @@ SoVulkanRenderBackend::expandWideLines(VulkanCachedCommand & entry,
 
   static int wlineDiag = 0;
   const bool isSketchCmd = vertexCount >= 900;
-  const bool wdiag = envFlagEnabled("FC_VULKAN_BACKEND_DEBUG")
+  const bool wdiag = COIN_VULKAN_ENV_FLAG("FC_VULKAN_BACKEND_DEBUG")
     && (isSketchCmd || wlineDiag < 40) && wlineDiag < 200;
   if (wdiag) {
     ++wlineDiag;
@@ -378,7 +378,7 @@ SoVulkanRenderBackend::expandWideLines(VulkanCachedCommand & entry,
             static_cast<double>(command.viewMatrix[3][2]));
   }
 
-  if (envFlagEnabled("FC_VULKAN_BACKEND_DEBUG")) {
+  if (COIN_VULKAN_ENV_FLAG("FC_VULKAN_BACKEND_DEBUG")) {
     static int distLog = 0;
     if (distLog++ < 3) {
       fprintf(stderr, "[WLINE] verts=%u segs=%u quads=%zu dists:",

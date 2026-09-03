@@ -216,6 +216,13 @@ envFlagEnabled(const char * name)
   return enabled;
 }
 
+// Literal-name fast path: the per-call-site static resolves the flag once,
+// so per-frame hot paths pay neither getenv() nor the map hash.  Use for
+// every call site that passes a string literal.
+#define COIN_VULKAN_ENV_FLAG(name) \
+  ([] { static const bool coin_env_flag_cached = envFlagEnabled(name); \
+        return coin_env_flag_cached; }())
+
 // Fixed interleaved vertex layout shared by every retained command.
 //
 //   offset 0 : vec3 position
