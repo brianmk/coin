@@ -957,9 +957,13 @@ private:
 #if COIN_BUILD_OIDN
   OIDNDevice oidnDevice = nullptr;
   OIDNFilter oidnFilter = nullptr;
+#endif
+  // Defined unconditionally in SoRTXRenderBackendDenoise.cpp; the bodies are
+  // compiled out when COIN_BUILD_OIDN=0, so the declarations must not be
+  // guarded (a guarded declaration with an unguarded definition produces a
+  // "no declaration matches" compile error for denose builds).
   void setupOidnDevice();
   bool configureOidnFilter();
-#endif
 
   // Async OIDN execution.  OIDN's oidnExecuteFilter() on the CPU device can
   // take tens of milliseconds and, because the render (and denoise) run on the
@@ -1101,9 +1105,11 @@ private:
   //! semaphore is available, signal it before the stream synchronize so the
   //! caller's Vulkan copy-back can wait on the CUDA writes.
   bool updateRtxDenoise(uint32_t w, uint32_t h, bool signalCudaToVulkan);
-  //! Free the CUDA context + OptiX denoiser state (keeps Vulkan staging).
-  void teardownRtxDenoiser();
 #endif
+  //! Free the CUDA context + OptiX denoiser state (keeps Vulkan staging).
+  //! Defined unconditionally in SoRTXRenderBackendDenoise.cpp (body compiled
+  //! out when COIN_BUILD_RTX_DENOISER=0), so the declaration is unguarded.
+  void teardownRtxDenoiser();
 };
 
 #endif // COIN_SORTXRENDERBACKEND_H
