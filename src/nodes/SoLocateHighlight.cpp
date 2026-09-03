@@ -65,7 +65,9 @@
 #include <Inventor/elements/SoOverrideElement.h>
 #include <Inventor/elements/SoLazyElement.h>
 #include <Inventor/SoFullPath.h>
+#if COIN_BUILD_LEGACY_GL_RENDERER
 #include <Inventor/actions/SoGLRenderAction.h>
+#endif
 #include <Inventor/actions/SoHandleEventAction.h>
 #include <Inventor/misc/SoState.h>
 #include <Inventor/misc/SoChildList.h>
@@ -233,11 +235,13 @@ SoLocateHighlight::initClass(void)
 /*!
   Static method that can be used to turn off the current highlight.
 */
+#if COIN_BUILD_LEGACY_GL_RENDERER
 void
 SoLocateHighlight::turnOffCurrentHighlight(SoGLRenderAction * action)
 {
   SoLocateHighlight::turnoffcurrent(action);
 }
+#endif
 
 // doc from parent
 void
@@ -270,6 +274,7 @@ SoLocateHighlight::handleEvent(SoHandleEventAction * action)
 }
 
 // doc from parent
+#if COIN_BUILD_LEGACY_GL_RENDERER
 void
 SoLocateHighlight::GLRenderBelowPath(SoGLRenderAction * action)
 {
@@ -281,8 +286,10 @@ SoLocateHighlight::GLRenderBelowPath(SoGLRenderAction * action)
   inherited::GLRenderBelowPath(action);
   state->pop();
 }
+#endif
 
 // doc from parent
+#if COIN_BUILD_LEGACY_GL_RENDERER
 void
 SoLocateHighlight::GLRenderInPath(SoGLRenderAction * action)
 {
@@ -294,6 +301,7 @@ SoLocateHighlight::GLRenderInPath(SoGLRenderAction * action)
   inherited::GLRenderInPath(action);
   state->pop();
 }
+#endif
 
 /*!
   Empty method in Coin. Can be used by subclasses to be told
@@ -307,6 +315,7 @@ SoLocateHighlight::redrawHighlighted(SoAction * /* act */, SbBool /* flag */)
 //
 // update override state before rendering
 //
+#if COIN_BUILD_LEGACY_GL_RENDERER
 void
 SoLocateHighlight::setOverride(SoGLRenderAction * action)
 {
@@ -322,6 +331,7 @@ SoLocateHighlight::setOverride(SoGLRenderAction * action)
     SoOverrideElement::setDiffuseColorOverride(state, this, TRUE);
   }
 }
+#endif
 
 // private convenience method
 void

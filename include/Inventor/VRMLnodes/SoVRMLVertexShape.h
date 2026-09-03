@@ -74,7 +74,9 @@ public:
   virtual SbBool generateDefaultNormals(SoState * s, SoNormalCache * nc);
 
   void doAction(SoAction * action) override;
+#if COIN_HAVE_LEGACY_GL_RENDERER
   void GLRender(SoGLRenderAction * action) override;
+#endif
   void getBoundingBox(SoGetBoundingBoxAction * action) override;
   void callback(SoCallbackAction * action) override;
   void pick(SoPickAction * action) override;
@@ -85,7 +87,9 @@ protected:
   SoVRMLVertexShape(void);
   virtual ~SoVRMLVertexShape();
 
+#if COIN_HAVE_LEGACY_GL_RENDERER
   SbBool shouldGLRender(SoGLRenderAction * action) override;
+#endif
 
   void setNormalCache(SoState * s, int numNormals, SbVec3f * normals);
   SoNormalCache * getNormalCache(void) const;

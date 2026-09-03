@@ -43,6 +43,7 @@
 class SoSensor;
 class SoFieldSensor;
 class SbImage;
+class SoIRRenderAction;
 
 class COIN_DLL_API SoImage : public SoShape {
   typedef SoShape inherited;
@@ -72,7 +73,10 @@ public:
   SoSFImage image;
   SoSFString filename;
 
+#if COIN_HAVE_LEGACY_GL_RENDERER
   void GLRender(SoGLRenderAction * action) override;
+#endif
+  void IRRender(SoIRRenderAction * action) override;
   void rayPick(SoRayPickAction * action) override;
   void getPrimitiveCount(SoGetPrimitiveCountAction * action) override;
 

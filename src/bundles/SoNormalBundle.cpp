@@ -58,10 +58,14 @@ SoNormalBundle::SoNormalBundle(SoAction * action, SbBool forrendering)
   this->node = action->getCurPathTail();
   this->generator = NULL;
   this->elem = SoNormalElement::getInstance(this->state);
+#if COIN_BUILD_LEGACY_GL_RENDERER
   this->glelem = NULL;
   if (forrendering) {
     this->glelem = static_cast<const SoGLNormalElement *>(this->elem);
   }
+#else
+  (void)forrendering;
+#endif
 }
 
 /*!
@@ -201,9 +205,11 @@ SoNormalBundle::set(int32_t num, const SbVec3f * normals)
   SoNormalElement::set(state, this->node, num, normals);
   // refetch element since we pushed
   this->elem = SoNormalElement::getInstance(this->state);
+#if COIN_BUILD_LEGACY_GL_RENDERER
   if (this->glelem) {
     this->glelem = static_cast<const SoGLNormalElement *>(this->elem);
   }
+#endif
 }
 
 /*!
@@ -221,6 +227,10 @@ SoNormalBundle::get(int index) const
 void 
 SoNormalBundle::send(int index) const
 {
+#if COIN_BUILD_LEGACY_GL_RENDERER
   assert(this->glelem);
   this->glelem->send(index);
+#else
+  (void)index;
+#endif
 }

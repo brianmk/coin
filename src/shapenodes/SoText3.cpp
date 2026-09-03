@@ -127,6 +127,8 @@
 // *************************************************************************
 
 #include <Inventor/nodes/SoText3.h>
+#include <Inventor/elements/SoMultiTextureEnabledElement.h>
+#include <Inventor/elements/SoShapeHintsElement.h>
 
 #include <cstring>
 #include <cfloat> // FLT_MAX, FLT_MIN
@@ -142,14 +144,18 @@
 #include <Inventor/details/SoTextDetail.h>
 #include <Inventor/elements/SoFontNameElement.h>
 #include <Inventor/elements/SoFontSizeElement.h>
+#if COIN_BUILD_LEGACY_GL_RENDERER
 #include <Inventor/elements/SoGLShapeHintsElement.h>
+#endif
 #include <Inventor/elements/SoMaterialBindingElement.h>
 #include <Inventor/elements/SoLazyElement.h>
 #include <Inventor/elements/SoGLCacheContextElement.h>
 #include <Inventor/elements/SoComplexityTypeElement.h>
 #include <Inventor/elements/SoComplexityElement.h>
 #include <Inventor/elements/SoCreaseAngleElement.h>
+#if COIN_BUILD_LEGACY_GL_RENDERER
 #include <Inventor/elements/SoGLMultiTextureEnabledElement.h>
+#endif
 #include <Inventor/elements/SoTextOutlineEnabledElement.h>
 #include <Inventor/misc/SoState.h>
 #include <Inventor/misc/SoNormalGenerator.h>
@@ -476,6 +482,7 @@ SoText3::getCharacterBounds(SoState * COIN_UNUSED_ARG(state), int COIN_UNUSED_AR
 }
 
 // doc in parent
+#if COIN_BUILD_LEGACY_GL_RENDERER
 void
 SoText3::GLRender(SoGLRenderAction * action)
 {
@@ -539,6 +546,7 @@ SoText3::GLRender(SoGLRenderAction * action)
   }
   PRIVATE(this)->unlock();
 }
+#endif
 
 // doc in parent
 void
@@ -597,6 +605,12 @@ void
 SoText3P::render(SoState * state, const cc_font_specification * fontspec,
                  unsigned int part)
 {
+#if !COIN_BUILD_LEGACY_GL_RENDERER
+  (void) state;
+  (void) fontspec;
+  (void) part;
+  return;
+#else
   int i, n = this->widths.getLength();
 
   int firstprofile = -1;
@@ -981,6 +995,7 @@ SoText3P::render(SoState * state, const cc_font_specification * fontspec,
     }
     ypos -= fontspec->size * PUBLIC(this)->spacing.getValue();
   }
+#endif
 }
 
 // render text geometry

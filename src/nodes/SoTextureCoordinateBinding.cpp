@@ -131,17 +131,19 @@ SoTextureCoordinateBinding::initClass(void)
 {
   SO_NODE_INTERNAL_INIT_CLASS(SoTextureCoordinateBinding, SO_FROM_INVENTOR_1);
 
-  SO_ENABLE(SoGLRenderAction, SoTextureCoordinateBindingElement);
+  SO_ENABLE_LEGACY_GL(SoGLRenderAction, SoTextureCoordinateBindingElement);
   SO_ENABLE(SoPickAction, SoTextureCoordinateBindingElement);
   SO_ENABLE(SoCallbackAction, SoTextureCoordinateBindingElement);
 }
 
 // Documented in superclass.
+#if COIN_BUILD_LEGACY_GL_RENDERER
 void
 SoTextureCoordinateBinding::GLRender(SoGLRenderAction * action)
 {
   SoTextureCoordinateBinding::doAction(action);
 }
+#endif
 
 // Documented in superclass.
 void

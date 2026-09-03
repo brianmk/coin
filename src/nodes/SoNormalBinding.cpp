@@ -207,18 +207,20 @@ SoNormalBinding::initClass(void)
 {
   SO_NODE_INTERNAL_INIT_CLASS(SoNormalBinding, SO_FROM_INVENTOR_1|SoNode::VRML1);
 
-  SO_ENABLE(SoGLRenderAction, SoNormalBindingElement);
+  SO_ENABLE_LEGACY_GL(SoGLRenderAction, SoNormalBindingElement);
   SO_ENABLE(SoPickAction, SoNormalBindingElement);
   SO_ENABLE(SoCallbackAction, SoNormalBindingElement);
   SO_ENABLE(SoGetPrimitiveCountAction, SoNormalBindingElement);
 }
 
 // Doc from superclass.
+#if COIN_BUILD_LEGACY_GL_RENDERER
 void
 SoNormalBinding::GLRender(SoGLRenderAction * action)
 {
   SoNormalBinding::doAction(action);
 }
+#endif
 
 // Doc from superclass.
 void

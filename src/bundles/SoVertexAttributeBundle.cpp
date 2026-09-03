@@ -50,10 +50,14 @@ SoVertexAttributeBundle::SoVertexAttributeBundle(SoAction * action, SbBool forre
   : SoBundle(action)
 {
   this->elem = SoVertexAttributeElement::getInstance(this->state);
+#if COIN_BUILD_LEGACY_GL_RENDERER
   this->glelem = NULL;
   if (forrendering) {
     this->glelem = static_cast<const SoGLVertexAttributeElement *> (this->elem);
   }
+#else
+  (void)forrendering;
+#endif
 }
 
 /*!
@@ -75,6 +79,10 @@ SoVertexAttributeBundle::doAttributes(void) const
 void 
 SoVertexAttributeBundle::send(int index) const
 {
+#if COIN_BUILD_LEGACY_GL_RENDERER
   assert(this->glelem);
   this->glelem->send(index);
+#else
+  (void)index;
+#endif
 }

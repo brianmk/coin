@@ -40,7 +40,9 @@
 #include <Inventor/SoDB.h>
 #include <Inventor/system/gl.h>
 #include <Inventor/nodes/SoCamera.h>
+#if COIN_BUILD_LEGACY_GL_RENDERER
 #include <Inventor/actions/SoGLRenderAction.h>
+#endif
 #include <Inventor/actions/SoSearchAction.h>
 #include <Inventor/sensors/SoNodeSensor.h>
 #ifdef HAVE_NODEKITS

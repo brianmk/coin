@@ -50,7 +50,9 @@ public:
 
   SoMFInt32 numVertices;
 
+#if COIN_HAVE_LEGACY_GL_RENDERER
   void GLRender(SoGLRenderAction * action) override;
+#endif
   SbBool generateDefaultNormals(SoState * state, SoNormalBundle * nb) override;
   void getPrimitiveCount(SoGetPrimitiveCountAction * action) override;
 
@@ -70,7 +72,9 @@ private:
 
   Binding findMaterialBinding(SoState * const state) const;
   Binding findNormalBinding(SoState * const state) const;
+#if COIN_HAVE_LEGACY_GL_RENDERER
   SbBool useConvexCache(SoAction * action);
+#endif
   void notify(SoNotList * list) override;
 
   SoFaceSetP * pimpl;

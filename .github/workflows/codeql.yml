@@ -5,7 +5,6 @@ on:
   push:
     branches: [ "master", "freecad-master" ]
   pull_request:
-    branches: [ "master", "freecad-master" ]
   schedule:
     - cron: '21 10 * * 4'
 

@@ -139,8 +139,8 @@ SoProfile::initClass(void)
   SO_ENABLE(SoCallbackAction, SoProfileCoordinateElement);
   SO_ENABLE(SoCallbackAction, SoProfileCoordinateElement);
   SO_ENABLE(SoCallbackAction, SoProfileElement);
-  SO_ENABLE(SoGLRenderAction, SoProfileCoordinateElement);
-  SO_ENABLE(SoGLRenderAction, SoProfileElement);
+  SO_ENABLE_LEGACY_GL(SoGLRenderAction, SoProfileCoordinateElement);
+  SO_ENABLE_LEGACY_GL(SoGLRenderAction, SoProfileElement);
   SO_ENABLE(SoGetBoundingBoxAction, SoProfileCoordinateElement);
   SO_ENABLE(SoGetBoundingBoxAction, SoProfileElement);
   SO_ENABLE(SoGetPrimitiveCountAction, SoProfileElement);
@@ -170,11 +170,13 @@ SoProfile::callback(SoCallbackAction * action)
 }
 
 // Doc from superclass.
+#if COIN_BUILD_LEGACY_GL_RENDERER
 void
 SoProfile::GLRender(SoGLRenderAction * action)
 {
   SoProfile::doAction(action);
 }
+#endif
 
 // Doc from superclass.
 void

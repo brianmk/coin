@@ -3,7 +3,6 @@ name: Continuous Integration Build
 on:
   workflow_dispatch:  # Allow manual triggers
   pull_request:
-    branches: [ master, freecad-master ]
   #push:
   #  branches: [ master ]
 
@@ -20,77 +19,146 @@ jobs:
         uses: docker://rhysd/actionlint:1.7.12
 
   ubuntu-build:
-    name: Ubuntu Build
+    name: Ubuntu CI (Legacy renderer ${{ matrix.renderer_state }})
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - renderer_state: enabled
+            legacy_gl_renderer: ON
+            artifact: Ubuntu-Artifacts-LegacyGL-ON
+          - renderer_state: disabled
+            legacy_gl_renderer: OFF
+            artifact: Ubuntu-Artifacts-LegacyGL-OFF
     steps:
       - name: Checkout repository
         uses: actions/checkout@v6
         with:
           submodules: recursive
-      - name: Create build directory and run CMake
+      - name: Configure
         run: |
           sudo apt-get -y update
           sudo apt-get -y install freeglut3-dev
           cmake -S . -B cmake_build_dir -G "Unix Makefiles" \
             -DCMAKE_BUILD_TYPE=Release \
             -DCMAKE_INSTALL_PREFIX=cmake_install_dir \
+            -DCOIN_BUILD_LEGACY_GL_RENDERER=${{ matrix.legacy_gl_renderer }} \
+            -DCOIN_BUILD_TESTS=ON \
+            -DCOIN_BUILD_EXAMPLES=OFF \
+            -DCOIN_BUILD_DOCUMENTATION=OFF \
             -DCOIN_STRICT_WARNINGS=ON
-      - name: Build project
+      - name: Build and install
         run: cmake --build cmake_build_dir --target install --config Release -- -j4
+      - name: Check installed package
+        run: |
+          cmake -S testsuite/installed-package-smoke -B installed-package-smoke \
+            -G "Unix Makefiles" \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_PREFIX_PATH="$GITHUB_WORKSPACE/cmake_install_dir"
+          cmake --build installed-package-smoke --config Release -- -j4
       - name: Run tests
-        run:  ctest -C Release -VV
+        run: ctest -C Release -VV
         working-directory: cmake_build_dir
-      - name: Create Artifacts
+      - name: Run core-profile OpenGL tests
+        if: matrix.renderer_state == 'disabled'
+        run: ctest -C Release -R '^(EGLBindingTest|GLSLRuntimeTest|OffscreenReadbackTest)$' --output-on-failure
+        working-directory: cmake_build_dir
+        env:
+          COIN_EGL: 1
+          EGL_PLATFORM: surfaceless
+          COIN_EGL_CORE_PROFILE: 1
+      - name: Upload artifacts
         uses: actions/upload-artifact@v7
         with:
-          name: Ubuntu-Artifacts
+          name: ${{ matrix.artifact }}
           path: cmake_install_dir/
         if: always()
 
   windows-build:
-    name: Windows Build
+    name: Windows CI (Legacy renderer ${{ matrix.renderer_state }})
     runs-on: windows-2022
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - renderer_state: enabled
+            legacy_gl_renderer: ON
+            artifact: Windows-Artifacts-LegacyGL-ON
+          - renderer_state: disabled
+            legacy_gl_renderer: OFF
+            artifact: Windows-Artifacts-LegacyGL-OFF
     steps:
       - name: Checkout repository
         uses: actions/checkout@v6
         with:
           submodules: recursive
-      - name: Create build directory and run CMake
+      - name: Configure
         shell: cmd
         run: |
-          cmake -S . -B cmake_build_dir -G "Visual Studio 17 2022" -A x64 -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX=cmake_install_dir
-      - name: Build project
+          cmake -S . -B cmake_build_dir -G "Visual Studio 17 2022" -A x64 -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX=cmake_install_dir -DCOIN_BUILD_LEGACY_GL_RENDERER=${{ matrix.legacy_gl_renderer }} -DCOIN_BUILD_TESTS=ON
+      - name: Build and install
         run: cmake --build cmake_build_dir --target INSTALL --config Release -- /nologo /verbosity:minimal /maxcpucount:2 /property:MultiProcessorCompilation=true
+      - name: Check installed package
+        shell: pwsh
+        run: |
+          $smokeSource = Join-Path $env:GITHUB_WORKSPACE "testsuite/installed-package-smoke"
+          $smokeBuild = Join-Path $env:RUNNER_TEMP "coin-installed-package-smoke"
+          $installedPrefix = (Join-Path $env:GITHUB_WORKSPACE "cmake_install_dir").Replace('\', '/')
+          cmake -S $smokeSource -B $smokeBuild -G "Visual Studio 17 2022" -A x64 -DCMAKE_PREFIX_PATH="$installedPrefix"
+          cmake --build $smokeBuild --config Release
       - name: Run tests
-        run:  ctest -C Release -VV
+        run: ctest -C Release -VV
         working-directory: cmake_build_dir
-      - name: Create Artifacts
+      - name: Upload artifacts
         uses: actions/upload-artifact@v7
         with:
-          name: Windows-Artifacts
+          name: ${{ matrix.artifact }}
           path: cmake_install_dir/
         if: always()
 
   macos-build:
-    name: MacOS Build
+    name: macOS CI (Legacy renderer ${{ matrix.renderer_state }})
     runs-on: macos-14
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - renderer_state: enabled
+            legacy_gl_renderer: ON
+            artifact: macOS-Artifacts-LegacyGL-ON
+          - renderer_state: disabled
+            legacy_gl_renderer: OFF
+            artifact: macOS-Artifacts-LegacyGL-OFF
     steps:
       - name: Checkout repository
         uses: actions/checkout@v6
         with:
           submodules: recursive
-      - name: Create build directory and run CMake
+      - name: Configure
         run: |
-          cmake -S . -B cmake_build_dir -G "Unix Makefiles" -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX=cmake_install_dir -DCMAKE_CXX_STANDARD=11 -DCOIN_STRICT_WARNINGS=ON
-      - name: Build project
+          cmake -S . -B cmake_build_dir -G "Unix Makefiles" \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_INSTALL_PREFIX=cmake_install_dir \
+            -DCMAKE_CXX_STANDARD=11 \
+            -DCOIN_STRICT_WARNINGS=ON \
+            -DCOIN_BUILD_LEGACY_GL_RENDERER=${{ matrix.legacy_gl_renderer }} \
+            -DCOIN_BUILD_TESTS=ON
+      - name: Build and install
         run: cmake --build cmake_build_dir --target install --config Release -- -j4
+      - name: Check installed package
+        run: |
+          cmake -S testsuite/installed-package-smoke -B installed-package-smoke \
+            -G "Unix Makefiles" \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_PREFIX_PATH="$GITHUB_WORKSPACE/cmake_install_dir"
+          cmake --build installed-package-smoke --config Release -- -j4
       - name: Run tests
-        run:  ctest -C Release -VV
+        run: ctest -C Release -VV
         working-directory: cmake_build_dir
-      - name: Create Artifacts
+      - name: Upload artifacts
         uses: actions/upload-artifact@v7
         with:
-          name: MacOS-Artifacts
+          name: ${{ matrix.artifact }}
           path: cmake_install_dir/
         if: always()
-        

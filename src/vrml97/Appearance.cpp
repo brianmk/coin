@@ -194,6 +194,7 @@ SoVRMLAppearance::callback(SoCallbackAction * action)
 }
 
 // doc in parent
+#if COIN_BUILD_LEGACY_GL_RENDERER
 void
 SoVRMLAppearance::GLRender(SoGLRenderAction * action)
 {
@@ -263,6 +264,7 @@ SoVRMLAppearance::GLRender(SoGLRenderAction * action)
     SoLazyElement::setPacked(state, this, 1, &PRIVATE(this)->fakecolor, alpha != 255);
   }
 }
+#endif
 
 // doc in parent
 void

@@ -207,6 +207,7 @@ SoVRMLCollision::~SoVRMLCollision() // virtual, protected
 }
 
 // Doc in parent
+#if COIN_BUILD_LEGACY_GL_RENDERER
 void
 SoVRMLCollision::GLRender(SoGLRenderAction * action)
 {
@@ -258,6 +259,7 @@ SoVRMLCollision::GLRender(SoGLRenderAction * action)
   }
   state->pop();
 }
+#endif
 
 // Doc in parent
 void

@@ -129,7 +129,9 @@
 
 #include <Inventor/nodes/SoGeometryShader.h>
 
+#if COIN_BUILD_LEGACY_GL_RENDERER
 #include <Inventor/actions/SoGLRenderAction.h>
+#endif
 #include <Inventor/elements/SoGLShaderProgramElement.h>
 #include <Inventor/elements/SoGLCacheContextElement.h>
 #include <Inventor/errors/SoDebugError.h>
@@ -185,6 +187,7 @@ SoGeometryShader::~SoGeometryShader()
 {
 }
 
+#if COIN_BUILD_LEGACY_GL_RENDERER
 void
 SoGeometryShader::GLRender(SoGLRenderAction * action)
 {
@@ -242,6 +245,7 @@ SoGeometryShader::GLRender(SoGLRenderAction * action)
   }
   inherited::GLRender(action);
 }
+#endif
 
 // *************************************************************************
 
@@ -269,7 +273,11 @@ SoGeometryShader::isSupported(SourceType sourceType)
     return FALSE;
   }
   else if (sourceType == GLSL_PROGRAM) {
-    return SoGLDriverDatabase::isSupported(glue, SO_GL_ARB_SHADER_OBJECT);
+    const SbBool shaderObjects =
+      cc_glglue_glversion_matches_at_least(glue, 2, 0, 0) ||
+      SoGLDriverDatabase::isSupported(glue, SO_GL_ARB_SHADER_OBJECT);
+    return shaderObjects &&
+      SoGLDriverDatabase::isSupported(glue, "GL_EXT_geometry_shader4");
   }
   // AFAIK Cg has no support for geometry shaders (yet).
   // pederb, 20070410

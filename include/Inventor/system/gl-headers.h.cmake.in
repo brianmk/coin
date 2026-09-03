@@ -2,25 +2,27 @@
 #ifndef COIN_GLHEADERS_H
 #define COIN_GLHEADERS_H
 
+#define COIN_HAVE_LEGACY_GL_RENDERER @COIN_BUILD_LEGACY_GL_RENDERER_VALUE@
+
 /**************************************************************************\
  * Copyright (c) Kongsberg Oil & Gas Technologies AS
  * All rights reserved.
- * 
+ *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted provided that the following conditions are
  * met:
- * 
+ *
  * Redistributions of source code must retain the above copyright notice,
  * this list of conditions and the following disclaimer.
- * 
+ *
  * Redistributions in binary form must reproduce the above copyright
  * notice, this list of conditions and the following disclaimer in the
  * documentation and/or other materials provided with the distribution.
- * 
+ *
  * Neither the name of the copyright holder nor the names of its
  * contributors may be used to endorse or promote products derived from
  * this software without specific prior written permission.
- * 
+ *
  * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
  * "AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT
  * LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR
@@ -42,11 +44,52 @@
 /* This define is at least needed before inclusion of the header files
    that are part of NVidia's Linux drivers v41.91. Without it, none of
    the extension and OpenGL 1.1+ function prototypes will be set up. */
+#ifndef GL_GLEXT_PROTOTYPES
 #define GL_GLEXT_PROTOTYPES 1
+#endif
 
+#if defined(_WIN32) && !defined(NOMINMAX)
+#define NOMINMAX
+#endif
+
+/* These guards only apply during Coin's own build (COIN_INTERNAL) when the
+   legacy GL renderer is not built. Consumer builds may freely mix legacy GL
+   headers. */
+#if !COIN_HAVE_LEGACY_GL_RENDERER
+# if defined(__gl_h_) || defined(__GL_H__) || (defined(GL_VERSION_1_1) && !defined(GLCOREARB_H))
+#  error "Legacy <GL/gl.h> detected before core headers. Use core headers only."
+# endif
+# if (defined(GL_VERSION) || defined(GLCOREARB_H)) && \
+     (defined(GL_ES_VERSION_2_0) || defined(GL_ES_VERSION_3_0) || defined(GL_ES_VERSION_3_1) || defined(GL_ES_VERSION_3_2))
+#  error "Mixed desktop GL and GLES headers. Use exactly one API family."
+# endif
+#endif
+
+#if defined(COIN_INTERNAL) && defined(_WIN32)
+/* The Windows SDK's legacy gl.h is still used for the compatibility API,
+   while modern GL declarations come from Coin's private Khronos snapshot.
+   Keep these includes private so installed public headers do not expose
+   Coin's source tree. */
+# if COIN_HAVE_LEGACY_GL_RENDERER
+#  include <windows.h>
+#  include <GL/gl.h>
+#  include "glue/khronos/GL/glext.h"
+# else
+#  include <windows.h>
+#  include "glue/khronos/GL/glcorearb.h"
+# endif
+
+#elif !defined(COIN_INTERNAL) && !COIN_HAVE_LEGACY_GL_RENDERER
+/* Installed core-profile consumers must use Coin's namespaced snapshot. */
+# include <Inventor/system/khronos/glcorearb.h>
+
+#else
 @SIM_INCLUDE_WINDOWS_H@
 @SIM_INCLUDE_GL_H@
-@SIM_INCLUDE_GLU_H@
 @SIM_INCLUDE_GLEXT_H@
+#endif
+
+/* Fallback enums for environments with legacy GL/GLU/WGL headers. */
+#include <Inventor/system/gl-fallbacks.h>
 
 #endif /* ! COIN_GLHEADERS_H */

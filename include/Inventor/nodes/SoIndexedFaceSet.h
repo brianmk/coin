@@ -51,7 +51,9 @@ public:
   static void initClass(void);
   SoIndexedFaceSet(void);
 
+#if COIN_HAVE_LEGACY_GL_RENDERER
   void GLRender(SoGLRenderAction * action) override;
+#endif
   void getPrimitiveCount(SoGetPrimitiveCountAction * action) override;
 
   virtual SbBool generateDefaultNormals(SoState * state,
@@ -74,10 +76,12 @@ private:
     NONE = OVERALL
   };
 
+#if COIN_HAVE_LEGACY_GL_RENDERER
   SbBool useConvexCache(SoAction * action,
                         const SbVec3f * normals,
                         const int32_t * nindices,
                         const SbBool normalsfromcache);
+#endif
   Binding findMaterialBinding(SoState * const state) const;
   Binding findNormalBinding(SoState * const state) const;
   void notify(SoNotList * list) override;

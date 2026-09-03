@@ -267,8 +267,11 @@ SoProfilerP::setActionType(SoType actiontype)
     profiler::console::actiontype = actiontype;                 \
   }
 
+#if COIN_BUILD_LEGACY_GL_RENDERER
   IF_ACTION(SoGLRenderAction)
-  else IF_ACTION(SoPickAction)
+  else
+#endif
+  IF_ACTION(SoPickAction)
   else IF_ACTION(SoCallbackAction)
   else IF_ACTION(SoGetBoundingBoxAction)
   else IF_ACTION(SoGetMatrixAction)
@@ -289,7 +292,9 @@ SoType
 SoProfilerP::getActionType(void)
 {
   if (profiler::console::actiontype == SoType::badType()) {
+#if COIN_BUILD_LEGACY_GL_RENDERER
     profiler::console::actiontype = SoGLRenderAction::getClassTypeId();
+#endif
   }
   return profiler::console::actiontype;
 }

@@ -146,6 +146,7 @@ public:
   static void setTwosideLighting(SoState * state, SbBool onoff);
   static void setShadeModel(SoState * state, SbBool flatshading);
   static void setAlphaTest(SoState * state, int func, float value);
+  static void setAlphaTestSemantic(SoState * state, int function, float value);
 
   static const SbColor & getDiffuse(SoState* state, int index);
   static float getTransparency(SoState*, int index);
@@ -164,6 +165,7 @@ public:
   
   static int32_t getLightModel(SoState*);
   static int getAlphaTest(SoState * state, float & value);
+  static int getAlphaTestSemantic(SoState * state, float & value);
   static SbBool getTwoSidedLighting(SoState * state);
 
   int32_t getNumDiffuse(void) const;
@@ -213,6 +215,7 @@ protected:
     SbColor emissive;
     float shininess;
     SbBool blending;
+    SbBool separateblending;
     int blend_sfactor;
     int blend_dfactor;
     int alpha_blend_sfactor;
@@ -235,6 +238,7 @@ protected:
     SbBool culling;
     SbBool flatshading;
     int alphatestfunc;
+    int semanticalphatestfunc;
     float alphatestvalue;
   } coinstate;
 
@@ -257,7 +261,9 @@ protected:
   virtual void setSpecularElt(const SbColor* color);
   virtual void setShininessElt(float value);
   virtual void setColorMaterialElt(SbBool value);
-  virtual void enableBlendingElt(int sfactor, int dfactor, int alpha_sfactor, int alpha_dfactor);
+  virtual void enableBlendingElt(int sfactor, int dfactor,
+                                 int alpha_sfactor, int alpha_dfactor,
+                                 SbBool separate);
   virtual void disableBlendingElt(void);
   virtual void setLightModelElt(SoState *state, int32_t model);
   virtual void setMaterialElt(SoNode * node, uint32_t bitmask,
@@ -274,6 +280,7 @@ protected:
   virtual void setTwosideLightingElt(SbBool onoff);
   virtual void setShadeModelElt(SbBool flatshading);
   virtual void setAlphaTestElt(int func, float value);
+  virtual void setAlphaTestSemanticElt(int function, float value);
 
 private:
   SoLazyElementP * pimpl; // for future use

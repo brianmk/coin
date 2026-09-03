@@ -40,6 +40,7 @@
 */
 
 #include <Inventor/elements/SoShapeStyleElement.h>
+#include <Inventor/nodes/SoTransparencyType.h>
 
 #include "SbBasicP.h"
 
@@ -186,8 +187,8 @@ SoShapeStyleElement::setTransparencyType(SoState * const state,
   assert(value <= TRANSPTYPE_MASK);
   elem->flags |= (value & TRANSPTYPE_MASK);
 
-  if ((value == int(SoGLRenderAction::SORTED_OBJECT_SORTED_TRIANGLE_BLEND)) ||
-      (value == int(SoGLRenderAction::SORTED_OBJECT_SORTED_TRIANGLE_ADD))) {
+  if ((value == int(SoTransparencyType::SORTED_OBJECT_SORTED_TRIANGLE_BLEND)) ||
+      (value == int(SoTransparencyType::SORTED_OBJECT_SORTED_TRIANGLE_ADD))) {
     elem->flags |= TRANSP_SORTED_TRIANGLES;
   }
   else {
@@ -281,7 +282,7 @@ SbBool
 SoShapeStyleElement::isScreenDoor(SoState * const state)
 {
   const SoShapeStyleElement * elem = getConstElement(state);
-  return ((elem->flags & TRANSPTYPE_MASK) == SoGLRenderAction::SCREEN_DOOR);
+  return ((elem->flags & TRANSPTYPE_MASK) == SoTransparencyType::SCREEN_DOOR);
 }
 
 /*!

@@ -37,7 +37,9 @@
 
 class SbViewportRegion;
 class SoEvent;
+#if COIN_HAVE_LEGACY_GL_RENDERER
 class SoGLRenderAction;
+#endif
 class SoAudioRenderAction;
 class SoHandleEventAction;
 class SoNode;
@@ -57,10 +59,12 @@ public:
 
   virtual void render(const SbBool clearwindow = TRUE,
                       const SbBool clearzbuffer = TRUE);
+#if COIN_HAVE_LEGACY_GL_RENDERER
   virtual void render(SoGLRenderAction * action,
                       const SbBool initmatrices = TRUE,
                       const SbBool clearwindow = TRUE,
                       const SbBool clearzbuffer = TRUE);
+#endif
 
   void setCamera(SoCamera * camera);
   SoCamera * getCamera(void) const;
@@ -71,6 +75,8 @@ public:
   virtual SoNode * getSceneGraph(void) const;
   void setWindowSize(const SbVec2s & newsize);
   const SbVec2s & getWindowSize(void) const;
+  void setDevicePixelRatio(float dpr);
+  float getDevicePixelRatio(void) const;
   void setSize(const SbVec2s & newsize);
   const SbVec2s & getSize(void) const;
   void setOrigin(const SbVec2s & newOrigin);
@@ -92,8 +98,10 @@ public:
   uint32_t getRedrawPriority(void) const;
   void setAntialiasing(const SbBool smoothing, const int numPasses);
   void getAntialiasing(SbBool & smoothing, int & numPasses) const;
+#if COIN_HAVE_LEGACY_GL_RENDERER
   void setGLRenderAction(SoGLRenderAction * const action);
   SoGLRenderAction * getGLRenderAction(void) const;
+#endif
   void setAudioRenderAction(SoAudioRenderAction * const action);
   SoAudioRenderAction * getAudioRenderAction(void) const;
   void setHandleEventAction(SoHandleEventAction * hea);

@@ -35,6 +35,7 @@
 
 #include <Inventor/elements/SoEnvironmentElement.h>
 
+#if COIN_HAVE_LEGACY_GL_RENDERER
 class COIN_DLL_API SoGLEnvironmentElement : public SoEnvironmentElement {
   typedef SoEnvironmentElement inherited;
 
@@ -62,5 +63,7 @@ protected:
 private:
   void updategl(SoState * const state);
 };
+
+#endif
 
 #endif // !COIN_SOGLENVIRONMENTELEMENT_H

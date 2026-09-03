@@ -139,11 +139,13 @@ SoGeoLocation::doAction(SoAction * action)
 }
 
 // Doc from superclass.
+#if COIN_BUILD_LEGACY_GL_RENDERER
 void
 SoGeoLocation::GLRender(SoGLRenderAction * action)
 {
   SoGeoLocation::doAction((SoAction *)action);
 }
+#endif
 
 // Doc from superclass.
 void

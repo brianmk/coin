@@ -75,11 +75,13 @@ SoTexture::doAction(SoAction * action)
   inherited::doAction(action);
 }
 
+#if COIN_BUILD_LEGACY_GL_RENDERER
 void
 SoTexture::GLRender(SoGLRenderAction * action)
 {
   inherited::GLRender(action);
 }
+#endif
 
 void
 SoTexture::callback(SoCallbackAction * action)

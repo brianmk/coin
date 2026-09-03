@@ -501,6 +501,7 @@ SoVRMLTransform::getPrimitiveCount(SoGetPrimitiveCountAction * action)
 }
 
 // Doc in parent
+#if COIN_BUILD_LEGACY_GL_RENDERER
 void
 SoVRMLTransform::GLRenderBelowPath(SoGLRenderAction * action)
 {
@@ -510,8 +511,10 @@ SoVRMLTransform::GLRenderBelowPath(SoGLRenderAction * action)
   inherited::GLRenderBelowPath(action);
   state->pop();
 }
+#endif
 
 // Doc in parent
+#if COIN_BUILD_LEGACY_GL_RENDERER
 void
 SoVRMLTransform::GLRenderInPath(SoGLRenderAction * action)
 {
@@ -527,6 +530,7 @@ SoVRMLTransform::GLRenderInPath(SoGLRenderAction * action)
     this->GLRenderBelowPath(action);
   }
 }
+#endif
 
 // Doc in parent
 void

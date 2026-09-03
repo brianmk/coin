@@ -59,7 +59,6 @@ class SoGetBoundingBoxAction;
 class SoGetMatrixAction;
 class SoSearchAction;
 class SbPList;
-
 class SoRenderManagerP {
 public:
   SoRenderManagerP(SoRenderManager * publ);
@@ -106,10 +105,16 @@ public:
   SoGetBoundingBoxAction * getbboxaction;
   SoAudioRenderAction * audiorenderaction;
   SoGetMatrixAction * getmatrixaction;
+#if COIN_BUILD_LEGACY_GL_RENDERER
   SoGLRenderAction * glaction;
+#endif
   SoSearchAction * searchaction;
   SbBool deleteaudiorenderaction;
+#if COIN_BUILD_LEGACY_GL_RENDERER
   SbBool deleteglaction;
+#endif
+  SbViewportRegion viewport;
+  float devicePixelRatio;
 
   SoRenderManager::StereoMode stereostenciltype;
   SoRenderManager::RenderMode rendermode;

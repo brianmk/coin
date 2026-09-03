@@ -34,6 +34,9 @@
 #include <config.h>
 #endif // HAVE_CONFIG_H
 
+class SoVBO;
+#include <Inventor/elements/SoLazyElement.h>
+
 #ifdef HAVE_VRML97
 
 /*!
@@ -231,8 +234,12 @@
 #include <Inventor/details/SoFaceDetail.h>
 #include <Inventor/elements/SoCacheElement.h>
 #include <Inventor/elements/SoCoordinateElement.h>
+#if COIN_BUILD_LEGACY_GL_RENDERER
 #include <Inventor/elements/SoGLLazyElement.h>
+#endif
+#if COIN_BUILD_LEGACY_GL_RENDERER
 #include <Inventor/elements/SoGLVBOElement.h>
+#endif
 #include <Inventor/elements/SoMaterialBindingElement.h>
 #include <Inventor/elements/SoVertexAttributeBindingElement.h>
 #include <Inventor/elements/SoModelMatrixElement.h>
@@ -245,11 +252,18 @@
 #include <Inventor/threads/SbRWMutex.h>
 #endif // HAVE_THREADS
 
+#if COIN_BUILD_LEGACY_GL_RENDERER
 #include "rendering/SoVBO.h"
+#endif
+#if COIN_BUILD_LEGACY_GL_RENDERER
 #include "rendering/SoVertexArrayIndexer.h"
+#endif
 #include "glue/glp.h"
 #include "rendering/SoGL.h"
 #include "nodes/SoSubNodeP.h"
+
+#include "coindefs.h"
+class SoVertexArrayIndexer;
 
 // *************************************************************************
 
@@ -330,7 +344,9 @@ SoVRMLIndexedFaceSet::SoVRMLIndexedFaceSet(void)
 SoVRMLIndexedFaceSet::~SoVRMLIndexedFaceSet() // virtual, protected
 {
   if (PRIVATE(this)->convexCache) PRIVATE(this)->convexCache->unref();
+#if COIN_BUILD_LEGACY_GL_RENDERER
   delete PRIVATE(this)->vaindexer;
+#endif
   delete PRIVATE(this);
 }
 
@@ -439,6 +455,7 @@ SoVRMLIndexedFaceSet::findNormalBinding(SoState * state) const
 
 
 // Doc in parent
+#if COIN_BUILD_LEGACY_GL_RENDERER
 void
 SoVRMLIndexedFaceSet::GLRender(SoGLRenderAction * action)
 {
@@ -663,6 +680,7 @@ SoVRMLIndexedFaceSet::GLRender(SoGLRenderAction * action)
 
   state->pop();
 }
+#endif
 
 // Doc in parent
 void
@@ -974,7 +992,9 @@ SoVRMLIndexedFaceSet::notify(SoNotList * list)
   if (f == &this->coordIndex) {
     PRIVATE(this)->concavestatus = STATUS_UNKNOWN;
     LOCK_VAINDEXER(this);
+#if COIN_BUILD_LEGACY_GL_RENDERER
     delete PRIVATE(this)->vaindexer;
+#endif
     PRIVATE(this)->vaindexer = NULL;
     UNLOCK_VAINDEXER(this);
   }

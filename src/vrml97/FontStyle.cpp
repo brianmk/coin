@@ -320,10 +320,12 @@ SoVRMLFontStyle::callback(SoCallbackAction * COIN_UNUSED_ARG(action))
 }
 
 // Doc in parent
+#if COIN_BUILD_LEGACY_GL_RENDERER
 void
 SoVRMLFontStyle::GLRender(SoGLRenderAction * COIN_UNUSED_ARG(action))
 {
 }
+#endif
 
 // Doc in parent
 void

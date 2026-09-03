@@ -141,8 +141,10 @@ SoProfilerStatsP::doAction(SoAction * action)
     clear_state = FALSE;
   }
 
+#if COIN_BUILD_LEGACY_GL_RENDERER
   this->action_timings.put(SoGLRenderAction::getClassTypeId().getKey(),
                            SbTime::zero());
+#endif
 
   SoState * state = action->getState();
   if (state->isElementEnabled(SoCacheElement::getClassStackIndex())) {
@@ -166,6 +168,7 @@ SoProfilerStatsP::doAction(SoAction * action)
   this->updateNodeTypeTimingMap(e);
   this->updateActionTimingMaps(e, action);
 
+#if COIN_BUILD_LEGACY_GL_RENDERER
   if (action->isOfType(SoGLRenderAction::getClassTypeId())) {
     this->updateNodeTypeTimingFields();
     updateActionTimingFields(e);
@@ -173,6 +176,7 @@ SoProfilerStatsP::doAction(SoAction * action)
 
     clear_state = TRUE;
   }
+#endif
 } // doAction
 
 void
@@ -358,7 +362,7 @@ SoProfilerStats::initClass(void)
 {
   SO_NODE_INTERNAL_INIT_CLASS(SoProfilerStats, SO_FROM_COIN_3_0);
 
-  SO_ENABLE(SoGLRenderAction, SoProfilerElement);
+  SO_ENABLE_LEGACY_GL(SoGLRenderAction, SoProfilerElement);
   SO_ENABLE(SoHandleEventAction, SoProfilerElement);
 }
 
@@ -404,11 +408,13 @@ SoProfilerStats::~SoProfilerStats()
 // *************************************************************************
 
 // Doc from superclass.
+#if COIN_BUILD_LEGACY_GL_RENDERER
 void
 SoProfilerStats::GLRender(SoGLRenderAction * action)
 {
   PRIVATE(this)->doAction(action);
 }
+#endif
 
 // Doc from superclass.
 void

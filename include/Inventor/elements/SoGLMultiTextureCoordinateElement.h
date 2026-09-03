@@ -38,6 +38,7 @@
 class SoGLMultiTextureCoordinateElementP;
 typedef void SoTexCoordTexgenCB(void * data);
 
+#if COIN_HAVE_LEGACY_GL_RENDERER
 class COIN_DLL_API SoGLMultiTextureCoordinateElement : public SoMultiTextureCoordinateElement {
   typedef SoMultiTextureCoordinateElement inherited;
 
@@ -112,5 +113,7 @@ private:
   mutable const SbBool * multienabled;
   mutable int multimax;
 };
+
+#endif
 
 #endif // !COIN_SOGLMULTITEXTURECOORDINATEELEMENT_H

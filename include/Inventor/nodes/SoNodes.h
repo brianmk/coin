@@ -33,6 +33,7 @@
  * OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 \**************************************************************************/
 
+#include <Inventor/SbBasic.h>
 #include <Inventor/nodes/SoNode.h>
 #include <Inventor/nodes/SoCamera.h>
 #include <Inventor/nodes/SoPerspectiveCamera.h>
@@ -70,7 +71,9 @@
 #include <Inventor/nodes/SoSeparator.h>
 #include <Inventor/nodes/SoAnnotation.h>
 #include <Inventor/nodes/SoSelection.h>
+#if COIN_HAVE_LEGACY_GL_RENDERER
 #include <Inventor/nodes/SoExtSelection.h>
+#endif
 #include <Inventor/nodes/SoLocateHighlight.h>
 #include <Inventor/nodes/SoWWWAnchor.h>
 #include <Inventor/nodes/SoArray.h>
@@ -166,7 +169,9 @@
 #include <Inventor/nodes/SoBumpMapCoordinate.h>
 #include <Inventor/nodes/SoBumpMapTransform.h>
 #include <Inventor/nodes/SoSceneTexture2.h>
+#if COIN_HAVE_LEGACY_GL_RENDERER
 #include <Inventor/nodes/SoSceneTextureCubeMap.h>
+#endif
 #include <Inventor/nodes/SoCacheHint.h>
 #include <Inventor/nodes/SoDepthBuffer.h>
 #include <Inventor/nodes/SoAlphaTest.h>

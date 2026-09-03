@@ -331,105 +331,139 @@ CoinOffscreenGLCanvas::readPixels(uint8_t * dst,
                                   unsigned int dstrowsize,
                                   unsigned int nrcomponents) const
 {
-  glPushAttrib(GL_ALL_ATTRIB_BITS);
+#if COIN_BUILD_LEGACY_GL_RENDERER
+  const cc_glglue * glue = cc_glglue_instance((int) this->renderid);
+  const SbBool legacyContext = cc_glglue_context_supports_legacy_rendering(glue);
+  if (legacyContext) {
+    glPushAttrib(GL_PIXEL_MODE_BIT);
+  }
+#endif
 
-  // First reset all settings that can influence the result of a
-  // glReadPixels() call, to make sure we get the actual contents of
-  // the buffer, unmodified.
-  //
-  // The values set up below matches the default settings of an
-  // OpenGL driver.
+  GLint packSwapBytes;
+  GLint packLsbFirst;
+  GLint packRowLength;
+  GLint packSkipRows;
+  GLint packSkipPixels;
+  GLint packAlignment;
+  glGetIntegerv(GL_PACK_SWAP_BYTES, &packSwapBytes);
+  glGetIntegerv(GL_PACK_LSB_FIRST, &packLsbFirst);
+  glGetIntegerv(GL_PACK_ROW_LENGTH, &packRowLength);
+  glGetIntegerv(GL_PACK_SKIP_ROWS, &packSkipRows);
+  glGetIntegerv(GL_PACK_SKIP_PIXELS, &packSkipPixels);
+  glGetIntegerv(GL_PACK_ALIGNMENT, &packAlignment);
 
-  glPixelStorei(GL_PACK_SWAP_BYTES, 0);
-  glPixelStorei(GL_PACK_LSB_FIRST, 0);
-  glPixelStorei(GL_PACK_ROW_LENGTH, (GLint)dstrowsize);
-  glPixelStorei(GL_PACK_SKIP_ROWS, 0);
-  glPixelStorei(GL_PACK_SKIP_PIXELS, 0);
+    // First reset all settings that can influence the result of a
+    // glReadPixels() call, to make sure we get the actual contents of
+    // the buffer, unmodified.
+    //
+    // The values set up below matches the default settings of an
+    // OpenGL driver.
 
-  // FIXME: should use best possible alignment, for speediest
-  // operation. 20050617 mortene.
-//   glPixelStorei(GL_PACK_ALIGNMENT, 4);
-  glPixelStorei(GL_PACK_ALIGNMENT, 1);
+    glPixelStorei(GL_PACK_SWAP_BYTES, 0);
+    glPixelStorei(GL_PACK_LSB_FIRST, 0);
+    glPixelStorei(GL_PACK_ROW_LENGTH, (GLint)dstrowsize);
+    glPixelStorei(GL_PACK_SKIP_ROWS, 0);
+    glPixelStorei(GL_PACK_SKIP_PIXELS, 0);
 
-  glPixelTransferi(GL_MAP_COLOR, 0);
-  glPixelTransferi(GL_MAP_STENCIL, 0);
-  glPixelTransferi(GL_INDEX_SHIFT, 0);
-  glPixelTransferi(GL_INDEX_OFFSET, 0);
-  glPixelTransferf(GL_RED_SCALE, 1);
-  glPixelTransferf(GL_RED_BIAS, 0);
-  glPixelTransferf(GL_GREEN_SCALE, 1);
-  glPixelTransferf(GL_GREEN_BIAS, 0);
-  glPixelTransferf(GL_BLUE_SCALE, 1);
-  glPixelTransferf(GL_BLUE_BIAS, 0);
-  glPixelTransferf(GL_ALPHA_SCALE, 1);
-  glPixelTransferf(GL_ALPHA_BIAS, 0);
-  glPixelTransferf(GL_DEPTH_SCALE, 1);
-  glPixelTransferf(GL_DEPTH_BIAS, 0);
+    // FIXME: should use best possible alignment, for speediest
+    // operation. 20050617 mortene.
+  //   glPixelStorei(GL_PACK_ALIGNMENT, 4);
+    glPixelStorei(GL_PACK_ALIGNMENT, 1);
 
-  GLuint i = 0;
-  GLfloat f = 0.0f;
-  glPixelMapfv(GL_PIXEL_MAP_I_TO_I, 1, &f);
-  glPixelMapuiv(GL_PIXEL_MAP_S_TO_S, 1, &i);
-  glPixelMapfv(GL_PIXEL_MAP_I_TO_R, 1, &f);
-  glPixelMapfv(GL_PIXEL_MAP_I_TO_G, 1, &f);
-  glPixelMapfv(GL_PIXEL_MAP_I_TO_B, 1, &f);
-  glPixelMapfv(GL_PIXEL_MAP_I_TO_A, 1, &f);
-  glPixelMapfv(GL_PIXEL_MAP_R_TO_R, 1, &f);
-  glPixelMapfv(GL_PIXEL_MAP_G_TO_G, 1, &f);
-  glPixelMapfv(GL_PIXEL_MAP_B_TO_B, 1, &f);
-  glPixelMapfv(GL_PIXEL_MAP_A_TO_A, 1, &f);
+#if COIN_BUILD_LEGACY_GL_RENDERER
+    if (legacyContext) {
+      glPixelTransferi(GL_MAP_COLOR, 0);
+      glPixelTransferi(GL_MAP_STENCIL, 0);
+      glPixelTransferi(GL_INDEX_SHIFT, 0);
+      glPixelTransferi(GL_INDEX_OFFSET, 0);
+      glPixelTransferf(GL_RED_SCALE, 1);
+      glPixelTransferf(GL_RED_BIAS, 0);
+      glPixelTransferf(GL_GREEN_SCALE, 1);
+      glPixelTransferf(GL_GREEN_BIAS, 0);
+      glPixelTransferf(GL_BLUE_SCALE, 1);
+      glPixelTransferf(GL_BLUE_BIAS, 0);
+      glPixelTransferf(GL_ALPHA_SCALE, 1);
+      glPixelTransferf(GL_ALPHA_BIAS, 0);
+      glPixelTransferf(GL_DEPTH_SCALE, 1);
+      glPixelTransferf(GL_DEPTH_BIAS, 0);
 
-  // The flushing of the OpenGL pipeline before and after the
-  // glReadPixels() call is done as a work-around for a reported
-  // OpenGL driver bug: on a Win2000 system with ATI Radeon graphics
-  // card, the system would hang hard if the flushing was not done.
-  //
-  // This is obviously an OpenGL driver bug, but the workaround of
-  // doing excessive flushing has no real ill effects, so we just do
-  // it unconditionally for all drivers. Note that it might not be
-  // necessary to flush both before and after glReadPixels() to work
-  // around the bug (this was not established with the external
-  // reporter), but again it shouldn't matter if we do.
-  //
-  // For reference, the specific driver which was reported to fail has
-  // the following characteristics:
-  //
-  // GL_VENDOR="ATI Technologies Inc."
-  // GL_RENDERER="Radeon 9000 DDR x86/SSE2"
-  // GL_VERSION="1.3.3446 Win2000 Release"
-  //
-  // mortene.
-
-  glFlush(); glFinish();
-
-  assert((nrcomponents >= 1) && (nrcomponents <= 4));
-
-  if (nrcomponents < 3) {
-    unsigned char * tmp = new unsigned char[vpdims[0]*vpdims[1]*4];
-    glReadPixels(0, 0, vpdims[0], vpdims[1],
-                 nrcomponents == 1 ? GL_RGB : GL_RGBA, GL_UNSIGNED_BYTE, tmp);
-
-    const unsigned char * src = tmp;
-    // manually convert to grayscale
-    for (short y = 0; y < vpdims[1]; y++) {
-      for (short x = 0; x < vpdims[0]; x++) {
-        double v = src[0] * 0.3 + src[1] * 0.59 + src[2] * 0.11;
-        *dst++ = (unsigned char) v;
-        if (nrcomponents == 2) {
-          *dst++ = src[3];
-        }
-        src += nrcomponents == 1 ? 3 : 4;
-      }
+      GLuint i = 0;
+      GLfloat f = 0.0f;
+      glPixelMapfv(GL_PIXEL_MAP_I_TO_I, 1, &f);
+      glPixelMapuiv(GL_PIXEL_MAP_S_TO_S, 1, &i);
+      glPixelMapfv(GL_PIXEL_MAP_I_TO_R, 1, &f);
+      glPixelMapfv(GL_PIXEL_MAP_I_TO_G, 1, &f);
+      glPixelMapfv(GL_PIXEL_MAP_I_TO_B, 1, &f);
+      glPixelMapfv(GL_PIXEL_MAP_I_TO_A, 1, &f);
+      glPixelMapfv(GL_PIXEL_MAP_R_TO_R, 1, &f);
+      glPixelMapfv(GL_PIXEL_MAP_G_TO_G, 1, &f);
+      glPixelMapfv(GL_PIXEL_MAP_B_TO_B, 1, &f);
+      glPixelMapfv(GL_PIXEL_MAP_A_TO_A, 1, &f);
     }
-    delete[] tmp;
-  }
-  else {
-    glReadPixels(0, 0, vpdims[0], vpdims[1],
-                 nrcomponents == 3 ? GL_RGB : GL_RGBA, GL_UNSIGNED_BYTE, dst);
-  }
-  glFlush(); glFinish();
+#endif
 
-  glPopAttrib();
+    // The flushing of the OpenGL pipeline before and after the
+    // glReadPixels() call is done as a work-around for a reported
+    // OpenGL driver bug: on a Win2000 system with ATI Radeon graphics
+    // card, the system would hang hard if the flushing was not done.
+    //
+    // This is obviously an OpenGL driver bug, but the workaround of
+    // doing excessive flushing has no real ill effects, so we just do
+    // it unconditionally for all drivers. Note that it might not be
+    // necessary to flush both before and after glReadPixels() to work
+    // around the bug (this was not established with the external
+    // reporter), but again it shouldn't matter if we do.
+    //
+    // For reference, the specific driver which was reported to fail has
+    // the following characteristics:
+    //
+    // GL_VENDOR="ATI Technologies Inc."
+    // GL_RENDERER="Radeon 9000 DDR x86/SSE2"
+    // GL_VERSION="1.3.3446 Win2000 Release"
+    //
+    // mortene.
+
+    glFlush(); glFinish();
+
+    assert((nrcomponents >= 1) && (nrcomponents <= 4));
+
+    if (nrcomponents < 3) {
+      unsigned char * tmp = new unsigned char[vpdims[0]*vpdims[1]*4];
+      glReadPixels(0, 0, vpdims[0], vpdims[1],
+                  nrcomponents == 1 ? GL_RGB : GL_RGBA, GL_UNSIGNED_BYTE, tmp);
+
+      const unsigned char * src = tmp;
+      // manually convert to grayscale
+      for (short y = 0; y < vpdims[1]; y++) {
+        for (short x = 0; x < vpdims[0]; x++) {
+          double v = src[0] * 0.3 + src[1] * 0.59 + src[2] * 0.11;
+          *dst++ = (unsigned char) v;
+          if (nrcomponents == 2) {
+            *dst++ = src[3];
+          }
+          src += nrcomponents == 1 ? 3 : 4;
+        }
+      }
+      delete[] tmp;
+    }
+    else {
+      glReadPixels(0, 0, vpdims[0], vpdims[1],
+                  nrcomponents == 3 ? GL_RGB : GL_RGBA, GL_UNSIGNED_BYTE, dst);
+    }
+    glFlush(); glFinish();
+
+    glPixelStorei(GL_PACK_SWAP_BYTES, packSwapBytes);
+    glPixelStorei(GL_PACK_LSB_FIRST, packLsbFirst);
+    glPixelStorei(GL_PACK_ROW_LENGTH, packRowLength);
+    glPixelStorei(GL_PACK_SKIP_ROWS, packSkipRows);
+    glPixelStorei(GL_PACK_SKIP_PIXELS, packSkipPixels);
+    glPixelStorei(GL_PACK_ALIGNMENT, packAlignment);
+
+#if COIN_BUILD_LEGACY_GL_RENDERER
+    if (legacyContext) {
+      glPopAttrib();
+    }
+#endif
 }
 
 // *************************************************************************

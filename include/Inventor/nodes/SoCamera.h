@@ -58,6 +58,7 @@
 #define SO_ASPECT_VISTAVISION   2.301
 
 class SoPath;
+class SoIRRenderAction;
 
 class SoCameraP;
 
@@ -115,7 +116,10 @@ public:
 
   void doAction(SoAction * action) override;
   void callback(SoCallbackAction * action) override;
+  void IRRender(SoIRRenderAction * action) override;
+#if COIN_HAVE_LEGACY_GL_RENDERER
   void GLRender(SoGLRenderAction * action) override;
+#endif
   void audioRender(SoAudioRenderAction *action) override;
   void getBoundingBox(SoGetBoundingBoxAction * action) override;
   void getMatrix(SoGetMatrixAction * action) override;
@@ -137,10 +141,12 @@ private:
                SbViewportRegion & resultvp,
                const SbBool considermodelmatrix = TRUE);
 
+#if COIN_HAVE_LEGACY_GL_RENDERER
   void drawCroppedFrame(SoGLRenderAction * action,
                         const int viewportmapping,
                         const SbViewportRegion & oldvp,
                         const SbViewportRegion & newvp);
+#endif
 
   void lookAt(const SbVec3f & dir, const SbVec3f & up);
 

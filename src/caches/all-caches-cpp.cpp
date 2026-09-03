@@ -33,11 +33,17 @@
 #include "SoBoundingBoxCache.cpp"
 #include "SoCache.cpp"
 #include "SoConvexDataCache.cpp"
+#if COIN_BUILD_LEGACY_GL_RENDERER
 #include "SoGLCacheList.cpp"
 #include "SoGLRenderCache.cpp"
+#endif
 #include "SoNormalCache.cpp"
 #include "SoTextureCoordinateCache.cpp"
+#if COIN_BUILD_LEGACY_GL_RENDERER
 #include "SoPrimitiveVertexCache.cpp"
+#endif
 #include "SoGlyphCache.cpp"
 #include "SoShaderProgramCache.cpp"
+#if COIN_BUILD_LEGACY_GL_RENDERER
 #include "SoVBOCache.cpp"
+#endif

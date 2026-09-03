@@ -146,6 +146,12 @@ soshape_bigtexture::endShape(SoState * state,
                              SoShape * shape,
                              SoMaterialBundle & mb)
 {
+#if !COIN_BUILD_LEGACY_GL_RENDERER
+  (void) state;
+  (void) shape;
+  (void) mb;
+  return TRUE;
+#else
   this->clip_triangles(state);
 
   // clear texture matrix. We've already calculated the world space
@@ -208,6 +214,7 @@ soshape_bigtexture::endShape(SoState * state,
 
   // return TRUE if all textures were created in the correct resolution
   return ! this->image->exceededChangeLimit();
+#endif
 }
 
 void

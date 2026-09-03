@@ -51,7 +51,9 @@ public:
   SoSFNode color;
 
   void doAction(SoAction * action) override;
+#if COIN_HAVE_LEGACY_GL_RENDERER
   void GLRender(SoGLRenderAction * action) override;
+#endif
   void getBoundingBox(SoGetBoundingBoxAction * action) override;
   void callback(SoCallbackAction * action) override;
   void pick(SoPickAction * action) override;
@@ -63,7 +65,9 @@ protected:
   SoVRMLVertexPoint(void);
   virtual ~SoVRMLVertexPoint();
 
+#if COIN_HAVE_LEGACY_GL_RENDERER
   SbBool shouldGLRender(SoGLRenderAction * action) override;
+#endif
   virtual void computeBBox(SoAction * action, SbBox3f & box,
                            SbVec3f & center) override;
 }; // class SoVRMLVertexPoint

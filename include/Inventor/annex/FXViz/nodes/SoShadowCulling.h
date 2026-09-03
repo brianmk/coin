@@ -35,8 +35,11 @@
 
 #include <Inventor/nodes/SoSubNode.h>
 #include <Inventor/fields/SoSFEnum.h>
+#if COIN_HAVE_LEGACY_GL_RENDERER
 #include <Inventor/annex/FXViz/elements/SoGLShadowCullingElement.h>
+#endif
 
+#if COIN_HAVE_LEGACY_GL_RENDERER
 class COIN_DLL_API SoShadowCulling : public SoNode {
   typedef SoNode inherited;
 
@@ -53,10 +56,13 @@ public:
 
   SoSFEnum mode;
 
+#if COIN_HAVE_LEGACY_GL_RENDERER
   void GLRender(SoGLRenderAction * action) override;
+#endif
 
 protected:
   virtual ~SoShadowCulling();
 };
+#endif
 
 #endif // !COIN_SOSHADOWCULLING_H

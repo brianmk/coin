@@ -36,6 +36,7 @@
 #include <Inventor/SbBasic.h>
 #include <Inventor/SbVec2s.h>
 #include <Inventor/SbVec2f.h>
+#if COIN_HAVE_LEGACY_GL_RENDERER
 #include <Inventor/misc/SoGLImage.h>
 
 class COIN_DLL_API SoGLBigImage : public SoGLImage {
@@ -89,5 +90,6 @@ private:
   class SoGLBigImageP * pimpl;
   friend class SoGLBigImageP;
 };
+#endif
 
 #endif // !COIN_SOGLBIGIMAGE_H

@@ -314,11 +314,13 @@ SoVRMLProximitySensor::doAction(SoAction * action)
 }
 
 // Doc in parent
+#if COIN_BUILD_LEGACY_GL_RENDERER
 void
 SoVRMLProximitySensor::GLRender(SoGLRenderAction * action)
 {
   SoVRMLProximitySensor::doAction((SoAction*) action);
 }
+#endif
 
 // Doc in parent
 void

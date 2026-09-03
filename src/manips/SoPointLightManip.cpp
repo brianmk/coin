@@ -266,12 +266,14 @@ SoPointLightManip::callback(SoCallbackAction * action)
 }
 
 // Documented in superclass
+#if COIN_BUILD_LEGACY_GL_RENDERER
 void
 SoPointLightManip::GLRender(SoGLRenderAction * action)
 {
   SoPointLightManip::doAction(action);
   SoPointLight::GLRender(action);
 }
+#endif
 
 // Documented in superclass
 void

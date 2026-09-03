@@ -193,6 +193,8 @@
 // *************************************************************************
 
 #include <Inventor/nodes/SoTexture2.h>
+#include <Inventor/elements/SoLazyElement.h>
+#include <Inventor/elements/SoMultiTextureImageElement.h>
 
 #include <cassert>
 
@@ -212,9 +214,15 @@
 #include <Inventor/actions/SoRayPickAction.h>
 #include <Inventor/elements/SoCacheElement.h>
 #include <Inventor/elements/SoGLCacheContextElement.h>
+#if COIN_BUILD_LEGACY_GL_RENDERER
 #include <Inventor/elements/SoGLLazyElement.h>
+#endif
+#if COIN_BUILD_LEGACY_GL_RENDERER
 #include <Inventor/elements/SoGLMultiTextureEnabledElement.h>
+#endif
+#if COIN_BUILD_LEGACY_GL_RENDERER
 #include <Inventor/elements/SoGLMultiTextureImageElement.h>
+#endif
 #include <Inventor/elements/SoMultiTextureEnabledElement.h>
 #include <Inventor/elements/SoTextureOverrideElement.h>
 #include <Inventor/elements/SoTextureQualityElement.h>
@@ -222,9 +230,13 @@
 #include <Inventor/errors/SoDebugError.h>
 #include <Inventor/errors/SoReadError.h>
 #include <Inventor/lists/SbStringList.h>
+#if COIN_BUILD_LEGACY_GL_RENDERER
 #include <Inventor/misc/SoGLBigImage.h>
+#endif
 #include <Inventor/sensors/SoFieldSensor.h>
 #include <Inventor/threads/SbMutex.h>
+
+class SoGLImage;
 
 // *************************************************************************
 
@@ -435,7 +447,9 @@ SoTexture2::SoTexture2(void)
   SO_NODE_DEFINE_ENUM_VALUE(Model, REPLACE);
   SO_NODE_SET_SF_ENUM_TYPE(model, Model);
 
+#if COIN_BUILD_LEGACY_GL_RENDERER
   PRIVATE(this)->glimage = NULL;
+#endif
   PRIVATE(this)->glimagevalid = FALSE;
   PRIVATE(this)->readstatus = 1;
 
@@ -453,7 +467,9 @@ SoTexture2::SoTexture2(void)
 */
 SoTexture2::~SoTexture2()
 {
+#if COIN_BUILD_LEGACY_GL_RENDERER
   if (PRIVATE(this)->glimage) PRIVATE(this)->glimage->unref(NULL);
+#endif
   delete PRIVATE(this)->filenamesensor;
   delete PRIVATE(this);
 }
@@ -467,8 +483,8 @@ SoTexture2::initClass(void)
 {
   SO_NODE_INTERNAL_INIT_CLASS(SoTexture2, SO_FROM_INVENTOR_1|SoNode::VRML1);
 
-  SO_ENABLE(SoGLRenderAction, SoGLMultiTextureImageElement);
-  SO_ENABLE(SoGLRenderAction, SoGLMultiTextureEnabledElement);
+  SO_ENABLE_LEGACY_GL(SoGLRenderAction, SoGLMultiTextureImageElement);
+  SO_ENABLE_LEGACY_GL(SoGLRenderAction, SoGLMultiTextureEnabledElement);
 
   SO_ENABLE(SoCallbackAction, SoMultiTextureEnabledElement);
   SO_ENABLE(SoCallbackAction, SoMultiTextureImageElement);
@@ -503,14 +519,17 @@ SoTexture2::readInstance(SoInput * in, unsigned short flags)
   return readOK;
 }
 
+#if COIN_BUILD_LEGACY_GL_RENDERER
 static SoGLImage::Wrap
 translateWrap(const SoTexture2::Wrap wrap)
 {
   if (wrap == SoTexture2::REPEAT) return SoGLImage::REPEAT;
   return SoGLImage::CLAMP;
 }
+#endif
 
 // Documented in superclass.
+#if COIN_BUILD_LEGACY_GL_RENDERER
 void
 SoTexture2::GLRender(SoGLRenderAction * action)
 {
@@ -614,6 +633,7 @@ SoTexture2::GLRender(SoGLRenderAction * action)
     // units will be ignored. pederb, 2003-11-04
   }
 }
+#endif
 
 // Documented in superclass.
 void
@@ -643,8 +663,8 @@ SoTexture2::doAction(SoAction * action)
   if (size != SbVec2s(0,0)) {
     SoMultiTextureImageElement::set(state, this, unit,
                                     size, nc, bytes,
-                                    (SoMultiTextureImageElement::Wrap)this->wrapT.getValue(),
                                     (SoMultiTextureImageElement::Wrap)this->wrapS.getValue(),
+                                    (SoMultiTextureImageElement::Wrap)this->wrapT.getValue(),
                                     (SoMultiTextureImageElement::Model) model.getValue(),
                                     this->blendColor.getValue());
     SoMultiTextureEnabledElement::set(state, this, unit, TRUE); 

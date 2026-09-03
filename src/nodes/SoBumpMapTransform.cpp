@@ -122,18 +122,20 @@ SoBumpMapTransform::initClass(void)
 {
   SO_NODE_INTERNAL_INIT_CLASS(SoBumpMapTransform, SO_FROM_COIN_2_2);
 
-  SO_ENABLE(SoGLRenderAction, SoBumpMapMatrixElement);
+  SO_ENABLE_LEGACY_GL(SoGLRenderAction, SoBumpMapMatrixElement);
   SO_ENABLE(SoCallbackAction, SoBumpMapMatrixElement);
   SO_ENABLE(SoPickAction, SoBumpMapMatrixElement);
 }
 
 
 // Documented in superclass.
+#if COIN_BUILD_LEGACY_GL_RENDERER
 void
 SoBumpMapTransform::GLRender(SoGLRenderAction * action)
 {
   SoBumpMapTransform::doAction(action);
 }
+#endif
 
 // Documented in superclass.
 void

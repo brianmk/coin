@@ -265,12 +265,14 @@ SoDirectionalLightManip::callback(SoCallbackAction * action)
 }
 
 // documented in superclass
+#if COIN_BUILD_LEGACY_GL_RENDERER
 void
 SoDirectionalLightManip::GLRender(SoGLRenderAction * action)
 {
   SoDirectionalLightManip::doAction(action);
   SoDirectionalLight::GLRender(action);
 }
+#endif
 
 // documented in superclass
 void

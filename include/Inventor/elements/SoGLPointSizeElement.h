@@ -36,6 +36,7 @@
 #include <Inventor/SbVec2f.h>
 #include <Inventor/elements/SoPointSizeElement.h>
 
+#if COIN_HAVE_LEGACY_GL_RENDERER
 class COIN_DLL_API SoGLPointSizeElement : public SoPointSizeElement {
   typedef SoPointSizeElement inherited;
 
@@ -59,5 +60,7 @@ private:
   static float sizerange[2];
   void updategl();
 };
+
+#endif
 
 #endif // !COIN_SOGLPOINTSIZEELEMENT_H

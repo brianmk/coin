@@ -72,12 +72,16 @@
 #include <Inventor/nodes/SoLight.h>
 
 #include <Inventor/actions/SoCallbackAction.h>
+#include <Inventor/actions/SoAction.h>
 #include <Inventor/actions/SoGLRenderAction.h>
+#if COIN_BUILD_LEGACY_GL_RENDERER
 #include <Inventor/elements/SoGLLightIdElement.h>
+#endif
 #include <Inventor/elements/SoLightAttenuationElement.h>
 #include <Inventor/elements/SoLightElement.h>
 #include <Inventor/elements/SoModelMatrixElement.h>
 #include <Inventor/elements/SoViewingMatrixElement.h>
+#include <Inventor/misc/SoState.h>
 
 #include "nodes/SoSubNodeP.h"
 
@@ -130,12 +134,21 @@ SoLight::initClass(void)
 {
   SO_NODE_INTERNAL_INIT_ABSTRACT_CLASS(SoLight, SO_FROM_INVENTOR_1);
 
-  SO_ENABLE(SoGLRenderAction, SoLightAttenuationElement);
-  SO_ENABLE(SoGLRenderAction, SoGLLightIdElement);
-  SO_ENABLE(SoGLRenderAction, SoLightElement);
+  SO_ENABLE_LEGACY_GL(SoGLRenderAction, SoLightAttenuationElement);
+  SO_ENABLE_LEGACY_GL(SoGLRenderAction, SoGLLightIdElement);
+  SO_ENABLE_LEGACY_GL(SoGLRenderAction, SoLightElement);
 
   SO_ENABLE(SoCallbackAction, SoLightAttenuationElement);
   SO_ENABLE(SoCallbackAction, SoLightElement);
+}
+
+// Doc from superclass.
+void
+SoLight::doAction(SoAction * action)
+{
+  SoState * state = action->getState();
+  SoLightElement::add(state, this, SoModelMatrixElement::get(state) *
+                                  SoViewingMatrixElement::get(state));
 }
 
 // Doc from superclass.

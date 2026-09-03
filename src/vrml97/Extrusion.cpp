@@ -34,6 +34,8 @@
 #include <config.h>
 #endif // HAVE_CONFIG_H
 
+class SoVBO;
+
 #ifdef HAVE_VRML97
 
 /*!
@@ -358,11 +360,20 @@
 #endif // HAVE_THREADS
 
 #include "nodes/SoSubNodeP.h"
+
+#include "coindefs.h"
+class SoVertexArrayIndexer;
+#if COIN_BUILD_LEGACY_GL_RENDERER
 #include "rendering/SoVBO.h"
+#endif
+#if COIN_BUILD_LEGACY_GL_RENDERER
 #include "rendering/SoVertexArrayIndexer.h"
+#endif
 #include "rendering/SoGL.h"
 #include "misc/SbHash.h"
+#if COIN_BUILD_LEGACY_GL_RENDERER
 #include "caches/SoVBOCache.h"
+#endif
 
 // *************************************************************************
 
@@ -422,8 +433,10 @@ public:
      tcoord(32),
      idx(32),
      gen(TRUE),
-     dirty(TRUE),
-     vbocache(NULL)
+     dirty(TRUE)
+#if COIN_BUILD_LEGACY_GL_RENDERER
+     , vbocache(NULL)
+#endif
 #ifdef COIN_THREADSAFE
      , rwmutex(SbRWMutex::READ_PRECEDENCE)
 #endif // COIN_THREADSAFE
@@ -431,7 +444,9 @@ public:
     this->tess.setCallback(tess_callback, this);
   }
   ~SoVRMLExtrusionP() {
+#if COIN_BUILD_LEGACY_GL_RENDERER
     if (this->vbocache) this->vbocache->unref();
+#endif
   }
 
   SoVRMLExtrusion * master;
@@ -444,7 +459,9 @@ public:
   void generateCoords(void);
   void generateNormals(void);
   SbBool dirty;
+#if COIN_BUILD_LEGACY_GL_RENDERER
   SoVBOCache * vbocache;
+#endif
 
   SbHash<SoVRMLExtrusionVertex, int32_t> vbohash;
 
@@ -533,6 +550,7 @@ SoVRMLExtrusion::~SoVRMLExtrusion()
 
 
 // Doc in parent
+#if COIN_BUILD_LEGACY_GL_RENDERER
 void
 SoVRMLExtrusion::GLRender(SoGLRenderAction * action)
 {
@@ -679,6 +697,7 @@ SoVRMLExtrusion::GLRender(SoGLRenderAction * action)
   sogl_autocache_update(state, PRIVATE(this)->idx.getLength() / 4,
                         vbo);
 }
+#endif
 
 // Doc in parent
 void
@@ -807,6 +826,7 @@ SoVRMLExtrusion::updateCache(void)
   }
 }
 
+#if COIN_BUILD_LEGACY_GL_RENDERER
 void
 SoVRMLExtrusionP::updateVBO(SoAction * action)
 {
@@ -826,7 +846,9 @@ SoVRMLExtrusionP::updateVBO(SoAction * action)
     this->readLock();
   }
 }
+#endif
 
+#if COIN_BUILD_LEGACY_GL_RENDERER
 void
 SoVRMLExtrusionP::generateVBO(SoAction * action, SoTextureCoordinateBundle & tb)
 {
@@ -914,13 +936,16 @@ SoVRMLExtrusionP::generateVBO(SoAction * action, SoTextureCoordinateBundle & tb)
   this->vbocache->getTexCoordVBO(0)->setBufferData(this->vbotexcoord.getArrayPtr(),
                                                    this->vbotexcoord.getLength()*sizeof(SbVec2f), 1);
 }
+#endif
 
 
 // Doc in parent
 void
 SoVRMLExtrusion::notify(SoNotList * list)
 {
+#if COIN_BUILD_LEGACY_GL_RENDERER
   if (PRIVATE(this)->vbocache) PRIVATE(this)->vbocache->invalidate();
+#endif
   PRIVATE(this)->dirty = TRUE;
   inherited::notify(list);
 }

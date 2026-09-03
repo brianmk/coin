@@ -269,7 +269,8 @@ SoTextureCombineElement::apply(SoState * state, const int unit)
 
   assert(unit < PRIVATE(elem)->unitdata.getLength());
   const UnitData & ud = PRIVATE(elem)->unitdata[unit];
-  
+
+#if COIN_BUILD_LEGACY_GL_RENDERER
   glTexEnvi(GL_TEXTURE_ENV, GL_TEXTURE_ENV_MODE, GL_COMBINE);
   glTexEnvi(GL_TEXTURE_ENV, GL_COMBINE_RGB, static_cast<GLenum>(ud.rgboperation));
   glTexEnvi(GL_TEXTURE_ENV, GL_COMBINE_ALPHA, static_cast<GLenum>(ud.alphaoperation));
@@ -294,6 +295,11 @@ SoTextureCombineElement::apply(SoState * state, const int unit)
              ud.constantcolor.getValue());
   glTexEnvf(GL_TEXTURE_ENV, GL_RGB_SCALE, ud.rgbscale);
   glTexEnvf(GL_TEXTURE_ENV, GL_ALPHA_SCALE, ud.alphascale);
+#else
+  (void) state;
+  (void) unit;
+  (void) ud;
+#endif
 }
 
 SoTextureCombineElement::UnitData::UnitData()

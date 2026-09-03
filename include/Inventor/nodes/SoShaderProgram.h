@@ -38,7 +38,9 @@
 #include <Inventor/fields/SoMFNode.h>
 
 class SoState;
+#if COIN_HAVE_LEGACY_GL_RENDERER
 class SoGLRenderAction;
+#endif
 
 
 typedef void SoShaderProgramEnableCB(void * closure, 
@@ -60,7 +62,9 @@ public:
                          void * closure);
 
 SoEXTENDER public:
+#if COIN_HAVE_LEGACY_GL_RENDERER
   void GLRender(SoGLRenderAction * action) override;
+#endif
   void search(SoSearchAction * action) override;
   void render(SoState * state);
 

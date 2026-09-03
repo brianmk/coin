@@ -105,6 +105,7 @@ SoVRMLVertexPoint::doAction(SoAction * action)
 }
 
 // Doc in parent
+#if COIN_BUILD_LEGACY_GL_RENDERER
 void
 SoVRMLVertexPoint::GLRender(SoGLRenderAction * action)
 {
@@ -116,6 +117,7 @@ SoVRMLVertexPoint::GLRender(SoGLRenderAction * action)
   node = this->color.getValue();
   if (node) node->GLRender(action);
 }
+#endif
 
 // Doc in parent
 void
@@ -176,11 +178,13 @@ SoVRMLVertexPoint::getPrimitiveCount(SoGetPrimitiveCountAction * action)
 }
 
 // Doc in parent
+#if COIN_BUILD_LEGACY_GL_RENDERER
 SbBool
 SoVRMLVertexPoint::shouldGLRender(SoGLRenderAction * action)
 {
   if (this->coord.getValue() == NULL) return FALSE;
   return inherited::shouldGLRender(action);
 }
+#endif
 
 #endif // HAVE_VRML97

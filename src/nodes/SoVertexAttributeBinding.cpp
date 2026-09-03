@@ -198,18 +198,20 @@ SoVertexAttributeBinding::initClass(void)
 {
   SO_NODE_INTERNAL_INIT_CLASS(SoVertexAttributeBinding, SO_FROM_INVENTOR_1|SoNode::VRML1);
 
-  SO_ENABLE(SoGLRenderAction, SoVertexAttributeBindingElement);
+  SO_ENABLE_LEGACY_GL(SoGLRenderAction, SoVertexAttributeBindingElement);
   SO_ENABLE(SoPickAction, SoVertexAttributeBindingElement);
   SO_ENABLE(SoCallbackAction, SoVertexAttributeBindingElement);
   SO_ENABLE(SoGetPrimitiveCountAction, SoVertexAttributeBindingElement);
 }
 
 // Doc from superclass.
+#if COIN_BUILD_LEGACY_GL_RENDERER
 void
 SoVertexAttributeBinding::GLRender(SoGLRenderAction * action)
 {
   SoVertexAttributeBinding::doAction(action);
 }
+#endif
 
 // Doc from superclass.
 void

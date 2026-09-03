@@ -98,13 +98,16 @@
 */
 
 #include <Inventor/nodes/SoNurbsCurve.h>
+#include <Inventor/elements/SoMultiTextureEnabledElement.h>
 
 #ifdef HAVE_CONFIG_H
 #include <config.h>
 #endif // HAVE_CONFIG_H
 
 #include <Inventor/SoPrimitiveVertex.h>
+#if COIN_BUILD_LEGACY_GL_RENDERER
 #include <Inventor/actions/SoGLRenderAction.h>
+#endif
 #include <Inventor/actions/SoGetBoundingBoxAction.h>
 #include <Inventor/actions/SoRayPickAction.h>
 #include <Inventor/bundles/SoMaterialBundle.h>
@@ -113,7 +116,9 @@
 #include <Inventor/elements/SoCoordinateElement.h>
 #include <Inventor/elements/SoDrawStyleElement.h>
 #include <Inventor/elements/SoGLCacheContextElement.h>
+#if COIN_BUILD_LEGACY_GL_RENDERER
 #include <Inventor/elements/SoGLMultiTextureEnabledElement.h>
+#endif
 #include <Inventor/elements/SoLazyElement.h>
 #include <Inventor/elements/SoPickStyleElement.h>
 #include <Inventor/errors/SoDebugError.h>
@@ -208,6 +213,7 @@ SoNurbsCurve::initClass(void)
 }
 
 // Doc from parent class.
+#if COIN_BUILD_LEGACY_GL_RENDERER
 void
 SoNurbsCurve::GLRender(SoGLRenderAction * action)
 {
@@ -238,6 +244,7 @@ SoNurbsCurve::GLRender(SoGLRenderAction * action)
                                              SoGLCacheContextElement::DO_AUTO_CACHE);
   }
 }
+#endif
 
 /*!
   Calculates the bounding box of all control points, and sets the

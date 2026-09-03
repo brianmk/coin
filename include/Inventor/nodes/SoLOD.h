@@ -56,10 +56,12 @@ public:
 
   void doAction(SoAction * action) override;
   void callback(SoCallbackAction * action) override;
+#if COIN_HAVE_LEGACY_GL_RENDERER
   void GLRender(SoGLRenderAction * action) override;
   void GLRenderBelowPath(SoGLRenderAction * action) override;
   void GLRenderInPath(SoGLRenderAction * action) override;
   void GLRenderOffPath(SoGLRenderAction * action) override;
+#endif
   void rayPick(SoRayPickAction * action) override;
   void getBoundingBox(SoGetBoundingBoxAction * action) override;
   void getPrimitiveCount(SoGetPrimitiveCountAction * action) override;

@@ -56,6 +56,10 @@
 */
 
 #include <Inventor/nodes/SoTextureUnit.h>
+#include <Inventor/elements/SoMultiTextureCoordinateElement.h>
+#include <Inventor/elements/SoMultiTextureEnabledElement.h>
+#include <Inventor/elements/SoMultiTextureImageElement.h>
+#include <Inventor/elements/SoMultiTextureMatrixElement.h>
 
 #include <Inventor/actions/SoGLRenderAction.h>
 #include <Inventor/actions/SoPickAction.h>
@@ -63,10 +67,18 @@
 #include <Inventor/actions/SoGetBoundingBoxAction.h>
 #include <Inventor/actions/SoGetMatrixAction.h>
 #include <Inventor/elements/SoTextureUnitElement.h>
+#if COIN_BUILD_LEGACY_GL_RENDERER
 #include <Inventor/elements/SoGLMultiTextureCoordinateElement.h>
+#endif
+#if COIN_BUILD_LEGACY_GL_RENDERER
 #include <Inventor/elements/SoGLMultiTextureImageElement.h>
+#endif
+#if COIN_BUILD_LEGACY_GL_RENDERER
 #include <Inventor/elements/SoGLMultiTextureEnabledElement.h>
+#endif
+#if COIN_BUILD_LEGACY_GL_RENDERER
 #include <Inventor/elements/SoGLMultiTextureMatrixElement.h>
+#endif
 #include <Inventor/elements/SoGLCacheContextElement.h>
 #include <Inventor/C/glue/gl.h>
 #include <Inventor/errors/SoDebugError.h>
@@ -137,17 +149,18 @@ SoTextureUnit::initClass(void)
 {
   SO_NODE_INTERNAL_INIT_CLASS(SoTextureUnit, SO_FROM_COIN_2_2);
 
-  SO_ENABLE(SoGLRenderAction, SoTextureUnitElement);
+  SO_ENABLE_LEGACY_GL(SoGLRenderAction, SoTextureUnitElement);
   SO_ENABLE(SoCallbackAction, SoTextureUnitElement);
   SO_ENABLE(SoPickAction, SoTextureUnitElement);
   SO_ENABLE(SoGetBoundingBoxAction, SoTextureUnitElement);
   SO_ENABLE(SoGetMatrixAction, SoTextureUnitElement);
-  SO_ENABLE(SoGLRenderAction, SoGLMultiTextureCoordinateElement);
-  SO_ENABLE(SoGLRenderAction, SoGLMultiTextureImageElement);
-  SO_ENABLE(SoGLRenderAction, SoGLMultiTextureEnabledElement);
-  SO_ENABLE(SoGLRenderAction, SoGLMultiTextureMatrixElement);
+  SO_ENABLE_LEGACY_GL(SoGLRenderAction, SoGLMultiTextureCoordinateElement);
+  SO_ENABLE_LEGACY_GL(SoGLRenderAction, SoGLMultiTextureImageElement);
+  SO_ENABLE_LEGACY_GL(SoGLRenderAction, SoGLMultiTextureEnabledElement);
+  SO_ENABLE_LEGACY_GL(SoGLRenderAction, SoGLMultiTextureMatrixElement);
 }
 
+#if COIN_BUILD_LEGACY_GL_RENDERER
 // Doc from superclass.
 void
 SoTextureUnit::GLRender(SoGLRenderAction * action)
@@ -173,6 +186,7 @@ SoTextureUnit::GLRender(SoGLRenderAction * action)
     }
   }
 }
+#endif
 
 // Doc from superclass.
 void
@@ -224,7 +238,11 @@ uint32_t
 SoTextureUnit::getMaxTextureUnit(void)
 {
   GLint tmp;
+#if COIN_BUILD_LEGACY_GL_RENDERER
   glGetIntegerv(GL_MAX_TEXTURE_UNITS, &tmp);
+#else
+  glGetIntegerv(GL_MAX_COMBINED_TEXTURE_IMAGE_UNITS, &tmp);
+#endif
 
   return (uint32_t) tmp;
 }

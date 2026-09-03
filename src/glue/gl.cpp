@@ -120,6 +120,11 @@
     initialization spit out lots of info about the underlying OpenGL
     implementation.
 
+  - COIN_EGL: set to "1" to select EGL for offscreen contexts, or to "0"
+    to select GLX when both bindings are available. If unset, Coin selects
+    the binding associated with the current context and otherwise defaults to
+    GLX.
+
   - COIN_PREFER_GLPOLYGONOFFSET_EXT: when set to "1" and both
     glPolygonOffset() and glPolygonOffsetEXT() are available, the
     latter will be used. This can be useful to work around a
@@ -239,6 +244,8 @@
 #include <cstring>
 #include <climits> /* SHRT_MAX */
 
+#include <Inventor/C/glue/gl.h>
+
 #ifdef HAVE_AGL
 #include <AGL/agl.h>
 #endif /* HAVE_AGL */
@@ -260,8 +267,6 @@
 #include <EGL/eglext.h>
 #endif /* HAVE_EGL */
 
-#include <Inventor/C/glue/gl.h>
-
 #include <Inventor/C/errors/debugerror.h>
 #include <Inventor/C/glue/dl.h>
 #include <Inventor/C/tidbits.h>
@@ -271,7 +276,12 @@
 #include "tidbitsp.h"
 #include "base/dict.h"
 #include "base/namemap.h"
+#ifdef HAVE_WGL
+#include <windows.h>
+#include "glue/khronos/GL/wglext.h"
+#endif
 #include "glue/glp.h"
+#include "glue/glslp.h"
 #include "glue/dlp.h"
 #include "glue/gl_agl.h"
 #include "glue/gl_cgl.h"
@@ -298,111 +308,6 @@ static int COIN_USE_AGL = -1;
 static int COIN_USE_EGL = -1;
 
 /* ********************************************************************** */
-
-/* Sanity checks for enum extension value assumed to be equal to the
- * final / "proper" / standard OpenGL enum values. (If not, we could
- * end up with hard-to-find bugs because of mismatches with the
- * compiled values versus the runtime values.)
- *
- * This doesn't really _fix_ anything, it is just meant as an aid to
- * smoke out platforms where we're getting unexpected enum values.
- */
-
-#ifdef GL_CLAMP_TO_EDGE_EXT
-#if GL_CLAMP_TO_EDGE != GL_CLAMP_TO_EDGE_EXT
-#error dangerous enum mismatch
-#endif /* cmp */
-#endif /* GL_CLAMP_TO_EDGE_EXT */
-
-#ifdef GL_CLAMP_TO_EDGE_SGIS
-#if GL_CLAMP_TO_EDGE != GL_CLAMP_TO_EDGE_SGIS
-#error dangerous enum mismatch
-#endif /* cmp */
-#endif /* GL_CLAMP_TO_EDGE_SGIS */
-
-#ifdef GL_MAX_3D_TEXTURE_SIZE_EXT
-#if GL_MAX_3D_TEXTURE_SIZE != GL_MAX_3D_TEXTURE_SIZE_EXT
-#error dangerous enum mismatch
-#endif /* cmp */
-#endif /* GL_MAX_3D_TEXTURE_SIZE_EXT */
-
-#ifdef GL_PACK_IMAGE_HEIGHT_EXT
-#if GL_PACK_IMAGE_HEIGHT != GL_PACK_IMAGE_HEIGHT_EXT
-#error dangerous enum mismatch
-#endif /* cmp */
-#endif /* GL_PACK_IMAGE_HEIGHT_EXT */
-
-#ifdef GL_PACK_SKIP_IMAGES_EXT
-#if GL_PACK_SKIP_IMAGES != GL_PACK_SKIP_IMAGES_EXT
-#error dangerous enum mismatch
-#endif /* cmp */
-#endif /* GL_PACK_SKIP_IMAGES_EXT */
-
-#ifdef GL_PROXY_TEXTURE_2D_EXT
-#if GL_PROXY_TEXTURE_2D != GL_PROXY_TEXTURE_2D_EXT
-#error dangerous enum mismatch
-#endif /* cmp */
-#endif /* GL_PROXY_TEXTURE_2D_EXT */
-
-#ifdef GL_PROXY_TEXTURE_3D_EXT
-#if GL_PROXY_TEXTURE_3D != GL_PROXY_TEXTURE_3D_EXT
-#error dangerous enum mismatch
-#endif /* cmp */
-#endif /* GL_PROXY_TEXTURE_3D_EXT */
-
-#ifdef GL_TEXTURE_3D_EXT
-#if GL_TEXTURE_3D != GL_TEXTURE_3D_EXT
-#error dangerous enum mismatch
-#endif /* cmp */
-#endif /* GL_TEXTURE_3D_EXT */
-
-#ifdef GL_TEXTURE_DEPTH_EXT
-#if GL_TEXTURE_DEPTH != GL_TEXTURE_DEPTH_EXT
-#error dangerous enum mismatch
-#endif /* cmp */
-#endif /* GL_TEXTURE_DEPTH_EXT */
-
-#ifdef GL_TEXTURE_WRAP_R_EXT
-#if GL_TEXTURE_WRAP_R != GL_TEXTURE_WRAP_R_EXT
-#error dangerous enum mismatch
-#endif /* cmp */
-#endif /* GL_TEXTURE_WRAP_R_EXT */
-
-#ifdef GL_UNPACK_IMAGE_HEIGHT_EXT
-#if GL_UNPACK_IMAGE_HEIGHT != GL_UNPACK_IMAGE_HEIGHT_EXT
-#error dangerous enum mismatch
-#endif /* cmp */
-#endif /* GL_UNPACK_IMAGE_HEIGHT_EXT */
-
-#ifdef GL_UNPACK_SKIP_IMAGES_EXT
-#if GL_UNPACK_SKIP_IMAGES != GL_UNPACK_SKIP_IMAGES_EXT
-#error dangerous enum mismatch
-#endif /* cmp */
-#endif /* GL_UNPACK_SKIP_IMAGES_EXT */
-
-#ifdef GL_FUNC_ADD_EXT
-#if GL_FUNC_ADD != GL_FUNC_ADD_EXT
-#error dangerous enum mismatch
-#endif /* cmp */
-#endif /* GL_FUNC_ADD_EXT */
-
-#ifdef GL_MIN_EXT
-#if GL_MIN != GL_MIN_EXT
-#error dangerous enum mismatch
-#endif /* cmp */
-#endif /* GL_MIN_EXT */
-
-#ifdef GL_MAX_EXT
-#if GL_MAX != GL_MAX_EXT
-#error dangerous enum mismatch
-#endif /* cmp */
-#endif /* GL_MAX_EXT */
-
-#ifdef GL_COLOR_TABLE_WIDTH_EXT
-#if GL_COLOR_TABLE_WIDTH != GL_COLOR_TABLE_WIDTH_EXT
-#error dangerous enum mismatch
-#endif /* cmp */
-#endif /* GL_COLOR_TABLE_WIDTH_EXT */
 
 /* ********************************************************************** */
 
@@ -633,6 +538,8 @@ returnpoint:
 /* Global dictionary which stores the mappings from the context IDs to
    actual cc_glglue instances. */
 static cc_dict * gldict = NULL;
+
+static SbBool glglue_detect_context_legacy_rendering(const cc_glglue * glue);
 
 static void
 free_glglue_instance(uintptr_t COIN_UNUSED_ARG(key), void * value, void * COIN_UNUSED_ARG(closure))
@@ -1278,6 +1185,27 @@ glglue_resolve_symbols(cc_glglue * w)
 #endif /* GL_VERSION_1_1 */
 
 
+  /* Vertex array objects are core in OpenGL 3.0 and exposed by
+     GL_ARB_vertex_array_object on older contexts. Resolve them explicitly;
+     the Windows OpenGL 1.1 import library does not export these symbols. */
+  w->glBindVertexArray = (COIN_PFNGLBINDVERTEXARRAYPROC)
+    cc_glglue_getprocaddress(w, "glBindVertexArray");
+  w->glDeleteVertexArrays = (COIN_PFNGLDELETEVERTEXARRAYSPROC)
+    cc_glglue_getprocaddress(w, "glDeleteVertexArrays");
+  w->glGenVertexArrays = (COIN_PFNGLGENVERTEXARRAYSPROC)
+    cc_glglue_getprocaddress(w, "glGenVertexArrays");
+  if (!w->glBindVertexArray || !w->glDeleteVertexArrays || !w->glGenVertexArrays) {
+    if (cc_glglue_glext_supported(w, "GL_APPLE_vertex_array_object")) {
+      w->glBindVertexArray = (COIN_PFNGLBINDVERTEXARRAYPROC)
+        cc_glglue_getprocaddress(w, "glBindVertexArrayAPPLE");
+      w->glDeleteVertexArrays = (COIN_PFNGLDELETEVERTEXARRAYSPROC)
+        cc_glglue_getprocaddress(w, "glDeleteVertexArraysAPPLE");
+      w->glGenVertexArrays = (COIN_PFNGLGENVERTEXARRAYSPROC)
+        cc_glglue_getprocaddress(w, "glGenVertexArraysAPPLE");
+    }
+  }
+
+
 #if defined(GL_VERSION_1_2)
   w->glDrawRangeElements = NULL;
   if (cc_glglue_glversion_matches_at_least(w, 1, 2, 0))
@@ -1773,6 +1701,104 @@ glglue_resolve_symbols(cc_glglue * w)
   w->glUniformMatrix3fvARB = NULL;
   w->glUniformMatrix4fvARB = NULL;
 
+  w->glCreateShader = NULL;
+  w->glShaderSource = NULL;
+  w->glCompileShader = NULL;
+  w->glGetShaderiv = NULL;
+  w->glGetShaderInfoLog = NULL;
+  w->glDeleteShader = NULL;
+  w->glAttachShader = NULL;
+  w->glDetachShader = NULL;
+  w->glGetUniformLocation = NULL;
+  w->glGetActiveUniform = NULL;
+  w->glUniform1f = NULL;
+  w->glUniform2f = NULL;
+  w->glUniform3f = NULL;
+  w->glUniform4f = NULL;
+  w->glUniform1fv = NULL;
+  w->glUniform2fv = NULL;
+  w->glUniform3fv = NULL;
+  w->glUniform4fv = NULL;
+  w->glUniform1i = NULL;
+  w->glUniform2i = NULL;
+  w->glUniform3i = NULL;
+  w->glUniform4i = NULL;
+  w->glUniform1iv = NULL;
+  w->glUniform2iv = NULL;
+  w->glUniform3iv = NULL;
+  w->glUniform4iv = NULL;
+  w->glUniformMatrix4fv = NULL;
+  w->glCreateProgram = NULL;
+  w->glLinkProgram = NULL;
+  w->glUseProgram = NULL;
+  w->glDeleteProgram = NULL;
+  w->glGetProgramiv = NULL;
+  w->glGetProgramInfoLog = NULL;
+  w->glBindAttribLocation = NULL;
+  w->glGetAttribLocation = NULL;
+  w->glVertexAttrib1f = NULL;
+  w->glVertexAttrib2f = NULL;
+  w->glVertexAttrib3f = NULL;
+  w->glVertexAttrib4f = NULL;
+  w->glVertexAttribPointer = NULL;
+  w->glEnableVertexAttribArray = NULL;
+  w->glDisableVertexAttribArray = NULL;
+  w->glBindAttribLocation = (COIN_PFNGLBINDATTRIBLOCATIONPROC)
+    cc_glglue_getprocaddress(w, "glBindAttribLocation");
+  w->glGetAttribLocation = (COIN_PFNGLGETATTRIBLOCATIONPROC)
+    cc_glglue_getprocaddress(w, "glGetAttribLocation");
+  w->glVertexAttrib1f = (COIN_PFNGLVERTEXATTRIB1FPROC)
+    cc_glglue_getprocaddress(w, "glVertexAttrib1f");
+  w->glVertexAttrib2f = (COIN_PFNGLVERTEXATTRIB2FPROC)
+    cc_glglue_getprocaddress(w, "glVertexAttrib2f");
+  w->glVertexAttrib3f = (COIN_PFNGLVERTEXATTRIB3FPROC)
+    cc_glglue_getprocaddress(w, "glVertexAttrib3f");
+  w->glVertexAttrib4f = (COIN_PFNGLVERTEXATTRIB4FPROC)
+    cc_glglue_getprocaddress(w, "glVertexAttrib4f");
+  w->glVertexAttribPointer = (COIN_PFNGLVERTEXATTRIBPOINTERPROC)
+    cc_glglue_getprocaddress(w, "glVertexAttribPointer");
+  w->glEnableVertexAttribArray = (COIN_PFNGLENABLEVERTEXATTRIBARRAYPROC)
+    cc_glglue_getprocaddress(w, "glEnableVertexAttribArray");
+  w->glDisableVertexAttribArray = (COIN_PFNGLDISABLEVERTEXATTRIBARRAYPROC)
+    cc_glglue_getprocaddress(w, "glDisableVertexAttribArray");
+
+  /* Resolve standard GLSL entry points independently of the active profile.
+     The wrappers below fall back to the ARB_shader_objects aliases when a
+     driver only exposes those names. */
+  w->glCreateShader = (COIN_PFNGLCREATESHADERPROC) PROC(w, glCreateShader);
+  w->glShaderSource = (COIN_PFNGLSHADERSOURCEPROC) PROC(w, glShaderSource);
+  w->glCompileShader = (COIN_PFNGLCOMPILESHADERPROC) PROC(w, glCompileShader);
+  w->glGetShaderiv = (COIN_PFNGLGETSHADERIVPROC) PROC(w, glGetShaderiv);
+  w->glGetShaderInfoLog = (COIN_PFNGLGETSHADERINFOLOGPROC) PROC(w, glGetShaderInfoLog);
+  w->glDeleteShader = (COIN_PFNGLDELETESHADERPROC) PROC(w, glDeleteShader);
+  w->glAttachShader = (COIN_PFNGLATTACHSHADERPROC) PROC(w, glAttachShader);
+  w->glDetachShader = (COIN_PFNGLDETACHSHADERPROC) PROC(w, glDetachShader);
+  w->glGetUniformLocation = (COIN_PFNGLGETUNIFORMLOCATIONPROC) PROC(w, glGetUniformLocation);
+  w->glGetActiveUniform = (COIN_PFNGLGETACTIVEUNIFORMPROC) PROC(w, glGetActiveUniform);
+  w->glUniform1f = (COIN_PFNGLUNIFORM1FPROC) PROC(w, glUniform1f);
+  w->glUniform2f = (COIN_PFNGLUNIFORM2FPROC) PROC(w, glUniform2f);
+  w->glUniform3f = (COIN_PFNGLUNIFORM3FPROC) PROC(w, glUniform3f);
+  w->glUniform4f = (COIN_PFNGLUNIFORM4FPROC) PROC(w, glUniform4f);
+  w->glUniform1fv = (COIN_PFNGLUNIFORM1FVPROC) PROC(w, glUniform1fv);
+  w->glUniform2fv = (COIN_PFNGLUNIFORM2FVPROC) PROC(w, glUniform2fv);
+  w->glUniform3fv = (COIN_PFNGLUNIFORM3FVPROC) PROC(w, glUniform3fv);
+  w->glUniform4fv = (COIN_PFNGLUNIFORM4FVPROC) PROC(w, glUniform4fv);
+  w->glUniform1i = (COIN_PFNGLUNIFORM1IPROC) PROC(w, glUniform1i);
+  w->glUniform2i = (COIN_PFNGLUNIFORM2IPROC) PROC(w, glUniform2i);
+  w->glUniform3i = (COIN_PFNGLUNIFORM3IPROC) PROC(w, glUniform3i);
+  w->glUniform4i = (COIN_PFNGLUNIFORM4IPROC) PROC(w, glUniform4i);
+  w->glUniform1iv = (COIN_PFNGLUNIFORM1IVPROC) PROC(w, glUniform1iv);
+  w->glUniform2iv = (COIN_PFNGLUNIFORM2IVPROC) PROC(w, glUniform2iv);
+  w->glUniform3iv = (COIN_PFNGLUNIFORM3IVPROC) PROC(w, glUniform3iv);
+  w->glUniform4iv = (COIN_PFNGLUNIFORM4IVPROC) PROC(w, glUniform4iv);
+  w->glUniformMatrix4fv = (COIN_PFNGLUNIFORMMATRIX4FVPROC) PROC(w, glUniformMatrix4fv);
+  w->glCreateProgram = (COIN_PFNGLCREATEPROGRAMPROC) PROC(w, glCreateProgram);
+  w->glLinkProgram = (COIN_PFNGLLINKPROGRAMPROC) PROC(w, glLinkProgram);
+  w->glUseProgram = (COIN_PFNGLUSEPROGRAMPROC) PROC(w, glUseProgram);
+  w->glDeleteProgram = (COIN_PFNGLDELETEPROGRAMPROC) PROC(w, glDeleteProgram);
+  w->glGetProgramiv = (COIN_PFNGLGETPROGRAMIVPROC) PROC(w, glGetProgramiv);
+  w->glGetProgramInfoLog = (COIN_PFNGLGETPROGRAMINFOLOGPROC) PROC(w, glGetProgramInfoLog);
+
 
 #ifdef GL_ARB_shader_objects
 
@@ -1837,6 +1863,59 @@ glglue_resolve_symbols(cc_glglue * w)
 #undef BIND_FUNCTION_WITH_WARN
   }
 #endif /* GL_ARB_shader_objects */
+
+  /* The uniform entry points have compatible core and ARB signatures. Keep
+     the normalized pointer in the glue object so callers do not need a
+     wrapper for every trivial uniform variant. */
+  if (!w->glUniform1f) w->glUniform1f = w->glUniform1fARB;
+  if (!w->glUniform2f) w->glUniform2f = w->glUniform2fARB;
+  if (!w->glUniform3f) w->glUniform3f = w->glUniform3fARB;
+  if (!w->glUniform4f) w->glUniform4f = w->glUniform4fARB;
+  if (!w->glUniform1fv) w->glUniform1fv = w->glUniform1fvARB;
+  if (!w->glUniform2fv) w->glUniform2fv = w->glUniform2fvARB;
+  if (!w->glUniform3fv) w->glUniform3fv = w->glUniform3fvARB;
+  if (!w->glUniform4fv) w->glUniform4fv = w->glUniform4fvARB;
+  if (!w->glUniform1i) w->glUniform1i = w->glUniform1iARB;
+  if (!w->glUniform2i) w->glUniform2i = w->glUniform2iARB;
+  if (!w->glUniform3i) w->glUniform3i = w->glUniform3iARB;
+  if (!w->glUniform4i) w->glUniform4i = w->glUniform4iARB;
+  if (!w->glUniform1iv) w->glUniform1iv = w->glUniform1ivARB;
+  if (!w->glUniform2iv) w->glUniform2iv = w->glUniform2ivARB;
+  if (!w->glUniform3iv) w->glUniform3iv = w->glUniform3ivARB;
+  if (!w->glUniform4iv) w->glUniform4iv = w->glUniform4ivARB;
+  if (!w->glUniformMatrix4fv) w->glUniformMatrix4fv = w->glUniformMatrix4fvARB;
+  if (!w->glBindAttribLocation && w->glBindAttribLocationARB) {
+    w->glBindAttribLocation = (COIN_PFNGLBINDATTRIBLOCATIONPROC)
+      w->glBindAttribLocationARB;
+  }
+  if (!w->glGetAttribLocation && w->glGetAttribLocationARB) {
+    w->glGetAttribLocation = (COIN_PFNGLGETATTRIBLOCATIONPROC)
+      w->glGetAttribLocationARB;
+  }
+  if (!w->glVertexAttrib1f && w->glVertexAttrib1fARB) {
+    w->glVertexAttrib1f = (COIN_PFNGLVERTEXATTRIB1FPROC) w->glVertexAttrib1fARB;
+  }
+  if (!w->glVertexAttrib2f && w->glVertexAttrib2fARB) {
+    w->glVertexAttrib2f = (COIN_PFNGLVERTEXATTRIB2FPROC) w->glVertexAttrib2fARB;
+  }
+  if (!w->glVertexAttrib3f && w->glVertexAttrib3fARB) {
+    w->glVertexAttrib3f = (COIN_PFNGLVERTEXATTRIB3FPROC) w->glVertexAttrib3fARB;
+  }
+  if (!w->glVertexAttrib4f && w->glVertexAttrib4fARB) {
+    w->glVertexAttrib4f = (COIN_PFNGLVERTEXATTRIB4FPROC) w->glVertexAttrib4fARB;
+  }
+  if (!w->glVertexAttribPointer && w->glVertexAttribPointerARB) {
+    w->glVertexAttribPointer = (COIN_PFNGLVERTEXATTRIBPOINTERPROC)
+      w->glVertexAttribPointerARB;
+  }
+  if (!w->glEnableVertexAttribArray && w->glEnableVertexAttribArrayARB) {
+    w->glEnableVertexAttribArray = (COIN_PFNGLENABLEVERTEXATTRIBARRAYPROC)
+      w->glEnableVertexAttribArrayARB;
+  }
+  if (!w->glDisableVertexAttribArray && w->glDisableVertexAttribArrayARB) {
+    w->glDisableVertexAttribArray = (COIN_PFNGLDISABLEVERTEXATTRIBARRAYPROC)
+      w->glDisableVertexAttribArrayARB;
+  }
 
   w->glGenQueries = NULL; /* so that cc_glglue_has_occlusion_query() works  */
 #if defined(GL_VERSION_1_5)
@@ -2394,7 +2473,10 @@ cc_glglue_instance(int contextid)
     }
 
     gi->rendererstr = (const char *)glGetString(GL_RENDERER);
-    gi->extensionsstr = (const char *)glGetString(GL_EXTENSIONS);
+    // GL_EXTENSIONS is invalid in an OpenGL core context. Use the indexed
+    // query path below for OpenGL 3.0 and newer contexts.
+    gi->extensionsstr = cc_glglue_glversion_matches_at_least(gi, 3, 0, 0) ?
+      NULL : (const char *)glGetString(GL_EXTENSIONS);
 
     /* Randall O'Reilly reports that the above call is deprecated from OpenGL 3.0
        onwards and may, particularly on some Linux systems, return NULL.
@@ -2440,13 +2522,29 @@ cc_glglue_instance(int contextid)
       }
     }
 
+    // Cache the legacy-rendering capability before querying limits. Some
+    // limits are invalid in a core profile and would otherwise leave a stale
+    // GL error for later capability queries.
+    gi->context_supports_legacy_rendering =
+      glglue_detect_context_legacy_rendering(gi);
+    gi->legacy_rendering_support_cached = TRUE;
+
     /* read some limits */
 
     glGetIntegerv(GL_MAX_TEXTURE_SIZE, &gltmp);
     gi->max_texture_size = gltmp;
 
-    glGetIntegerv(GL_MAX_LIGHTS, &gltmp);
-    gi->max_lights = (int) gltmp;
+    if (gi->context_supports_legacy_rendering) {
+#if COIN_BUILD_LEGACY_GL_RENDERER
+      glGetIntegerv(GL_MAX_LIGHTS, &gltmp);
+      gi->max_lights = (int) gltmp;
+#else
+      gi->max_lights = 0;
+#endif
+    }
+    else {
+      gi->max_lights = 0;
+    }
 
     {
       GLfloat vals[2];
@@ -2587,6 +2685,231 @@ cc_glglue_isdirect(const cc_glglue * w)
   return w->glx.isdirect;
 }
 
+static SbBool
+glglue_detect_context_legacy_rendering(const cc_glglue * glue)
+{
+  if (glue == NULL || glue->versionstr == NULL) return FALSE;
+  if (strncmp(glue->versionstr, "OpenGL ES", 9) == 0) return FALSE;
+
+  unsigned int major, minor, release;
+  cc_glglue_glversion(glue, &major, &minor, &release);
+  if (major == 0) return FALSE;
+  if (major < 2 || (major == 2 && minor <= 1)) return TRUE;
+
+  if (major == 3 && minor == 0) {
+    GLint flags = 0;
+    glGetIntegerv(GL_CONTEXT_FLAGS, &flags);
+    return (flags & GL_CONTEXT_FLAG_FORWARD_COMPATIBLE_BIT) == 0;
+  }
+
+  if (major == 3 && minor == 1) {
+    if (glue->extensionsstr != NULL) {
+      return coin_glglue_extension_available(glue->extensionsstr,
+                                             "GL_ARB_compatibility");
+    }
+    COIN_PFNGLGETSTRINGIPROC getStringi = glue->glGetStringi;
+    if (getStringi == NULL) {
+      getStringi = reinterpret_cast<COIN_PFNGLGETSTRINGIPROC>(
+        cc_glglue_getprocaddress(glue, "glGetStringi"));
+    }
+    if (getStringi != NULL) {
+      GLint extensionCount = 0;
+      glGetIntegerv(GL_NUM_EXTENSIONS, &extensionCount);
+      for (GLint i = 0; i < extensionCount; ++i) {
+        const char * name = reinterpret_cast<const char *>(
+          getStringi(GL_EXTENSIONS, static_cast<GLuint>(i)));
+        if (name && strcmp(name, "GL_ARB_compatibility") == 0) return TRUE;
+      }
+    }
+    return FALSE;
+  }
+
+  GLint profile = 0;
+  glGetIntegerv(GL_CONTEXT_PROFILE_MASK, &profile);
+  return (profile & GL_CONTEXT_COMPATIBILITY_PROFILE_BIT) != 0 &&
+    (profile & GL_CONTEXT_CORE_PROFILE_BIT) == 0;
+}
+
+SbBool
+cc_glglue_context_supports_legacy_rendering(const cc_glglue * glue)
+{
+  if (glue == NULL) return FALSE;
+  if (!glue->legacy_rendering_support_cached) {
+    cc_glglue * mutableGlue = const_cast<cc_glglue *>(glue);
+    mutableGlue->context_supports_legacy_rendering =
+      glglue_detect_context_legacy_rendering(glue);
+    mutableGlue->legacy_rendering_support_cached = TRUE;
+  }
+  return glue->context_supports_legacy_rendering;
+}
+
+
+/* Standard-facing shader wrappers.  Keeping the fallback here means shader
+   code does not need to know whether the driver exposed core or ARB names. */
+GLuint
+cc_glglue_glCreateShader(const cc_glglue * glue, GLenum type)
+{
+  if (glue->glCreateShader) return glue->glCreateShader(type);
+  if (glue->glCreateShaderObjectARB) {
+    return (GLuint) glue->glCreateShaderObjectARB(type);
+  }
+  return 0;
+}
+
+void
+cc_glglue_glShaderSource(const cc_glglue * glue, GLuint shader, GLsizei count,
+                         const char * const * string, const GLint * length)
+{
+  if (glue->glShaderSource) {
+    glue->glShaderSource(shader, count, string, length);
+  }
+  else if (glue->glShaderSourceARB) {
+    glue->glShaderSourceARB((COIN_GLhandle) shader, count,
+                            (const COIN_GLchar **) string, length);
+  }
+}
+
+void
+cc_glglue_glCompileShader(const cc_glglue * glue, GLuint shader)
+{
+  if (glue->glCompileShader) glue->glCompileShader(shader);
+  else if (glue->glCompileShaderARB) glue->glCompileShaderARB((COIN_GLhandle) shader);
+}
+
+void
+cc_glglue_glGetShaderiv(const cc_glglue * glue, GLuint shader, GLenum pname,
+                        GLint * params)
+{
+  if (glue->glGetShaderiv) glue->glGetShaderiv(shader, pname, params);
+  else if (glue->glGetObjectParameterivARB) {
+    glue->glGetObjectParameterivARB((COIN_GLhandle) shader, pname, params);
+  }
+}
+
+void
+cc_glglue_glGetShaderInfoLog(const cc_glglue * glue, GLuint shader,
+                             GLsizei maxLength, GLsizei * length, char * infoLog)
+{
+  if (glue->glGetShaderInfoLog) {
+    glue->glGetShaderInfoLog(shader, maxLength, length, infoLog);
+  }
+  else if (glue->glGetInfoLogARB) {
+    glue->glGetInfoLogARB((COIN_GLhandle) shader, maxLength, length,
+                          (COIN_GLchar *) infoLog);
+  }
+}
+
+void
+cc_glglue_glDeleteShader(const cc_glglue * glue, GLuint shader)
+{
+  if (glue->glDeleteShader) glue->glDeleteShader(shader);
+  else if (glue->glDeleteObjectARB) glue->glDeleteObjectARB((COIN_GLhandle) shader);
+}
+
+void
+cc_glglue_glAttachShader(const cc_glglue * glue, GLuint program, GLuint shader)
+{
+  if (glue->glAttachShader) glue->glAttachShader(program, shader);
+  else if (glue->glAttachObjectARB) {
+    glue->glAttachObjectARB((COIN_GLhandle) program, (COIN_GLhandle) shader);
+  }
+}
+
+void
+cc_glglue_glDetachShader(const cc_glglue * glue, GLuint program, GLuint shader)
+{
+  if (glue->glDetachShader) glue->glDetachShader(program, shader);
+  else if (glue->glDetachObjectARB) {
+    glue->glDetachObjectARB((COIN_GLhandle) program, (COIN_GLhandle) shader);
+  }
+}
+
+GLint
+cc_glglue_glGetUniformLocation(const cc_glglue * glue, GLuint program,
+                               const char * name)
+{
+  if (glue->glGetUniformLocation) return glue->glGetUniformLocation(program, name);
+  if (glue->glGetUniformLocationARB) {
+    return glue->glGetUniformLocationARB((COIN_GLhandle) program,
+                                         (const COIN_GLchar *) name);
+  }
+  return -1;
+}
+
+void
+cc_glglue_glGetActiveUniform(const cc_glglue * glue, GLuint program, GLuint index,
+                             GLsizei maxLength, GLsizei * length, GLint * size,
+                             GLenum * type, char * name)
+{
+  if (glue->glGetActiveUniform) {
+    glue->glGetActiveUniform(program, index, maxLength, length, size, type, name);
+  }
+  else if (glue->glGetActiveUniformARB) {
+    glue->glGetActiveUniformARB((COIN_GLhandle) program, index, maxLength,
+                                length, size, type, (COIN_GLchar *) name);
+  }
+}
+
+GLuint
+cc_glglue_glCreateProgram(const cc_glglue * glue)
+{
+  if (glue->glCreateProgram) return glue->glCreateProgram();
+  if (glue->glCreateProgramObjectARB) return (GLuint) glue->glCreateProgramObjectARB();
+  return 0;
+}
+
+void
+cc_glglue_glLinkProgram(const cc_glglue * glue, GLuint program)
+{
+  if (glue->glLinkProgram) glue->glLinkProgram(program);
+  else if (glue->glLinkProgramARB) glue->glLinkProgramARB((COIN_GLhandle) program);
+}
+
+void
+cc_glglue_glUseProgram(const cc_glglue * glue, GLuint program)
+{
+  if (glue->glUseProgram) glue->glUseProgram(program);
+  else if (glue->glUseProgramObjectARB) glue->glUseProgramObjectARB((COIN_GLhandle) program);
+}
+
+void
+cc_glglue_glDeleteProgram(const cc_glglue * glue, GLuint program)
+{
+  if (glue->glDeleteProgram) glue->glDeleteProgram(program);
+  else if (glue->glDeleteObjectARB) glue->glDeleteObjectARB((COIN_GLhandle) program);
+}
+
+void
+cc_glglue_glGetGLSLProgramiv(const cc_glglue * glue, GLuint program, GLenum pname,
+                             GLint * params)
+{
+  if (glue->glGetProgramiv) glue->glGetProgramiv(program, pname, params);
+  else if (glue->glGetObjectParameterivARB) {
+    glue->glGetObjectParameterivARB((COIN_GLhandle) program, pname, params);
+  }
+}
+
+void
+cc_glglue_glGetProgramInfoLog(const cc_glglue * glue, GLuint program,
+                              GLsizei maxLength, GLsizei * length, char * infoLog)
+{
+  if (glue->glGetProgramInfoLog) {
+    glue->glGetProgramInfoLog(program, maxLength, length, infoLog);
+  }
+  else if (glue->glGetInfoLogARB) {
+    glue->glGetInfoLogARB((COIN_GLhandle) program, maxLength, length,
+                          (COIN_GLchar *) infoLog);
+  }
+}
+
+void
+cc_glglue_glProgramParameteriEXT(const cc_glglue * glue, GLuint program, GLenum pname,
+                                 GLint value)
+{
+  if (glue->glProgramParameteriEXT) {
+    glue->glProgramParameteriEXT((COIN_GLhandle) program, pname, value);
+  }
+}
 
 /*!
   Whether glPolygonOffset() is available or not: either we're on OpenGL
@@ -3986,7 +4309,7 @@ void
 cc_glglue_glVertexAttrib1f(const cc_glglue * glue,
                            GLuint index, GLfloat x)
 {
-  glue->glVertexAttrib1fARB(index, x);
+  glue->glVertexAttrib1f(index, x);
 }
 
 void
@@ -4007,7 +4330,7 @@ void
 cc_glglue_glVertexAttrib2f(const cc_glglue * glue,
                            GLuint index, GLfloat x, GLfloat y)
 {
-  glue->glVertexAttrib2fARB(index, x, y);
+  glue->glVertexAttrib2f(index, x, y);
 }
 
 void
@@ -4030,7 +4353,7 @@ cc_glglue_glVertexAttrib3f(const cc_glglue * glue,
                            GLuint index, GLfloat x,
                            GLfloat y, GLfloat z)
 {
-  glue->glVertexAttrib3fARB(index, x, y, z);
+  glue->glVertexAttrib3f(index, x, y, z);
 }
 
 void
@@ -4054,7 +4377,7 @@ cc_glglue_glVertexAttrib4f(const cc_glglue * glue,
                            GLuint index, GLfloat x,
                            GLfloat y, GLfloat z, GLfloat w)
 {
-  glue->glVertexAttrib4fARB(index, x, y, z, w);
+  glue->glVertexAttrib4f(index, x, y, z, w);
 }
 
 void
@@ -4241,21 +4564,21 @@ cc_glglue_glVertexAttribPointer(const cc_glglue * glue,
                                 GLsizei stride,
                                 const GLvoid *pointer)
 {
-  glue->glVertexAttribPointerARB(index, size, type, normalized, stride, pointer);
+  glue->glVertexAttribPointer(index, size, type, normalized, stride, pointer);
 }
 
 void
 cc_glglue_glEnableVertexAttribArray(const cc_glglue * glue,
                                     GLuint index)
 {
-  glue->glEnableVertexAttribArrayARB(index);
+  glue->glEnableVertexAttribArray(index);
 }
 
 void
 cc_glglue_glDisableVertexAttribArray(const cc_glglue * glue,
                                      GLuint index)
 {
-  glue->glDisableVertexAttribArrayARB(index);
+  glue->glDisableVertexAttribArray(index);
 }
 
 void
@@ -4485,6 +4808,7 @@ cc_glglue_context_create_offscreen(unsigned int width, unsigned int height)
 #elif defined(HAVE_WGL)
   return wglglue_context_create_offscreen(width, height);
 #else
+  check_egl();
 #if defined(HAVE_EGL)
     if (COIN_USE_EGL > 0) return eglglue_context_create_offscreen(width, height);
 #endif
@@ -5016,14 +5340,25 @@ cc_glglue_is_texture_size_legal(const cc_glglue * glw,
   GLenum internalformat;
   GLenum format;
   GLenum type = GL_UNSIGNED_BYTE;
+  const SbBool legacy = cc_glglue_context_supports_legacy_rendering(glw);
 
   switch (bytespertexel) {
   default:
   case 1:
-    format = internalformat = GL_LUMINANCE;
+    if (legacy) {
+      format = internalformat = GL_LUMINANCE;
+    } else {
+      internalformat = GL_R8;
+      format = GL_RED;
+    }
     break;
   case 2:
-    format = internalformat = GL_LUMINANCE_ALPHA;
+    if (legacy) {
+      format = internalformat = GL_LUMINANCE_ALPHA;
+    } else {
+      internalformat = GL_RG8;
+      format = GL_RG;
+    }
     break;
   case 3:
     format = internalformat = GL_RGB8;

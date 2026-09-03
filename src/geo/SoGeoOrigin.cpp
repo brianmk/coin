@@ -280,7 +280,7 @@ SoGeoOrigin::initClass(void)
   SO_NODE_INTERNAL_INIT_CLASS(SoGeoOrigin, SO_FROM_INVENTOR_1|SoNode::VRML1);
 
   SO_ENABLE(SoGetBoundingBoxAction, SoGeoElement);
-  SO_ENABLE(SoGLRenderAction, SoGeoElement);
+  SO_ENABLE_LEGACY_GL(SoGLRenderAction, SoGeoElement);
   SO_ENABLE(SoGetMatrixAction, SoGeoElement);
   SO_ENABLE(SoGetPrimitiveCountAction, SoGeoElement);
   SO_ENABLE(SoPickAction, SoGeoElement);
@@ -297,11 +297,13 @@ SoGeoOrigin::doAction(SoAction * action)
 }
 
 // Doc from superclass.
+#if COIN_BUILD_LEGACY_GL_RENDERER
 void
 SoGeoOrigin::GLRender(SoGLRenderAction * action)
 {
   SoGeoOrigin::doAction((SoAction *)action);
 }
+#endif
 
 // Doc from superclass.
 void

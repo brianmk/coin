@@ -144,6 +144,7 @@ SoTransformSeparator::callback(SoCallbackAction * action)
   SoModelMatrixElement::popMatrix(action->getState(), matrix);
 }
 
+#if COIN_BUILD_LEGACY_GL_RENDERER
 // Documented in superclass.
 void
 SoTransformSeparator::GLRender(SoGLRenderAction * action)
@@ -154,6 +155,7 @@ SoTransformSeparator::GLRender(SoGLRenderAction * action)
   SoGLCacheContextElement::shouldAutoCache(action->getState(),
                                            SoGLCacheContextElement::DONT_AUTO_CACHE);
 }
+#endif
 
 // Documented in superclass.
 void

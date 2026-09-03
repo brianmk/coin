@@ -222,11 +222,13 @@ SoAntiSquish::callback(SoCallbackAction * action)
 }
 
 // Doc from superclass.
+#if COIN_BUILD_LEGACY_GL_RENDERER
 void
 SoAntiSquish::GLRender(SoGLRenderAction * action)
 {
   SoAntiSquish::doAction((SoAction *) action);
 }
+#endif
 
 // Doc from superclass.
 void

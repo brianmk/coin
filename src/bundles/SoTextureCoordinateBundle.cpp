@@ -43,11 +43,17 @@
 
 
 #include <Inventor/bundles/SoTextureCoordinateBundle.h>
+#include <Inventor/elements/SoMultiTextureCoordinateElement.h>
 
 #include <Inventor/misc/SoState.h>
+#include <Inventor/elements/SoMultiTextureEnabledElement.h>
 #include <Inventor/elements/SoMultiTextureImageElement.h>
+#if COIN_BUILD_LEGACY_GL_RENDERER
 #include <Inventor/elements/SoGLMultiTextureEnabledElement.h>
+#endif
+#if COIN_BUILD_LEGACY_GL_RENDERER
 #include <Inventor/elements/SoGLMultiTextureCoordinateElement.h>
+#endif
 #include <Inventor/elements/SoBumpMapElement.h>
 #include <Inventor/elements/SoBumpMapCoordinateElement.h>
 
@@ -96,8 +102,13 @@ SoTextureCoordinateBundle(SoAction * const action,
   const SbBool * multienabled = 
     SoMultiTextureEnabledElement::getEnabledUnits(this->state, lastenabled);
   SbBool needinit = lastenabled >= 0;
+#if COIN_BUILD_LEGACY_GL_RENDERER
   SbBool glrender = forRendering || action->isOfType(SoGLRenderAction::getClassTypeId());
   SbBool bumpenabled = glrender && (SoBumpMapElement::get(this->state) != NULL);
+#else
+  SbBool glrender = FALSE;
+  SbBool bumpenabled = FALSE;
+#endif
 
   if (!needinit && !multienabled && !bumpenabled) return;
   
@@ -145,6 +156,7 @@ SoTextureCoordinateBundle(SoAction * const action,
   if (this->flags & FLAG_DIDPUSH) {
     this->coordElt = SoMultiTextureCoordinateElement::getInstance(this->state);
   }
+#if COIN_BUILD_LEGACY_GL_RENDERER
   this->glElt = NULL;
   if (glrender) {
     SbBool needindices = FALSE;
@@ -159,6 +171,9 @@ SoTextureCoordinateBundle(SoAction * const action,
     this->glElt = static_cast<const SoGLMultiTextureCoordinateElement *>(this->coordElt);
     this->glElt->initMulti(action->getState());
   }
+#else
+  (void)glrender;
+#endif
   if ((this->flags & FLAG_DEFAULT) && !setUpDefault) {
     // FIXME: I couldn't be bothered to support this yet. It is for picking
     // optimization only, I think. pederb, 20000218

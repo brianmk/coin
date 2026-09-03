@@ -35,8 +35,6 @@
 
 #include <Inventor/fields/SoSFEnum.h>
 #include <Inventor/nodes/SoSubNode.h>
-#include <Inventor/actions/SoGLRenderAction.h>
-
 class COIN_DLL_API SoTransparencyType : public SoNode {
   typedef SoNode inherited;
 
@@ -47,24 +45,24 @@ public:
   SoTransparencyType(void);
 
   enum Type {
-    SCREEN_DOOR = SoGLRenderAction::SCREEN_DOOR,
-    ADD = SoGLRenderAction::ADD,
-    DELAYED_ADD = SoGLRenderAction::DELAYED_ADD,
-    SORTED_OBJECT_ADD = SoGLRenderAction::SORTED_OBJECT_ADD,
-    BLEND = SoGLRenderAction::BLEND,
-    DELAYED_BLEND = SoGLRenderAction::DELAYED_BLEND,
-    SORTED_OBJECT_BLEND = SoGLRenderAction::SORTED_OBJECT_BLEND,
-    SORTED_OBJECT_SORTED_TRIANGLE_ADD =
-    SoGLRenderAction::SORTED_OBJECT_SORTED_TRIANGLE_ADD,
-    SORTED_OBJECT_SORTED_TRIANGLE_BLEND =
-    SoGLRenderAction::SORTED_OBJECT_SORTED_TRIANGLE_BLEND,
-    NONE = SoGLRenderAction::NONE
+    SCREEN_DOOR = 0,
+    ADD = 1,
+    DELAYED_ADD = 2,
+    SORTED_OBJECT_ADD = 3,
+    BLEND = 4,
+    DELAYED_BLEND = 5,
+    SORTED_OBJECT_BLEND = 6,
+    SORTED_OBJECT_SORTED_TRIANGLE_ADD = 7,
+    SORTED_OBJECT_SORTED_TRIANGLE_BLEND = 8,
+    NONE = 9
   };
 
   SoSFEnum value;
 
   void doAction(SoAction * action) override;
+#if COIN_HAVE_LEGACY_GL_RENDERER
   void GLRender(SoGLRenderAction * action) override;
+#endif
   void callback(SoCallbackAction * action) override;
 
 protected:

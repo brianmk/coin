@@ -209,8 +209,8 @@ void
 SoTextureScalePolicy::initClass(void)
 {
   SO_NODE_INTERNAL_INIT_CLASS(SoTextureScalePolicy, SO_FROM_COIN_2_0);
-  SO_ENABLE(SoGLRenderAction, SoTextureScalePolicyElement);
-  SO_ENABLE(SoGLRenderAction, SoTextureScaleQualityElement);
+  SO_ENABLE_LEGACY_GL(SoGLRenderAction, SoTextureScalePolicyElement);
+  SO_ENABLE_LEGACY_GL(SoGLRenderAction, SoTextureScaleQualityElement);
 }
 
 static SoTextureScalePolicyElement::Policy
@@ -237,6 +237,7 @@ convert_policy(const SoTextureScalePolicy::Policy policy)
 }
 
 // Doc from superclass.
+#if COIN_BUILD_LEGACY_GL_RENDERER
 void
 SoTextureScalePolicy::GLRender(SoGLRenderAction * action)
 {
@@ -249,3 +250,4 @@ SoTextureScalePolicy::GLRender(SoGLRenderAction * action)
                                       this->quality.getValue());
   }
 }
+#endif

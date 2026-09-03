@@ -1439,7 +1439,7 @@ SoGLImageP::resizeImage(SoState * state, unsigned char *& imageptr,
   }
   else {
     GLint maxr;
-    glGetIntegerv(GL_MAX_RECTANGLE_TEXTURE_SIZE_EXT, &maxr);
+    glGetIntegerv(GL_MAX_RECTANGLE_TEXTURE_SIZE_ARB, &maxr);
     maxrectsize = (uint32_t) maxr;
   }
 
@@ -1652,7 +1652,7 @@ SoGLImageP::createGLDisplayList(SoState *state)
     }
     else {
       dl->setTextureTarget((int) ((this->flags & SoGLImage::RECTANGLE) ?
-                                  GL_TEXTURE_RECTANGLE_EXT : GL_TEXTURE_2D));
+                                  GL_TEXTURE_RECTANGLE_ARB : GL_TEXTURE_2D));
     }
   }
 
@@ -1738,7 +1738,7 @@ void
 SoGLImageP::reallyBindPBuffer(SoState * state)
 {
   GLenum target = this->flags & SoGLImage::RECTANGLE ?
-    GL_TEXTURE_RECTANGLE_EXT : GL_TEXTURE_2D;
+    GL_TEXTURE_RECTANGLE_ARB : GL_TEXTURE_2D;
 
   glTexParameteri(target, GL_TEXTURE_WRAP_S,
                   translate_wrap(state, this->wraps));
@@ -1823,7 +1823,7 @@ SoGLImageP::reallyCreateTexture(SoState *state,
     SbBool generatemipmap = FALSE;
 
     GLenum target = this->flags & SoGLImage::RECTANGLE ?
-      GL_TEXTURE_RECTANGLE_EXT : GL_TEXTURE_2D;
+      GL_TEXTURE_RECTANGLE_ARB : GL_TEXTURE_2D;
 
     glTexParameteri(target, GL_TEXTURE_WRAP_S,
                     translate_wrap(state, this->wraps));
@@ -1997,7 +1997,7 @@ SoGLImageP::applyFilter(const SbBool ismipmap)
   if (size[2] >= 1) target = GL_TEXTURE_3D;
   else {
     target = this->flags & SoGLImage::RECTANGLE ?
-      GL_TEXTURE_RECTANGLE_EXT : GL_TEXTURE_2D;
+      GL_TEXTURE_RECTANGLE_ARB : GL_TEXTURE_2D;
   }
   if (this->flags & SoGLImage::USE_QUALITY_VALUE) {
     if (this->quality < COIN_TEX2_LINEAR_LIMIT) {

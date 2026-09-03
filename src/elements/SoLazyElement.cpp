@@ -75,9 +75,10 @@
 #include <cassert>
 #include <cstring>
 
-#include <Inventor/actions/SoGLRenderAction.h>
 #include <Inventor/elements/SoShapeStyleElement.h>
+#if COIN_BUILD_LEGACY_GL_RENDERER
 #include <Inventor/elements/SoGLVBOElement.h>
+#endif
 #include <Inventor/fields/SoMFColor.h>
 #include <Inventor/fields/SoMFFloat.h>
 #include <Inventor/misc/SoState.h>
@@ -167,6 +168,7 @@ SoLazyElement::init(SoState * COIN_UNUSED_ARG(state))
   this->coinstate.emissive = this->getDefaultEmissive();
   this->coinstate.shininess = this->getDefaultShininess();
   this->coinstate.blending = FALSE;
+  this->coinstate.separateblending = FALSE;
   this->coinstate.blend_sfactor = 0;
   this->coinstate.blend_dfactor = 0;
   this->coinstate.alpha_blend_sfactor = 0;
@@ -180,7 +182,9 @@ SoLazyElement::init(SoState * COIN_UNUSED_ARG(state))
   this->coinstate.transparray = lazy_defaulttransp;
   this->coinstate.colorindexarray = lazy_defaultindex;
   this->coinstate.istransparent = FALSE;
-  this->coinstate.transptype = static_cast<int32_t>(SoGLRenderAction::BLEND);
+  // Keep the public transparency enum ABI stable without depending on the
+  // LegacyGL-only SoGLRenderAction declaration in core builds.
+  this->coinstate.transptype = 4; // SoTransparencyType::BLEND
   this->coinstate.diffusenodeid = 0;
   this->coinstate.transpnodeid = 0;
   this->coinstate.stipplenum = 0;
@@ -189,6 +193,7 @@ SoLazyElement::init(SoState * COIN_UNUSED_ARG(state))
   this->coinstate.culling = FALSE;
   this->coinstate.flatshading = FALSE;
   this->coinstate.alphatestfunc = 0;
+  this->coinstate.semanticalphatestfunc = 0;
   this->coinstate.alphatestvalue = 0.5f;
 }
 
@@ -240,9 +245,11 @@ void
 SoLazyElement::setDiffuse(SoState * state, SoNode * node, int32_t numcolors,
                           const SbColor * colors, SoColorPacker * packer)
 {
+#if COIN_BUILD_LEGACY_GL_RENDERER
   if (state->isElementEnabled(SoGLVBOElement::getClassStackIndex())) {
     SoGLVBOElement::setColorVBO(state, NULL);
   }
+#endif
   SoLazyElement * elem = SoLazyElement::getInstance(state);
   if (numcolors && (elem->coinstate.diffusenodeid !=
                     get_diffuse_node_id(node, numcolors, colors))) {
@@ -261,9 +268,11 @@ void
 SoLazyElement::setTransparency(SoState *state, SoNode *node, int32_t numvalues,
                                const float * transparency, SoColorPacker * packer)
 {
+#if COIN_BUILD_LEGACY_GL_RENDERER
   if (state->isElementEnabled(SoGLVBOElement::getClassStackIndex())) {
     SoGLVBOElement::setColorVBO(state, NULL);
   }
+#endif
   SoLazyElement * elem = SoLazyElement::getInstance(state);
   if (numvalues && (elem->coinstate.transpnodeid !=
                     get_transp_node_id(node, numvalues, transparency))) {
@@ -284,9 +293,11 @@ SoLazyElement::setPacked(SoState * state, SoNode * node,
                          int32_t numcolors, const uint32_t * colors,
                          const SbBool packedtransparency)
 {
+#if COIN_BUILD_LEGACY_GL_RENDERER
   if (state->isElementEnabled(SoGLVBOElement::getClassStackIndex())) {
     SoGLVBOElement::setColorVBO(state, NULL);
   }
+#endif
   SoLazyElement * elem = SoLazyElement::getInstance(state);
   if (numcolors && elem->coinstate.diffusenodeid != node->getNodeId()) {
     elem = getWInstance(state);
@@ -392,7 +403,17 @@ SoLazyElement::setColorMaterial(SoState * COIN_UNUSED_ARG(state), SbBool COIN_UN
 void
 SoLazyElement::enableBlending(SoState * state,  int sfactor, int dfactor)
 {
-  SoLazyElement::enableSeparateBlending(state, sfactor, dfactor, 0, 0);
+  SoLazyElement * elem = SoLazyElement::getInstance(state);
+  if (!elem->coinstate.blending || elem->coinstate.separateblending ||
+      elem->coinstate.blend_sfactor != sfactor ||
+      elem->coinstate.blend_dfactor != dfactor) {
+    elem = getWInstance(state);
+    elem->enableBlendingElt(sfactor, dfactor, 0, 0, FALSE);
+    if (state->isCacheOpen()) elem->lazyDidSet(BLENDING_MASK);
+  }
+  else if (state->isCacheOpen()) {
+    elem->lazyDidntSet(BLENDING_MASK);
+  }
 }
 
 void
@@ -401,13 +422,13 @@ SoLazyElement::enableSeparateBlending(SoState * state,
                                       int alpha_sfactor, int alpha_dfactor)
 {
   SoLazyElement * elem = SoLazyElement::getInstance(state);
-  if (!elem->coinstate.blending ||
+  if (!elem->coinstate.blending || !elem->coinstate.separateblending ||
       elem->coinstate.blend_sfactor != sfactor ||
       elem->coinstate.blend_dfactor != dfactor ||
       elem->coinstate.alpha_blend_sfactor != alpha_sfactor ||
       elem->coinstate.alpha_blend_dfactor != alpha_dfactor) {
     elem = getWInstance(state);
-    elem->enableBlendingElt(sfactor, dfactor, alpha_sfactor, alpha_dfactor);
+    elem->enableBlendingElt(sfactor, dfactor, alpha_sfactor, alpha_dfactor, TRUE);
     if (state->isCacheOpen()) elem->lazyDidSet(BLENDING_MASK);
   }
   else if (state->isCacheOpen()) {
@@ -567,7 +588,7 @@ SoLazyElement::getAlphaBlending(SoState * state, int & sfactor, int & dfactor)
   sfactor = elem->coinstate.alpha_blend_sfactor;
   dfactor = elem->coinstate.alpha_blend_dfactor;
 
-  return elem->coinstate.blending && (sfactor != 0) && (dfactor != 0);
+  return elem->coinstate.blending && elem->coinstate.separateblending;
 }
 
 // ! FIXME: write doc
@@ -593,6 +614,14 @@ SoLazyElement::getAlphaTest(SoState * state, float & value)
   SoLazyElement * elem = getInstance(state);
   value = elem->coinstate.alphatestvalue;
   return elem->coinstate.alphatestfunc;
+}
+
+int
+SoLazyElement::getAlphaTestSemantic(SoState * state, float & value)
+{
+  SoLazyElement * elem = getInstance(state);
+  value = elem->coinstate.alphatestvalue;
+  return elem->coinstate.semanticalphatestfunc;
 }
 
 // ! FIXME: write doc
@@ -745,9 +774,11 @@ SoLazyElement::setMaterials(SoState * state, SoNode *node, uint32_t bitmask,
                             const float shininess,
                             const SbBool istransparent)
 {
+#if COIN_BUILD_LEGACY_GL_RENDERER
   if (state->isElementEnabled(SoGLVBOElement::getClassStackIndex())) {
     SoGLVBOElement::setColorVBO(state, NULL);
   }
+#endif
   SoLazyElement * elem = SoLazyElement::getInstance(state);
 
   uint32_t eltbitmask = 0;
@@ -868,6 +899,21 @@ SoLazyElement::setAlphaTest(SoState * state, int func, float value)
       elem->coinstate.alphatestvalue != value) {
     elem = getWInstance(state);
     elem->setAlphaTestElt(func, value);
+    if (state->isCacheOpen()) elem->lazyDidSet(ALPHATEST_MASK);
+  }
+  else if (state->isCacheOpen()) {
+    elem->lazyDidntSet(ALPHATEST_MASK);
+  }
+}
+
+void
+SoLazyElement::setAlphaTestSemantic(SoState * state, int function, float value)
+{
+  SoLazyElement * elem = SoLazyElement::getInstance(state);
+  if (elem->coinstate.semanticalphatestfunc != function ||
+      elem->coinstate.alphatestvalue != value) {
+    elem = getWInstance(state);
+    elem->setAlphaTestSemanticElt(function, value);
     if (state->isCacheOpen()) elem->lazyDidSet(ALPHATEST_MASK);
   }
   else if (state->isCacheOpen()) {
@@ -1025,9 +1071,12 @@ SoLazyElement::setColorMaterialElt(SbBool COIN_UNUSED_ARG(value))
 }
 
 void
-SoLazyElement::enableBlendingElt(int sfactor, int dfactor, int alpha_sfactor, int alpha_dfactor)
+SoLazyElement::enableBlendingElt(int sfactor, int dfactor,
+                                 int alpha_sfactor, int alpha_dfactor,
+                                 SbBool separate)
 {
   this->coinstate.blending = TRUE;
+  this->coinstate.separateblending = separate;
   this->coinstate.blend_sfactor = sfactor;
   this->coinstate.blend_dfactor = dfactor;
   this->coinstate.alpha_blend_sfactor = alpha_sfactor;
@@ -1038,6 +1087,7 @@ void
 SoLazyElement::disableBlendingElt(void)
 {
   this->coinstate.blending = FALSE;
+  this->coinstate.separateblending = FALSE;
 }
 
 void
@@ -1120,6 +1170,13 @@ void
 SoLazyElement::setAlphaTestElt(int func, float value)
 {
   this->coinstate.alphatestfunc = func;
+  this->coinstate.alphatestvalue = value;
+}
+
+void
+SoLazyElement::setAlphaTestSemanticElt(int function, float value)
+{
+  this->coinstate.semanticalphatestfunc = function;
   this->coinstate.alphatestvalue = value;
 }
 

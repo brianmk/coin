@@ -208,6 +208,7 @@ SoVRMLVertexShape::doAction(SoAction * action)
   if (node) node->doAction(action);
 }
 
+#if COIN_BUILD_LEGACY_GL_RENDERER
 void
 SoVRMLVertexShape::GLRender(SoGLRenderAction * action)
 {
@@ -225,6 +226,7 @@ SoVRMLVertexShape::GLRender(SoGLRenderAction * action)
   node = this->color.getValue();
   if (node) node->GLRender(action);
 }
+#endif
 
 void
 SoVRMLVertexShape::getBoundingBox(SoGetBoundingBoxAction * action)
@@ -259,11 +261,13 @@ SoVRMLVertexShape::notify(SoNotList * list)
   inherited::notify(list);
 }
 
+#if COIN_BUILD_LEGACY_GL_RENDERER
 SbBool
 SoVRMLVertexShape::shouldGLRender(SoGLRenderAction * action)
 {
   return SoShape::shouldGLRender(action);
 }
+#endif
 
 void
 SoVRMLVertexShape::setNormalCache(SoState * state,

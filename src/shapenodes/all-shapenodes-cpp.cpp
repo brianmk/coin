@@ -57,7 +57,10 @@
 #include "SoText3.cpp"
 #include "SoTriangleStripSet.cpp"
 #include "SoVertexShape.cpp"
-#include "soshape_bigtexture.cpp"
 #include "soshape_primdata.cpp"
-#include "soshape_trianglesort.cpp"
+
+#if COIN_BUILD_LEGACY_GL_RENDERER
+#include "soshape_bigtexture.cpp"
 #include "soshape_bumprender.cpp"
+#include "soshape_trianglesort.cpp"
+#endif

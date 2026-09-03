@@ -35,6 +35,7 @@
 
 #include <Inventor/elements/SoModelMatrixElement.h>
 
+#if COIN_HAVE_LEGACY_GL_RENDERER
 class COIN_DLL_API SoGLModelMatrixElement : public SoModelMatrixElement {
   typedef SoModelMatrixElement inherited;
 
@@ -67,5 +68,7 @@ private:
   SbUniqueId viewEltNodeId;
   SbBool stackoverflow;
 };
+
+#endif
 
 #endif // !COIN_SOGLMODELMATRIXELEMENT_H

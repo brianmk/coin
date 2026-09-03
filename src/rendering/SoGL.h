@@ -68,6 +68,10 @@ class SbVec2f;
 // pointer.
 const cc_glglue * sogl_glue_instance(const SoState * state);
 
+// Return whether the context associated with the state exposes the
+// fixed-function/compatibility rendering API used by the legacy renderer.
+SbBool sogl_context_supports_legacy_rendering(const SoState * state);
+
 
 // render
 void sogl_render_cone(const float bottomRadius,

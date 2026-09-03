@@ -483,9 +483,10 @@ SoTextureCombine::initClass(void)
 {
   SO_NODE_INTERNAL_INIT_CLASS(SoTextureCombine, SO_FROM_COIN_2_2);
 
-  SO_ENABLE(SoGLRenderAction, SoTextureCombineElement);
+  SO_ENABLE_LEGACY_GL(SoGLRenderAction, SoTextureCombineElement);
 }
 
+#if COIN_BUILD_LEGACY_GL_RENDERER
 // Doc from superclass.
 void
 SoTextureCombine::GLRender(SoGLRenderAction * action)
@@ -523,6 +524,7 @@ SoTextureCombine::GLRender(SoGLRenderAction * action)
 
   }
 }
+#endif
 
 // Doc from superclass.
 void

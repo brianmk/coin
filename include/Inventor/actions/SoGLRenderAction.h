@@ -40,6 +40,7 @@
 #include <Inventor/lists/SoPathList.h>
 #include <Inventor/lists/SbList.h>
 
+#if COIN_HAVE_LEGACY_GL_RENDERER
 typedef void SoGLRenderPassCB(void * userdata);
 typedef void SoGLPreRenderCB(void * userdata, class SoGLRenderAction * action);
 typedef float SoGLSortedObjectOrderCB(void * userdata, SoGLRenderAction * action);
@@ -146,5 +147,6 @@ private:
   SoGLRenderAction & operator = (const SoGLRenderAction & rhs);
 
 }; // SoGLRenderAction
+#endif
 
 #endif // !COIN_SOGLRENDERACTION_H

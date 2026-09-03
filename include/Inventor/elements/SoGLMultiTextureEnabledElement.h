@@ -37,6 +37,7 @@
 
 typedef struct cc_glglue cc_glglue;
 
+#if COIN_HAVE_LEGACY_GL_RENDERER
 class COIN_DLL_API SoGLMultiTextureEnabledElement : public SoMultiTextureEnabledElement {
   typedef SoMultiTextureEnabledElement inherited;
 
@@ -60,5 +61,7 @@ private:
 
   uint32_t cachecontext;
 };
+
+#endif
 
 #endif // !COIN_SOGLMULTITEXTUREENABLEDELEMENT_H

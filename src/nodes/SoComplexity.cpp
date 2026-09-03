@@ -184,10 +184,10 @@ SoComplexity::initClass(void)
   SO_ENABLE(SoGetBoundingBoxAction, SoComplexityTypeElement);
   SO_ENABLE(SoGetBoundingBoxAction, SoShapeStyleElement);
 
-  SO_ENABLE(SoGLRenderAction, SoComplexityElement);
-  SO_ENABLE(SoGLRenderAction, SoComplexityTypeElement);
-  SO_ENABLE(SoGLRenderAction, SoShapeStyleElement);
-  SO_ENABLE(SoGLRenderAction, SoTextureQualityElement);
+  SO_ENABLE_LEGACY_GL(SoGLRenderAction, SoComplexityElement);
+  SO_ENABLE_LEGACY_GL(SoGLRenderAction, SoComplexityTypeElement);
+  SO_ENABLE_LEGACY_GL(SoGLRenderAction, SoShapeStyleElement);
+  SO_ENABLE_LEGACY_GL(SoGLRenderAction, SoTextureQualityElement);
 
   SO_ENABLE(SoCallbackAction, SoComplexityElement);
   SO_ENABLE(SoCallbackAction, SoComplexityTypeElement);
@@ -211,6 +211,7 @@ SoComplexity::getBoundingBox(SoGetBoundingBoxAction * action)
 }
 
 // Doc from superclass.
+#if COIN_BUILD_LEGACY_GL_RENDERER
 void
 SoComplexity::GLRender(SoGLRenderAction * action)
 {
@@ -226,6 +227,7 @@ SoComplexity::GLRender(SoGLRenderAction * action)
     }
   }
 }
+#endif
 
 // Doc from superclass.
 void

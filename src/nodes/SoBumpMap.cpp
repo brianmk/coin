@@ -103,7 +103,9 @@
 #include <Inventor/errors/SoDebugError.h>
 #include <Inventor/SbImage.h>
 #include <Inventor/SbVec3f.h>
+#if COIN_BUILD_LEGACY_GL_RENDERER
 #include <Inventor/misc/SoGLImage.h>
+#endif
 #include <Inventor/C/glue/gl.h>
 #include <Inventor/misc/SoGLDriverDatabase.h>
 #include <Inventor/engines/SoHeightMapToNormalMap.h>
@@ -204,7 +206,9 @@ SO_NODE_SOURCE(SoBumpMap);
 SoBumpMap::SoBumpMap(void)
 {
   PRIVATE(this) = new SoBumpMapP;
+#if COIN_BUILD_LEGACY_GL_RENDERER
   PRIVATE(this)->glimage = new SoGLImage;
+#endif
   PRIVATE(this)->glimagevalid = FALSE;
   PRIVATE(this)->didconvert = FALSE;
   PRIVATE(this)->isgrayscale = -1;
@@ -236,7 +240,9 @@ SoBumpMap::SoBumpMap(void)
 */
 SoBumpMap::~SoBumpMap()
 {
+#if COIN_BUILD_LEGACY_GL_RENDERER
   PRIVATE(this)->glimage->unref(NULL);
+#endif
   delete PRIVATE(this)->filenamesensor;
   delete PRIVATE(this);
 }
@@ -250,7 +256,7 @@ SoBumpMap::initClass(void)
 {
   SO_NODE_INTERNAL_INIT_CLASS(SoBumpMap, SO_FROM_COIN_2_2);
 
-  SO_ENABLE(SoGLRenderAction, SoBumpMapElement);
+  SO_ENABLE_LEGACY_GL(SoGLRenderAction, SoBumpMapElement);
   SO_ENABLE(SoCallbackAction, SoBumpMapElement);
   SO_ENABLE(SoRayPickAction, SoBumpMapElement);
 }
@@ -274,14 +280,17 @@ SoBumpMap::readInstance(SoInput * in, unsigned short flags)
   return readOK;
 }
 
+#if COIN_BUILD_LEGACY_GL_RENDERER
 static SoGLImage::Wrap
 bumpmap_translateWrap(const SoBumpMap::Wrap wrap)
 {
   if (wrap == SoBumpMap::REPEAT) return SoGLImage::REPEAT;
   return SoGLImage::CLAMP;
 }
+#endif
 
 
+#if COIN_BUILD_LEGACY_GL_RENDERER
 // Documented in superclass.
 void
 SoBumpMap::GLRender(SoGLRenderAction * action)
@@ -331,6 +340,7 @@ SoBumpMap::GLRender(SoGLRenderAction * action)
     }
   }
 }
+#endif
 
 // Documented in superclass.
 void

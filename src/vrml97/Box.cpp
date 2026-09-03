@@ -34,6 +34,8 @@
 #include <config.h>
 #endif // HAVE_CONFIG_H
 
+#include <Inventor/elements/SoMultiTextureEnabledElement.h>
+
 #ifdef HAVE_VRML97
 
 /*!
@@ -90,7 +92,9 @@
 #include "coindefs.h"
 
 #include <Inventor/VRMLnodes/SoVRMLMacros.h>
+#if COIN_BUILD_LEGACY_GL_RENDERER
 #include <Inventor/elements/SoGLMultiTextureEnabledElement.h>
+#endif
 #include <Inventor/elements/SoMultiTextureCoordinateElement.h>
 #include <Inventor/actions/SoGLRenderAction.h>
 #include <Inventor/actions/SoGetPrimitiveCountAction.h>
@@ -132,6 +136,7 @@ SoVRMLBox::~SoVRMLBox()
 }
 
 // Doc in parent
+#if COIN_BUILD_LEGACY_GL_RENDERER
 void
 SoVRMLBox::GLRender(SoGLRenderAction * action)
 {
@@ -158,6 +163,7 @@ SoVRMLBox::GLRender(SoGLRenderAction * action)
                    &mb,
                    flags, state);
 }
+#endif
 
 // Doc in parent
 void

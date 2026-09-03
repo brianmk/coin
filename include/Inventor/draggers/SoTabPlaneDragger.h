@@ -42,6 +42,9 @@ class SoFieldSensor;
 class SbLineProjector;
 class SbPlaneProjector;
 class SoTabPlaneDraggerP;
+#if COIN_HAVE_LEGACY_GL_RENDERER
+class SoGLRenderAction;
+#endif
 
 class COIN_DLL_API SoTabPlaneDragger : public SoDragger {
   typedef SoDragger inherited;
@@ -78,12 +81,16 @@ public:
 protected:
   virtual ~SoTabPlaneDragger(void);
 
+#if COIN_HAVE_LEGACY_GL_RENDERER
   void GLRender(SoGLRenderAction * action) override;
+#endif
 
   SbBool setUpConnections(SbBool onoff, SbBool doitalways = FALSE) override;
   void setDefaultOnNonWritingFields(void) override;
 
+#if COIN_HAVE_LEGACY_GL_RENDERER
   void reallyAdjustScaleTabSize(SoGLRenderAction * action);
+#endif
 
   void getXYScreenLengths(SbVec2f & lengths, const SbMatrix & localtoscreen,
                            const SbVec2s & winsize);

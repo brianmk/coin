@@ -31,7 +31,12 @@
 \**************************************************************************/
 
 #include <Inventor/nodes/SoVertexAttribute.h>
+
+class SoVBO;
+#include <Inventor/elements/SoVertexAttributeElement.h>
+#if COIN_BUILD_LEGACY_GL_RENDERER
 #include <Inventor/elements/SoGLVertexAttributeElement.h>
+#endif
 
 #include <memory>
 
@@ -49,12 +54,17 @@
 #include <Inventor/errors/SoDebugError.h>
 #include <Inventor/elements/SoGLShaderProgramElement.h>
 #include <Inventor/elements/SoGLCacheContextElement.h>
+#if COIN_BUILD_LEGACY_GL_RENDERER
 #include <Inventor/elements/SoGLVBOElement.h>
+#endif
 #include <Inventor/misc/SoGLDriverDatabase.h>
 
+#if COIN_BUILD_LEGACY_GL_RENDERER
 #include "rendering/SoVBO.h"
+#endif
 #include "nodes/SoSubNodeP.h"
 #include "elements/SoVertexAttributeData.h"
+#include "coindefs.h"
 
 /*!
   \class SoVertexAttribute SoVertexAttribute.h Inventor/nodes/SoVertexAttribute.h
@@ -168,7 +178,7 @@ SoVertexAttribute::initClass(void)
                        SoNode::nextActionMethodIndex++);
 
   SoNode::setCompatibilityTypes(SoVertexAttribute::getClassTypeId(), SO_FROM_COIN_3_0);
-  SO_ENABLE(SoGLRenderAction, SoGLVertexAttributeElement);
+  SO_ENABLE_LEGACY_GL(SoGLRenderAction, SoGLVertexAttributeElement);
 }
 
 /*!
@@ -247,6 +257,7 @@ SoVertexAttribute::doAction(SoAction * action)
   SoVertexAttributeElement::add(action->getState(), PRIVATE(this)->attributedata);
 }
 
+#if COIN_BUILD_LEGACY_GL_RENDERER
 void
 SoVertexAttribute::GLRender(SoGLRenderAction * action)
 {
@@ -313,6 +324,7 @@ SoVertexAttribute::GLRender(SoGLRenderAction * action)
   }
   SoBase::staticDataUnlock();
 }
+#endif
 
 SoMField *
 SoVertexAttribute::getValuesField(void) const

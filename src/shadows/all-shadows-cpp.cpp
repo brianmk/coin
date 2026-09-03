@@ -30,6 +30,7 @@
  * OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 \**************************************************************************/
 
+#if COIN_BUILD_LEGACY_GL_RENDERER
 #include "SoGLShadowCullingElement.cpp"
 #include "SoShadowCulling.cpp"
 #include "SoShadowDirectionalLight.cpp"
@@ -37,3 +38,4 @@
 #include "SoShadowSpotLight.cpp"
 #include "SoShadowStyle.cpp"
 #include "SoShadowStyleElement.cpp"
+#endif

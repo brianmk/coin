@@ -203,7 +203,7 @@ SoSwitch::initClass(void)
   SO_ENABLE(SoGetBoundingBoxAction, SoSwitchElement);
   SO_ENABLE(SoSearchAction, SoSwitchElement);
   SO_ENABLE(SoGetMatrixAction, SoSwitchElement);
-  SO_ENABLE(SoGLRenderAction, SoSwitchElement);
+  SO_ENABLE_LEGACY_GL(SoGLRenderAction, SoSwitchElement);
   SO_ENABLE(SoPickAction, SoSwitchElement);
 
   SO_ENABLE(SoCallbackAction, SoSwitchElement);
@@ -212,11 +212,13 @@ SoSwitch::initClass(void)
 }
 
 // Documented in superclass.
+#if COIN_BUILD_LEGACY_GL_RENDERER
 void
 SoSwitch::GLRender(SoGLRenderAction * action)
 {
   this->doAction(action);
 }
+#endif
 
 // Documented in superclass.
 void

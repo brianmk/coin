@@ -50,6 +50,7 @@ public:
   SoSFFloat intensity;
   SoSFColor color;
 
+  void doAction(SoAction * action) override;
   void callback(SoCallbackAction * action) override;
 
 protected:

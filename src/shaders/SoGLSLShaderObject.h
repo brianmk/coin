@@ -68,11 +68,16 @@ public:
 
   // source should be the name of the calling function
   static SbBool didOpenGLErrorOccur(const SbString & source);
-  static void printInfoLog(const cc_glglue * g, COIN_GLhandle handle, int objType);
 
   void updateCoinParameter(SoState * state, const SbName & name, SoShaderParameter * param, const int value) override;
 
 private:
+  static void printInfoLog(const cc_glglue * g,
+                           COIN_GLhandle handle,
+                           const ShaderType shaderType,
+                           const SbString & sourceHint,
+                           const SbBool failed);
+
   COIN_GLhandle programHandle;
   COIN_GLhandle shaderHandle;
   SbBool isattached;

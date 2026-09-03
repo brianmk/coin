@@ -34,7 +34,6 @@
 \**************************************************************************/
 
 #include <Inventor/SbString.h>
-#include <Inventor/actions/SoGLRenderAction.h>
 #include <Inventor/actions/SoAudioRenderAction.h>
 
 class SoAudioDeviceP;

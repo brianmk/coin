@@ -39,21 +39,26 @@
 
 #include "SoAction.cpp"
 #include "SoActionP.cpp"
+#if COIN_BUILD_LEGACY_GL_RENDERER
 #include "SoBoxHighlightRenderAction.cpp"
-#include "SoCallbackAction.cpp"
 #include "SoGLRenderAction.cpp"
+#endif
+#include "SoCallbackAction.cpp"
 #include "SoGetBoundingBoxAction.cpp"
 #include "SoGetMatrixAction.cpp"
 #include "SoGetPrimitiveCountAction.cpp"
 #include "SoHandleEventAction.cpp"
+#if COIN_BUILD_LEGACY_GL_RENDERER
 #include "SoLineHighlightRenderAction.cpp"
+#include "SoReorganizeAction.cpp"
+#endif
 #include "SoPickAction.cpp"
 #include "SoRayPickAction.cpp"
-#include "SoReorganizeAction.cpp"
 #include "SoSearchAction.cpp"
 #include "SoSimplifyAction.cpp"
 #include "SoToVRMLAction.cpp"
 #include "SoWriteAction.cpp"
 #include "SoAudioRenderAction.cpp"
+#include "SoIRRenderAction.cpp"
 #include "SoToVRML2Action.cpp"
 // #include "SoIntersectionDetectionAction.cpp"

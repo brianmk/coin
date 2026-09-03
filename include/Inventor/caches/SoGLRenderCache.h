@@ -34,11 +34,13 @@
 \**************************************************************************/
 
 #include <Inventor/caches/SoCache.h>
+#if COIN_HAVE_LEGACY_GL_RENDERER
 #include <Inventor/elements/SoGLLazyElement.h>
+#endif
 
+#if COIN_HAVE_LEGACY_GL_RENDERER
 class SoGLDisplayList;
 class SoGLRenderCacheP;
-
 
 class COIN_DLL_API SoGLRenderCache : public SoCache {
   typedef SoCache inherited;
@@ -56,8 +58,10 @@ public:
   SbBool isValid(const SoState * state) const override;
   virtual void addNestedCache(SoGLDisplayList * child);
 
+#if COIN_HAVE_LEGACY_GL_RENDERER
   SoGLLazyElement::GLState * getPreLazyState(void);
   SoGLLazyElement::GLState * getPostLazyState(void);
+#endif
 
 protected:
   void destroy(SoState *state) override;
@@ -65,5 +69,6 @@ protected:
 private:
   SoGLRenderCacheP * pimpl;
 };
+#endif
 
 #endif // !COIN_SOGLRENDERCACHE

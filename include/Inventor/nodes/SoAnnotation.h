@@ -45,10 +45,12 @@ public:
   static void initClass(void);
   SoAnnotation(void);
 
+#if COIN_HAVE_LEGACY_GL_RENDERER
   void GLRender(SoGLRenderAction * action) override;
   void GLRenderBelowPath(SoGLRenderAction * action) override;
   void GLRenderInPath(SoGLRenderAction * action) override;
   void GLRenderOffPath(SoGLRenderAction * action) override;
+#endif
 
 protected:
   virtual ~SoAnnotation();

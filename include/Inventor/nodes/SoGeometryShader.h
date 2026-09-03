@@ -64,7 +64,9 @@ public:
   SoSFEnum outputType;
   SoSFInt32 maxEmit;
 
+#if COIN_HAVE_LEGACY_GL_RENDERER
   void GLRender(SoGLRenderAction * action) override;
+#endif
 
   static SbBool isSupported(SourceType sourceType);
 

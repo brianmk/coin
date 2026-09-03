@@ -23,6 +23,7 @@ include_directories(BEFORE
   "${PROJECT_SOURCE_DIR}/include"
   "${CMAKE_CURRENT_BINARY_DIR}"
   "${CMAKE_CURRENT_SOURCE_DIR}"
+  "${PROJECT_SOURCE_DIR}/src/glue/khronos"
   "${PROJECT_SOURCE_DIR}/include/Inventor/annex"
   "${PROJECT_BINARY_DIR}/data"
 )
@@ -51,6 +52,14 @@ foreach(_subdir ${SUBDIRS})
   add_subdirectory(${_subdir})
 endforeach()
 add_subdirectory(doc)
+
+if(TARGET coin_generated_data_headers)
+  foreach(_subdir ${SUBDIRS})
+    if(TARGET ${_subdir})
+      add_dependencies(${_subdir} coin_generated_data_headers)
+    endif()
+  endforeach()
+endif()
 
 # Adding source groups for IDE's (Visual Studio, XCode, Qt Creator, etc.)
 source_group("Header Files\\Inventor"                            REGULAR_EXPRESSION ".*/include/Inventor/.*[.]h")
@@ -153,9 +162,20 @@ endif()
 
 set(ADDITIONAL_HDRS ${PROJECT_SOURCE_DIR}/include/SoWinEnterScope.h ${PROJECT_SOURCE_DIR}/include/SoWinLeaveScope.h ${PROJECT_SOURCE_DIR}/include/SoDebug.h ${PROJECT_BINARY_DIR}/src/config.h)
 
+set(COIN_GLELEMENTS_OBJECTS "")
+if(NOT COIN_BUILD_SINGLE_LIB)
+  set(COIN_GLELEMENTS_OBJECTS $<TARGET_OBJECTS:glelements>)
+endif()
+
+set(COIN_SHADOWS_OBJECTS "")
+if(NOT COIN_BUILD_SINGLE_LIB AND COIN_BUILD_LEGACY_GL_RENDERER)
+  set(COIN_SHADOWS_OBJECTS $<TARGET_OBJECTS:shadows>)
+endif()
+
 # Create the library target
 if(COIN_BUILD_SINGLE_LIB)
-  add_library(${PROJECT_NAME} ${COIN_LIBRARY_TYPE} ${COIN_SOURCE} ${COMMON_HDRS} ${ADDITIONAL_HDRS} ${COMMON_RESOURCES})
+  add_library(${PROJECT_NAME} ${COIN_LIBRARY_TYPE} ${COIN_SOURCE} ${COMMON_HDRS} ${ADDITIONAL_HDRS} ${COMMON_RESOURCES}
+    )
 else()
   if(NOT COIN_USE_SYSTEM_EXPAT)
     set(expat_target $<TARGET_OBJECTS:expat>)
@@ -179,7 +199,7 @@ else()
     $<TARGET_OBJECTS:fonts>
     $<TARGET_OBJECTS:foreignfiles>
     $<TARGET_OBJECTS:geo>
-    $<TARGET_OBJECTS:glelements>
+    ${COIN_GLELEMENTS_OBJECTS}
     $<TARGET_OBJECTS:glue>
     $<TARGET_OBJECTS:hardcopy>
     $<TARGET_OBJECTS:io>
@@ -195,7 +215,7 @@ else()
     $<TARGET_OBJECTS:scxml>
     $<TARGET_OBJECTS:sensors>
     $<TARGET_OBJECTS:shaders>
-    $<TARGET_OBJECTS:shadows>
+    ${COIN_SHADOWS_OBJECTS}
     $<TARGET_OBJECTS:shapenodes>
     $<TARGET_OBJECTS:soscxml>
     $<TARGET_OBJECTS:threads>
@@ -203,6 +223,24 @@ else()
     $<TARGET_OBJECTS:vrml97>
     $<TARGET_OBJECTS:xml>
   )
+endif()
+
+if(TARGET coin_generated_data_headers)
+  add_dependencies(${PROJECT_NAME} coin_generated_data_headers)
+endif()
+
+# Keep the renderer selection attached to the final library target as well as
+# the directory scope.  This is important for single-library generators,
+# where all translation units are linked through this target.
+target_compile_definitions(${PROJECT_NAME} PRIVATE
+  COIN_BUILD_LEGACY_GL_RENDERER=${COIN_BUILD_LEGACY_GL_RENDERER_VALUE}
+  COIN_BUILD_VULKAN_RENDERER=${COIN_BUILD_VULKAN_RENDERER_VALUE}
+)
+
+if(NOT COIN_BUILD_LEGACY_GL_RENDERER AND
+   CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang" AND
+   CMAKE_SYSTEM_NAME STREQUAL "Linux")
+  target_link_options(${PROJECT_NAME} PRIVATE LINKER:-z,defs)
 endif()
 
 # Export a Coin::Coin target when the library is built as a cmake subdirectory
@@ -371,6 +409,17 @@ if(COIN_INSTALL)
   install(DIRECTORY ${PROJECT_SOURCE_DIR}/include/Inventor/ DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}/Inventor COMPONENT development FILES_MATCHING PATTERN "*.h")
   install(DIRECTORY ${CMAKE_BINARY_DIR}/include/Inventor/ DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}/Inventor COMPONENT development FILES_MATCHING PATTERN "*.h")
   install(FILES ${PROJECT_SOURCE_DIR}/include/SoWinEnterScope.h ${PROJECT_SOURCE_DIR}/include/SoWinLeaveScope.h ${PROJECT_SOURCE_DIR}/include/SoDebug.h DESTINATION ${CMAKE_INSTALL_INCLUDEDIR} COMPONENT development)
+
+  # Keep Coin's vendored Khronos snapshot under the Coin namespace so it
+  # cannot shadow a platform or application-owned GL/KHR header tree.
+  install(FILES
+    ${PROJECT_SOURCE_DIR}/src/glue/khronos/GL/glcorearb.h
+    DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}/Inventor/system/khronos
+    COMPONENT development)
+  install(FILES
+    ${PROJECT_SOURCE_DIR}/src/glue/khronos/KHR/khrplatform.h
+    DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}/Inventor/system/khronos
+    COMPONENT development)
 
 # ############################################################################
 # Install data files

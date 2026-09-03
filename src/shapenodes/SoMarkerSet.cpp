@@ -67,6 +67,7 @@
 // FIXME: change standard markers to use GL_UNPACK_ALIGNMENT 1, instead of 4, as it is now... skei 200009005
 
 #include <Inventor/nodes/SoMarkerSet.h>
+#include <Inventor/elements/SoCoordinateElement.h>
 
 #include <cmath>
 #include <cstring>
@@ -80,7 +81,9 @@
 #include <Inventor/actions/SoGLRenderAction.h>
 #include <Inventor/nodes/SoVertexProperty.h>
 #include <Inventor/actions/SoGetPrimitiveCountAction.h>
+#if COIN_BUILD_LEGACY_GL_RENDERER
 #include <Inventor/elements/SoGLCoordinateElement.h>
+#endif
 #include <Inventor/elements/SoMaterialBindingElement.h>
 #include <Inventor/bundles/SoMaterialBundle.h>
 #include <Inventor/elements/SoMultiTextureEnabledElement.h>
@@ -1133,6 +1136,7 @@ convert_bitmaps(void)
 }
 
 // doc in super
+#if COIN_BUILD_LEGACY_GL_RENDERER
 void
 SoMarkerSet::GLRender(SoGLRenderAction * action)
 {
@@ -1276,6 +1280,7 @@ SoMarkerSet::GLRender(SoGLRenderAction * action)
 
   state->pop(); // we pushed, remember
 }
+#endif
 
 // ----------------------------------------------------------------------------------------------------
 

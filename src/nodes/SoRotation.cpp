@@ -147,11 +147,13 @@ SoRotation::callback(SoCallbackAction * action)
 }
 
 // Doc from superclass.
+#if COIN_BUILD_LEGACY_GL_RENDERER
 void
 SoRotation::GLRender(SoGLRenderAction * action)
 {
   SoRotation::doAction((SoAction *)action);
 }
+#endif
 
 // Doc from superclass.
 void

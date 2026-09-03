@@ -47,9 +47,13 @@
 #include "SbBasicP.h"
 
 #include <Inventor/elements/SoMultiTextureImageElement.h>
+#if COIN_BUILD_LEGACY_GL_RENDERER
 #include <Inventor/elements/SoGLMultiTextureImageElement.h>
+#endif
 #include <Inventor/nodes/SoNode.h>
+#if COIN_BUILD_LEGACY_GL_RENDERER
 #include <Inventor/misc/SoGLImage.h>
+#endif
 #include <Inventor/SbImage.h>
 #include <Inventor/lists/SbList.h>
 #include <cassert>

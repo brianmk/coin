@@ -61,10 +61,12 @@ public:
   SoSFEnum pickCulling;
 
   void doAction(SoAction * action) override;
+#if COIN_HAVE_LEGACY_GL_RENDERER
   void GLRender(SoGLRenderAction * action) override;
   void GLRenderBelowPath(SoGLRenderAction * action) override;
   void GLRenderInPath(SoGLRenderAction * action) override;
   void GLRenderOffPath(SoGLRenderAction * action) override;
+#endif
   void callback(SoCallbackAction * action) override;
   void getBoundingBox(SoGetBoundingBoxAction * action) override;
   void getMatrix(SoGetMatrixAction * action) override;
@@ -84,7 +86,9 @@ protected:
   virtual ~SoSeparator();
 
   virtual SbBool cullTest(SoState * state);
+#if COIN_HAVE_LEGACY_GL_RENDERER
   virtual SbBool cullTest(SoGLRenderAction * action, int & cullresults);
+#endif
   SbBool readInstance(SoInput * in, unsigned short flags) override;
 
 private:

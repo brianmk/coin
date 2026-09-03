@@ -69,7 +69,9 @@ public:
   void setNodeClassName(const SbName & name);
   SoChildList * getChildren(void) const override;
 
+#if COIN_BUILD_LEGACY_GL_RENDERER
   void GLRender(SoGLRenderAction * action) override;
+#endif
   void getBoundingBox(SoGetBoundingBoxAction * action) override;
   void pick(SoPickAction * action) override;
   void search(SoSearchAction * action) override;

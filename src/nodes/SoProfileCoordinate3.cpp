@@ -107,7 +107,7 @@ SoProfileCoordinate3::initClass(void)
 {
   SO_NODE_INTERNAL_INIT_CLASS(SoProfileCoordinate3, SO_FROM_INVENTOR_1);
 
-  SO_ENABLE(SoGLRenderAction, SoProfileCoordinateElement);
+  SO_ENABLE_LEGACY_GL(SoGLRenderAction, SoProfileCoordinateElement);
   SO_ENABLE(SoPickAction, SoProfileCoordinateElement);
   SO_ENABLE(SoCallbackAction, SoProfileCoordinateElement);
   SO_ENABLE(SoGetBoundingBoxAction, SoProfileCoordinateElement);
@@ -128,11 +128,13 @@ SoProfileCoordinate3::doAction(SoAction * action)
                                    this->point.getValues(0));
 }
 
+#if COIN_BUILD_LEGACY_GL_RENDERER
 void
 SoProfileCoordinate3::GLRender(SoGLRenderAction * action)
 {
   SoProfileCoordinate3::doAction(action);
 }
+#endif
 
 void
 SoProfileCoordinate3::callback(SoCallbackAction * action)

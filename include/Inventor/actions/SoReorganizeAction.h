@@ -39,6 +39,7 @@ class SoSimplifier;
 class SoSeparator;
 class SoReorganizeActionP;
 
+#if COIN_HAVE_LEGACY_GL_RENDERER
 class COIN_DLL_API SoReorganizeAction : public SoSimplifyAction {
   typedef SoSimplifyAction inherited;
 
@@ -80,5 +81,6 @@ private:
   SoReorganizeAction(const SoReorganizeAction & rhs);
   SoReorganizeAction & operator = (const SoReorganizeAction & rhs);
 }; // SoReorganizeAction
+#endif
 
 #endif // !COIN_SOREORGANIZEACTION_H

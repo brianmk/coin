@@ -97,6 +97,7 @@ SoAnnotation::initClass(void)
   SO_NODE_INTERNAL_INIT_CLASS(SoAnnotation, SO_FROM_INVENTOR_1);
 }
 
+#if COIN_BUILD_LEGACY_GL_RENDERER
 // Doc in superclass.
 void
 SoAnnotation::GLRender(SoGLRenderAction * action)
@@ -114,8 +115,10 @@ SoAnnotation::GLRender(SoGLRenderAction * action)
     break;
   }
 }
+#endif
 
 // Doc in superclass.
+#if COIN_BUILD_LEGACY_GL_RENDERER
 void
 SoAnnotation::GLRenderBelowPath(SoGLRenderAction * action)
 {
@@ -130,8 +133,10 @@ SoAnnotation::GLRenderBelowPath(SoGLRenderAction * action)
     action->addDelayedPath(action->getCurPath()->copy());
   }
 }
+#endif
 
 // Doc in superclass.
+#if COIN_BUILD_LEGACY_GL_RENDERER
 void
 SoAnnotation::GLRenderInPath(SoGLRenderAction * action)
 {
@@ -146,13 +151,16 @@ SoAnnotation::GLRenderInPath(SoGLRenderAction * action)
     action->addDelayedPath(action->getCurPath()->copy());
   }
 }
+#endif
 
 // Doc in superclass.
+#if COIN_BUILD_LEGACY_GL_RENDERER
 void
 SoAnnotation::GLRenderOffPath(SoGLRenderAction *)
 {
   // should never render, this is a separator node
 }
+#endif
 
 #ifdef COIN_TEST_SUITE
 

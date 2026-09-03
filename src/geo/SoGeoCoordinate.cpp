@@ -163,11 +163,13 @@ SoGeoCoordinate::doAction(SoAction * action)
 }
 
 // Doc from superclass.
+#if COIN_BUILD_LEGACY_GL_RENDERER
 void
 SoGeoCoordinate::GLRender(SoGLRenderAction * action)
 {
   SoGeoCoordinate::doAction((SoAction *)action);
 }
+#endif
 
 // Doc from superclass.
 void

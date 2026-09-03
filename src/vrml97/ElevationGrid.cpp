@@ -34,6 +34,8 @@
 #include <config.h>
 #endif // HAVE_CONFIG_H
 
+#include <Inventor/elements/SoMultiTextureEnabledElement.h>
+
 #ifdef HAVE_VRML97
 
 /*!
@@ -278,8 +280,12 @@
 #include <Inventor/actions/SoGLRenderAction.h>
 #include <Inventor/actions/SoGetPrimitiveCountAction.h>
 #include <Inventor/bundles/SoMaterialBundle.h>
+#if COIN_BUILD_LEGACY_GL_RENDERER
 #include <Inventor/elements/SoGLMultiTextureEnabledElement.h>
+#endif
+#if COIN_BUILD_LEGACY_GL_RENDERER
 #include <Inventor/elements/SoGLLazyElement.h>
+#endif
 #include <Inventor/elements/SoLazyElement.h>
 #include <Inventor/misc/SoState.h>
 #include <Inventor/VRMLnodes/SoVRMLColor.h>
@@ -377,6 +383,7 @@ SoVRMLElevationGrid::~SoVRMLElevationGrid(void)
 }
 
 // Doc in parent
+#if COIN_BUILD_LEGACY_GL_RENDERER
 void
 SoVRMLElevationGrid::GLRender(SoGLRenderAction * action)
 {
@@ -627,6 +634,7 @@ SoVRMLElevationGrid::GLRender(SoGLRenderAction * action)
   if (normalcache) PRIVATE(this)->readUnlockNormalCache();
   state->pop();
 }
+#endif
 
 // Doc in parent
 void

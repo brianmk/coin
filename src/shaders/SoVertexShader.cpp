@@ -115,7 +115,8 @@ SoVertexShader::isSupported(SourceType sourceType)
     return SoGLDriverDatabase::isSupported(glue, SO_GL_ARB_VERTEX_PROGRAM);
   }
   else if (sourceType == GLSL_PROGRAM) {
-    return SoGLDriverDatabase::isSupported(glue, SO_GL_ARB_SHADER_OBJECT);
+    return cc_glglue_glversion_matches_at_least(glue, 2, 0, 0) ||
+      SoGLDriverDatabase::isSupported(glue, SO_GL_ARB_SHADER_OBJECT);
   }
   // FIXME: Add support for detecting missing Cg support
   // (20050427 handegar)

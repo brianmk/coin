@@ -214,9 +214,11 @@ SoVRMLMovieTexture::~SoVRMLMovieTexture()
 }
 
 // Doc in parent
+#if COIN_BUILD_LEGACY_GL_RENDERER
 void
 SoVRMLMovieTexture::GLRender(SoGLRenderAction * COIN_UNUSED_ARG(action))
 {
 }
+#endif
 
 #endif // HAVE_VRML97

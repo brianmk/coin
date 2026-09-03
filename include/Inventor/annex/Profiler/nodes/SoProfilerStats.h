@@ -77,7 +77,9 @@ public:
   //  SoMFNode handlingNode;
   //  SoMFTime handlingTimePerNode;
 
+#if COIN_HAVE_LEGACY_GL_RENDERER
   void GLRender(SoGLRenderAction * action) override;
+#endif
   void handleEvent(SoHandleEventAction * action) override;
   void rayPick(SoRayPickAction * action) override;
   void getBoundingBox(SoGetBoundingBoxAction * action) override;

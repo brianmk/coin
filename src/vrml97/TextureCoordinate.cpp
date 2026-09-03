@@ -34,6 +34,9 @@
 #include <config.h>
 #endif // HAVE_CONFIG_H
 
+class SoVBO;
+#include <Inventor/elements/SoMultiTextureCoordinateElement.h>
+
 #ifdef HAVE_VRML97
 
 /*!
@@ -94,16 +97,26 @@
 
 #include <Inventor/VRMLnodes/SoVRMLMacros.h>
 #include <Inventor/actions/SoGLRenderAction.h>
+#if COIN_BUILD_LEGACY_GL_RENDERER
 #include <Inventor/elements/SoGLMultiTextureCoordinateElement.h>
+#endif
+#if COIN_BUILD_LEGACY_GL_RENDERER
 #include <Inventor/elements/SoGLVBOElement.h>
+#endif
 
 #include "nodes/SoSubNodeP.h"
+#if COIN_BUILD_LEGACY_GL_RENDERER
 #include "rendering/SoVBO.h"
+#endif
 
 class SoVRMLTextureCoordinateP {
  public:
   SoVRMLTextureCoordinateP() : vbo(NULL) { }
-  ~SoVRMLTextureCoordinateP() { delete this->vbo; }
+  ~SoVRMLTextureCoordinateP() {
+#if COIN_BUILD_LEGACY_GL_RENDERER
+    delete this->vbo;
+#endif
+  }
   SoVBO * vbo;
 };
 
@@ -156,6 +169,7 @@ SoVRMLTextureCoordinate::callback(SoCallbackAction * action)
 }
 
 // Doc in parent
+#if COIN_BUILD_LEGACY_GL_RENDERER
 void
 SoVRMLTextureCoordinate::GLRender(SoGLRenderAction * action)
 {
@@ -192,6 +206,7 @@ SoVRMLTextureCoordinate::GLRender(SoGLRenderAction * action)
     SoGLVBOElement::setTexCoordVBO(state, 0, PRIVATE(this)->vbo);
   }
 }
+#endif
 
 // Doc in parent
 void

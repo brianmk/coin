@@ -86,6 +86,8 @@
 */
 
 #include <Inventor/nodes/SoIndexedMarkerSet.h>
+#include <Inventor/elements/SoCoordinateElement.h>
+#include <Inventor/elements/SoLazyElement.h>
 
 #ifdef HAVE_CONFIG_H
 #include <config.h>
@@ -96,7 +98,9 @@
 #include <Inventor/system/gl.h>
 #include <Inventor/nodes/SoVertexProperty.h>
 #include <Inventor/nodes/SoMarkerSet.h>
+#if COIN_BUILD_LEGACY_GL_RENDERER
 #include <Inventor/elements/SoGLCoordinateElement.h>
+#endif
 #include <Inventor/elements/SoMaterialBindingElement.h>
 #include <Inventor/elements/SoMultiTextureEnabledElement.h>
 #include <Inventor/elements/SoModelMatrixElement.h>
@@ -104,8 +108,12 @@
 #include <Inventor/elements/SoViewportRegionElement.h>
 #include <Inventor/elements/SoViewingMatrixElement.h>
 #include <Inventor/elements/SoProjectionMatrixElement.h>
+#if COIN_BUILD_LEGACY_GL_RENDERER
 #include <Inventor/elements/SoGLLazyElement.h>
+#endif
+#if COIN_BUILD_LEGACY_GL_RENDERER
 #include <Inventor/elements/SoGLVBOElement.h>
+#endif
 #include <Inventor/elements/SoCullElement.h>
 #include <Inventor/elements/SoGLCacheContextElement.h>
 
@@ -147,6 +155,7 @@ SoIndexedMarkerSet::initClass(void)
 }
 
 // doc from parent
+#if COIN_BUILD_LEGACY_GL_RENDERER
 void
 SoIndexedMarkerSet::GLRender(SoGLRenderAction * action)
 {
@@ -160,6 +169,7 @@ SoIndexedMarkerSet::GLRender(SoGLRenderAction * action)
     this->vertexProperty.getValue()->GLRender(action);
   }
 
+  // send approx number of points for autocache handling. Divide
   if (!this->shouldGLRender(action)){
     state->pop();
     return;
@@ -320,3 +330,4 @@ SoIndexedMarkerSet::GLRender(SoGLRenderAction * action)
   // by three so that three points is the same as one triangle.
   sogl_autocache_update(state, numindices/3, FALSE);
 }
+#endif

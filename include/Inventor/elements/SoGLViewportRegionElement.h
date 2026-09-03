@@ -35,6 +35,7 @@
 
 #include <Inventor/elements/SoViewportRegionElement.h>
 
+#if COIN_HAVE_LEGACY_GL_RENDERER
 class COIN_DLL_API SoGLViewportRegionElement : public SoViewportRegionElement {
   typedef SoViewportRegionElement inherited;
 
@@ -57,5 +58,7 @@ private:
   SbBool initialized;
   void updategl() const;
 };
+
+#endif
 
 #endif // !COIN_SOGLVIEWPORTREGIONELEMENT_H

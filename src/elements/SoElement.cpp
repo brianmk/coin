@@ -284,24 +284,35 @@
 // *************************************************************************
 
 #include <Inventor/elements/SoElement.h>
+#include <Inventor/elements/SoLazyElement.h>
 
 #include <cstdlib>
 #include <cassert>
 
 #include <Inventor/elements/SoElements.h>
 #include <Inventor/elements/SoTextureUnitElement.h>
+#include <Inventor/elements/SoMultiTextureCoordinateElement.h>
+#include <Inventor/elements/SoMultiTextureImageElement.h>
+#include <Inventor/elements/SoMultiTextureEnabledElement.h>
+#include <Inventor/elements/SoMultiTextureMatrixElement.h>
+#if COIN_BUILD_LEGACY_GL_RENDERER
 #include <Inventor/elements/SoGLMultiTextureCoordinateElement.h>
 #include <Inventor/elements/SoGLMultiTextureImageElement.h>
 #include <Inventor/elements/SoGLMultiTextureEnabledElement.h>
 #include <Inventor/elements/SoGLMultiTextureMatrixElement.h>
+#endif
 #include <Inventor/elements/SoBumpMapElement.h>
 #include <Inventor/elements/SoBumpMapCoordinateElement.h>
 #include <Inventor/elements/SoBumpMapMatrixElement.h>
 #include <Inventor/elements/SoTextureCombineElement.h>
 #include <Inventor/elements/SoCacheHintElement.h>
+#include <Inventor/elements/SoDepthBufferElement.h>
+#include <Inventor/elements/SoVertexAttributeElement.h>
 
 #include <Inventor/elements/SoCullElement.h> // internal element
+#if COIN_BUILD_LEGACY_GL_RENDERER
 #include <Inventor/elements/SoGLLazyElement.h> // internal element
+#endif
 #include <Inventor/misc/SoState.h>
 #include <Inventor/lists/SoTypeList.h>
 
@@ -379,11 +390,15 @@ SoElement::initElements(void)
 {
   SoAccumulatedElement::initClass();
   SoClipPlaneElement::initClass();
+#if COIN_BUILD_LEGACY_GL_RENDERER
   SoGLClipPlaneElement::initClass();
+#endif
   SoLightElement::initClass();
   SoModelMatrixElement::initClass();
   SoBBoxModelMatrixElement::initClass();
+#if COIN_BUILD_LEGACY_GL_RENDERER
   SoGLModelMatrixElement::initClass();
+#endif
   SoProfileElement::initClass();
   SoCacheElement::initClass();
   SoInt32Element::initClass();
@@ -393,10 +408,14 @@ SoElement::initElements(void)
   SoComplexityTypeElement::initClass();
   SoDecimationTypeElement::initClass();
   SoDrawStyleElement::initClass();
+#if COIN_BUILD_LEGACY_GL_RENDERER
   SoGLDrawStyleElement::initClass();
   SoGLLightIdElement::initClass();
+#endif
   SoLinePatternElement::initClass();
+#if COIN_BUILD_LEGACY_GL_RENDERER
   SoGLLinePatternElement::initClass();
+#endif
   SoMaterialBindingElement::initClass();
   SoNormalBindingElement::initClass();
   SoPickStyleElement::initClass();
@@ -408,42 +427,65 @@ SoElement::initElements(void)
   SoComplexityElement::initClass();
   SoCreaseAngleElement::initClass();
   SoDecimationPercentageElement::initClass();
+  SoDevicePixelRatioElement::initClass();
   SoFocalDistanceElement::initClass();
   SoFontSizeElement::initClass();
   SoLineWidthElement::initClass();
+#if COIN_BUILD_LEGACY_GL_RENDERER
   SoGLLineWidthElement::initClass();
+#endif
   SoPointSizeElement::initClass();
+#if COIN_BUILD_LEGACY_GL_RENDERER
   SoGLPointSizeElement::initClass();
+#endif
   SoTextureQualityElement::initClass();
+#if COIN_BUILD_LEGACY_GL_RENDERER
   SoGLRenderPassElement::initClass();
   SoGLUpdateAreaElement::initClass();
+#endif
   SoLocalBBoxMatrixElement::initClass();
   SoOverrideElement::initClass();
   SoTextureOverrideElement::initClass();
   SoPickRayElement::initClass();
   SoReplacedElement::initClass();
   SoCoordinateElement::initClass();
+#if COIN_BUILD_LEGACY_GL_RENDERER
   SoGLCoordinateElement::initClass();
   SoGLColorIndexElement::initClass();
+#endif
   SoEnvironmentElement::initClass();
+#if COIN_BUILD_LEGACY_GL_RENDERER
   SoGLEnvironmentElement::initClass();
+#endif
   SoFontNameElement::initClass();
   SoLightAttenuationElement::initClass();
   SoNormalElement::initClass();
+#if COIN_BUILD_LEGACY_GL_RENDERER
   SoGLNormalElement::initClass();
+#endif
   SoPolygonOffsetElement::initClass();
+#if COIN_BUILD_LEGACY_GL_RENDERER
   SoGLPolygonOffsetElement::initClass();
+#endif
   SoProjectionMatrixElement::initClass();
+#if COIN_BUILD_LEGACY_GL_RENDERER
   SoGLProjectionMatrixElement::initClass();
+#endif
   SoProfileCoordinateElement::initClass();
   SoViewingMatrixElement::initClass();
+#if COIN_BUILD_LEGACY_GL_RENDERER
   SoGLViewingMatrixElement::initClass();
+#endif
   SoViewVolumeElement::initClass();
   SoShapeHintsElement::initClass();
+#if COIN_BUILD_LEGACY_GL_RENDERER
   SoGLShapeHintsElement::initClass();
+#endif
   SoShapeStyleElement::initClass();
   SoViewportRegionElement::initClass();
+#if COIN_BUILD_LEGACY_GL_RENDERER
   SoGLViewportRegionElement::initClass();
+#endif
   SoWindowElement::initClass();
 
   SoTransparencyElement::initClass();
@@ -455,7 +497,9 @@ SoElement::initElements(void)
   SoSpecularColorElement::initClass();
 
   SoLazyElement::initClass();
+#if COIN_BUILD_LEGACY_GL_RENDERER
   SoGLLazyElement::initClass();
+#endif
   SoCullElement::initClass();
   SoGLCacheContextElement::initClass();
 
@@ -475,10 +519,12 @@ SoElement::initElements(void)
   SoMultiTextureImageElement::initClass();
   SoMultiTextureEnabledElement::initClass();
   SoMultiTextureMatrixElement::initClass();
+#if COIN_BUILD_LEGACY_GL_RENDERER
   SoGLMultiTextureCoordinateElement::initClass();
   SoGLMultiTextureImageElement::initClass();
   SoGLMultiTextureEnabledElement::initClass();
   SoGLMultiTextureMatrixElement::initClass();
+#endif
 
   SoBumpMapElement::initClass();
   SoBumpMapCoordinateElement::initClass();
@@ -487,13 +533,19 @@ SoElement::initElements(void)
   SoTextureCombineElement::initClass();
   SoCacheHintElement::initClass();
 
+#if COIN_BUILD_LEGACY_GL_RENDERER
   SoGLVBOElement::initClass();
+#endif
 
   SoDepthBufferElement::initClass();
+#if COIN_BUILD_LEGACY_GL_RENDERER
   SoGLDepthBufferElement::initClass();
+#endif
 
   SoVertexAttributeElement::initClass();
+#if COIN_BUILD_LEGACY_GL_RENDERER
   SoGLVertexAttributeElement::initClass();
+#endif
   SoVertexAttributeBindingElement::initClass();
 }
 

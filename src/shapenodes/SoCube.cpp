@@ -67,6 +67,7 @@
 */
 
 #include <Inventor/nodes/SoCube.h>
+#include <Inventor/elements/SoMultiTextureEnabledElement.h>
 #include "coindefs.h"
 
 #include <Inventor/SbPlane.h>
@@ -77,7 +78,9 @@
 #include <Inventor/bundles/SoMaterialBundle.h>
 #include <Inventor/details/SoCubeDetail.h>
 #include <Inventor/elements/SoDrawStyleElement.h>
+#if COIN_BUILD_LEGACY_GL_RENDERER
 #include <Inventor/elements/SoGLMultiTextureEnabledElement.h>
+#endif
 #include <Inventor/elements/SoMaterialBindingElement.h>
 #include <Inventor/elements/SoMultiTextureCoordinateElement.h>
 #include <Inventor/misc/SoState.h>
@@ -134,6 +137,7 @@ SoCube::initClass(void)
 }
 
 // Doc in parent.
+#if COIN_BUILD_LEGACY_GL_RENDERER
 void
 SoCube::GLRender(SoGLRenderAction * action)
 {
@@ -186,6 +190,7 @@ SoCube::GLRender(SoGLRenderAction * action)
                    &mb,
                    flags, state);
 }
+#endif
 
 // Doc in parent.
 void

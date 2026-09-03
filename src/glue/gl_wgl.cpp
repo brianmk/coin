@@ -46,6 +46,11 @@
 #include <Inventor/C/glue/dl.h>
 #include <Inventor/elements/SoGLCacheContextElement.h>
 
+#ifdef HAVE_WGL
+#include <windows.h>
+#include "glue/khronos/GL/wglext.h"
+#endif
+
 #include "glue/glp.h"
 #include "glue/dlp.h"
 

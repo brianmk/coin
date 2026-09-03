@@ -173,7 +173,35 @@ SoAlphaTest::~SoAlphaTest()
 {
 }
 
+static int
+coin_alpha_test_function_to_gl(const int function)
+{
+  switch (function) {
+  case SoAlphaTest::NEVER: return GL_NEVER;
+  case SoAlphaTest::ALWAYS: return GL_ALWAYS;
+  case SoAlphaTest::LESS: return GL_LESS;
+  case SoAlphaTest::LEQUAL: return GL_LEQUAL;
+  case SoAlphaTest::EQUAL: return GL_EQUAL;
+  case SoAlphaTest::GEQUAL: return GL_GEQUAL;
+  case SoAlphaTest::GREATER: return GL_GREATER;
+  case SoAlphaTest::NOTEQUAL: return GL_NOTEQUAL;
+  case SoAlphaTest::NONE:
+  default: return 0;
+  }
+}
+
+void
+SoAlphaTest::doAction(SoAction * action)
+{
+  // Generic traversal retains the semantic Inventor function. The LegacyGL
+  // override below is the only path that translates it to a GL enum.
+  SoLazyElement::setAlphaTestSemantic(action->getState(),
+                                      this->function.getValue(),
+                                      this->value.getValue());
+}
+
 // Doc from parent
+#if COIN_BUILD_LEGACY_GL_RENDERER
 void
 SoAlphaTest::GLRender(SoGLRenderAction * action)
 {
@@ -213,3 +241,4 @@ SoAlphaTest::GLRender(SoGLRenderAction * action)
   SoLazyElement::setAlphaTest(action->getState(),
                               glfunc, this->value.getValue());
 }
+#endif

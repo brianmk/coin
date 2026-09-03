@@ -34,6 +34,9 @@
 #include <config.h>
 #endif // HAVE_CONFIG_H
 
+#include <Inventor/elements/SoMultiTextureEnabledElement.h>
+#include <Inventor/elements/SoShapeHintsElement.h>
+
 #ifdef HAVE_VRML97
 
 /*!
@@ -119,8 +122,12 @@
 #include <Inventor/bundles/SoMaterialBundle.h>
 #include <Inventor/details/SoConeDetail.h>
 #include <Inventor/misc/SoState.h>
+#if COIN_BUILD_LEGACY_GL_RENDERER
 #include <Inventor/elements/SoGLShapeHintsElement.h>
+#endif
+#if COIN_BUILD_LEGACY_GL_RENDERER
 #include <Inventor/elements/SoGLMultiTextureEnabledElement.h>
+#endif
 #include <Inventor/elements/SoMultiTextureCoordinateElement.h>
 
 #include "nodes/SoSubNodeP.h"
@@ -163,6 +170,7 @@ SoVRMLCone::~SoVRMLCone()
 }
 
 // Doc in parent
+#if COIN_BUILD_LEGACY_GL_RENDERER
 void
 SoVRMLCone::GLRender(SoGLRenderAction * action)
 {
@@ -196,6 +204,7 @@ SoVRMLCone::GLRender(SoGLRenderAction * action)
                    &mb,
                    flags, state);
 }
+#endif
 
 // Doc in parent
 void

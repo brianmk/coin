@@ -35,6 +35,7 @@
 
 #include <Inventor/elements/SoInt32Element.h>
 
+#if COIN_HAVE_LEGACY_GL_RENDERER
 class COIN_DLL_API SoGLLightIdElement : public SoInt32Element {
   typedef SoInt32Element inherited;
 
@@ -60,5 +61,7 @@ public:
 
 protected:
 };
+
+#endif
 
 #endif // !COIN_SOGLLIGHTIDELEMENT_H

@@ -3,15 +3,20 @@ set(COIN_CACHES_FILES
 	SoBoundingBoxCache.cpp
 	SoCache.cpp
 	SoConvexDataCache.cpp
-	SoGLCacheList.cpp
-	SoGLRenderCache.cpp
 	SoNormalCache.cpp
 	SoTextureCoordinateCache.cpp
-	SoPrimitiveVertexCache.cpp
 	SoGlyphCache.cpp
 	SoShaderProgramCache.cpp
-	SoVBOCache.cpp
 )
+
+if(COIN_BUILD_LEGACY_GL_RENDERER)
+	list(APPEND COIN_CACHES_FILES
+		SoGLCacheList.cpp
+		SoGLRenderCache.cpp
+		SoPrimitiveVertexCache.cpp
+		SoVBOCache.cpp
+	)
+endif()
 
 # Files excluded from public API documentation, included in complete documentation.
 set(COIN_CACHES_INTERNAL_FILES
@@ -20,7 +25,6 @@ set(COIN_CACHES_INTERNAL_FILES
 	SoShaderProgramCache.h
 	SoShaderProgramCache.cpp
 	SoVBOCache.h
-	SoVBOCache.cpp
 )
 
 # build library

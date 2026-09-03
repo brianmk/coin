@@ -106,11 +106,13 @@ SoTranslation::doAction(SoAction * action)
 }
 
 // Doc in superclass.
+#if COIN_BUILD_LEGACY_GL_RENDERER
 void
 SoTranslation::GLRender(SoGLRenderAction * action)
 {
   SoTranslation::doAction((SoAction *)action);
 }
+#endif
 
 // Doc in superclass.
 void

@@ -275,11 +275,13 @@ SoFontStyle::getBoundingBox(SoGetBoundingBoxAction * action)
 }
 
 // Doc from superclass.
+#if COIN_BUILD_LEGACY_GL_RENDERER
 void
 SoFontStyle::GLRender(SoGLRenderAction * action)
 {
   this->doAction(action);
 }
+#endif
 
 // Doc from superclass.
 void

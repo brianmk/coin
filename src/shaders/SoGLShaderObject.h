@@ -85,9 +85,7 @@ public:
   void setParametersDirty(SbBool flag);
   SbBool getParametersDirty(void) const;
 
-#if defined(SOURCE_HINT)
-  SbString sourceHint; // either the file name or the first line of source code
-#endif
+  SbString sourceHint; // diagnostic source name used in shader compile/link logs
 
 protected:
   const cc_glglue * glctx;

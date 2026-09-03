@@ -152,7 +152,7 @@ SoUnits::initClass(void)
 
   SO_ENABLE(SoGetBoundingBoxAction, SoUnitsElement);
   SO_ENABLE(SoGetMatrixAction, SoUnitsElement);
-  SO_ENABLE(SoGLRenderAction, SoUnitsElement);
+  SO_ENABLE_LEGACY_GL(SoGLRenderAction, SoUnitsElement);
   SO_ENABLE(SoPickAction, SoUnitsElement);
   SO_ENABLE(SoCallbackAction, SoUnitsElement);
   SO_ENABLE(SoGetPrimitiveCountAction, SoUnitsElement);
@@ -166,11 +166,13 @@ SoUnits::getBoundingBox(SoGetBoundingBoxAction * action)
 }
 
 // Doc from superclass.
+#if COIN_BUILD_LEGACY_GL_RENDERER
 void
 SoUnits::GLRender(SoGLRenderAction * action)
 {
   SoUnits::doAction((SoAction*)action);
 }
+#endif
 
 // Doc from superclass.
 void

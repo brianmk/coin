@@ -35,6 +35,7 @@
 
 #include <Inventor/elements/SoShapeHintsElement.h>
 
+#if COIN_HAVE_LEGACY_GL_RENDERER
 class COIN_DLL_API SoGLShapeHintsElement : public SoShapeHintsElement {
   typedef SoShapeHintsElement inherited;
 
@@ -63,5 +64,7 @@ protected:
 private:
   SoState * state;
 };
+
+#endif
 
 #endif // !COIN_SOGLSHAPEHINTSELEMENT_H

@@ -138,6 +138,7 @@
 // *************************************************************************
 
 #include <Inventor/nodes/SoAsciiText.h>
+#include <Inventor/elements/SoMultiTextureEnabledElement.h>
 #include "coindefs.h"
 
 #include <cstring>
@@ -154,7 +155,9 @@
 #include <Inventor/details/SoTextDetail.h>
 #include <Inventor/elements/SoFontNameElement.h>
 #include <Inventor/elements/SoFontSizeElement.h>
+#if COIN_BUILD_LEGACY_GL_RENDERER
 #include <Inventor/elements/SoGLMultiTextureEnabledElement.h>
+#endif
 #include <Inventor/elements/SoGLCacheContextElement.h>
 #include <Inventor/elements/SoComplexityTypeElement.h>
 #include <Inventor/elements/SoComplexityElement.h>
@@ -316,6 +319,7 @@ SoAsciiText::initClass(void)
 }
 
 // Doc in parent.
+#if COIN_BUILD_LEGACY_GL_RENDERER
 void
 SoAsciiText::GLRender(SoGLRenderAction * action)
 {  
@@ -466,6 +470,7 @@ SoAsciiText::GLRender(SoGLRenderAction * action)
     SoGLCacheContextElement::incNumShapes(state);
   }
 }
+#endif
 
 // Doc in parent.
 void

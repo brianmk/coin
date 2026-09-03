@@ -136,11 +136,13 @@ SoTransparencyType::initClass(void)
 }
 
 // Doc from superclass.
+#if COIN_BUILD_LEGACY_GL_RENDERER
 void
 SoTransparencyType::GLRender(SoGLRenderAction * action)
 {
   SoTransparencyType::doAction(action);
 }
+#endif
 
 // Doc from superclass.
 void

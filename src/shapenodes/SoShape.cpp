@@ -45,8 +45,16 @@
 
 #include <Inventor/nodes/SoShape.h>
 
+class SoVBO;
+#include <Inventor/elements/SoLazyElement.h>
+#include <Inventor/elements/SoMultiTextureImageElement.h>
+#include <Inventor/elements/SoVertexAttributeElement.h>
+
 #include <cstring>
+#include <cstdio>
 #include <cstdlib>
+#include <vector>
+#include <memory>
 
 #ifdef HAVE_CONFIG_H
 #include <config.h>
@@ -61,14 +69,21 @@
 #include <Inventor/SoPickedPoint.h>
 #include <Inventor/SoPrimitiveVertex.h>
 #include <Inventor/actions/SoCallbackAction.h>
+#if COIN_BUILD_LEGACY_GL_RENDERER
 #include <Inventor/actions/SoGLRenderAction.h>
+#endif
+#include <Inventor/actions/SoIRRenderAction.h>
 #include <Inventor/actions/SoGetBoundingBoxAction.h>
 #include <Inventor/actions/SoGetPrimitiveCountAction.h>
 #include <Inventor/actions/SoRayPickAction.h>
+#if COIN_BUILD_LEGACY_GL_RENDERER
 #include <Inventor/annex/FXViz/elements/SoShadowStyleElement.h>
+#endif
 #include <Inventor/bundles/SoMaterialBundle.h>
 #include <Inventor/caches/SoBoundingBoxCache.h>
+#if COIN_BUILD_LEGACY_GL_RENDERER
 #include <Inventor/caches/SoPrimitiveVertexCache.h>
+#endif
 #include <Inventor/details/SoFaceDetail.h>
 #include <Inventor/details/SoLineDetail.h>
 #include <Inventor/elements/SoBumpMapElement.h>
@@ -77,12 +92,24 @@
 #include <Inventor/elements/SoCoordinateElement.h>
 #include <Inventor/elements/SoCullElement.h>
 #include <Inventor/elements/SoGLCacheContextElement.h>
+#if COIN_BUILD_LEGACY_GL_RENDERER
 #include <Inventor/elements/SoGLLazyElement.h>
+#endif
+#if COIN_BUILD_LEGACY_GL_RENDERER
 #include <Inventor/elements/SoGLMultiTextureEnabledElement.h>
+#endif
+#if COIN_BUILD_LEGACY_GL_RENDERER
 #include <Inventor/elements/SoGLMultiTextureImageElement.h>
+#endif
+#if COIN_BUILD_LEGACY_GL_RENDERER
 #include <Inventor/elements/SoGLShapeHintsElement.h>
+#endif
+#if COIN_BUILD_LEGACY_GL_RENDERER
 #include <Inventor/elements/SoGLVBOElement.h>
+#endif
+#if COIN_BUILD_LEGACY_GL_RENDERER
 #include <Inventor/elements/SoGLVertexAttributeElement.h>
+#endif
 #include <Inventor/elements/SoLightElement.h>
 #include <Inventor/elements/SoLightModelElement.h>
 #include <Inventor/elements/SoMaterialBindingElement.h>
@@ -98,7 +125,9 @@
 #include <Inventor/elements/SoViewingMatrixElement.h>
 #include <Inventor/elements/SoViewportRegionElement.h>
 #include <Inventor/errors/SoDebugError.h>
+#if COIN_BUILD_LEGACY_GL_RENDERER
 #include <Inventor/misc/SoGLBigImage.h>
+#endif
 #include <Inventor/misc/SoGLDriverDatabase.h>
 #include <Inventor/misc/SoState.h>
 #include <Inventor/nodes/SoLight.h>
@@ -116,18 +145,352 @@
 
 #include "nodes/SoSubNodeP.h"
 #include "rendering/SoGL.h"
+#include "rendering/SoRenderIRP.h"
 #include "glue/glp.h"
 #include "threads/threadsutilp.h"
 #include "tidbitsp.h"
+#if COIN_BUILD_LEGACY_GL_RENDERER
 #include "rendering/SoVBO.h"
+#endif
 #include "coindefs.h" // COIN_OBSOLETED()
+
+namespace {
+
+struct SoIRVertex {
+  SbVec3f position;
+  SbVec3f normal;
+  SbVec4f texcoord;
+  int materialIndex = 0;
+};
+
+struct SoIRBatch {
+  size_t first = 0;
+  size_t count = 0;
+  int materialIndex = -1;
+
+  SoIRBatch(size_t first, size_t count, int materialIndex)
+    : first(first), count(count), materialIndex(materialIndex) {}
+};
+
+// Retained, shape-owned tessellation output for the IR render path.  The
+// flattened stream arrays are allocated afresh on every rebuild so their
+// pointers are stable across frames for an unchanged shape and change exactly
+// when the shape re-tessellates.  The Vulkan backend's GPU geometry cache keys
+// on these pointers, so a rebuilt cache (new pointers) forces a re-upload while
+// an unchanged one (stable pointers, stable content) is safely reused.
+struct SoIRRetainedGeometry {
+  SoPrimitiveTopology topology = SO_TOPOLOGY_COUNT;
+  std::shared_ptr<std::vector<float>> positions;
+  std::shared_ptr<std::vector<float>> normals;
+  std::shared_ptr<std::vector<float>> texcoords;
+  // Per-vertex material index, so colors/batches can be re-resolved from the
+  // current material binding/state on every emission.
+  std::shared_ptr<std::vector<int>> matIndices;
+  size_t vertexCount = 0;
+  uint32_t vertexStride = 0;
+  uint32_t texcoordStride = 0;
+  uint32_t normalCount = 0;
+
+  void invalidate()
+  {
+    this->topology = SO_TOPOLOGY_COUNT;
+    this->positions.reset();
+    this->normals.reset();
+    this->texcoords.reset();
+    this->matIndices.reset();
+    this->vertexCount = 0;
+    this->vertexStride = 0;
+    this->texcoordStride = 0;
+    this->normalCount = 0;
+  }
+};
+
+class SoIRPrimitiveAssembler : public SoIRRenderAction::PrimitiveCollector {
+public:
+  SoIRPrimitiveAssembler(SoIRRenderAction * action, SoShape * shape,
+                         std::vector<SoIRRetainedGeometry> * runs)
+    : action(action), shape(shape), runs(runs), topology(SO_TOPOLOGY_COUNT) {}
+
+  void onTriangle(const SoPrimitiveVertex * v1,
+                  const SoPrimitiveVertex * v2,
+                  const SoPrimitiveVertex * v3) override
+  {
+    if (this->ensureTopology(SO_TOPOLOGY_TRIANGLES)) {
+      this->append(v1, v1->getMaterialIndex());
+      this->append(v2, v2->getMaterialIndex());
+      this->append(v3, v3->getMaterialIndex());
+    }
+  }
+
+  void onLine(const SoPrimitiveVertex * v1,
+              const SoPrimitiveVertex * v2) override
+  {
+    if (this->ensureTopology(SO_TOPOLOGY_LINES)) {
+      this->append(v1, v1->getMaterialIndex());
+      this->append(v2, v2->getMaterialIndex());
+    }
+  }
+
+  void onPoint(const SoPrimitiveVertex * v) override
+  {
+    if (this->ensureTopology(SO_TOPOLOGY_POINTS)) {
+      this->append(v, v->getMaterialIndex());
+    }
+  }
+
+  void finalize()
+  {
+    this->flushRun();
+  }
+
+private:
+  void flushRun()
+  {
+    if (this->vertices.empty()) return;
+
+    // Flatten the accumulated SoIRVertex stream into shape-retained buffers.
+    // A fresh run is created per flushRun() (one per topology run), so its
+    // pointers are stable across frames for an unchanged shape and change
+    // whenever the shape re-tessellates -- the property the IR/GPU caches key
+    // on.  Actual command/state materialization happens later in
+    // soshape_emit_ir_commands(), which runs on a cache-replay frame too.
+    SoIRRetainedGeometry run;
+    const size_t count = this->vertices.size();
+    run.topology = this->topology;
+    run.vertexCount = count;
+    run.normalCount = static_cast<uint32_t>(count);
+    run.vertexStride = sizeof(float) * 3;
+    run.texcoordStride = sizeof(float) * 4;
+
+    run.positions = std::make_shared<std::vector<float>>(count * 3);
+    run.normals = std::make_shared<std::vector<float>>(count * 3);
+    run.texcoords = std::make_shared<std::vector<float>>(count * 4);
+    run.matIndices = std::make_shared<std::vector<int>>(count);
+
+    std::vector<float> & positions = *run.positions;
+    std::vector<float> & normals = *run.normals;
+    std::vector<float> & texcoords = *run.texcoords;
+    std::vector<int> & matIndices = *run.matIndices;
+    for (size_t i = 0; i < count; ++i) {
+      const SoIRVertex & vertex = this->vertices[i];
+      positions[i * 3 + 0] = vertex.position[0];
+      positions[i * 3 + 1] = vertex.position[1];
+      positions[i * 3 + 2] = vertex.position[2];
+      normals[i * 3 + 0] = vertex.normal[0];
+      normals[i * 3 + 1] = vertex.normal[1];
+      normals[i * 3 + 2] = vertex.normal[2];
+      texcoords[i * 4 + 0] = vertex.texcoord[0];
+      texcoords[i * 4 + 1] = vertex.texcoord[1];
+      texcoords[i * 4 + 2] = vertex.texcoord[2];
+      texcoords[i * 4 + 3] = vertex.texcoord[3];
+      matIndices[i] = vertex.materialIndex;
+    }
+
+    this->runs->push_back(std::move(run));
+    this->vertices.clear();
+  }
+
+  bool ensureTopology(SoPrimitiveTopology candidate)
+  {
+    if (this->topology == SO_TOPOLOGY_COUNT) {
+      this->topology = candidate;
+      return true;
+    }
+    if (this->topology == candidate) return true;
+
+    this->flushRun();
+    this->topology = candidate;
+    return true;
+  }
+
+  void append(const SoPrimitiveVertex * vertex, int materialIndex)
+  {
+    SoIRVertex copy;
+    copy.position = vertex->getPoint();
+    copy.normal = vertex->getNormal();
+    copy.texcoord = vertex->getTextureCoords();
+    copy.materialIndex = materialIndex;
+    this->vertices.push_back(copy);
+  }
+
+  SoIRRenderAction * action;
+  SoShape * shape;
+  std::vector<SoIRRetainedGeometry> * runs;
+  SoPrimitiveTopology topology;
+  std::vector<SoIRVertex> vertices;
+};
+
+// Build and append the SoRenderCommands for one shape's tessellated geometry.
+// The positions/normals/texcoords are the shape-retained streams (stable
+// pointers); the per-vertex material indices, when present, allow the
+// batched/material assignment and any per-vertex colors to be re-derived from
+// the *current* traversal state so a material change is always honoured.
+//
+// This is the materialization half of the IR render cache: it runs both on a
+// fresh tessellation (right after generatePrimitives) and on a cache-replay
+// frame (without re-running generatePrimitives), and is the only per-frame
+// work remaining for an unchanged shape.
+static void
+soshape_emit_ir_commands(SoIRRenderAction * action, SoShape * shape,
+                         SoState * state, const SoIRRetainedGeometry & geom,
+                         bool retained, std::vector<SoIRBatch> & batchScratch)
+{
+  const std::vector<float> & positions = *geom.positions;
+  const std::vector<float> & normals = *geom.normals;
+  const std::vector<float> & texcoords = *geom.texcoords;
+  const bool hasMatIndices = geom.matIndices != nullptr;
+  static const std::vector<int> emptyMatIndices;
+  const std::vector<int> & matIndices =
+    hasMatIndices ? *geom.matIndices : emptyMatIndices;
+  const size_t count = geom.vertexCount;
+  const size_t primitiveWidth = geom.topology == SO_TOPOLOGY_TRIANGLES ? 3
+    : geom.topology == SO_TOPOLOGY_LINES ? 2 : 1;
+
+  const SoMaterialBindingElement::Binding materialBinding =
+    SoMaterialBindingElement::get(state);
+  const bool hasExplicitMaterialIndices =
+    materialBinding == SoMaterialBindingElement::PER_PART ||
+    materialBinding == SoMaterialBindingElement::PER_PART_INDEXED ||
+    materialBinding == SoMaterialBindingElement::PER_FACE ||
+    materialBinding == SoMaterialBindingElement::PER_FACE_INDEXED ||
+    materialBinding == SoMaterialBindingElement::PER_VERTEX_INDEXED;
+  const bool hasPerVertexMaterials =
+    materialBinding == SoMaterialBindingElement::PER_VERTEX ||
+    materialBinding == SoMaterialBindingElement::PER_VERTEX_INDEXED;
+
+  // Reuse the shape-owned scratch (capacity persists across frames) rather
+  // than allocating a fresh batch vector per run.
+  std::vector<SoIRBatch> & batches = batchScratch;
+  batches.clear();
+  batches.reserve((count + primitiveWidth - 1) / primitiveWidth);
+  bool hasMixedMaterials = false;
+  if (!hasExplicitMaterialIndices) {
+    batches.push_back(SoIRBatch(0, count, 0));
+  }
+  for (size_t first = 0; hasExplicitMaterialIndices && first < count;) {
+    const size_t primitiveCount = std::min(primitiveWidth, count - first);
+    int materialIndex = hasMatIndices ? matIndices[first] : 0;
+    for (size_t i = 1; i < primitiveCount; ++i) {
+      if ((hasMatIndices ? matIndices[first + i] : 0) != materialIndex) {
+        materialIndex = -1;
+        hasMixedMaterials = true;
+        break;
+      }
+    }
+    if (batches.empty() || batches.back().materialIndex != materialIndex) {
+      batches.push_back(SoIRBatch(first, primitiveCount, materialIndex));
+    }
+    else {
+      batches.back().count += primitiveCount;
+    }
+    first += primitiveCount;
+  }
+
+  // Per-vertex/mixed colors depend on the current material state, so they are
+  // resolved into action-owned frame storage on every emission.  This is only
+  // reached for the (rare) explicit/per-vertex binding case; the common
+  // single-material case keeps colors null and is shaded by the material
+  // uniform.  The colors buffer lives in the action's arena (persists through
+  // the backend's per-frame update) rather than a local vector, and any command
+  // carrying colors is deliberately not claimed `retained`, since the arena
+  // rewrites the same pointer in place.
+  float * colors = nullptr;
+  if (hasMixedMaterials || hasPerVertexMaterials) {
+    colors = static_cast<float *>(
+      action->allocateGeometryStorage(sizeof(float) * 4 * count));
+    for (size_t i = 0; i < count; ++i) {
+      const int materialIndex = std::max(hasMatIndices ? matIndices[i] : 0, 0);
+      const SbColor & color =
+        SoLazyElement::getDiffuse(state, materialIndex);
+      const float alpha = 1.0f - SoLazyElement::getTransparency(state, materialIndex);
+      colors[i * 4 + 0] = color[0];
+      colors[i * 4 + 1] = color[1];
+      colors[i * 4 + 2] = color[2];
+      colors[i * 4 + 3] = alpha;
+    }
+  }
+
+  // Validate the clip-debug flag once: it is process-lifetime and this runs on
+  // the per-command path, so a getenv() (environ scan) per command is pure
+  // overhead.  Mirrors SoVulkanRenderManager's clipDebugEnabled().
+  static const bool clipDebug = std::getenv("FC_VULKAN_CLIP_DEBUG") != nullptr;
+
+  for (const SoIRBatch & batch : batches) {
+    SoRenderCommand command = {};
+    command.geometry.topology = geom.topology;
+    command.geometry.vertexCount = static_cast<uint32_t>(batch.count);
+    command.geometry.normalCount = command.geometry.vertexCount;
+    command.geometry.vertexStride = sizeof(float) * 3;
+    command.geometry.texcoordStride = sizeof(float) * 4;
+    command.geometry.positions = positions.data() + batch.first * 3;
+    command.geometry.normals = normals.data() + batch.first * 3;
+    command.geometry.texcoords = texcoords.data() + batch.first * 4;
+    command.geometry.colors = colors ? colors + batch.first * 4 : nullptr;
+    // The position/normal/texcoord streams are the shape-retained buffers
+    // (stable pointers, new pointer on change), so the backend can trust
+    // pointer identity without re-hashing.  Commands carrying per-vertex colors
+    // are NOT claimed retained: their colors come from the per-frame arena and
+    // could be rewritten in place, so those must still be content-verified.
+    command.geometry.retained = retained && (colors == nullptr);
+    command.modelMatrix = SoModelMatrixElement::get(state);
+    command.viewMatrix = SoViewingMatrixElement::get(state);
+    command.projMatrix = SoProjectionMatrixElement::get(state);
+    if (clipDebug) {
+      static int mmLog = 0;
+      if (mmLog++ < 6) {
+        SbBool isId = FALSE;
+        const SbMatrix & el = SoModelMatrixElement::get(state, isId);
+        SbMatrix mm = command.modelMatrix;
+        fprintf(stderr, "[SHAPE] cmd rec pass=%d verts=%u model00=%.3f m11=%.3f "
+                        "m22=%.3f trans=(%.3f,%.3f,%.3f) isIdentity=%d "
+                        "el00=%.3f eltrans=(%.3f,%.3f,%.3f)\n",
+                static_cast<int>(command.pass),
+                static_cast<unsigned>(command.geometry.vertexCount),
+                mm[0][0], mm[1][1], mm[2][2],
+                mm[3][0], mm[3][1], mm[3][2],
+                isId ? 1 : 0, el[0][0], el[3][0], el[3][1], el[3][2]);
+      }
+    }
+    SoRenderIR::fillMaterialFromState(
+      state, command.material, std::max(batch.materialIndex, 0));
+    command.material.vertexColorAlphaIncludesOpacity =
+      command.geometry.colors != nullptr;
+    SoRenderIR::fillTextureFromState(state, action, command.material);
+    SoRenderIR::fillRenderStateFromState(state, command.state);
+    SoRenderIR::ensureMaterialBlendState(command.state, command.material);
+    bool transparent = SoRenderIR::isMaterialTransparent(command.material);
+    if (!transparent && command.geometry.colors) {
+      for (uint32_t i = 0; i < command.geometry.vertexCount; ++i) {
+        if (command.geometry.colors[i * 4 + 3] < 0.999f) {
+          transparent = true;
+          break;
+        }
+      }
+    }
+    if (!transparent && command.state.blend.enabled
+        && !command.state.depth.writeEnabled
+        && command.state.depth.func == SO_DEPTH_ALWAYS) {
+      transparent = true;
+    }
+    command.pass = transparent ? SO_RENDERPASS_TRANSPARENT
+                               : SO_RENDERPASS_OPAQUE;
+    command.lightingHandle = SoRenderIR::fillLightingFromState(
+      state, action->getMutableDrawList());
+    command.userData = shape;
+    action->getMutableDrawList().addCommand(command);
+  }
+}
+
+}
 
 // SoShape.cpp grew too big, so I had to move some code into new
 // files. pederb, 2001-07-18
 #include "soshape_primdata.h"
+#if COIN_BUILD_LEGACY_GL_RENDERER
 #include "soshape_trianglesort.h"
 #include "soshape_bigtexture.h"
 #include "soshape_bumprender.h"
+#endif
 
 // *************************************************************************
 
@@ -174,15 +537,24 @@ class SoShapeP {
 public:
   SoShapeP() {
     this->bboxcache = NULL;
+#if COIN_BUILD_LEGACY_GL_RENDERER
     this->pvcache = NULL;
+#endif
+#if COIN_BUILD_LEGACY_GL_RENDERER
     this->bumprender = NULL;
+#endif
     this->rendercnt = 0;
     this->flags = 0;
+    this->irCacheValid = false;
   }
   ~SoShapeP() {
     if (this->bboxcache) { this->bboxcache->unref(); }
+#if COIN_BUILD_LEGACY_GL_RENDERER
     if (this->pvcache) { this->pvcache->unref(); }
+#endif
+#if COIN_BUILD_LEGACY_GL_RENDERER
     delete this->bumprender;
+#endif
   }
   enum {
     RENDERCNT_BITS = 4,     // bits needed to store rendercnt
@@ -197,11 +569,32 @@ public:
   static void calibrateBBoxCache(void);
   static double bboxcachetimelimit;
   SoBoundingBoxCache * bboxcache;
+#if COIN_BUILD_LEGACY_GL_RENDERER
   SoPrimitiveVertexCache * pvcache;
+#endif
+#if COIN_BUILD_LEGACY_GL_RENDERER
   soshape_bumprender * bumprender;
+#endif
   uint32_t flags : FLAG_BITS;
   // stores the number of frames rendered with no node changes
   uint32_t rendercnt : RENDERCNT_BITS;
+
+  // Retained IR tessellation output (positions/normals/texcoords + per-vertex
+  // material indices), cached so an unchanged shape skips generatePrimitives()
+  // on the IR/Vulkan path.  `irCacheValid` is cleared in SoShape::notify() on
+  // any field change; the build-time complexity is snapshotted so a change in
+  // the (non-notified) Complexity element -- which drives primitive count for
+  // shapes like SoSphere -- also forces a rebuild rather than serving stale
+  // tessellation.  A fresh build reallocates the stream buffers (new pointers)
+  // so the backend geometry cache detects the change.
+  std::vector<SoIRRetainedGeometry> irRuns;
+  bool irCacheValid;
+  float irCacheComplexity = -1.0f;
+
+  // Reusable scratch for the IR command emitter: the batch vector is rebuilt
+  // (and only transiently used) on every run/frame, so keeping its capacity
+  // across frames avoids a small heap allocation per emission.
+  std::vector<SoIRBatch> irBatchScratch;
 
   // needed since some VRML97 nodes change the GL state inside the node
   void testSetupShapeHints(SoShape * shape) {
@@ -220,7 +613,11 @@ public:
     if (this->flags & SoShapeP::NEED_SETUP_SHAPE_HINTS) {
       SbBool ccw = ((SoSFBool*)(shape->getField("ccw")))->getValue();
       SbBool solid = ((SoSFBool*)(shape->getField("solid")))->getValue();
+#if COIN_BUILD_LEGACY_GL_RENDERER
       SoGLShapeHintsElement::forceSend(state, ccw, solid, !solid);
+#else
+      (void)state;
+#endif
     }
 #endif // HAVE_VRML97
   }
@@ -269,17 +666,22 @@ enum SoShapeRenderMode {
 
 typedef struct {
   soshape_primdata * primdata;
+#if COIN_BUILD_LEGACY_GL_RENDERER
   SbList <soshape_bigtexture*> * bigtexturelist;
   SbList <uint32_t> * bigtexturecontext;
   soshape_trianglesort * trianglesort;
 
   soshape_bigtexture * currentbigtexture;
+#endif
   // used in generatePrimitives() callbacks to set correct material
   SoMaterialBundle * currentbundle;
 
+#if COIN_BUILD_LEGACY_GL_RENDERER
   int rendermode;
+#endif
 } soshape_staticdata;
 
+#if COIN_BUILD_LEGACY_GL_RENDERER
 static soshape_bigtexture *
 soshape_get_bigtexture(soshape_staticdata * data, uint32_t context)
 {
@@ -293,30 +695,37 @@ soshape_get_bigtexture(soshape_staticdata * data, uint32_t context)
   data->bigtexturecontext->append(context);
   return newtex;
 }
+#endif
 
 static void
 soshape_construct_staticdata(void * closure)
 {
   soshape_staticdata * data = (soshape_staticdata*) closure;
 
+#if COIN_BUILD_LEGACY_GL_RENDERER
   data->bigtexturelist = new SbList <soshape_bigtexture*>;
   data->bigtexturecontext = new SbList <uint32_t>;
-  data->primdata = new soshape_primdata();
   data->trianglesort = new soshape_trianglesort();
   data->rendermode = NORMAL;
+#endif
+  data->primdata = new soshape_primdata();
 }
 
 static void
 soshape_destruct_staticdata(void * closure)
 {
   soshape_staticdata * data = (soshape_staticdata*) closure;
+#if COIN_BUILD_LEGACY_GL_RENDERER
   for (int i = 0; i < data->bigtexturelist->getLength(); i++) {
     delete (*(data->bigtexturelist))[i];
   }
   delete data->bigtexturelist;
   delete data->bigtexturecontext;
+#endif
   delete data->primdata;
+#if COIN_BUILD_LEGACY_GL_RENDERER
   delete data->trianglesort;
+#endif
 }
 
 static SbStorage * soshape_staticstorage;
@@ -361,6 +770,14 @@ SoShape::~SoShape()
   delete PRIVATE(this);
 }
 
+#if COIN_BUILD_LEGACY_GL_RENDERER
+SbBool
+SoShape::canRenderSortedTriangles(void) const
+{
+  return TRUE;
+}
+#endif
+
 /*!
   \copybrief SoBase::initClass(void)
 */
@@ -396,6 +813,7 @@ SoShape::getBoundingBox(SoGetBoundingBoxAction * action)
 }
 
 // Doc in parent.
+#if COIN_BUILD_LEGACY_GL_RENDERER
 void
 SoShape::GLRender(SoGLRenderAction * action)
 {
@@ -424,6 +842,149 @@ SoShape::GLRender(SoGLRenderAction * action)
   this->generatePrimitives(action);
 
   if (vp) action->getState()->pop();
+}
+#endif
+
+void
+SoShape::IRRender(SoIRRenderAction * action)
+{
+  if (!action) return;
+
+  SoState * state = action->getState();
+
+  const SoShapeStyleElement * shapestyle = SoShapeStyleElement::get(state);
+  const unsigned int shapestyleflags = shapestyle->getFlags();
+  if (shapestyleflags & SoShapeStyleElement::INVISIBLE) return;
+
+  // Draw style BOUNDS: record the shape's local bounding box as a solid
+  // cube instead of the shape's primitives, mirroring GLRenderBoundingBox().
+  if (shapestyleflags & SoShapeStyleElement::BBOXCMPLX) {
+    SbBox3f box;
+    SbVec3f center;
+    this->getBBox(action, box, center);
+    if (box.isEmpty()) return;
+
+    const SbVec3f min = box.getMin();
+    const SbVec3f max = box.getMax();
+    const SbVec3f c[8] = {
+      SbVec3f(min[0], min[1], min[2]),
+      SbVec3f(max[0], min[1], min[2]),
+      SbVec3f(max[0], max[1], min[2]),
+      SbVec3f(min[0], max[1], min[2]),
+      SbVec3f(min[0], min[1], max[2]),
+      SbVec3f(max[0], min[1], max[2]),
+      SbVec3f(max[0], max[1], max[2]),
+      SbVec3f(min[0], max[1], max[2])
+    };
+    static const int faces[6][4] = {
+      {4, 5, 6, 7},  // +Z
+      {0, 3, 2, 1},  // -Z
+      {5, 1, 2, 6},  // +X
+      {0, 4, 7, 3},  // -X
+      {7, 6, 2, 3},  // +Y
+      {0, 1, 5, 4}   // -Y
+    };
+    static const SbVec3f normals[6] = {
+      SbVec3f(0.0f, 0.0f, 1.0f),
+      SbVec3f(0.0f, 0.0f, -1.0f),
+      SbVec3f(1.0f, 0.0f, 0.0f),
+      SbVec3f(-1.0f, 0.0f, 0.0f),
+      SbVec3f(0.0f, 1.0f, 0.0f),
+      SbVec3f(0.0f, -1.0f, 0.0f)
+    };
+
+    // The bounds cube is tiny and its geometry follows the (per-frame) bbox,
+    // so it is generated each time (never cached) and emitted immediately.
+    SoIRRetainedGeometry boxRun;
+    {
+      std::vector<SoIRRetainedGeometry> boxRuns;
+      SoIRPrimitiveAssembler assembler(action, this, &boxRuns);
+      action->pushPrimitiveCollector(&assembler);
+      for (int f = 0; f < 6; ++f) {
+        SoPrimitiveVertex v[4];
+        for (int i = 0; i < 4; ++i) {
+          v[i].setPoint(c[faces[f][i]]);
+          v[i].setNormal(normals[f]);
+        }
+        assembler.onTriangle(&v[0], &v[1], &v[2]);
+        assembler.onTriangle(&v[0], &v[2], &v[3]);
+      }
+      action->popPrimitiveCollector(&assembler);
+      assembler.finalize();
+      if (!boxRuns.empty()) {
+        boxRun = std::move(boxRuns[0]);
+      }
+    }
+    if (boxRun.positions) {
+      soshape_emit_ir_commands(action, this, state, boxRun, false,
+                               PRIVATE(this)->irBatchScratch);
+    }
+    return;
+  }
+
+  SoVertexProperty * vertexProperty =
+    this->isOfType(SoVertexShape::getClassTypeId())
+      ? (SoVertexProperty *) static_cast<SoVertexShape *>(this)->vertexProperty.getValue()
+      : NULL;
+  if (vertexProperty) {
+    state->push();
+    vertexProperty->doAction(action);
+  }
+
+  // IR render cache: retain the tessellation output so an unchanged shape does
+  // not re-run generatePrimitives() on every frame.  Material/state-dependent
+  // work (batches, per-vertex colors, matrices, lighting) is re-derived on
+  // every emission from the current state, so only the (expensive) geometry
+  // generation is skipped.  The cache is invalidated on any field change via
+  // SoShape::notify(); a rebuild allocates fresh stream buffers (new pointers)
+  // so the backend geometry cache observes the change.
+  //
+  // notify() and IRRender may run on different threads (GUI vs render), so the
+  // shared irRuns/irCacheValid are guarded by the shape mutex.  geometry
+  // generation on a missed cache runs unlocked into a local buffer; only the
+  // cheap swap/snapshot is under the lock.  Emitting from a snapshot of the
+  // retained runs keeps the shared_ptr stream buffers alive even if a
+  // concurrent edit invalidates the cache mid-frame.
+  std::vector<SoIRRetainedGeometry> emitRuns;
+  const float complexity = SoComplexityElement::get(state);
+  PRIVATE(this)->lock();
+  const bool cacheValid =
+    PRIVATE(this)->irCacheValid && !PRIVATE(this)->irRuns.empty() &&
+    PRIVATE(this)->irCacheComplexity == complexity;
+  if (cacheValid) {
+    emitRuns = PRIVATE(this)->irRuns;
+  }
+  PRIVATE(this)->unlock();
+
+  if (!cacheValid) {
+    std::vector<SoIRRetainedGeometry> built;
+    SoIRPrimitiveAssembler assembler(action, this, &built);
+    action->pushPrimitiveCollector(&assembler);
+    this->generatePrimitives(action);
+    action->popPrimitiveCollector(&assembler);
+    assembler.finalize();
+    PRIVATE(this)->lock();
+    PRIVATE(this)->irRuns.swap(built);
+    PRIVATE(this)->irCacheValid = !PRIVATE(this)->irRuns.empty();
+    PRIVATE(this)->irCacheComplexity = complexity;
+    emitRuns = PRIVATE(this)->irRuns;
+    PRIVATE(this)->unlock();
+  }
+
+  // Emitting writes the shape-owned batch scratch.  Guard it with the same
+  // mutex that protects the cache: notify() and IRRender may run on different
+  // threads, and a second IRRender (e.g. a shared shape rendered by another
+  // viewport's render manager) would otherwise race on irBatchScratch.  The
+  // retained geometry itself is safe to read unlocked (emitRuns is a snapshot
+  // holding shared_ptr refs), so this only serializes the scratch.
+  PRIVATE(this)->lock();
+  for (const SoIRRetainedGeometry & run : emitRuns) {
+    soshape_emit_ir_commands(action, this, state, run, true,
+                             PRIVATE(this)->irBatchScratch);
+  }
+  PRIVATE(this)->unlock();
+
+  if (vertexProperty) state->pop();
 }
 
 // Doc in parent.
@@ -553,6 +1114,7 @@ SoShape::getComplexityValue(SoAction * action)
   }
 }
 
+#if COIN_BUILD_LEGACY_GL_RENDERER
 /*!
   \COININTERNAL
 */
@@ -594,7 +1156,8 @@ SoShape::shouldGLRender(SoGLRenderAction * action)
   }
 
   // test if we should sort triangles before rendering
-  if (transparent && (shapestyleflags & SoShapeStyleElement::TRANSP_SORTED_TRIANGLES)) {
+  if (transparent && this->canRenderSortedTriangles() &&
+      (shapestyleflags & SoShapeStyleElement::TRANSP_SORTED_TRIANGLES)) {
     // lock since pvcache is shared among all threads
     PRIVATE(this)->lock();
     this->validatePVCache(action);
@@ -823,6 +1386,7 @@ SoShape::shouldGLRender(SoGLRenderAction * action)
   return TRUE; // let the shape node render the geometry using OpenGL
 #endif // ! generatePrimitives() rendering
 }
+#endif
 
 /*!
   \COININTERNAL
@@ -847,9 +1411,10 @@ SoShape::shouldRayPick(SoRayPickAction * const action)
   }
 }
 
+#if COIN_BUILD_LEGACY_GL_RENDERER
 /*!
   \COININTERNAL
-*/
+ */
 void
 SoShape::beginSolidShape(SoGLRenderAction * action)
 {
@@ -870,6 +1435,7 @@ SoShape::endSolidShape(SoGLRenderAction * action)
 {
   action->getState()->pop();
 }
+#endif
 
 /*!
   \COININTERNAL
@@ -1053,6 +1619,13 @@ SoShape::invokeTriangleCallbacks(SoAction * const action,
     SoGetPrimitiveCountAction * ga = (SoGetPrimitiveCountAction *) action;
     ga->incNumTriangles();
   }
+  else if (action->getTypeId().isDerivedFrom(SoIRRenderAction::getClassTypeId())) {
+    SoIRRenderAction * ir = static_cast<SoIRRenderAction *>(action);
+    SoIRRenderAction::PrimitiveCollector * collector =
+      ir->getActivePrimitiveCollector();
+    if (collector) collector->onTriangle(v1, v2, v3);
+  }
+#if COIN_BUILD_LEGACY_GL_RENDERER
   else if (action->getTypeId().isDerivedFrom(SoGLRenderAction::getClassTypeId())) {
     soshape_staticdata * shapedata = soshape_get_staticdata();
 
@@ -1092,6 +1665,7 @@ SoShape::invokeTriangleCallbacks(SoAction * const action,
       break;
     }
   }
+#endif
 }
 
 /*!
@@ -1146,6 +1720,13 @@ SoShape::invokeLineSegmentCallbacks(SoAction * const action,
     SoGetPrimitiveCountAction * ga = (SoGetPrimitiveCountAction *) action;
     ga->incNumLines();
   }
+  else if (action->getTypeId().isDerivedFrom(SoIRRenderAction::getClassTypeId())) {
+    SoIRRenderAction * ir = static_cast<SoIRRenderAction *>(action);
+    SoIRRenderAction::PrimitiveCollector * collector =
+      ir->getActivePrimitiveCollector();
+    if (collector) collector->onLine(v1, v2);
+  }
+#if COIN_BUILD_LEGACY_GL_RENDERER
   else if (action->getTypeId().isDerivedFrom(SoGLRenderAction::getClassTypeId())) {
     soshape_staticdata * shapedata = soshape_get_staticdata();
     switch (shapedata->rendermode) {
@@ -1167,6 +1748,7 @@ SoShape::invokeLineSegmentCallbacks(SoAction * const action,
       break;
     }
   }
+#endif
 }
 
 /*!
@@ -1200,6 +1782,13 @@ SoShape::invokePointCallbacks(SoAction * const action,
     SoGetPrimitiveCountAction * ga = (SoGetPrimitiveCountAction *) action;
     ga->incNumPoints();
   }
+  else if (action->getTypeId().isDerivedFrom(SoIRRenderAction::getClassTypeId())) {
+    SoIRRenderAction * ir = static_cast<SoIRRenderAction *>(action);
+    SoIRRenderAction::PrimitiveCollector * collector =
+      ir->getActivePrimitiveCollector();
+    if (collector) collector->onPoint(v);
+  }
+#if COIN_BUILD_LEGACY_GL_RENDERER
   else if (action->getTypeId().isDerivedFrom(SoGLRenderAction::getClassTypeId())) {
     soshape_staticdata * shapedata = soshape_get_staticdata();
 
@@ -1217,6 +1806,7 @@ SoShape::invokePointCallbacks(SoAction * const action,
       break;
     }
   }
+#endif
 }
 
 /*!
@@ -1370,6 +1960,7 @@ SoShape::getDecimatedComplexity(SoState * COIN_UNUSED_ARG(state), float complexi
 /*!
   Render a bounding box.
 */
+#if COIN_BUILD_LEGACY_GL_RENDERER
 void
 SoShape::GLRenderBoundingBox(SoGLRenderAction * action)
 {
@@ -1392,6 +1983,7 @@ SoShape::GLRenderBoundingBox(SoGLRenderAction * action)
                    SOGL_NEED_NORMALS | SOGL_NEED_TEXCOORDS, NULL);
   glPopMatrix();
 }
+#endif
 
 /*!
   \COININTERNAL
@@ -1430,11 +2022,15 @@ SoShape::notify(SoNotList * nl)
   if (PRIVATE(this)->bboxcache) {
     PRIVATE(this)->bboxcache->invalidate();
   }
+#if COIN_BUILD_LEGACY_GL_RENDERER
   if (PRIVATE(this)->pvcache) {
     PRIVATE(this)->pvcache->invalidate();
   }
+#endif
   PRIVATE(this)->flags &= ~SoShapeP::SHOULD_BBOX_CACHE;
   PRIVATE(this)->rendercnt = 0;
+  PRIVATE(this)->irCacheValid = false;
+  PRIVATE(this)->irRuns.clear();
   PRIVATE(this)->unlock();
 }
 
@@ -1559,6 +2155,7 @@ SoShapeP::calibrateBBoxCache(void)
   \sa finishVertexArray()
   \since Coin 3.0
 */
+#if COIN_BUILD_LEGACY_GL_RENDERER
 SbBool
 SoShape::startVertexArray(SoGLRenderAction * action,
                           const SoCoordinateElement * coords,
@@ -1755,7 +2352,9 @@ SoShape::finishVertexArray(SoGLRenderAction * action,
 
   SoGLVertexAttributeElement::getInstance(state)->disableVBO(action);
 }
+#endif
 
+#if COIN_BUILD_LEGACY_GL_RENDERER
 void
 SoShape::validatePVCache(SoGLRenderAction * action)
 {
@@ -1791,6 +2390,7 @@ SoShape::validatePVCache(SoGLRenderAction * action)
     PRIVATE(this)->testSetupShapeHints(this);
   }
 }
+#endif
 
 
 #undef PRIVATE

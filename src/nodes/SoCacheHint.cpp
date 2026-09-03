@@ -109,7 +109,7 @@ SoCacheHint::initClass(void)
 {
   SO_NODE_INTERNAL_INIT_CLASS(SoCacheHint, SO_FROM_COIN_2_4);
   
-  SO_ENABLE(SoGLRenderAction, SoCacheHintElement);
+  SO_ENABLE_LEGACY_GL(SoGLRenderAction, SoCacheHintElement);
 }
 
 void
@@ -121,11 +121,13 @@ SoCacheHint::doAction(SoAction * action)
                           this->gfxValue.getValue());
 }
 
+#if COIN_BUILD_LEGACY_GL_RENDERER
 void
 SoCacheHint::GLRender(SoGLRenderAction * action)
 {
   SoCacheHint::doAction(action);
 }
+#endif
 
 void
 SoCacheHint::callback(SoCallbackAction * action)

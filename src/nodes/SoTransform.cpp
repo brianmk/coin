@@ -341,11 +341,13 @@ SoTransform::doAction(SoAction * action)
 }
 
 // Doc from superclass.
+#if COIN_BUILD_LEGACY_GL_RENDERER
 void
 SoTransform::GLRender(SoGLRenderAction * action)
 {
   SoTransform::doAction((SoAction *)action);
 }
+#endif
 
 // Doc from superclass.
 void

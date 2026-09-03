@@ -34,6 +34,8 @@
 #include <config.h>
 #endif // HAVE_CONFIG_H
 
+class SoVBO;
+
 #ifdef HAVE_VRML97
 
 /*!
@@ -67,17 +69,25 @@
 #include <Inventor/VRMLnodes/SoVRMLMacros.h>
 #include <Inventor/actions/SoGLRenderAction.h>
 #include <Inventor/elements/SoNormalElement.h>
+#if COIN_BUILD_LEGACY_GL_RENDERER
 #include <Inventor/elements/SoGLVBOElement.h>
+#endif
 
 #include "nodes/SoSubNodeP.h"
+#if COIN_BUILD_LEGACY_GL_RENDERER
 #include "rendering/SoVBO.h"
+#endif
 
 SO_NODE_SOURCE(SoVRMLNormal);
 
 class SoVRMLNormalP {
  public:
   SoVRMLNormalP() : vbo(NULL) { }
-  ~SoVRMLNormalP() { delete this->vbo; }
+  ~SoVRMLNormalP() {
+#if COIN_BUILD_LEGACY_GL_RENDERER
+    delete this->vbo;
+#endif
+  }
   
   SoVBO * vbo;
 };
@@ -121,6 +131,7 @@ SoVRMLNormal::doAction(SoAction * action)
 }
 
 // Doc in parent
+#if COIN_BUILD_LEGACY_GL_RENDERER
 void
 SoVRMLNormal::GLRender(SoGLRenderAction * action)
 {
@@ -161,6 +172,7 @@ SoVRMLNormal::GLRender(SoGLRenderAction * action)
   }
 
 }
+#endif
 
 // Doc in parent
 void

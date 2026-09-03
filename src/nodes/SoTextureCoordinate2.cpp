@@ -109,17 +109,26 @@ Separator {
 
 #include <Inventor/nodes/SoTextureCoordinate2.h>
 
+class SoVBO;
+#include <Inventor/elements/SoMultiTextureCoordinateElement.h>
+
 #include <Inventor/actions/SoGLRenderAction.h>
 #include <Inventor/elements/SoGLCacheContextElement.h>
+#if COIN_BUILD_LEGACY_GL_RENDERER
 #include <Inventor/elements/SoGLMultiTextureCoordinateElement.h>
+#endif
 #include <Inventor/elements/SoTextureUnitElement.h>
+#if COIN_BUILD_LEGACY_GL_RENDERER
 #include <Inventor/elements/SoGLVBOElement.h>
+#endif
 #include <Inventor/actions/SoCallbackAction.h>
 #include <Inventor/actions/SoPickAction.h>
 #include <Inventor/C/glue/gl.h>
 
 #include "nodes/SoSubNodeP.h"
+#if COIN_BUILD_LEGACY_GL_RENDERER
 #include "rendering/SoVBO.h"
+#endif
 
 // *************************************************************************
 
@@ -143,7 +152,11 @@ Separator {
 class SoTextureCoordinate2P {
  public:
   SoTextureCoordinate2P() : vbo(NULL) { }
-  ~SoTextureCoordinate2P() { delete this->vbo; }
+  ~SoTextureCoordinate2P() {
+#if COIN_BUILD_LEGACY_GL_RENDERER
+    delete this->vbo;
+#endif
+  }
   SoVBO * vbo;
 };
 
@@ -178,7 +191,7 @@ SoTextureCoordinate2::initClass(void)
 {
   SO_NODE_INTERNAL_INIT_CLASS(SoTextureCoordinate2, SO_FROM_INVENTOR_1|SoNode::VRML1);
 
-  SO_ENABLE(SoGLRenderAction, SoGLMultiTextureCoordinateElement);
+  SO_ENABLE_LEGACY_GL(SoGLRenderAction, SoGLMultiTextureCoordinateElement);
   SO_ENABLE(SoCallbackAction, SoMultiTextureCoordinateElement);
   SO_ENABLE(SoPickAction, SoMultiTextureCoordinateElement);
 }
@@ -194,6 +207,7 @@ SoTextureCoordinate2::doAction(SoAction * action)
                                         this->point.getValues(0));
 }
 
+#if COIN_BUILD_LEGACY_GL_RENDERER
 // Documented in superclass.
 void
 SoTextureCoordinate2::GLRender(SoGLRenderAction * action)
@@ -237,6 +251,7 @@ SoTextureCoordinate2::GLRender(SoGLRenderAction * action)
   SoBase::staticDataUnlock();
   SoGLVBOElement::setTexCoordVBO(state, 0, setvbo ? PRIVATE(this)->vbo : NULL);
 }
+#endif
 
 // Documented in superclass.
 void

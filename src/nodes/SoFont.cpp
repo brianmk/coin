@@ -279,8 +279,8 @@ SoFont::initClass(void)
 
   SO_ENABLE(SoCallbackAction, SoFontNameElement);
   SO_ENABLE(SoCallbackAction, SoFontSizeElement);
-  SO_ENABLE(SoGLRenderAction, SoFontNameElement);
-  SO_ENABLE(SoGLRenderAction, SoFontSizeElement);
+  SO_ENABLE_LEGACY_GL(SoGLRenderAction, SoFontNameElement);
+  SO_ENABLE_LEGACY_GL(SoGLRenderAction, SoFontSizeElement);
   SO_ENABLE(SoGetBoundingBoxAction, SoFontNameElement);
   SO_ENABLE(SoGetBoundingBoxAction, SoFontSizeElement);
   SO_ENABLE(SoGetPrimitiveCountAction, SoFontNameElement);
@@ -322,11 +322,13 @@ SoFont::getBoundingBox(SoGetBoundingBoxAction * action)
 }
 
 // Doc from superclass.
+#if COIN_BUILD_LEGACY_GL_RENDERER
 void
 SoFont::GLRender(SoGLRenderAction * action)
 {
   SoFont::doAction(action);
 }
+#endif
 
 // Doc from superclass.
 void

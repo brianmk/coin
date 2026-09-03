@@ -33,6 +33,9 @@
  * OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 \**************************************************************************/
 
+#include <Inventor/C/basic.h>
+
+#if COIN_HAVE_LEGACY_GL_RENDERER
 #include <Inventor/actions/SoGLRenderAction.h>
 #include <Inventor/SbColor.h>
 
@@ -79,5 +82,6 @@ private:
   SoLineHighlightRenderAction(const SoLineHighlightRenderAction & rhs);
   SoLineHighlightRenderAction & operator = (const SoLineHighlightRenderAction & rhs);
 }; // SoLineHighlightRenderAction
+#endif
 
 #endif // !COIN_SOLINEHIGHLIGHTRENDERACTION_H

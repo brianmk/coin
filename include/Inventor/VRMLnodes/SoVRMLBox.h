@@ -48,7 +48,9 @@ public:
 
   SoSFVec3f size;
 
+#if COIN_HAVE_LEGACY_GL_RENDERER
   void GLRender(SoGLRenderAction * action) override;
+#endif
   void rayPick(SoRayPickAction * action) override;
   void getPrimitiveCount( SoGetPrimitiveCountAction * action ) override;
 

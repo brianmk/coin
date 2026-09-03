@@ -106,15 +106,18 @@
 
 #include <cassert>
 
+#if COIN_BUILD_LEGACY_GL_RENDERER
 #include <Inventor/actions/SoGLRenderAction.h>
+#endif
 #include <Inventor/actions/SoSearchAction.h>
 #include <Inventor/elements/SoGLCacheContextElement.h>
 #include <Inventor/elements/SoGLShaderProgramElement.h>
-#include <Inventor/elements/SoGLMultiTextureImageElement.h>
+#include <Inventor/elements/SoMultiTextureImageElement.h>
 #include <Inventor/elements/SoLazyElement.h>
 #include <Inventor/misc/SoContextHandler.h>
 #include <Inventor/misc/SoGLDriverDatabase.h>
 #include <Inventor/errors/SoDebugError.h>
+#include <Inventor/SbName.h>
 #include <Inventor/nodes/SoFragmentShader.h>
 #include <Inventor/nodes/SoShaderParameter.h>
 #include <Inventor/nodes/SoVertexShader.h>
@@ -130,6 +133,41 @@
 #include "shaders/SoGLSLShaderObject.h"
 #include "shaders/SoGLShaderProgram.h"
 
+#include <cstring>
+
+// *************************************************************************
+
+static SbString
+soshaderobject_inline_source_preview(const SbString & source)
+{
+  const char * cursor = source.getString();
+  if (cursor == NULL) return SbString("<inline>");
+
+  while (*cursor != '\0') {
+    const char * text = cursor;
+    while (*text == ' ' || *text == '\t') ++text;
+
+    const char * end = text;
+    while (*end != '\0' && *end != '\n' && *end != '\r') ++end;
+    while (end > text && (end[-1] == ' ' || end[-1] == '\t')) --end;
+
+    // #version is useful to the compiler but not as a source identity.
+    if (end != text && std::strncmp(text, "#version", 8) != 0) {
+      SbString preview(text, 0, int(end - text) - 1);
+      if (preview.getLength() > 80) {
+        preview = preview.getSubString(0, 79);
+        preview += "...";
+      }
+      return preview;
+    }
+
+    cursor = end;
+    while (*cursor == '\n' || *cursor == '\r') ++cursor;
+  }
+
+  return SbString("<inline>");
+}
+
 // *************************************************************************
 
 class SoShaderObjectP
@@ -138,7 +176,9 @@ public:
   SoShaderObjectP(SoShaderObject *ownerptr);
   ~SoShaderObjectP();
 
+#if COIN_BUILD_LEGACY_GL_RENDERER
   void GLRender(SoGLRenderAction *action);
+#endif
   void render(SoState * state);
 
   SoGLShaderObject * getGLShaderObject(const uint32_t cachecontext) {
@@ -198,6 +238,7 @@ public:
 
   SoShaderObject * owner;
   SoShaderObject::SourceType cachedSourceType;
+  SbString resolvedSourceName;
   SbString cachedSourceProgram;
   SbBool didSetSearchDirectories;
   SbBool shouldload;
@@ -221,9 +262,7 @@ private:
 
   SbBool isSupported(SoShaderObject::SourceType sourceType, const cc_glglue * glue);
 
-#if defined(SOURCE_HINT)
   SbString getSourceHint(void) const;
-#endif
 };
 
 #define PRIVATE(obj) ((obj)->pimpl)
@@ -277,11 +316,13 @@ SoShaderObject::~SoShaderObject()
 }
 
 // doc from parent
+#if COIN_BUILD_LEGACY_GL_RENDERER
 void
 SoShaderObject::GLRender(SoGLRenderAction * action)
 {
   PRIVATE(this)->GLRender(action);
 }
+#endif
 
 // doc from parent
 void
@@ -389,11 +430,13 @@ SoShaderObjectP::~SoShaderObjectP()
   delete this->sensor;
 }
 
+#if COIN_BUILD_LEGACY_GL_RENDERER
 void
 SoShaderObjectP::GLRender(SoGLRenderAction * action)
 {
   this->render(action ? action->getState() : NULL);
 }
+#endif
 
 void
 SoShaderObjectP::render(SoState * state)
@@ -466,9 +509,7 @@ SoShaderObjectP::render(SoState * state)
 
     }
 
-#if defined(SOURCE_HINT)
     shaderobject->sourceHint = getSourceHint();
-#endif
     shaderobject->load(this->cachedSourceProgram.getString());
     this->setGLShaderObject(shaderobject, cachecontext);
   }
@@ -540,6 +581,7 @@ SoShaderObjectP::readSource(void)
   SoShaderObject::SourceType srcType =
     (SoShaderObject::SourceType)this->owner->sourceType.getValue();
 
+  this->resolvedSourceName.makeEmpty();
   this->cachedSourceProgram.makeEmpty();
 
   if (this->owner->sourceProgram.isDefault())
@@ -577,6 +619,7 @@ SoShaderObjectP::readSource(void)
             size_t readlen = fread(srcstr, 1, length, f);
             if (readlen == (size_t) length) {
               srcstr[length] = '\0';
+              this->resolvedSourceName = fileName;
               this->cachedSourceProgram = srcstr;
               readok = TRUE;
             }
@@ -606,7 +649,8 @@ SoShaderObjectP::isSupported(SoShaderObject::SourceType sourceType, const cc_glg
       return SoGLDriverDatabase::isSupported(glue, SO_GL_ARB_VERTEX_PROGRAM);
     }
     else if (sourceType == SoShaderObject::GLSL_PROGRAM) {
-      return SoGLDriverDatabase::isSupported(glue, SO_GL_ARB_SHADER_OBJECT);
+      return cc_glglue_glversion_matches_at_least(glue, 2, 0, 0) ||
+        SoGLDriverDatabase::isSupported(glue, SO_GL_ARB_SHADER_OBJECT);
     }
     // FIXME: Add support for detecting missing Cg support
     // (20050427 handegar)
@@ -621,7 +665,8 @@ SoShaderObjectP::isSupported(SoShaderObject::SourceType sourceType, const cc_glg
       return SoGLDriverDatabase::isSupported(glue, SO_GL_ARB_FRAGMENT_PROGRAM);
     }
     else if (sourceType == SoShaderObject::GLSL_PROGRAM) {
-      return SoGLDriverDatabase::isSupported(glue, SO_GL_ARB_SHADER_OBJECT);
+      return cc_glglue_glversion_matches_at_least(glue, 2, 0, 0) ||
+        SoGLDriverDatabase::isSupported(glue, SO_GL_ARB_SHADER_OBJECT);
     }
     // FIXME: Add support for detecting missing Cg support (20050427
     // handegar)
@@ -631,9 +676,11 @@ SoShaderObjectP::isSupported(SoShaderObject::SourceType sourceType, const cc_glg
   else {
     assert(this->owner->isOfType(SoGeometryShader::getClassTypeId()));
     if (sourceType == SoShaderObject::GLSL_PROGRAM) {
-      return
-        SoGLDriverDatabase::isSupported(glue, "GL_EXT_geometry_shader4") &&
+      const SbBool shaderObjects =
+        cc_glglue_glversion_matches_at_least(glue, 2, 0, 0) ||
         SoGLDriverDatabase::isSupported(glue, SO_GL_ARB_SHADER_OBJECT);
+      return shaderObjects &&
+        SoGLDriverDatabase::isSupported(glue, "GL_EXT_geometry_shader4");
     }
     return FALSE;
   }
@@ -674,27 +721,35 @@ SoShaderObjectP::updateCoinParameters(const uint32_t cachecontext, SoState * sta
     
     if (strncmp(name.getString(), "coin_", 5) == 0) {
       if (name == "coin_texunit0_model") {
-        SoMultiTextureImageElement::Model model;
-        SbColor dummy;
-        SbBool tex = SoGLMultiTextureImageElement::get(state, model, dummy) != NULL;
+        SoMultiTextureImageElement::Model model =
+          SoMultiTextureImageElement::getModel(state, 0);
+        SbVec2s size;
+        int numcomponents;
+        SbBool tex = SoMultiTextureImageElement::getImage(state, 0, size, numcomponents) != NULL;
         shaderobject->updateCoinParameter(state, name, NULL, tex ? model : 0);
       }
       else if (name == "coin_texunit1_model") {
-        SoMultiTextureImageElement::Model model;
-        SbColor dummy;
-        SbBool tex = SoGLMultiTextureImageElement::get(state, 1, model, dummy) != NULL;
+        SoMultiTextureImageElement::Model model =
+          SoMultiTextureImageElement::getModel(state, 1);
+        SbVec2s size;
+        int numcomponents;
+        SbBool tex = SoMultiTextureImageElement::getImage(state, 1, size, numcomponents) != NULL;
         shaderobject->updateCoinParameter(state, name, NULL, tex ? model : 0);
       }
       else if (name == "coin_texunit2_model") {
-        SoMultiTextureImageElement::Model model;
-        SbColor dummy;
-        SbBool tex = SoGLMultiTextureImageElement::get(state, 2, model, dummy) != NULL;
+        SoMultiTextureImageElement::Model model =
+          SoMultiTextureImageElement::getModel(state, 2);
+        SbVec2s size;
+        int numcomponents;
+        SbBool tex = SoMultiTextureImageElement::getImage(state, 2, size, numcomponents) != NULL;
         shaderobject->updateCoinParameter(state, name, NULL, tex ? model : 0);
       }
       else if (name == "coin_texunit3_model") {
-        SoMultiTextureImageElement::Model model;
-        SbColor dummy;
-        SbBool tex = SoGLMultiTextureImageElement::get(state, 3, model, dummy) != NULL;
+        SoMultiTextureImageElement::Model model =
+          SoMultiTextureImageElement::getModel(state, 3);
+        SbVec2s size;
+        int numcomponents;
+        SbBool tex = SoMultiTextureImageElement::getImage(state, 3, size, numcomponents) != NULL;
         shaderobject->updateCoinParameter(state, name, NULL, tex ? model : 0);
       }
       else if (name == "coin_light_model") {
@@ -760,19 +815,19 @@ SoShaderObjectP::containStateMatrixParameters(void) const
   return FALSE;
 }
 
-#if defined(SOURCE_HINT)
 SbString
 SoShaderObjectP::getSourceHint(void) const
 {
-  SoShaderObject::SourceType srcType =
-    (SoShaderObject::SourceType)this->owner->sourceType.getValue();
+  if (this->resolvedSourceName.getLength() > 0) {
+    return this->resolvedSourceName;
+  }
 
-  if (srcType == SoShaderObject::FILENAME)
+  if (this->cachedSourceType == SoShaderObject::FILENAME) {
     return this->owner->sourceProgram.getValue();
-  else
-    return ""; // FIXME: should return first line of shader source code
+  }
+
+  return soshaderobject_inline_source_preview(this->cachedSourceProgram);
 }
-#endif
 
 void
 SoShaderObjectP::sensorCB(void *data, SoSensor *sensor)

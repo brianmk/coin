@@ -36,8 +36,31 @@
 #include <Inventor/misc/SoContextHandler.h>
 
 #include "shaders/SoGLSLShaderObject.h"
+#include "shaders/SoGLSLShaderDiagnostics.h"
 #include <Inventor/errors/SoDebugError.h>
 #include "glue/glp.h"
+#include "glue/glslp.h"
+
+// *************************************************************************
+
+static void
+soglshaderprogram_append_source_description(
+  SbString & result, const SoGLSLShaderObject * shader)
+{
+  if (shader == NULL || !shader->isActive() ||
+      shader->sourceHint.getLength() == 0) return;
+
+  SbString sourceDescription(soglsl_stage_name(shader->getShaderType()));
+  sourceDescription += "=";
+  sourceDescription += shader->sourceHint;
+
+  if (result.getLength() > 0) result += ", ";
+  result += sourceDescription;
+  if (result.getLength() > 256) {
+    result = result.getSubString(0, 252);
+    result += "...";
+  }
+}
 
 // *************************************************************************
 
@@ -113,10 +136,11 @@ SoGLSLShaderProgram::enable(const cc_glglue * g)
 
   if (this->isExecutable) {
     COIN_GLhandle programhandle = this->getProgramHandle(g, TRUE);
-    g->glUseProgramObjectARB(programhandle);
+    cc_glglue_glUseProgram(g, (GLuint) programhandle);
 
     if (SoGLSLShaderObject::didOpenGLErrorOccur("SoGLSLShaderProgram::enable")) {
-      SoGLSLShaderObject::printInfoLog(g, programhandle, 0);
+      SoGLSLShaderProgram::printInfoLog(g, programhandle,
+                                        this->getSourceDescription(), FALSE);
     }
   }
 }
@@ -125,26 +149,20 @@ void
 SoGLSLShaderProgram::disable(const cc_glglue * g)
 {
   if (this->isExecutable) {
-    g->glUseProgramObjectARB(0);
+    cc_glglue_glUseProgram(g, 0);
   }
 }
 
-#if defined(SOURCE_HINT)
 SbString
-SoGLSLShaderProgram::getSourceHint(void) const
+SoGLSLShaderProgram::getSourceDescription(void) const
 {
   SbString result;
-  for (int i=0; i<this->shaderObjects.size(); i++) {
+  for (int i=0; i<this->shaderObjects.getLength(); i++) {
     SoGLSLShaderObject *shader = this->shaderObjects[i];
-    if (shader && shader->isActive()) {
-      SbString str = shader->sourceHint;
-      if (str.getLength() > 0) str += " ";
-      result += str;
-    }
+    soglshaderprogram_append_source_description(result, shader);
   }
   return result;
 }
-#endif
 
 void
 SoGLSLShaderProgram::ensureLinking(const cc_glglue * g)
@@ -168,28 +186,60 @@ SoGLSLShaderProgram::ensureLinking(const cc_glglue * g)
   if (cnt > 0) {
     int i;
     GLint didLink = 0;
+    const SbString sourceDescription = this->getSourceDescription();
 
     for (i = 0; i < cnt; i++) {
       this->shaderObjects[i]->attach(programHandle);
     }
 
     for (i = 0; i < this->programParameters.getLength(); i += 2) {
-      g->glProgramParameteriEXT(programHandle,
-                                (GLenum) this->programParameters[i],
-                                this->programParameters[i+1]);
+      cc_glglue_glProgramParameteriEXT(g, (GLuint) programHandle,
+                                       (GLenum) this->programParameters[i],
+                                       this->programParameters[i+1]);
 
     }
 
-    g->glLinkProgramARB(programHandle);
+    cc_glglue_glLinkProgram(g, (GLuint) programHandle);
+    cc_glglue_glGetGLSLProgramiv(g, (GLuint) programHandle, GL_LINK_STATUS, &didLink);
 
-    if (SoGLSLShaderObject::didOpenGLErrorOccur("SoGLSLShaderProgram::ensureLinking")) {
-      SoGLSLShaderObject::printInfoLog(g, programHandle, 0);
+    if (SoGLSLShaderObject::didOpenGLErrorOccur("SoGLSLShaderProgram::ensureLinking")
+      || !didLink) {
+      printInfoLog(g, programHandle, sourceDescription, !didLink);
     }
-    g->glGetObjectParameterivARB(programHandle,
-                                 GL_OBJECT_LINK_STATUS_ARB,&didLink);
 
     this->isExecutable = didLink;
     this->neededlinking = TRUE;
+  }
+}
+
+void
+SoGLSLShaderProgram::printInfoLog(const cc_glglue * g,
+                                  COIN_GLhandle handle,
+                                  const SbString & sourceDescription,
+                                  const SbBool failed)
+{
+  const char * sourceName = sourceDescription.getLength() > 0 ?
+    sourceDescription.getString() : "<unnamed>";
+  const SbString infoLog = soglsl_get_info_log(g, (GLuint) handle, TRUE);
+
+  if (infoLog.getLength() > 0) {
+    if (failed) {
+      SoDebugError::postWarning("SoGLSLShaderProgram::printInfoLog",
+                                "program [%s] failed to link: %s",
+                                sourceName,
+                                infoLog.getString());
+    }
+    else {
+      SoDebugError::postInfo("SoGLSLShaderProgram::printInfoLog",
+                             "program [%s] log: %s",
+                             sourceName,
+                             infoLog.getString());
+    }
+  }
+  else if (failed) {
+    SoDebugError::postWarning("SoGLSLShaderProgram::printInfoLog",
+                              "program [%s] failed to link with no linker log",
+                              sourceName);
   }
 }
 
@@ -216,7 +266,7 @@ SoGLSLShaderProgram::getProgramHandle(const cc_glglue * g, const SbBool create)
 {
   COIN_GLhandle handle = 0;
   if (!this->programHandles.get(g->contextid, handle) && create) {
-    handle = g->glCreateProgramObjectARB();
+    handle = (COIN_GLhandle) cc_glglue_glCreateProgram(g);
     this->programHandles.put(g->contextid, handle);
   }
   return handle;
@@ -237,7 +287,7 @@ SoGLSLShaderProgram::context_destruction_cb(uint32_t cachecontext, void * userda
   if (thisp->programHandles.get(cachecontext, glhandle)) {
     // just delete immediately. The context is current
     const cc_glglue * glue = cc_glglue_instance(cachecontext);
-    glue->glDeleteObjectARB(glhandle);
+    cc_glglue_glDeleteProgram(glue, (GLuint) glhandle);
     thisp->programHandles.erase(cachecontext);
   }
 }
@@ -250,7 +300,7 @@ SoGLSLShaderProgram::really_delete_object(void * closure, uint32_t contextid)
   COIN_GLhandle glhandle = (COIN_GLhandle) tmp;
 
   const cc_glglue * glue = cc_glglue_instance(contextid);
-  glue->glDeleteObjectARB(glhandle);
+  cc_glglue_glDeleteProgram(glue, (GLuint) glhandle);
 }
 
 void

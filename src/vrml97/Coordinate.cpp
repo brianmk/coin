@@ -34,6 +34,8 @@
 #include <config.h>
 #endif // HAVE_CONFIG_H
 
+class SoVBO;
+
 #ifdef HAVE_VRML97
 
 /*!
@@ -66,11 +68,15 @@
 #include <Inventor/actions/SoGLRenderAction.h>
 #include <Inventor/VRMLnodes/SoVRMLMacros.h>
 #include <Inventor/elements/SoCoordinateElement.h>
+#if COIN_BUILD_LEGACY_GL_RENDERER
 #include <Inventor/elements/SoGLVBOElement.h>
+#endif
 #include <Inventor/actions/SoAction.h>
 
 #include "nodes/SoSubNodeP.h"
+#if COIN_BUILD_LEGACY_GL_RENDERER
 #include "rendering/SoVBO.h"
+#endif
 
 SO_NODE_SOURCE(SoVRMLCoordinate);
 
@@ -79,7 +85,11 @@ SO_NODE_SOURCE(SoVRMLCoordinate);
 class SoVRMLCoordinateP {
  public:
   SoVRMLCoordinateP() : vbo(NULL) { }
-  ~SoVRMLCoordinateP() { delete this->vbo; }
+  ~SoVRMLCoordinateP() {
+#if COIN_BUILD_LEGACY_GL_RENDERER
+    delete this->vbo;
+#endif
+  }
   SoVBO * vbo;
 };
 
@@ -120,6 +130,7 @@ SoVRMLCoordinate::doAction(SoAction * action)
 }
 
 // Doc in parent
+#if COIN_BUILD_LEGACY_GL_RENDERER
 void
 SoVRMLCoordinate::GLRender(SoGLRenderAction * action)
 {
@@ -155,6 +166,7 @@ SoVRMLCoordinate::GLRender(SoGLRenderAction * action)
   }
 
 }
+#endif
 
 // Doc in parent
 void

@@ -34,6 +34,9 @@
 #include <config.h>
 #endif // HAVE_CONFIG_H
 
+#include <Inventor/elements/SoLazyElement.h>
+#include <Inventor/elements/SoShapeHintsElement.h>
+
 #ifdef HAVE_VRML97
 
 /*!
@@ -129,10 +132,18 @@
 #include <Inventor/elements/SoCullElement.h>
 #include <Inventor/elements/SoComplexityTypeElement.h>
 #include <Inventor/caches/SoBoundingBoxCache.h>
+#if COIN_BUILD_LEGACY_GL_RENDERER
 #include <Inventor/caches/SoGLCacheList.h>
+#endif
+#if COIN_BUILD_LEGACY_GL_RENDERER
 #include <Inventor/elements/SoGLLazyElement.h>
+#endif
+#if COIN_BUILD_LEGACY_GL_RENDERER
 #include <Inventor/caches/SoGLCacheList.h>
+#endif
+#if COIN_BUILD_LEGACY_GL_RENDERER
 #include <Inventor/elements/SoGLShapeHintsElement.h>
+#endif
 #include <Inventor/system/gl.h>
 #ifdef HAVE_THREADS
 #include <Inventor/threads/SbMutex.h>
@@ -142,6 +153,8 @@
 #include "nodes/SoSubNodeP.h"
 #include "tidbitsp.h"
 #include "profiler/SoNodeProfiling.h"
+
+class SoGLCacheList;
 
 // *************************************************************************
 
@@ -219,7 +232,9 @@ SoVRMLShape::SoVRMLShape(void)
 SoVRMLShape::~SoVRMLShape()
 {
   delete PRIVATE(this)->childlist;
+#if COIN_BUILD_LEGACY_GL_RENDERER
   delete PRIVATE(this)->cachelist;
+#endif
   delete PRIVATE(this);
 }
 
@@ -271,6 +286,7 @@ SoVRMLShape::callback(SoCallbackAction * action)
   SoVRMLShape::doAction((SoAction*) action);
 }
 
+#if COIN_BUILD_LEGACY_GL_RENDERER
 void
 SoVRMLShape::GLRender(SoGLRenderAction * action)
 {
@@ -327,6 +343,7 @@ SoVRMLShape::GLRender(SoGLRenderAction * action)
   }
   state->pop();
 }
+#endif
 
 void
 SoVRMLShape::getBoundingBox(SoGetBoundingBoxAction * action)

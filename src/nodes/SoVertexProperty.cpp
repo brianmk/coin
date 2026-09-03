@@ -95,25 +95,40 @@
 
 #include <Inventor/nodes/SoVertexProperty.h>
 
+class SoVBO;
+#include <Inventor/elements/SoCoordinateElement.h>
+#include <Inventor/elements/SoMultiTextureCoordinateElement.h>
+#include <Inventor/elements/SoNormalElement.h>
+
 #include <Inventor/actions/SoCallbackAction.h>
 #include <Inventor/actions/SoGLRenderAction.h>
 #include <Inventor/actions/SoGetBoundingBoxAction.h>
 #include <Inventor/actions/SoGetPrimitiveCountAction.h>
 #include <Inventor/actions/SoPickAction.h>
 #include <Inventor/elements/SoLazyElement.h>
+#if COIN_BUILD_LEGACY_GL_RENDERER
 #include <Inventor/elements/SoGLCoordinateElement.h>
+#endif
+#if COIN_BUILD_LEGACY_GL_RENDERER
 #include <Inventor/elements/SoGLNormalElement.h>
+#endif
+#if COIN_BUILD_LEGACY_GL_RENDERER
 #include <Inventor/elements/SoGLMultiTextureCoordinateElement.h>
+#endif
 #include <Inventor/elements/SoMaterialBindingElement.h>
 #include <Inventor/elements/SoNormalBindingElement.h>
 #include <Inventor/elements/SoOverrideElement.h>
 #include <Inventor/elements/SoShapeStyleElement.h>
+#if COIN_BUILD_LEGACY_GL_RENDERER
 #include <Inventor/elements/SoGLVBOElement.h>
+#endif
 #include <Inventor/lists/SbList.h>
 #include <Inventor/errors/SoDebugError.h>
 
 #include "nodes/SoSubNodeP.h"
+#if COIN_BUILD_LEGACY_GL_RENDERER
 #include "rendering/SoVBO.h"
+#endif
 
 /*!
   \enum SoVertexProperty::Binding
@@ -229,12 +244,14 @@ class SoVertexPropertyP {
     this->transparent = FALSE;
   }
   ~SoVertexPropertyP() {
+#if COIN_BUILD_LEGACY_GL_RENDERER
     for (int i = 0; i < this->texcoordvbo.getLength(); i++) {
       delete this->texcoordvbo[i];
     }
     delete this->vertexvbo;
     delete this->normalvbo;
     delete this->colorvbo;
+#endif
   }
   
   SoVertexProperty * master;
@@ -306,11 +323,11 @@ SoVertexProperty::initClass(void)
 
   SO_ENABLE(SoGetBoundingBoxAction, SoCoordinateElement);
 
-  SO_ENABLE(SoGLRenderAction, SoGLCoordinateElement);
-  SO_ENABLE(SoGLRenderAction, SoMaterialBindingElement);
-  SO_ENABLE(SoGLRenderAction, SoNormalBindingElement);
-  SO_ENABLE(SoGLRenderAction, SoGLNormalElement);
-  SO_ENABLE(SoGLRenderAction, SoGLMultiTextureCoordinateElement);
+  SO_ENABLE_LEGACY_GL(SoGLRenderAction, SoGLCoordinateElement);
+  SO_ENABLE_LEGACY_GL(SoGLRenderAction, SoMaterialBindingElement);
+  SO_ENABLE_LEGACY_GL(SoGLRenderAction, SoNormalBindingElement);
+  SO_ENABLE_LEGACY_GL(SoGLRenderAction, SoGLNormalElement);
+  SO_ENABLE_LEGACY_GL(SoGLRenderAction, SoGLMultiTextureCoordinateElement);
 
   SO_ENABLE(SoPickAction, SoCoordinateElement);
   SO_ENABLE(SoPickAction, SoMaterialBindingElement);
@@ -341,12 +358,14 @@ SoVertexProperty::getBoundingBox(SoGetBoundingBoxAction * action)
   }
 }
 
+#if COIN_BUILD_LEGACY_GL_RENDERER
 // Documented in superclass.
 void
 SoVertexProperty::GLRender(SoGLRenderAction * action)
 {
   SoVertexProperty::doAction(action);
 }
+#endif
 
 #define TEST_OVERRIDE(bit, flags) ((SoOverrideElement::bit & (flags)) != 0)
 
@@ -357,7 +376,10 @@ SoVertexProperty::doAction(SoAction *action)
   SoState * state = action->getState();
 
   uint32_t overrideflags = SoOverrideElement::getFlags(state);
-  SbBool glrender = action->isOfType(SoGLRenderAction::getClassTypeId());
+  SbBool glrender = FALSE;
+#if COIN_BUILD_LEGACY_GL_RENDERER
+  glrender = action->isOfType(SoGLRenderAction::getClassTypeId());
+#endif
   if (glrender) SoBase::staticDataLock();
 
   if (PRIVATE(this)->checktransparent) {
@@ -371,7 +393,11 @@ SoVertexProperty::doAction(SoAction *action)
       }
     }
   }
+#if COIN_BUILD_LEGACY_GL_RENDERER
   const SbBool shouldcreatevbo = glrender ? SoGLVBOElement::shouldCreateVBO(state, this->vertex.getNum()) : FALSE;
+#else
+  const SbBool shouldcreatevbo = FALSE;
+#endif
   this->updateVertex(state, glrender, shouldcreatevbo);
   this->updateNormal(state, overrideflags, glrender, shouldcreatevbo);
   this->updateMaterial(state, overrideflags, glrender, shouldcreatevbo);
@@ -425,6 +451,7 @@ SoVertexProperty::updateVertex(SoState * state, SbBool glrender, SbBool vbo)
   if (num > 0) {    
     SoCoordinateElement::set3(state, this, num,
                               this->vertex.getValues(0));
+#if COIN_BUILD_LEGACY_GL_RENDERER
     if (glrender) {
       if (vbo) {
         SbBool dirty = FALSE;
@@ -447,6 +474,7 @@ SoVertexProperty::updateVertex(SoState * state, SbBool glrender, SbBool vbo)
       }
       SoGLVBOElement::setVertexVBO(state, vbo ? PRIVATE(this)->vertexvbo : NULL);
     }
+#endif
   }
 }
 
@@ -478,12 +506,14 @@ SoVertexProperty::updateTexCoord(SoState * state, SbBool glrender, SbBool vbo)
     else {
       for (int i = 0; i < numunits; i++) {
         int32_t unit = this->textureUnit[i];
+#if COIN_BUILD_LEGACY_GL_RENDERER
         if (glrender) {
           // it's important to call this _before_ setting the coordinates
           // on the state.
           SoGLMultiTextureCoordinateElement::setTexGen(state,
                                                        this, unit, NULL);
         }
+#endif
         if (dim == 2) {
           SoMultiTextureCoordinateElement::set2(state, this, unit, numperunit,
                                                 tc2 + i*numperunit);
@@ -493,6 +523,7 @@ SoVertexProperty::updateTexCoord(SoState * state, SbBool glrender, SbBool vbo)
                                                 tc3 + i*numperunit);
         }
       
+#if COIN_BUILD_LEGACY_GL_RENDERER
         if (glrender) {
           SbBool setvbo = FALSE;
 
@@ -529,6 +560,7 @@ SoVertexProperty::updateTexCoord(SoState * state, SbBool glrender, SbBool vbo)
           }
           SoGLVBOElement::setTexCoordVBO(state, 0, setvbo ? PRIVATE(this)->texcoordvbo[i] : NULL);
         }
+#endif
       }
     }
   }
@@ -545,6 +577,7 @@ SoVertexProperty::updateNormal(SoState * state, uint32_t overrideflags, SbBool g
     if (this->isOverride()) {
       SoOverrideElement::setNormalVectorOverride(state, this, TRUE);
     }
+#if COIN_BUILD_LEGACY_GL_RENDERER
     if (glrender) {
       SbBool setvbo = FALSE;
       if ((num == numvertex) && vbo) {
@@ -569,6 +602,7 @@ SoVertexProperty::updateNormal(SoState * state, uint32_t overrideflags, SbBool g
       }
       SoGLVBOElement::setNormalVBO(state, setvbo ? PRIVATE(this)->normalvbo : NULL);
     }
+#endif
   }
   if (this->normal.getNum() > 0 && !TEST_OVERRIDE(NORMAL_BINDING, overrideflags)) {
     SoNormalBindingElement::set(state, this,
@@ -594,6 +628,7 @@ SoVertexProperty::updateMaterial(SoState * state, uint32_t overrideflags, SbBool
     if (this->isOverride()) {
       SoOverrideElement::setDiffuseColorOverride(state, this, TRUE);
     }
+#if COIN_BUILD_LEGACY_GL_RENDERER
     if (glrender) {
       SbBool setvbo = FALSE;
       if ((num == numvertex) && vbo) {
@@ -633,6 +668,7 @@ SoVertexProperty::updateMaterial(SoState * state, uint32_t overrideflags, SbBool
       }
       SoGLVBOElement::setColorVBO(state, setvbo ? PRIVATE(this)->colorvbo : NULL);
     }
+#endif
   }
   if (num && !TEST_OVERRIDE(MATERIAL_BINDING, overrideflags)) {
     SoMaterialBindingElement::set(state, this,

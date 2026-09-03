@@ -61,6 +61,10 @@
 
 #include <Inventor/nodes/SoIndexedLineSet.h>
 
+class SoVBO;
+#include <Inventor/elements/SoLazyElement.h>
+#include <Inventor/elements/SoShapeHintsElement.h>
+
 #include <cassert>
 
 #ifdef HAVE_CONFIG_H
@@ -78,13 +82,21 @@
 #include <Inventor/elements/SoNormalBindingElement.h>
 #include <Inventor/elements/SoMaterialBindingElement.h>
 #include <Inventor/elements/SoCoordinateElement.h>
+#if COIN_BUILD_LEGACY_GL_RENDERER
 #include <Inventor/elements/SoGLShapeHintsElement.h>
+#endif
 #include <Inventor/elements/SoTextureCoordinateBindingElement.h>
 #include <Inventor/elements/SoDrawStyleElement.h>
+#if COIN_BUILD_LEGACY_GL_RENDERER
 #include <Inventor/elements/SoGLCoordinateElement.h>
+#endif
+#if COIN_BUILD_LEGACY_GL_RENDERER
 #include <Inventor/elements/SoGLLazyElement.h>
+#endif
 #include <Inventor/elements/SoGLCacheContextElement.h>
+#if COIN_BUILD_LEGACY_GL_RENDERER
 #include <Inventor/elements/SoGLVBOElement.h>
+#endif
 #include <Inventor/elements/SoMultiTextureCoordinateElement.h>
 #include <Inventor/elements/SoMultiTextureEnabledElement.h>
 #include <Inventor/bundles/SoTextureCoordinateBundle.h>
@@ -97,9 +109,16 @@
 #endif // COIN_DEBUG
 
 #include "nodes/SoSubNodeP.h"
+
+#include "coindefs.h"
+class SoVertexArrayIndexer;
 #include "rendering/SoGL.h"
+#if COIN_BUILD_LEGACY_GL_RENDERER
 #include "rendering/SoVertexArrayIndexer.h"
+#endif
+#if COIN_BUILD_LEGACY_GL_RENDERER
 #include "rendering/SoVBO.h"
+#endif
 
 
 SO_NODE_SOURCE(SoIndexedLineSet);
@@ -130,7 +149,9 @@ SoIndexedLineSet::SoIndexedLineSet()
 */
 SoIndexedLineSet::~SoIndexedLineSet()
 {
+#if COIN_BUILD_LEGACY_GL_RENDERER
   delete PRIVATE(this)->vaindexer;
+#endif
   delete PRIVATE(this);
 }
 
@@ -229,6 +250,7 @@ SoIndexedLineSet::findNormalBinding(SoState* state)
 }
 
 
+#if COIN_BUILD_LEGACY_GL_RENDERER
 // doc from parent
 void
 SoIndexedLineSet::GLRender(SoGLRenderAction * action)
@@ -413,6 +435,7 @@ SoIndexedLineSet::GLRender(SoGLRenderAction * action)
   // send approx number of lines for autocache handling
   sogl_autocache_update(state, this->coordIndex.getNum() / 2, didrenderasvbo);
 }
+#endif
 
 // Documented in superclass.
 SbBool
@@ -781,7 +804,9 @@ SoIndexedLineSet::notify(SoNotList * list)
   SoField *f = list->getLastField();
   if (f == &this->coordIndex) {
     LOCK_VAINDEXER(this);
+#if COIN_BUILD_LEGACY_GL_RENDERER
     delete PRIVATE(this)->vaindexer;
+#endif
     PRIVATE(this)->vaindexer = NULL;
     UNLOCK_VAINDEXER(this);
   }

@@ -31,20 +31,28 @@
 \**************************************************************************/
 
 #include "shaders/SoGLSLShaderObject.h"
+#include <Inventor/elements/SoMultiTextureImageElement.h>
 #include "coindefs.h"
 
+#include <Inventor/system/gl.h>
 #include <cassert>
 #include <cstdio>
 #include <Inventor/errors/SoDebugError.h>
-#include <Inventor/system/gl.h>
+
+// GL 3.2+ shader types not in macOS legacy GL headers
+#ifdef __APPLE__
+#ifndef GL_GEOMETRY_SHADER
+#define GL_GEOMETRY_SHADER 0x8DD9
+#endif
+#endif
 
 #include "glue/glp.h"
+#include "glue/glslp.h"
 #include "rendering/SoGL.h"
+#include "shaders/SoGLSLShaderDiagnostics.h"
 #include "shaders/SoGLSLShaderParameter.h"
 
 static int32_t soglshaderobject_idcounter = 1;
-
-// *************************************************************************
 
 SoGLSLShaderObject::SoGLSLShaderObject(const uint32_t cachecontext)
   : SoGLShaderObject(cachecontext)
@@ -91,46 +99,54 @@ SoGLSLShaderObject::load(const char* srcStr)
   default:
     assert(0 &&" unknown shader type");
   case VERTEX:
-    sType = GL_VERTEX_SHADER_ARB;
+    sType = GL_VERTEX_SHADER;
     break;
   case FRAGMENT:
-    sType = GL_FRAGMENT_SHADER_ARB;
+    sType = GL_FRAGMENT_SHADER;
     break;
   case GEOMETRY:
-    sType = GL_GEOMETRY_SHADER_EXT;
+    sType = GL_GEOMETRY_SHADER;
     break;
   }
 
   SoGLSLShaderObject::didOpenGLErrorOccur("SoGLSLShaderObject::load() : previous errors");
 
-  this->shaderHandle = this->glctx->glCreateShaderObjectARB(sType);
+  this->shaderHandle = (COIN_GLhandle) cc_glglue_glCreateShader(this->glctx, sType);
   this->programid = 0;
 
   if (this->shaderHandle == 0) return;
   this->programid = soglshaderobject_idcounter++;
 
-  this->glctx->glShaderSourceARB(this->shaderHandle, 1, (const COIN_GLchar **)&srcStr, NULL);
-  this->glctx->glCompileShaderARB(this->shaderHandle);
+  const char * preparedSourcePtr = srcStr;
+  cc_glglue_glShaderSource(this->glctx, (GLuint) this->shaderHandle, 1,
+                           &preparedSourcePtr, NULL);
+  cc_glglue_glCompileShader(this->glctx, (GLuint) this->shaderHandle);
 
   if (SoGLSLShaderObject::didOpenGLErrorOccur("SoGLSLShaderObject::load()")) {
     this->shaderHandle = 0;
     return;
   }
 
-  this->glctx->glGetObjectParameterivARB(this->shaderHandle,
-                                         GL_OBJECT_COMPILE_STATUS_ARB,
-                                         &flag);
-  SoGLSLShaderObject::printInfoLog(this->GLContext(), this->shaderHandle,
-                                   this->getShaderType());
+  cc_glglue_glGetShaderiv(this->glctx, (GLuint) this->shaderHandle,
+                          GL_COMPILE_STATUS, &flag);
+  SoGLSLShaderObject::printInfoLog(this->GLContext(),
+                                   this->shaderHandle,
+                                   this->getShaderType(),
+                                   this->sourceHint,
+                                   !flag);
 
-  if (!flag) this->shaderHandle = 0;
+  if (!flag) {
+    this->shaderHandle = 0;
+  }
 }
 
 void
 SoGLSLShaderObject::unload(void)
 {
   this->detach();
-  if (this->shaderHandle) { this->glctx->glDeleteObjectARB(this->shaderHandle); }
+  if (this->shaderHandle) {
+    cc_glglue_glDeleteShader(this->glctx, (GLuint) this->shaderHandle);
+  }
   this->shaderHandle = 0;
   this->programHandle = 0;
   this->programid = 0;
@@ -153,7 +169,9 @@ SoGLSLShaderObject::attach(COIN_GLhandle programHandle)
 
   if (this->shaderHandle) {
     this->programHandle = programHandle;
-    this->glctx->glAttachObjectARB(this->programHandle, this->shaderHandle);
+    cc_glglue_glAttachShader(this->glctx,
+                             (GLuint) this->programHandle,
+                             (GLuint) this->shaderHandle);
     this->isattached = TRUE;
   }
 }
@@ -162,7 +180,9 @@ void
 SoGLSLShaderObject::detach(void)
 {
   if (this->isattached && this->programHandle && this->shaderHandle) {
-    this->glctx->glDetachObjectARB(this->programHandle, this->shaderHandle);
+    cc_glglue_glDetachShader(this->glctx,
+                             (GLuint) this->programHandle,
+                             (GLuint) this->shaderHandle);
     this->isattached = FALSE;
     this->programHandle = 0;
   }
@@ -175,27 +195,37 @@ SoGLSLShaderObject::isAttached(void) const
 }
 
 void
-SoGLSLShaderObject::printInfoLog(const cc_glglue * g, COIN_GLhandle handle, int objType)
+SoGLSLShaderObject::printInfoLog(const cc_glglue * g,
+                                 COIN_GLhandle handle,
+                                 const ShaderType shaderType,
+                                 const SbString & sourceHint,
+                                 const SbBool failed)
 {
-  GLint length = 0;
+  const char * sourceName = sourceHint.getLength() > 0 ?
+    sourceHint.getString() : "<unnamed>";
+  const SbString infoLog = soglsl_get_info_log(g, (GLuint) handle, FALSE);
 
-  g->glGetObjectParameterivARB(handle, GL_OBJECT_INFO_LOG_LENGTH_ARB, &length);
-
-  if (length > 1) {
-    COIN_GLchar *infoLog = new COIN_GLchar[length];
-    GLsizei charsWritten = 0;
-    g->glGetInfoLogARB(handle, length, &charsWritten, infoLog);
-    SbString s("GLSL");
-    switch (objType) {
-    case 0: s += "vertexShader "; break;
-    case 1: s += "fragmentShader "; break;
-    case 2: s += "geometryShader "; break;
-    default: ;// do nothing
+  if (infoLog.getLength() > 0) {
+    if (failed) {
+      SoDebugError::postWarning("SoGLSLShaderObject::printInfoLog",
+                                "%s '%s' failed to compile: %s",
+                                soglsl_stage_name(shaderType),
+                                sourceName,
+                                infoLog.getString());
     }
-    SoDebugError::postInfo("SoGLSLShaderObject::printInfoLog",
-                           "%s log: '%s'",
-                           s.getString(), infoLog);
-    delete [] infoLog;
+    else {
+      SoDebugError::postInfo("SoGLSLShaderObject::printInfoLog",
+                             "%s '%s' log: %s",
+                             soglsl_stage_name(shaderType),
+                             sourceName,
+                             infoLog.getString());
+    }
+  }
+  else if (failed) {
+    SoDebugError::postWarning("SoGLSLShaderObject::printInfoLog",
+                              "%s '%s' failed to compile with no compiler log",
+                              soglsl_stage_name(shaderType),
+                              sourceName);
   }
 }
 
@@ -230,7 +260,9 @@ SoGLSLShaderObject::didOpenGLErrorOccur(const SbString & source)
 #include <cstdio>
 #include <Inventor/SbName.h>
 #include <Inventor/nodes/SoShaderParameter.h>
+#if COIN_BUILD_LEGACY_GL_RENDERER
 #include <Inventor/elements/SoGLMultiTextureImageElement.h>
+#endif
 #include <Inventor/elements/SoLightModelElement.h>
 #include <Inventor/actions/SoAction.h>
 #include <cstdio>
@@ -249,8 +281,8 @@ SoGLSLShaderObject::updateCoinParameter(SoState * COIN_UNUSED_ARG(state), const 
       if (p->value.getValue() != value) p->value = value;
     }
     else {
-      GLint location = glue->glGetUniformLocationARB(pHandle,
-                                                     (const COIN_GLchar *)name.getString());
+      GLint location = cc_glglue_glGetUniformLocation(
+        glue, (GLuint) pHandle, name.getString());
 
 #if 0
       fprintf(stderr,"action: %s, name: %s, loc: %d, handle: %p\n",
@@ -258,7 +290,7 @@ SoGLSLShaderObject::updateCoinParameter(SoState * COIN_UNUSED_ARG(state), const 
               name.getString(), location, pHandle);
 #endif
       if (location >= 0) {
-        glue->glUniform1iARB(location, value);
+        glue->glUniform1i(location, value);
       }
     }
   }

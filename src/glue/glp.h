@@ -241,6 +241,12 @@ typedef void (APIENTRY * COIN_PFNGLDRAWELEMENTSPROC)(GLenum mode, GLsizei count,
 typedef void (APIENTRY * COIN_PFNGLDRAWRANGEELEMENTSPROC)(GLenum mode, GLuint start, GLuint end, GLsizei count, GLenum type, const GLvoid * indices);
 typedef void (APIENTRY * COIN_PFNGLARRAYELEMENTPROC)(GLint i);
 
+/* Modern entry points which are not exported by the Windows OpenGL 1.1
+   import library and therefore must be resolved through the active context. */
+typedef void (APIENTRY * COIN_PFNGLBINDVERTEXARRAYPROC)(GLuint array);
+typedef void (APIENTRY * COIN_PFNGLDELETEVERTEXARRAYSPROC)(GLsizei n, const GLuint * arrays);
+typedef void (APIENTRY * COIN_PFNGLGENVERTEXARRAYSPROC)(GLsizei n, GLuint * arrays);
+
 typedef void (APIENTRY * COIN_PFNGLMULTIDRAWARRAYSPROC)(GLenum mode, const GLint * first,
                                                         const GLsizei * count, GLsizei primcount);
 typedef void (APIENTRY * COIN_PFNGLMULTIDRAWELEMENTSPROC)(GLenum mode, const GLsizei * count,
@@ -482,7 +488,7 @@ typedef void (APIENTRY * COIN_PFNGLGETACTIVEATTRIBARBPROC)(COIN_GLhandle program
 
 
 /* Typedefs for shader objects -- GL_ARB_shader_objects */
-typedef void (APIENTRY * COIN_PFNGLPROGRAMPARAMETERIEXT)(COIN_GLhandle, GLenum, GLenum);
+typedef void (APIENTRY * COIN_PFNGLPROGRAMPARAMETERIEXT)(COIN_GLhandle, GLenum, GLint);
 
 typedef int (APIENTRY * COIN_PFNGLGETUNIFORMLOCATIONARBPROC)(COIN_GLhandle,
                                                              const COIN_GLchar *);
@@ -508,22 +514,72 @@ typedef void (APIENTRY * COIN_PFNGLGETINFOLOGARBPROC)(COIN_GLhandle, GLsizei, GL
 typedef void (APIENTRY * COIN_PFNGLLINKPROGRAMARBPROC)(COIN_GLhandle);
 typedef void (APIENTRY * COIN_PFNGLUSEPROGRAMOBJECTARBPROC)(COIN_GLhandle);
 typedef COIN_GLhandle (APIENTRY * COIN_PFNGLCREATEPROGRAMOBJECTARBPROC)(void);
-typedef void (APIENTRY * COIN_PFNGLUNIFORM1FVARBPROC)(COIN_GLhandle, GLsizei, const GLfloat *);
-typedef void (APIENTRY * COIN_PFNGLUNIFORM2FVARBPROC)(COIN_GLhandle, GLsizei, const GLfloat *);
-typedef void (APIENTRY * COIN_PFNGLUNIFORM3FVARBPROC)(COIN_GLhandle, GLsizei, const GLfloat *);
-typedef void (APIENTRY * COIN_PFNGLUNIFORM4FVARBPROC)(COIN_GLhandle, GLsizei, const GLfloat *);
-typedef void (APIENTRY * COIN_PFNGLUNIFORM1IARBPROC)(COIN_GLhandle, const GLint);
-typedef void (APIENTRY * COIN_PFNGLUNIFORM2IARBPROC)(COIN_GLhandle, const GLint, GLint);
-typedef void (APIENTRY * COIN_PFNGLUNIFORM3IARBPROC)(COIN_GLhandle, const GLint, GLint, GLint);
-typedef void (APIENTRY * COIN_PFNGLUNIFORM4IARBPROC)(COIN_GLhandle, const GLint, GLint, GLint, GLint);
-typedef void (APIENTRY * COIN_PFNGLUNIFORM1IVARBPROC)(COIN_GLhandle, GLsizei, const GLint *);
-typedef void (APIENTRY * COIN_PFNGLUNIFORM2IVARBPROC)(COIN_GLhandle, GLsizei, const GLint *);
-typedef void (APIENTRY * COIN_PFNGLUNIFORM3IVARBPROC)(COIN_GLhandle, GLsizei, const GLint *);
-typedef void (APIENTRY * COIN_PFNGLUNIFORM4IVARBPROC)(COIN_GLhandle, GLsizei, const GLint *);
+typedef void (APIENTRY * COIN_PFNGLUNIFORM1FVARBPROC)(GLint, GLsizei, const GLfloat *);
+typedef void (APIENTRY * COIN_PFNGLUNIFORM2FVARBPROC)(GLint, GLsizei, const GLfloat *);
+typedef void (APIENTRY * COIN_PFNGLUNIFORM3FVARBPROC)(GLint, GLsizei, const GLfloat *);
+typedef void (APIENTRY * COIN_PFNGLUNIFORM4FVARBPROC)(GLint, GLsizei, const GLfloat *);
+typedef void (APIENTRY * COIN_PFNGLUNIFORM1IARBPROC)(GLint, const GLint);
+typedef void (APIENTRY * COIN_PFNGLUNIFORM2IARBPROC)(GLint, const GLint, GLint);
+typedef void (APIENTRY * COIN_PFNGLUNIFORM3IARBPROC)(GLint, const GLint, GLint, GLint);
+typedef void (APIENTRY * COIN_PFNGLUNIFORM4IARBPROC)(GLint, const GLint, GLint, GLint, GLint);
+typedef void (APIENTRY * COIN_PFNGLUNIFORM1IVARBPROC)(GLint, GLsizei, const GLint *);
+typedef void (APIENTRY * COIN_PFNGLUNIFORM2IVARBPROC)(GLint, GLsizei, const GLint *);
+typedef void (APIENTRY * COIN_PFNGLUNIFORM3IVARBPROC)(GLint, GLsizei, const GLint *);
+typedef void (APIENTRY * COIN_PFNGLUNIFORM4IVARBPROC)(GLint, GLsizei, const GLint *);
 
-typedef void (APIENTRY * COIN_PFNGLUNIFORMMATRIX2FVARBPROC)(COIN_GLhandle, GLsizei, GLboolean, const GLfloat *);
-typedef void (APIENTRY * COIN_PFNGLUNIFORMMATRIX3FVARBPROC)(COIN_GLhandle, GLsizei, GLboolean, const GLfloat *);
-typedef void (APIENTRY * COIN_PFNGLUNIFORMMATRIX4FVARBPROC)(COIN_GLhandle, GLsizei, GLboolean, const GLfloat *);
+typedef void (APIENTRY * COIN_PFNGLUNIFORMMATRIX2FVARBPROC)(GLint, GLsizei, GLboolean, const GLfloat *);
+typedef void (APIENTRY * COIN_PFNGLUNIFORMMATRIX3FVARBPROC)(GLint, GLsizei, GLboolean, const GLfloat *);
+typedef void (APIENTRY * COIN_PFNGLUNIFORMMATRIX4FVARBPROC)(GLint, GLsizei, GLboolean, const GLfloat *);
+
+/* Standard GLSL entry points.  These are resolved dynamically so shader
+   users do not have to link directly against post-OpenGL-1.1 symbols. */
+typedef GLuint (APIENTRY * COIN_PFNGLCREATESHADERPROC)(GLenum);
+typedef void (APIENTRY * COIN_PFNGLSHADERSOURCEPROC)(GLuint, GLsizei,
+                                                      const char * const *,
+                                                      const GLint *);
+typedef void (APIENTRY * COIN_PFNGLCOMPILESHADERPROC)(GLuint);
+typedef void (APIENTRY * COIN_PFNGLGETSHADERIVPROC)(GLuint, GLenum, GLint *);
+typedef void (APIENTRY * COIN_PFNGLGETSHADERINFOLOGPROC)(GLuint, GLsizei,
+                                                          GLsizei *, char *);
+typedef void (APIENTRY * COIN_PFNGLDELETESHADERPROC)(GLuint);
+typedef void (APIENTRY * COIN_PFNGLATTACHSHADERPROC)(GLuint, GLuint);
+typedef void (APIENTRY * COIN_PFNGLDETACHSHADERPROC)(GLuint, GLuint);
+typedef GLint (APIENTRY * COIN_PFNGLGETUNIFORMLOCATIONPROC)(GLuint, const char *);
+typedef void (APIENTRY * COIN_PFNGLGETACTIVEUNIFORMPROC)(GLuint, GLuint, GLsizei,
+                                                          GLsizei *, GLint *, GLenum *, char *);
+typedef void (APIENTRY * COIN_PFNGLUNIFORM1FPROC)(GLint, GLfloat);
+typedef void (APIENTRY * COIN_PFNGLUNIFORM2FPROC)(GLint, GLfloat, GLfloat);
+typedef void (APIENTRY * COIN_PFNGLUNIFORM3FPROC)(GLint, GLfloat, GLfloat, GLfloat);
+typedef void (APIENTRY * COIN_PFNGLUNIFORM4FPROC)(GLint, GLfloat, GLfloat, GLfloat, GLfloat);
+typedef void (APIENTRY * COIN_PFNGLUNIFORM1FVPROC)(GLint, GLsizei, const GLfloat *);
+typedef void (APIENTRY * COIN_PFNGLUNIFORM2FVPROC)(GLint, GLsizei, const GLfloat *);
+typedef void (APIENTRY * COIN_PFNGLUNIFORM3FVPROC)(GLint, GLsizei, const GLfloat *);
+typedef void (APIENTRY * COIN_PFNGLUNIFORM4FVPROC)(GLint, GLsizei, const GLfloat *);
+typedef void (APIENTRY * COIN_PFNGLUNIFORM1IPROC)(GLint, GLint);
+typedef void (APIENTRY * COIN_PFNGLUNIFORM2IPROC)(GLint, GLint, GLint);
+typedef void (APIENTRY * COIN_PFNGLUNIFORM3IPROC)(GLint, GLint, GLint, GLint);
+typedef void (APIENTRY * COIN_PFNGLUNIFORM4IPROC)(GLint, GLint, GLint, GLint, GLint);
+typedef void (APIENTRY * COIN_PFNGLUNIFORM1IVPROC)(GLint, GLsizei, const GLint *);
+typedef void (APIENTRY * COIN_PFNGLUNIFORM2IVPROC)(GLint, GLsizei, const GLint *);
+typedef void (APIENTRY * COIN_PFNGLUNIFORM3IVPROC)(GLint, GLsizei, const GLint *);
+typedef void (APIENTRY * COIN_PFNGLUNIFORM4IVPROC)(GLint, GLsizei, const GLint *);
+typedef void (APIENTRY * COIN_PFNGLUNIFORMMATRIX4FVPROC)(GLint, GLsizei, GLboolean,
+                                                           const GLfloat *);
+typedef GLuint (APIENTRY * COIN_PFNGLCREATEPROGRAMPROC)(void);
+typedef void (APIENTRY * COIN_PFNGLLINKPROGRAMPROC)(GLuint);
+typedef void (APIENTRY * COIN_PFNGLUSEPROGRAMPROC)(GLuint);
+typedef void (APIENTRY * COIN_PFNGLDELETEPROGRAMPROC)(GLuint);
+typedef void (APIENTRY * COIN_PFNGLGETPROGRAMIVPROC)(GLuint, GLenum, GLint *);
+typedef void (APIENTRY * COIN_PFNGLGETPROGRAMINFOLOGPROC)(GLuint, GLsizei, GLsizei *, char *);
+typedef void (APIENTRY * COIN_PFNGLBINDATTRIBLOCATIONPROC)(GLuint, GLuint, const char *);
+typedef GLint (APIENTRY * COIN_PFNGLGETATTRIBLOCATIONPROC)(GLuint, const char *);
+typedef void (APIENTRY * COIN_PFNGLVERTEXATTRIB1FPROC)(GLuint, GLfloat);
+typedef void (APIENTRY * COIN_PFNGLVERTEXATTRIB2FPROC)(GLuint, GLfloat, GLfloat);
+typedef void (APIENTRY * COIN_PFNGLVERTEXATTRIB3FPROC)(GLuint, GLfloat, GLfloat, GLfloat);
+typedef void (APIENTRY * COIN_PFNGLVERTEXATTRIB4FPROC)(GLuint, GLfloat, GLfloat, GLfloat, GLfloat);
+typedef void (APIENTRY * COIN_PFNGLVERTEXATTRIBPOINTERPROC)(GLuint, GLint, GLenum, GLboolean, GLsizei, const GLvoid *);
+typedef void (APIENTRY * COIN_PFNGLENABLEVERTEXATTRIBARRAYPROC)(GLuint);
+typedef void (APIENTRY * COIN_PFNGLDISABLEVERTEXATTRIBARRAYPROC)(GLuint);
 
 
 /* Typedefs for occlusion queries -- GL_ARB_occlusion_query */
@@ -658,6 +714,10 @@ struct cc_glglue {
   COIN_PFNGLDRAWELEMENTSPROC glDrawElements;
   COIN_PFNGLDRAWRANGEELEMENTSPROC glDrawRangeElements;
   COIN_PFNGLARRAYELEMENTPROC glArrayElement;
+
+  COIN_PFNGLBINDVERTEXARRAYPROC glBindVertexArray;
+  COIN_PFNGLDELETEVERTEXARRAYSPROC glDeleteVertexArrays;
+  COIN_PFNGLGENVERTEXARRAYSPROC glGenVertexArrays;
 
   COIN_PFNGLMULTIDRAWARRAYSPROC glMultiDrawArrays;
   COIN_PFNGLMULTIDRAWELEMENTSPROC glMultiDrawElements;
@@ -800,6 +860,49 @@ struct cc_glglue {
   COIN_PFNGLUNIFORMMATRIX3FVARBPROC glUniformMatrix3fvARB;
   COIN_PFNGLUNIFORMMATRIX4FVARBPROC glUniformMatrix4fvARB;
 
+  COIN_PFNGLCREATESHADERPROC glCreateShader;
+  COIN_PFNGLSHADERSOURCEPROC glShaderSource;
+  COIN_PFNGLCOMPILESHADERPROC glCompileShader;
+  COIN_PFNGLGETSHADERIVPROC glGetShaderiv;
+  COIN_PFNGLGETSHADERINFOLOGPROC glGetShaderInfoLog;
+  COIN_PFNGLDELETESHADERPROC glDeleteShader;
+  COIN_PFNGLATTACHSHADERPROC glAttachShader;
+  COIN_PFNGLDETACHSHADERPROC glDetachShader;
+  COIN_PFNGLGETUNIFORMLOCATIONPROC glGetUniformLocation;
+  COIN_PFNGLGETACTIVEUNIFORMPROC glGetActiveUniform;
+  COIN_PFNGLUNIFORM1FPROC glUniform1f;
+  COIN_PFNGLUNIFORM2FPROC glUniform2f;
+  COIN_PFNGLUNIFORM3FPROC glUniform3f;
+  COIN_PFNGLUNIFORM4FPROC glUniform4f;
+  COIN_PFNGLUNIFORM1FVPROC glUniform1fv;
+  COIN_PFNGLUNIFORM2FVPROC glUniform2fv;
+  COIN_PFNGLUNIFORM3FVPROC glUniform3fv;
+  COIN_PFNGLUNIFORM4FVPROC glUniform4fv;
+  COIN_PFNGLUNIFORM1IPROC glUniform1i;
+  COIN_PFNGLUNIFORM2IPROC glUniform2i;
+  COIN_PFNGLUNIFORM3IPROC glUniform3i;
+  COIN_PFNGLUNIFORM4IPROC glUniform4i;
+  COIN_PFNGLUNIFORM1IVPROC glUniform1iv;
+  COIN_PFNGLUNIFORM2IVPROC glUniform2iv;
+  COIN_PFNGLUNIFORM3IVPROC glUniform3iv;
+  COIN_PFNGLUNIFORM4IVPROC glUniform4iv;
+  COIN_PFNGLUNIFORMMATRIX4FVPROC glUniformMatrix4fv;
+  COIN_PFNGLCREATEPROGRAMPROC glCreateProgram;
+  COIN_PFNGLLINKPROGRAMPROC glLinkProgram;
+  COIN_PFNGLUSEPROGRAMPROC glUseProgram;
+  COIN_PFNGLDELETEPROGRAMPROC glDeleteProgram;
+  COIN_PFNGLGETPROGRAMIVPROC glGetProgramiv;
+  COIN_PFNGLGETPROGRAMINFOLOGPROC glGetProgramInfoLog;
+  COIN_PFNGLBINDATTRIBLOCATIONPROC glBindAttribLocation;
+  COIN_PFNGLGETATTRIBLOCATIONPROC glGetAttribLocation;
+  COIN_PFNGLVERTEXATTRIB1FPROC glVertexAttrib1f;
+  COIN_PFNGLVERTEXATTRIB2FPROC glVertexAttrib2f;
+  COIN_PFNGLVERTEXATTRIB3FPROC glVertexAttrib3f;
+  COIN_PFNGLVERTEXATTRIB4FPROC glVertexAttrib4f;
+  COIN_PFNGLVERTEXATTRIBPOINTERPROC glVertexAttribPointer;
+  COIN_PFNGLENABLEVERTEXATTRIBARRAYPROC glEnableVertexAttribArray;
+  COIN_PFNGLDISABLEVERTEXATTRIBARRAYPROC glDisableVertexAttribArray;
+
   COIN_PFNGLPUSHCLIENTATTRIBPROC glPushClientAttrib;
   COIN_PFNGLPOPCLIENTATTRIBPROC glPopClientAttrib;
 
@@ -870,6 +973,8 @@ struct cc_glglue {
 
   SbBool vbo_in_displaylist_ok;
   SbBool non_power_of_two_textures;
+  SbBool legacy_rendering_support_cached;
+  SbBool context_supports_legacy_rendering;
   int max_lights;
   float line_width_range[2];
   float point_size_range[2];

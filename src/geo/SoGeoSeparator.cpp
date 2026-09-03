@@ -148,6 +148,7 @@ SoGeoSeparator::applyTransformation(SoAction * action)
 }
 
 // Doc from superclass.
+#if COIN_BUILD_LEGACY_GL_RENDERER
 void
 SoGeoSeparator::GLRenderBelowPath(SoGLRenderAction * action)
 {
@@ -157,8 +158,10 @@ SoGeoSeparator::GLRenderBelowPath(SoGLRenderAction * action)
   SoSeparator::GLRenderBelowPath(action);
   state->pop();
 }
+#endif
 
 // Doc from superclass.
+#if COIN_BUILD_LEGACY_GL_RENDERER
 void
 SoGeoSeparator::GLRenderInPath(SoGLRenderAction * action)
 {
@@ -168,6 +171,7 @@ SoGeoSeparator::GLRenderInPath(SoGLRenderAction * action)
   SoSeparator::GLRenderInPath(action);
   state->pop();
 }
+#endif
 
 // Doc from superclass.
 void

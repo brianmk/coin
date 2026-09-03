@@ -55,7 +55,10 @@
 
 #include <Inventor/SoDB.h>
 #include <Inventor/nodes/SoAntiSquish.h>
+#include <Inventor/nodes/SoSelection.h>
+#if COIN_BUILD_LEGACY_GL_RENDERER
 #include <Inventor/nodes/SoExtSelection.h>
+#endif
 #include <Inventor/nodes/SoSurroundScale.h>
 
 #include <Inventor/nodekits/SoNodeKit.h>
@@ -132,7 +135,9 @@ SoInteraction::init(void)
 
   SoAntiSquish::initClass();
   SoSelection::initClass();
+#if COIN_BUILD_LEGACY_GL_RENDERER
   SoExtSelection::initClass();
+#endif
   SoSurroundScale::initClass();
 
   SoNodeKit::init();

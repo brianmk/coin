@@ -42,11 +42,11 @@
 
 #include <cstdio>
 
+#if COIN_HAVE_LEGACY_GL_RENDERER
 class SoBase;
 class SoGLRenderAction;
 class SoNode;
 class SoPath;
-
 // This shouldn't strictly be necessary, but the OSF1/cxx compiler
 // complains if this is left out, while using the "friend class
 // SoExtSelectionP" statement in the class definition.
@@ -104,5 +104,6 @@ private:
   friend class SoOffscreenRendererP;
   class SoOffscreenRendererP * pimpl;
 };
+#endif
 
 #endif // !COIN_SOOFFSCREENRENDERER_H

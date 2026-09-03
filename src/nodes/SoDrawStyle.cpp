@@ -76,12 +76,24 @@
 // *************************************************************************
 
 #include <Inventor/actions/SoCallbackAction.h>
+#include <Inventor/elements/SoDrawStyleElement.h>
+#include <Inventor/elements/SoLinePatternElement.h>
+#include <Inventor/elements/SoLineWidthElement.h>
+#include <Inventor/elements/SoPointSizeElement.h>
 
 #include <Inventor/actions/SoGLRenderAction.h>
+#if COIN_BUILD_LEGACY_GL_RENDERER
 #include <Inventor/elements/SoGLDrawStyleElement.h>
+#endif
+#if COIN_BUILD_LEGACY_GL_RENDERER
 #include <Inventor/elements/SoGLLinePatternElement.h>
+#endif
+#if COIN_BUILD_LEGACY_GL_RENDERER
 #include <Inventor/elements/SoGLLineWidthElement.h>
+#endif
+#if COIN_BUILD_LEGACY_GL_RENDERER
 #include <Inventor/elements/SoGLPointSizeElement.h>
+#endif
 #include <Inventor/elements/SoOverrideElement.h>
 #include <Inventor/elements/SoShapeStyleElement.h>
 
@@ -205,11 +217,11 @@ SoDrawStyle::initClass(void)
 {
   SO_NODE_INTERNAL_INIT_CLASS(SoDrawStyle, SO_FROM_INVENTOR_1);
 
-  SO_ENABLE(SoGLRenderAction, SoGLDrawStyleElement);
-  SO_ENABLE(SoGLRenderAction, SoShapeStyleElement);
-  SO_ENABLE(SoGLRenderAction, SoGLLinePatternElement);
-  SO_ENABLE(SoGLRenderAction, SoGLLineWidthElement);
-  SO_ENABLE(SoGLRenderAction, SoGLPointSizeElement);
+  SO_ENABLE_LEGACY_GL(SoGLRenderAction, SoGLDrawStyleElement);
+  SO_ENABLE_LEGACY_GL(SoGLRenderAction, SoShapeStyleElement);
+  SO_ENABLE_LEGACY_GL(SoGLRenderAction, SoGLLinePatternElement);
+  SO_ENABLE_LEGACY_GL(SoGLRenderAction, SoGLLineWidthElement);
+  SO_ENABLE_LEGACY_GL(SoGLRenderAction, SoGLPointSizeElement);
 
   SO_ENABLE(SoCallbackAction, SoDrawStyleElement);
   SO_ENABLE(SoCallbackAction, SoShapeStyleElement);
@@ -258,11 +270,13 @@ SoDrawStyle::doAction(SoAction * action)
 }
 
 // Doc from superclass.
+#if COIN_BUILD_LEGACY_GL_RENDERER
 void
 SoDrawStyle::GLRender(SoGLRenderAction * action)
 {
   SoDrawStyle::doAction(action);
 }
+#endif
 
 // Doc from superclass.
 void

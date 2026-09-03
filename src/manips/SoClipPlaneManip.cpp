@@ -413,12 +413,14 @@ SoClipPlaneManip::callback(SoCallbackAction * action)
 }
 
 // doc from parent
+#if COIN_BUILD_LEGACY_GL_RENDERER
 void
 SoClipPlaneManip::GLRender(SoGLRenderAction * action)
 {
   SoClipPlaneManip::doAction(action);
   SoClipPlane::GLRender(action);
 }
+#endif
 
 // doc from parent
 void

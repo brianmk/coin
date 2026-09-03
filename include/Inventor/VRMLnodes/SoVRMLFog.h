@@ -55,7 +55,9 @@ public:
   SoSFFloat visibilityRange;
   SoSFColor color;
 
+#if COIN_HAVE_LEGACY_GL_RENDERER
   void GLRender( SoGLRenderAction * action ) override;
+#endif
 
 protected:
   SoSFBool set_bind;

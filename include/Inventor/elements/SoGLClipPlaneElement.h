@@ -35,6 +35,7 @@
 
 #include <Inventor/elements/SoClipPlaneElement.h>
 
+#if COIN_HAVE_LEGACY_GL_RENDERER
 class COIN_DLL_API SoGLClipPlaneElement : public SoClipPlaneElement {
   typedef SoClipPlaneElement inherited;
 
@@ -56,5 +57,7 @@ protected:
 
 private:
 };
+
+#endif
 
 #endif // !COIN_SOGLCLIPPLANEELEMENT_H

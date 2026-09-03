@@ -27,11 +27,16 @@ set(COIN_SHAPENODES_FILES
 	SoText3.cpp
 	SoTriangleStripSet.cpp
 	SoVertexShape.cpp
-	soshape_bigtexture.cpp
-	soshape_bumprender.cpp
 	soshape_primdata.cpp
-	soshape_trianglesort.cpp
 )
+
+if(COIN_BUILD_LEGACY_GL_RENDERER)
+	list(APPEND COIN_SHAPENODES_FILES
+		soshape_bigtexture.cpp
+		soshape_bumprender.cpp
+		soshape_trianglesort.cpp
+	)
+endif()
 
 # Files excluded from public API documentation, included in complete documentation.
 set(COIN_SHAPENODES_INTERNAL_FILES

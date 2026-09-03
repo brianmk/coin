@@ -51,11 +51,14 @@
 // *************************************************************************
 
 #include <Inventor/nodes/SoResetTransform.h>
+#include <Inventor/elements/SoModelMatrixElement.h>
 
 #include <Inventor/actions/SoGLRenderAction.h>
 #include <Inventor/actions/SoGetBoundingBoxAction.h>
 #include <Inventor/actions/SoGetMatrixAction.h>
+#if COIN_BUILD_LEGACY_GL_RENDERER
 #include <Inventor/elements/SoGLModelMatrixElement.h>
+#endif
 #include <Inventor/elements/SoGLCacheContextElement.h>
 #include <Inventor/elements/SoCacheElement.h>
 
@@ -123,6 +126,7 @@ SoResetTransform::initClass(void)
 }
 
 // Doc from superclass.
+#if COIN_BUILD_LEGACY_GL_RENDERER
 void
 SoResetTransform::GLRender(SoGLRenderAction * action)
 {
@@ -132,6 +136,7 @@ SoResetTransform::GLRender(SoGLRenderAction * action)
     SoGLModelMatrixElement::makeIdentity(state, this);
   }
 }
+#endif
 
 // Doc from superclass.
 void

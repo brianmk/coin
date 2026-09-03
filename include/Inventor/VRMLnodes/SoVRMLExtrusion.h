@@ -61,7 +61,9 @@ public:
   SoSFBool solid;
   SoMFVec3f spine;
 
+#if COIN_HAVE_LEGACY_GL_RENDERER
   void GLRender(SoGLRenderAction * action) override;
+#endif
   void getPrimitiveCount(SoGetPrimitiveCountAction * action) override;
   virtual void computeBBox(SoAction * action,
                            SbBox3f & bbox, SbVec3f & center) override;

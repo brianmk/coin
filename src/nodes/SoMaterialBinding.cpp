@@ -263,18 +263,20 @@ SoMaterialBinding::initClass(void)
 {
   SO_NODE_INTERNAL_INIT_CLASS(SoMaterialBinding, SO_FROM_INVENTOR_1|SoNode::VRML1);
 
-  SO_ENABLE(SoGLRenderAction, SoMaterialBindingElement);
+  SO_ENABLE_LEGACY_GL(SoGLRenderAction, SoMaterialBindingElement);
   SO_ENABLE(SoPickAction, SoMaterialBindingElement);
   SO_ENABLE(SoCallbackAction, SoMaterialBindingElement);
   SO_ENABLE(SoGetPrimitiveCountAction, SoMaterialBindingElement);
 }
 
 // Doc from superclass.
+#if COIN_BUILD_LEGACY_GL_RENDERER
 void
 SoMaterialBinding::GLRender(SoGLRenderAction * action)
 {
   SoMaterialBinding::doAction(action);
 }
+#endif
 
 // Doc from superclass.
 void

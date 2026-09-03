@@ -174,6 +174,7 @@ SoPathSwitch::doAction(SoAction * action)
 }
 
 // doc in parent
+#if COIN_BUILD_LEGACY_GL_RENDERER
 void
 SoPathSwitch::GLRender(SoGLRenderAction * action)
 {
@@ -181,6 +182,7 @@ SoPathSwitch::GLRender(SoGLRenderAction * action)
     inherited::GLRender(action);
   }
 }
+#endif
 
 // doc in parent
 void

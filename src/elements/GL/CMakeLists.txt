@@ -31,13 +31,39 @@ set(COIN_GLELEMENTS_FILES
 	SoResetMatrixElement.cpp
 )
 
-# build library
+# SoGLCacheContextElement is shared by the EGL/offscreen and shader paths.
+# The remaining GL elements implement the legacy renderer and are omitted from
+# core-only builds.
+set(COIN_CORE_GLELEMENTS_FILES
+	SoGLCacheContextElement.cpp
+)
+
 if(COIN_BUILD_SINGLE_LIB)
-	foreach(SRCFILE ${COIN_GLELEMENTS_FILES})
-		set(COIN_SOURCE ${COIN_SOURCE} elements/GL/${SRCFILE} CACHE INTERNAL "COIN_SOURCE")
+	foreach(SRCFILE ${COIN_CORE_GLELEMENTS_FILES})
+		set(COIN_SOURCE
+			${COIN_SOURCE}
+			elements/GL/${SRCFILE}
+			CACHE INTERNAL "COIN_SOURCE"
+		)
 	endforeach(SRCFILE)
+	if(COIN_BUILD_LEGACY_GL_RENDERER)
+		set(COIN_LEGACY_GLELEMENTS_FILES ${COIN_GLELEMENTS_FILES})
+		list(REMOVE_ITEM COIN_LEGACY_GLELEMENTS_FILES ${COIN_CORE_GLELEMENTS_FILES})
+		foreach(SRCFILE ${COIN_LEGACY_GLELEMENTS_FILES})
+			set(COIN_SOURCE
+				${COIN_SOURCE}
+				elements/GL/${SRCFILE}
+				CACHE INTERNAL "COIN_SOURCE"
+			)
+		endforeach()
+	endif()
 else()
-	add_library(glelements OBJECT ${COIN_GLELEMENTS_FILES})
+	add_library(glelements OBJECT ${COIN_CORE_GLELEMENTS_FILES})
+	if(COIN_BUILD_LEGACY_GL_RENDERER)
+		set(COIN_LEGACY_GLELEMENTS_FILES ${COIN_GLELEMENTS_FILES})
+		list(REMOVE_ITEM COIN_LEGACY_GLELEMENTS_FILES ${COIN_CORE_GLELEMENTS_FILES})
+		target_sources(glelements PRIVATE ${COIN_LEGACY_GLELEMENTS_FILES})
+	endif()
 endif()
 
 # define documentation

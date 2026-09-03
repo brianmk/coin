@@ -1004,11 +1004,13 @@ SoBaseKit::callback(SoCallbackAction * action)
 }
 
 // Doc in superclass.
+#if COIN_BUILD_LEGACY_GL_RENDERER
 void
 SoBaseKit::GLRender(SoGLRenderAction * action)
 {
   SoBaseKit::doAction((SoAction *)action);
 }
+#endif
 
 // Doc in superclass. Overridden to calculate bounding box center.
 void

@@ -109,7 +109,9 @@
 #include <Inventor/VRMLnodes/SoVRMLMacros.h>
 #include <Inventor/actions/SoActions.h>
 #include <Inventor/caches/SoBoundingBoxCache.h>
+#if COIN_BUILD_LEGACY_GL_RENDERER
 #include <Inventor/caches/SoGLCacheList.h>
+#endif
 #include <Inventor/elements/SoCacheElement.h>
 #include <Inventor/elements/SoCullElement.h>
 #include <Inventor/elements/SoLocalBBoxMatrixElement.h>
@@ -138,21 +140,29 @@
 // when doing threadsafe rendering, each thread needs its own
 // glcachelist
 typedef struct {
+#if COIN_BUILD_LEGACY_GL_RENDERER
   SoGLCacheList * glcachelist;
+#endif
 } sovrmlgroup_storage;
 
 static void
 sovrmlgroup_storage_construct(void * data)
 {
   sovrmlgroup_storage * ptr = (sovrmlgroup_storage*) data;
+#if COIN_BUILD_LEGACY_GL_RENDERER
   ptr->glcachelist = NULL;
+#else
+  (void) ptr;
+#endif
 }
 
 static void 
 sovrmlgroup_storage_destruct(void * data)
 {
   sovrmlgroup_storage * ptr = (sovrmlgroup_storage*) data;
+#if COIN_BUILD_LEGACY_GL_RENDERER
   delete ptr->glcachelist;
+#endif
 }
 
 // *************************************************************************
@@ -180,15 +190,21 @@ public:
   SbStorage * glcachestorage;
   static void invalidate_gl_cache(void * tls, void *) {
     sovrmlgroup_storage * ptr = (sovrmlgroup_storage*) tls;
+#if COIN_BUILD_LEGACY_GL_RENDERER
     if (ptr->glcachelist) {
       ptr->glcachelist->invalidateAll();
     }
+#else
+    (void) ptr;
+#endif
   }
 
 public:
   enum { YES, NO, MAYBE } hassoundchild;
 
+#if COIN_BUILD_LEGACY_GL_RENDERER
   SoGLCacheList * getGLCacheList(const SbBool createifnull);
+#endif
 
   void invalidateGLCaches(void) {
     glcachestorage->applyToAll(invalidate_gl_cache, NULL);
@@ -204,6 +220,7 @@ public:
 #endif // !COIN_THREADSAFE
 };
 
+#if COIN_BUILD_LEGACY_GL_RENDERER
 SoGLCacheList *
 SoVRMLGroupP::getGLCacheList(const SbBool createifnull)
 {
@@ -214,6 +231,7 @@ SoVRMLGroupP::getGLCacheList(const SbBool createifnull)
   }
   return ptr->glcachelist;
 }
+#endif
 
 #define PRIVATE(obj) ((obj)->pimpl)
 
@@ -351,6 +369,7 @@ SoVRMLGroup::callback(SoCallbackAction * action)
 }
 
 // Doc in parent
+#if COIN_BUILD_LEGACY_GL_RENDERER
 void
 SoVRMLGroup::GLRender(SoGLRenderAction * action )
 {
@@ -367,6 +386,7 @@ SoVRMLGroup::GLRender(SoGLRenderAction * action )
     break;
   }
 }
+#endif
 
 // Doc in parent
 void
@@ -560,6 +580,7 @@ SoVRMLGroup::getPrimitiveCount(SoGetPrimitiveCountAction * action)
 }
 
 // Doc in parent
+#if COIN_BUILD_LEGACY_GL_RENDERER
 void
 SoVRMLGroup::GLRenderBelowPath(SoGLRenderAction * action)
 {
@@ -647,8 +668,10 @@ SoVRMLGroup::GLRenderBelowPath(SoGLRenderAction * action)
     createcache->close(action);
   }
 }
+#endif
 
 // Doc in parent
+#if COIN_BUILD_LEGACY_GL_RENDERER
 void
 SoVRMLGroup::GLRenderInPath(SoGLRenderAction * action)
 {
@@ -701,13 +724,16 @@ SoVRMLGroup::GLRenderInPath(SoGLRenderAction * action)
     this->GLRenderBelowPath(action);
   }
 }
+#endif
 
 // Doc in parent
+#if COIN_BUILD_LEGACY_GL_RENDERER
 void
 SoVRMLGroup::GLRenderOffPath(SoGLRenderAction * COIN_UNUSED_ARG(action))
 {
   // do nothing
 }
+#endif
 
 // Doc in parent
 void

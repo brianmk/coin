@@ -369,7 +369,10 @@
 #include <Inventor/elements/SoModelMatrixElement.h>
 #include <Inventor/elements/SoViewingMatrixElement.h>
 #include <Inventor/elements/SoProjectionMatrixElement.h>
+#if COIN_BUILD_LEGACY_GL_RENDERER
 #include <Inventor/elements/SoGLMultiTextureMatrixElement.h>
+#endif
+#include <Inventor/elements/SoMultiTextureMatrixElement.h>
 #include <Inventor/elements/SoTextureUnitElement.h>
 
 #include <cassert>
@@ -645,11 +648,11 @@ void SoShaderStateMatrixParameter::initClass(void)
   SO_NODE_INTERNAL_INIT_CLASS(SoShaderStateMatrixParameter,
                               SO_FROM_COIN_2_5|SO_FROM_INVENTOR_5_0);
 
-  SO_ENABLE(SoGLRenderAction, SoModelMatrixElement);
-  SO_ENABLE(SoGLRenderAction, SoViewingMatrixElement);
-  SO_ENABLE(SoGLRenderAction, SoProjectionMatrixElement);
-  SO_ENABLE(SoGLRenderAction, SoGLMultiTextureMatrixElement);
-  SO_ENABLE(SoGLRenderAction, SoTextureUnitElement);
+  SO_ENABLE_LEGACY_GL(SoGLRenderAction, SoModelMatrixElement);
+  SO_ENABLE_LEGACY_GL(SoGLRenderAction, SoViewingMatrixElement);
+  SO_ENABLE_LEGACY_GL(SoGLRenderAction, SoProjectionMatrixElement);
+  SO_ENABLE_LEGACY_GL(SoGLRenderAction, SoGLMultiTextureMatrixElement);
+  SO_ENABLE_LEGACY_GL(SoGLRenderAction, SoTextureUnitElement);
 }
 
 SoShaderStateMatrixParameter::SoShaderStateMatrixParameter(void)
@@ -749,7 +752,7 @@ SoShaderStateMatrixParameter::updateValue(SoState *state)
     } break;
     case TEXTURE: {
       int unit = SoTextureUnitElement::get(state);
-      matrix = SoGLMultiTextureMatrixElement::get(state, unit);
+      matrix = SoMultiTextureMatrixElement::get(state, unit);
     } break;
     case MODELVIEW_PROJECTION: {
       matrix = SoModelMatrixElement::get(state);

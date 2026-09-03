@@ -1,26 +1,57 @@
 # source files
 set(COIN_RENDERING_FILES
-	SoGL.cpp
-	SoGLBigImage.cpp
+	SoGLContext.cpp
 	SoGLDriverDatabase.cpp
-	SoGLImage.cpp
-	SoGLCubeMapImage.cpp
 	SoGLNurbs.cpp
+	CoinOffscreenGLCanvas.cpp
 	SoRenderManager.cpp
 	SoRenderManagerP.cpp
-	SoOffscreenRenderer.cpp
-	SoOffscreenCGData.cpp
-	SoOffscreenGLXData.cpp
-	SoOffscreenWGLData.cpp
-	SoVBO.cpp
-	SoVertexArrayIndexer.cpp
-	CoinOffscreenGLCanvas.cpp
+	SoRenderIR.cpp
+	SoRenderBackend.cpp
+	SoGLRenderBackend.cpp
 )
+
+if(COIN_BUILD_VULKAN_RENDERER)
+	list(APPEND COIN_RENDERING_FILES
+		SoVulkanRenderBackend/SoVulkanRenderBackendCore.cpp
+		SoVulkanRenderBackend/SoVulkanRenderBackendPipeline.cpp
+		SoVulkanRenderBackend/SoVulkanRenderBackendGeometry.cpp
+		SoVulkanRenderBackend/SoVulkanRenderBackendTexture.cpp
+		SoVulkanRenderBackend/SoVulkanRenderBackendCommand.cpp
+		SoVulkanRenderBackend/SoVulkanRenderBackendWideLine.cpp
+		SoVulkanRenderBackend/SoVulkanRenderBackendFrame.cpp
+		SoVulkanRenderManager.cpp
+		SoRTXRenderBackend/SoRTXRenderBackendCore.cpp
+		SoRTXRenderBackend/SoRTXRenderBackendPipeline.cpp
+		SoRTXRenderBackend/SoRTXRenderBackendGeometry.cpp
+		SoRTXRenderBackend/SoRTXRenderBackendBuffers.cpp
+		SoRTXRenderBackend/SoRTXRenderBackendPathTracing.cpp
+		SoRTXRenderBackend/SoRTXRenderBackendDenoise.cpp
+	)
+endif()
+
+if(COIN_BUILD_LEGACY_GL_RENDERER)
+	list(APPEND COIN_RENDERING_FILES
+		SoGL.cpp
+		SoGLBigImage.cpp
+		SoGLImage.cpp
+		SoGLCubeMapImage.cpp
+		SoOffscreenRenderer.cpp
+		SoOffscreenCGData.cpp
+		SoOffscreenGLXData.cpp
+		SoOffscreenWGLData.cpp
+		# These belong to the legacy renderer's resource/draw architecture.
+		# VBOs themselves are not unsupported by core OpenGL.
+		SoVBO.cpp
+		SoVertexArrayIndexer.cpp
+	)
+endif()
 
 # Files excluded from public API documentation, included in complete documentation.
 set(COIN_RENDERING_INTERNAL_FILES
 	SoGL.h
 	SoGL.cpp
+	SoGLContext.cpp
 	SoGLNurbs.h
 	SoGLNurbs.cpp
 	SoRenderManagerP.h
@@ -37,6 +68,14 @@ set(COIN_RENDERING_INTERNAL_FILES
 	SoVertexArrayIndexer.cpp
 	CoinOffscreenGLCanvas.h
 	CoinOffscreenGLCanvas.cpp
+	SoRenderIRP.h
+	SoRenderBackend.h
+	SoGLRenderBackend.h
+	SoVulkanRenderBackend.h
+	SoVulkanRenderBackend/SoVulkanRenderBackendP.h
+	SoVulkanRenderManager.h
+	SoRTXRenderBackend.h
+	SoRTXRenderBackend/SoRTXRenderBackendP.h
 )
 
 # build library

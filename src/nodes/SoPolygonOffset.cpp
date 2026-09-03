@@ -149,10 +149,13 @@
 // *************************************************************************
 
 #include <Inventor/nodes/SoPolygonOffset.h>
+#include <Inventor/elements/SoPolygonOffsetElement.h>
 
 #include <Inventor/actions/SoCallbackAction.h>
 #include <Inventor/actions/SoGLRenderAction.h>
+#if COIN_BUILD_LEGACY_GL_RENDERER
 #include <Inventor/elements/SoGLPolygonOffsetElement.h>
+#endif
 #include <Inventor/elements/SoOverrideElement.h>
 
 #include "nodes/SoSubNodeP.h"
@@ -315,7 +318,7 @@ SoPolygonOffset::initClass(void)
   SO_NODE_INTERNAL_INIT_CLASS(SoPolygonOffset, SO_FROM_INVENTOR_2_5|SO_FROM_COIN_1_0);
 
   SO_ENABLE(SoCallbackAction, SoPolygonOffsetElement);
-  SO_ENABLE(SoGLRenderAction, SoGLPolygonOffsetElement);
+  SO_ENABLE_LEGACY_GL(SoGLRenderAction, SoGLPolygonOffsetElement);
 }
 
 
@@ -353,8 +356,10 @@ SoPolygonOffset::callback(SoCallbackAction * action)
   SoPolygonOffset::doAction((SoAction *)action);
 }
 
+#if COIN_BUILD_LEGACY_GL_RENDERER
 void
 SoPolygonOffset::GLRender(SoGLRenderAction * action)
 {
   SoPolygonOffset::doAction((SoAction *)action);
 }
+#endif

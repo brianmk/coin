@@ -64,7 +64,9 @@ public:
   SoSFEnum value;
 
   void doAction(SoAction * action) override;
+#if COIN_HAVE_LEGACY_GL_RENDERER
   void GLRender(SoGLRenderAction * action) override;
+#endif
   void callback(SoCallbackAction * action) override;
   void pick(SoPickAction * action) override;
   void getPrimitiveCount(SoGetPrimitiveCountAction * action) override;

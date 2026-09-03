@@ -1,4 +1,4 @@
-cmake_minimum_required(VERSION 3.0...3.31)
+cmake_minimum_required(VERSION 3.21...3.31)
 
 set(COIN_MAJOR_VERSION 4)
 set(COIN_MINOR_VERSION 0)
@@ -157,6 +157,29 @@ if(COIN_STRICT_WARNINGS)
   endif()
 endif()
 
+option(COIN_BUILD_LEGACY_GL_RENDERER
+  "Build Coin's legacy fixed-function OpenGL renderer."
+  ON)
+
+option(COIN_BUILD_VULKAN_RENDERER
+  "Build Coin's experimental Vulkan retained-renderer backend."
+  OFF)
+
+# Make the renderer selection explicit for every Coin translation unit and
+# generated public header.  This keeps core-only declarations and definitions
+# in sync even when the build uses separate object-library targets.
+if(COIN_BUILD_LEGACY_GL_RENDERER)
+  set(COIN_BUILD_LEGACY_GL_RENDERER_VALUE 1)
+else()
+  set(COIN_BUILD_LEGACY_GL_RENDERER_VALUE 0)
+endif()
+
+if(COIN_BUILD_VULKAN_RENDERER)
+  set(COIN_BUILD_VULKAN_RENDERER_VALUE 1)
+else()
+  set(COIN_BUILD_VULKAN_RENDERER_VALUE 0)
+endif()
+
 check_include_file_cxx(thread HAVE_STD_THREAD)
 cmake_dependent_option(COIN_DEBUG_CHECK_THREAD "Enable thread check in several central Coin functions." OFF "HAVE_STD_THREAD" OFF)
 
@@ -294,6 +317,55 @@ else()
 endif()
 
 list(APPEND COIN_TARGET_LINK_LIBRARIES ${COIN_TARGET_LINK_LIBRARIES_GL})
+
+if(COIN_BUILD_VULKAN_RENDERER)
+  find_package(Vulkan REQUIRED)
+  if(TARGET Vulkan::Vulkan)
+    list(APPEND COIN_TARGET_LINK_LIBRARIES Vulkan::Vulkan)
+  else()
+    list(APPEND COIN_TARGET_INCLUDE_DIRECTORIES ${Vulkan_INCLUDE_DIRS})
+    list(APPEND COIN_TARGET_LINK_LIBRARIES ${Vulkan_LIBRARIES})
+  endif()
+  set(HAVE_VULKAN 1)
+  # Optional: Intel Open Image Denoise for the path tracing denoise pass.
+  # When absent the RTX backend falls back to the in-shader edge-stopping
+  # filter in the present pass.
+  find_package(OpenImageDenoise CONFIG QUIET)
+  if(TARGET OpenImageDenoise)
+    list(APPEND COIN_TARGET_LINK_LIBRARIES OpenImageDenoise)
+    set(HAVE_OIDN 1)
+  endif()
+  # Optional: NVIDIA OptiX (RTX) GPU denoiser.  OptiX is header-only; the
+  # host API dlopen()s libnvoptix.so.1 at runtime, so we only need the
+  # include tree plus the CUDA runtime/driver to own the CUcontext the
+  # denoiser images live on.  When absent the backend falls back to OIDN.
+  find_path(OptiX_INCLUDE
+    NAMES optix.h
+    HINTS "${OptiX_INSTALL_DIR}/include" "/opt/optix/include" /usr/local/include
+    NO_DEFAULT_PATH
+  )
+  if(OptiX_INCLUDE)
+    find_library(CUDA_DRIVER_LIB
+      NAMES cuda
+      HINTS ${CUDA_LIB_DIR} "/opt/cuda/lib64" /usr/local/cuda/lib64
+    )
+    find_library(CUDA_RUNTIME_LIB
+      NAMES cudart cudart_static
+      HINTS ${CUDA_LIB_DIR} "/opt/cuda/lib64" /usr/local/cuda/lib64
+    )
+    # OptiX headers include cuda.h and the CUDA driver/runtime headers, so the
+    # CUDA include tree must be on the path whenever the RTX denoiser is on.
+    find_path(CUDA_INCLUDE_DIR cuda.h
+      HINTS /opt/cuda/include /usr/local/cuda/include ${CUDA_TOOLKIT_INCLUDE}
+    )
+    if(CUDA_DRIVER_LIB AND CUDA_RUNTIME_LIB AND CUDA_INCLUDE_DIR)
+      list(APPEND COIN_TARGET_INCLUDE_DIRECTORIES
+           ${OptiX_INCLUDE} ${CUDA_INCLUDE_DIR})
+      list(APPEND COIN_TARGET_LINK_LIBRARIES ${CUDA_RUNTIME_LIB} ${CUDA_DRIVER_LIB})
+      set(HAVE_RTX_DENOISER 1)
+    endif()
+  endif()
+endif()
 
 set(CMAKE_THREAD_PREFER_PTHREAD 1)
 set(THREADS_PREFER_PTHREAD_FLAG 1)
@@ -675,7 +747,11 @@ check_include_file(ieeefp.h HAVE_IEEEFP_H)
 check_include_file(time.h HAVE_TIME_H)
 check_include_files("stdlib.h;stdarg.h;string.h;float.h" STDC_HEADERS)
 
-check_include_file(windows.h HAVE_WINDOWS_H)
+if(WIN32)
+  check_include_file(windows.h HAVE_WINDOWS_H)
+else()
+  set(HAVE_WINDOWS_H 0)
+endif()
 if(HAVE_WINDOWS_H)
   check_include_file(direct.h HAVE_DIRECT_H)
   check_include_files("windows.h;tlhelp32.h" HAVE_TLHELP32_H)
@@ -759,53 +835,110 @@ if(UNIX AND NOT APPLE AND COIN_BUILD_GLX)
   " HAVE_GLX)
 endif()
 
+# Helpers to keep GL header logic in one place.
+macro(coin_check_gl_headers)
+  if(COIN_BUILD_LEGACY_GL_RENDERER)
+    message(STATUS "Legacy GL renderer build enabled; using compatibility headers")
+    if(HAVE_WINDOWS_H)
+      check_include_files("windows.h;GL/gl.h" HAVE_GL_GL_H)
+      check_include_files("windows.h;GL/glu.h" HAVE_GL_GLU_H)
+    elseif(APPLE AND NOT COIN_BUILD_MAC_X11)
+      check_include_file(OpenGL/gl.h HAVE_OPENGL_GL_H)
+      check_include_file(OpenGL/glu.h HAVE_OPENGL_GLU_H)
+      check_include_file(OpenGL/glext.h HAVE_OPENGL_GLEXT_H)
+    else()
+      check_include_files("GL/gl.h" HAVE_GL_GL_H)
+      check_include_files("GL/glu.h" HAVE_GL_GLU_H)
+      check_include_files("GL/gl.h;GL/glext.h" HAVE_GL_GLEXT_H)
+    endif()
+  else()
+    message(STATUS "Legacy GL renderer build disabled; using core profile headers")
+    if(APPLE AND NOT COIN_BUILD_MAC_X11)
+      check_include_file(OpenGL/gl3.h HAVE_OPENGL_GL3_H)
+      check_include_file(OpenGL/gl3ext.h HAVE_OPENGL_GL3EXT_H)
+    else()
+      if(HAVE_WINDOWS_H)
+        # Coin uses its private Khronos snapshot for internal Windows builds.
+        # Do not make configuration depend on modern headers from the SDK.
+      else()
+        check_include_file(GL/glcorearb.h HAVE_GL_GLCOREARB_H)
+        check_include_file(GL/glext.h HAVE_GL_GLEXT_H)
+      endif()
+    endif()
+  endif()
+endmacro()
+
+macro(coin_configure_gl_include_strings)
+  set(CMAKE_REQUIRED_INCLUDES)
+  set(CMAKE_REQUIRED_LIBRARIES)
+
+  if(HAVE_WINDOWS_H)
+    set(SIM_INCLUDE_WINDOWS_H "#include <windows.h>")
+  else()
+    set(SIM_INCLUDE_WINDOWS_H "/* #include <windows.h> - not needed on system */")
+  endif()
+
+  if(COIN_BUILD_LEGACY_GL_RENDERER)
+    if(HAVE_GL_GL_H)
+      set(SIM_INCLUDE_GL_H "#include <GL/gl.h>")
+    elseif(HAVE_OPENGL_GL_H)
+      set(SIM_INCLUDE_GL_H "#include <OpenGL/gl.h>")
+    else()
+      set(SIM_INCLUDE_GL_H "#error \"don't know how to include gl.h header\"")
+    endif()
+    if(HAVE_SUPERGLU)
+      set(SIM_INCLUDE_GLU_H "/* #include <GL/glu.h> - not used, Coin linked with embedded SuperGLU */")
+    elseif(HAVE_GL_GLU_H)
+      set(SIM_INCLUDE_GLU_H "#include <GL/glu.h>")
+    elseif(HAVE_OPENGL_GLU_H)
+      set(SIM_INCLUDE_GLU_H "#include <OpenGL/glu.h>")
+    else()
+      set(SIM_INCLUDE_GLU_H "/* #include <GL/glu.h> - not found on system */")
+    endif()
+    if(HAVE_GL_GLEXT_H)
+      set(SIM_INCLUDE_GLEXT_H "#include <GL/glext.h>")
+    elseif(HAVE_OPENGL_GLEXT_H)
+      set(SIM_INCLUDE_GLEXT_H "#include <OpenGL/glext.h>")
+    else()
+      set(SIM_INCLUDE_GLEXT_H "/* #include <GL/glext.h> - not found on system */")
+    endif()
+  else()
+    if(APPLE AND NOT COIN_BUILD_MAC_X11)
+      if(HAVE_OPENGL_GL3_H)
+        set(SIM_INCLUDE_GL_H "#include <OpenGL/gl3.h>")
+      else()
+        set(SIM_INCLUDE_GL_H "#error \"OpenGL/gl3.h is required for core profile\"")
+      endif()
+      if(HAVE_OPENGL_GL3EXT_H)
+        set(SIM_INCLUDE_GLEXT_H "#include <OpenGL/gl3ext.h>")
+      else()
+        set(SIM_INCLUDE_GLEXT_H "/* #include <OpenGL/gl3ext.h> - not found on system */")
+      endif()
+    elseif(HAVE_WINDOWS_H)
+      # This is only the public-header fallback. Internal Coin compilation
+      # selects the private Khronos glcorearb.h in gl-headers.h.cmake.in.
+      set(SIM_INCLUDE_GL_H "#include <GL/glcorearb.h>")
+      set(SIM_INCLUDE_GLEXT_H "/* glcorearb.h provides the core-profile declarations */")
+    else()
+      if(HAVE_GL_GLCOREARB_H)
+        set(SIM_INCLUDE_GL_H "#include <GL/glcorearb.h>")
+      else()
+        set(SIM_INCLUDE_GL_H "#error \"GL/glcorearb.h is required for core profile\"")
+      endif()
+      set(SIM_INCLUDE_GLEXT_H "/* glcorearb.h provides the core-profile declarations */")
+    endif()
+    set(SIM_INCLUDE_GLU_H "/* #include <GL/glu.h> - not used with core profile */")
+  endif()
+endmacro()
+
 # Checks specific OpenGL configurations
-if(HAVE_WINDOWS_H)
-  check_include_files("windows.h;GL/gl.h" HAVE_GL_GL_H)
-  check_include_files("windows.h;GL/glu.h" HAVE_GL_GLU_H)
-  check_include_files("windows.h;GL/gl.h;GL/glext.h" HAVE_GL_GLEXT_H)
-elseif(APPLE AND NOT COIN_BUILD_MAC_X11)
-  check_include_file(OpenGL/gl.h HAVE_OPENGL_GL_H)
-  check_include_file(OpenGL/glu.h HAVE_OPENGL_GLU_H)
-  check_include_file(OpenGL/glext.h HAVE_OPENGL_GLEXT_H)
+coin_check_gl_headers()
+
+if(APPLE AND NOT COIN_BUILD_MAC_X11)
   check_include_file(OpenGL/CGLCurrent.h HAVE_OPENGL_CGLCURRENT_H)
-else()
-  check_include_files("GL/gl.h" HAVE_GL_GL_H)
-  check_include_files("GL/glu.h" HAVE_GL_GLU_H)
-  check_include_files("GL/gl.h;GL/glext.h" HAVE_GL_GLEXT_H)
 endif()
 
-set(CMAKE_REQUIRED_INCLUDES)
-set(CMAKE_REQUIRED_LIBRARIES)
-
-if(HAVE_WINDOWS_H)
-  set(SIM_INCLUDE_WINDOWS_H "#include <windows.h>")
-else()
-  set(SIM_INCLUDE_WINDOWS_H "/* #include <windows.h> - not needed on system */")
-endif()
-if(HAVE_GL_GL_H)
-  set(SIM_INCLUDE_GL_H "#include <GL/gl.h>")
-elseif(HAVE_OPENGL_GL_H)
-  set(SIM_INCLUDE_GL_H "#include <OpenGL/gl.h>")
-else()
-  set(SIM_INCLUDE_GL_H "#error \"don't know how to include gl.h header\"")
-endif()
-if(HAVE_SUPERGLU)
-  set(SIM_INCLUDE_GLU_H "/* #include <GL/glu.h> - not used, Coin linked with embedded SuperGLU */")
-elseif(HAVE_GL_GLU_H)
-  set(SIM_INCLUDE_GLU_H "#include <GL/glu.h>")
-elseif(HAVE_OPENGL_GLU_H)
-  set(SIM_INCLUDE_GLU_H "#include <OpenGL/glu.h>")
-else()
-  set(SIM_INCLUDE_GLU_H "/* #include <GL/glu.h> - not found on system */")
-endif()
-if(HAVE_GL_GLEXT_H)
-  set(SIM_INCLUDE_GLEXT_H "#include <GL/glext.h>")
-elseif(HAVE_OPENGL_GLEXT_H)
-  set(SIM_INCLUDE_GLEXT_H "#include <OpenGL/glext.h>")
-else()
-  set(SIM_INCLUDE_GLEXT_H "/* #include <GL/glext.h> - not found on system */")
-endif()
+coin_configure_gl_include_strings()
 
 check_symbol_exists(va_copy stdarg.h HAVE_VA_COPY_MACRO)
 check_symbol_exists(strncasecmp string.h HAVE_STRNCASECMP)
@@ -938,6 +1071,42 @@ if(COIN_THREADSAFE)
 else()
   set(FEAT_HAVE_SAFETHREAD 0)
 endif()
+if(HAVE_OIDN)
+  set(FEAT_HAVE_OIDN 1)
+else()
+  set(FEAT_HAVE_OIDN 0)
+endif()
+if(HAVE_RTX_DENOISER)
+  set(FEAT_HAVE_RTX_DENOISER 1)
+else()
+  set(FEAT_HAVE_RTX_DENOISER 0)
+endif()
+# AMD FidelityFX (FSR) ray-regeneration denoiser is an on-GPU Vulkan compute
+# denoiser that needs the AMD FFX SDK.  It is not currently wired up for a
+# build (the SDK is an optional drop-in); COIN_BUILD_FSR_DENOISER stays 0 so
+# SoRTXRenderBackend degrades to the OIDN path.
+set(HAVE_FSR_DENOISER 0)
+set(FEAT_HAVE_FSR_DENOISER 0)
+
+if(HAVE_OIDN)
+  set(COIN_BUILD_OIDN_VALUE 1)
+else()
+  set(COIN_BUILD_OIDN_VALUE 0)
+endif()
+if(HAVE_RTX_DENOISER)
+  set(COIN_BUILD_RTX_DENOISER_VALUE 1)
+else()
+  set(COIN_BUILD_RTX_DENOISER_VALUE 0)
+endif()
+set(COIN_BUILD_FSR_DENOISER_VALUE 0)
+
+add_compile_definitions(
+  COIN_BUILD_LEGACY_GL_RENDERER=${COIN_BUILD_LEGACY_GL_RENDERER_VALUE}
+  COIN_BUILD_VULKAN_RENDERER=${COIN_BUILD_VULKAN_RENDERER_VALUE}
+  COIN_BUILD_OIDN=${COIN_BUILD_OIDN_VALUE}
+  COIN_BUILD_RTX_DENOISER=${COIN_BUILD_RTX_DENOISER_VALUE}
+  COIN_BUILD_FSR_DENOISER=${COIN_BUILD_FSR_DENOISER_VALUE}
+)
 
 # ############################################################################
 # Setup targets in subdirectories

@@ -42,7 +42,10 @@
 */
 
 #include <Inventor/bundles/SoMaterialBundle.h>
+#include <Inventor/elements/SoLazyElement.h>
+#if COIN_BUILD_LEGACY_GL_RENDERER
 #include <Inventor/elements/SoGLLazyElement.h>
+#endif
 #include <Inventor/misc/SoState.h>
 
 #ifdef HAVE_CONFIG_H
@@ -76,10 +79,12 @@ SoMaterialBundle::SoMaterialBundle(SoAction *action)
   if (SoLazyElement::getLightModel(this->state) == SoLazyElement::BASE_COLOR) 
     this->coloronly |= FLAG_COLORONLY;
 
+#if COIN_BUILD_LEGACY_GL_RENDERER
   const cc_glglue * glue = sogl_glue_instance(this->state);
-  if (glue->nvidia_color_per_face_bug) {
+  if (glue && glue->nvidia_color_per_face_bug) {
     this->coloronly |= FLAG_NVIDIA_BUG;
   }
+#endif
 }
 
 /*!
@@ -95,7 +100,9 @@ SoMaterialBundle::~SoMaterialBundle()
 void
 SoMaterialBundle::setUpMultiple(void)
 {
+#if COIN_BUILD_LEGACY_GL_RENDERER
   this->setupElements(FALSE);
+#endif
 }
 
 /*!
@@ -105,7 +112,9 @@ SoMaterialBundle::setUpMultiple(void)
 void
 SoMaterialBundle::sendFirst(void)
 {
+#if COIN_BUILD_LEGACY_GL_RENDERER
   this->setupElements(FALSE);
+#endif
 }
 
 /*!
@@ -119,6 +128,7 @@ SoMaterialBundle::sendFirst(void)
 void
 SoMaterialBundle::send(const int index, const SbBool betweenbeginend)
 {
+#if COIN_BUILD_LEGACY_GL_RENDERER
   if (this->firsttime) this->setupElements(betweenbeginend);
   //if (index != this->currindex || (this->coloronly & FLAG_NVIDIA_BUG)) {
   // Bug fix: Force setting the color for all indices. ATI cards do not
@@ -126,6 +136,10 @@ SoMaterialBundle::send(const int index, const SbBool betweenbeginend)
   // it to black. - jostein 20/09/2010
     this->lazyelem->sendDiffuseByIndex(index);    
     this->currindex = index;
+#else
+  (void)index;
+  (void)betweenbeginend;
+#endif
   //}
 }
 
@@ -138,9 +152,13 @@ SoMaterialBundle::send(const int index, const SbBool betweenbeginend)
 void
 SoMaterialBundle::forceSend(const int index)
 {
+#if COIN_BUILD_LEGACY_GL_RENDERER
   if (this->firsttime) this->setupElements(FALSE);
   this->reallySend(index);
   this->currindex = index;
+#else
+  (void)index;
+#endif
 }
 
 /*!
@@ -158,7 +176,11 @@ SoMaterialBundle::isColorOnly(void) const
 void
 SoMaterialBundle::reallySend(const int index)
 {
+#if COIN_BUILD_LEGACY_GL_RENDERER
   this->lazyelem->sendDiffuseByIndex(index);
+#else
+  (void)index;
+#endif
 }
 
 //
@@ -167,6 +189,7 @@ SoMaterialBundle::reallySend(const int index)
 void
 SoMaterialBundle::setupElements(const SbBool isbetweenbeginend)
 {
+#if COIN_BUILD_LEGACY_GL_RENDERER
   this->lazyelem = static_cast<const SoGLLazyElement *>(SoLazyElement::getInstance(this->state));
   this->currindex = 0;
   
@@ -177,6 +200,11 @@ SoMaterialBundle::setupElements(const SbBool isbetweenbeginend)
     this->lazyelem->send(this->state, SoLazyElement::ALL_MASK); 
   }
   this->firsttime = FALSE;
+#else
+  (void)isbetweenbeginend;
+  this->currindex = 0;
+  this->firsttime = FALSE;
+#endif
 }
 
 #undef FLAG_COLORONLY

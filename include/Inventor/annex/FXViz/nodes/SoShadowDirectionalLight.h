@@ -39,6 +39,7 @@
 #include <Inventor/fields/SoSFFloat.h>
 #include <Inventor/fields/SoSFVec3f.h>
 
+#if COIN_HAVE_LEGACY_GL_RENDERER
 class COIN_DLL_API SoShadowDirectionalLight : public SoDirectionalLight {
   typedef SoDirectionalLight inherited;
 
@@ -48,7 +49,9 @@ public:
   static void initClass(void);
   SoShadowDirectionalLight(void);
 
+#if COIN_HAVE_LEGACY_GL_RENDERER
   void GLRender(SoGLRenderAction * action) override;
+#endif
 
   SoSFNode shadowMapScene;
   SoSFFloat maxShadowDistance;
@@ -58,5 +61,6 @@ public:
 protected:
   virtual ~SoShadowDirectionalLight();
 };
+#endif
 
 #endif // !COIN_SOSHADOWDIRECTIONALLIGHT_H

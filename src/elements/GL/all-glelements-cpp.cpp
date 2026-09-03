@@ -31,6 +31,7 @@
 \**************************************************************************/
 
 #include "SoGLCacheContextElement.cpp"
+#if COIN_BUILD_LEGACY_GL_RENDERER
 #include "SoGLClipPlaneElement.cpp"
 #include "SoGLColorIndexElement.cpp"
 #include "SoGLCoordinateElement.cpp"
@@ -59,3 +60,4 @@
 #include "SoGLViewportRegionElement.cpp"
 #include "SoGLVBOElement.cpp"
 #include "SoResetMatrixElement.cpp"
+#endif

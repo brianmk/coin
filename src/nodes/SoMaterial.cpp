@@ -153,6 +153,9 @@
 
 #include <Inventor/nodes/SoMaterial.h>
 
+class SoVBO;
+#include <Inventor/elements/SoLazyElement.h>
+
 #include <cstdlib>
 
 #include <Inventor/C/tidbits.h>
@@ -161,7 +164,9 @@
 #include <Inventor/actions/SoPickAction.h>
 #include <Inventor/elements/SoOverrideElement.h>
 #include <Inventor/elements/SoShapeStyleElement.h>
+#if COIN_BUILD_LEGACY_GL_RENDERER
 #include <Inventor/elements/SoGLLazyElement.h>
+#endif
 #include <Inventor/elements/SoAmbientColorElement.h>
 #include <Inventor/elements/SoDiffuseColorElement.h>
 #include <Inventor/elements/SoSpecularColorElement.h>
@@ -169,7 +174,9 @@
 #include <Inventor/elements/SoShininessElement.h>
 #include <Inventor/elements/SoTransparencyElement.h>
 #include <Inventor/elements/SoLightModelElement.h>
+#if COIN_BUILD_LEGACY_GL_RENDERER
 #include <Inventor/elements/SoGLVBOElement.h>
+#endif
 #include <Inventor/errors/SoDebugError.h>
 
 #include <Inventor/annex/Profiler/SoProfiler.h>
@@ -184,7 +191,9 @@
 #include <Inventor/threads/SbStorage.h>
 #endif // COIN_THREADSAFE
 
+#if COIN_BUILD_LEGACY_GL_RENDERER
 #include "rendering/SoVBO.h"
+#endif
 #include "nodes/SoSubNodeP.h"
 
 // *************************************************************************
@@ -294,7 +303,11 @@ public:
     colorpacker_storage(sizeof(void*), alloc_colorpacker, free_colorpacker),
 #endif // COIN_THREADSAFE
     vbo(NULL) { }
-  ~SoMaterialP() { delete this->vbo; }
+  ~SoMaterialP() {
+#if COIN_BUILD_LEGACY_GL_RENDERER
+    delete this->vbo;
+#endif
+  }
 
   int materialtype;
   int transparencyflag;
@@ -368,7 +381,7 @@ SoMaterial::initClass(void)
 {
   SO_NODE_INTERNAL_INIT_CLASS(SoMaterial, SO_FROM_INVENTOR_1|SoNode::VRML1);
 
-  SO_ENABLE(SoGLRenderAction, SoGLLazyElement);
+  SO_ENABLE_LEGACY_GL(SoGLRenderAction, SoGLLazyElement);
   SO_ENABLE(SoCallbackAction, SoLazyElement);
 
   SO_ENABLE(SoCallbackAction, SoAmbientColorElement);
@@ -378,20 +391,22 @@ SoMaterial::initClass(void)
   SO_ENABLE(SoCallbackAction, SoShininessElement);
   SO_ENABLE(SoCallbackAction, SoTransparencyElement);
 
-  SO_ENABLE(SoGLRenderAction, SoAmbientColorElement);
-  SO_ENABLE(SoGLRenderAction, SoDiffuseColorElement);
-  SO_ENABLE(SoGLRenderAction, SoEmissiveColorElement);
-  SO_ENABLE(SoGLRenderAction, SoSpecularColorElement);
-  SO_ENABLE(SoGLRenderAction, SoShininessElement);
-  SO_ENABLE(SoGLRenderAction, SoTransparencyElement);
+  SO_ENABLE_LEGACY_GL(SoGLRenderAction, SoAmbientColorElement);
+  SO_ENABLE_LEGACY_GL(SoGLRenderAction, SoDiffuseColorElement);
+  SO_ENABLE_LEGACY_GL(SoGLRenderAction, SoEmissiveColorElement);
+  SO_ENABLE_LEGACY_GL(SoGLRenderAction, SoSpecularColorElement);
+  SO_ENABLE_LEGACY_GL(SoGLRenderAction, SoShininessElement);
+  SO_ENABLE_LEGACY_GL(SoGLRenderAction, SoTransparencyElement);
 }
 
+#if COIN_BUILD_LEGACY_GL_RENDERER
 // Doc from superclass.
 void
 SoMaterial::GLRender(SoGLRenderAction * action)
 {
   SoMaterial::doAction(action);
 }
+#endif
 
 // Doc from superclass.
 void
@@ -537,6 +552,7 @@ SoMaterial::doAction(SoAction * action)
                                 bitmask & SoLazyElement::SHININESS_MASK ?
                                 SbClamp(this->shininess[0], 0.0f, 1.0f) : dummyval,
                                 istransparent);
+#if COIN_BUILD_LEGACY_GL_RENDERER
     if (state->isElementEnabled(SoGLVBOElement::getClassStackIndex())) {
       SoBase::staticDataLock();
       SbBool setvbo = FALSE;
@@ -556,6 +572,7 @@ SoMaterial::doAction(SoAction * action)
         SoGLVBOElement::setColorVBO(state, PRIVATE(this)->vbo);
       }
     }
+#endif
   }
 }
 

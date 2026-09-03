@@ -35,6 +35,7 @@
 
 #include <Inventor/elements/SoReplacedElement.h>
 
+#if COIN_HAVE_LEGACY_GL_RENDERER
 class COIN_DLL_API SoGLColorIndexElement : public SoReplacedElement {
   typedef SoReplacedElement inherited;
 
@@ -61,5 +62,7 @@ public:
 private:
   SoState * state;
 };
+
+#endif
 
 #endif // !COIN_SOGLCOLORINDEXELEMENT_H

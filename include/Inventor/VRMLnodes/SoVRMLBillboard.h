@@ -58,15 +58,19 @@ public:
 
   void doAction(SoAction * action) override;
   void callback(SoCallbackAction * action) override;
+#if COIN_HAVE_LEGACY_GL_RENDERER
   void GLRender(SoGLRenderAction * action) override;
+#endif
   void getBoundingBox(SoGetBoundingBoxAction * action) override;
   void getMatrix(SoGetMatrixAction * action) override;
   void pick(SoPickAction * action) override;
   void search(SoSearchAction * action) override;
 
+#if COIN_HAVE_LEGACY_GL_RENDERER
   void GLRenderBelowPath(SoGLRenderAction * action) override;
   void GLRenderInPath(SoGLRenderAction * action) override;
   void GLRenderOffPath(SoGLRenderAction * action) override;
+#endif
 
   void notify(SoNotList * list) override;
 

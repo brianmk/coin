@@ -68,7 +68,9 @@
 #include <Inventor/elements/SoCoordinateElement.h>
 #include <Inventor/elements/SoDrawStyleElement.h>
 #include <Inventor/bundles/SoMaterialBundle.h>
+#if COIN_BUILD_LEGACY_GL_RENDERER
 #include <Inventor/actions/SoGLRenderAction.h>
+#endif
 #include <Inventor/actions/SoRayPickAction.h>
 #include <Inventor/elements/SoPickStyleElement.h>
 #include <Inventor/misc/SoState.h>
@@ -240,6 +242,7 @@ SoIndexedNurbsSurface::computeBBox(SoAction * action,
 }
 
 // Doc in superclass.
+#if COIN_BUILD_LEGACY_GL_RENDERER
 void
 SoIndexedNurbsSurface::GLRender(SoGLRenderAction * action)
 {
@@ -266,7 +269,9 @@ SoIndexedNurbsSurface::GLRender(SoGLRenderAction * action)
     SoGLCacheContextElement::incNumShapes(state);
   }
 }
+#endif
 
+  // Doc in superclass.
 // Doc in superclass.
 void
 SoIndexedNurbsSurface::rayPick(SoRayPickAction * action)

@@ -52,7 +52,9 @@ public:
   SoSFColor color;
   SoSFFloat ambientIntensity;
 
+#if COIN_HAVE_LEGACY_GL_RENDERER
   void GLRender(SoGLRenderAction * action) override;
+#endif
 
 protected:
   SoVRMLLight(void);

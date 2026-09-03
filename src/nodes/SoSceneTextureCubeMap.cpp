@@ -67,6 +67,8 @@
 #include <Inventor/threads/SbMutex.h>
 #endif // COIN_THREADSAFE
 
+#include "nodes/SoSubNodeP.h"
+
 // *************************************************************************
 
 /*!
@@ -229,8 +231,8 @@ SoSceneTextureCubeMap::initClass(void)
 {
   SO_NODE_INIT_CLASS(SoSceneTextureCubeMap, SoNode, "Node");
 
-  SO_ENABLE(SoGLRenderAction, SoGLMultiTextureImageElement);
-  SO_ENABLE(SoGLRenderAction, SoGLMultiTextureEnabledElement);
+  SO_ENABLE_LEGACY_GL(SoGLRenderAction, SoGLMultiTextureImageElement);
+  SO_ENABLE_LEGACY_GL(SoGLRenderAction, SoGLMultiTextureEnabledElement);
 
   SO_ENABLE(SoCallbackAction, SoMultiTextureImageElement);
   SO_ENABLE(SoCallbackAction, SoMultiTextureEnabledElement);

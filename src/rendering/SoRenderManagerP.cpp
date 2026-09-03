@@ -32,6 +32,7 @@
 
 #include "SoRenderManagerP.h"
 #include "coindefs.h"
+#include "SoClippingPlanes.h"
 
 #include <limits>
 
@@ -39,11 +40,12 @@
 #include <Inventor/nodes/SoCamera.h>
 #include <Inventor/nodes/SoPerspectiveCamera.h>
 #include "Inventor/nodes/SoOrthographicCamera.h"
+#if COIN_BUILD_LEGACY_GL_RENDERER
 #include <Inventor/actions/SoGLRenderAction.h>
+#endif
 #include <Inventor/actions/SoGetBoundingBoxAction.h>
 #include <Inventor/actions/SoGetMatrixAction.h>
 #include <Inventor/actions/SoSearchAction.h>
-#include <Inventor/actions/SoGLRenderAction.h>
 
 SbBool SoRenderManagerP::touchtimer = TRUE;
 SbBool SoRenderManagerP::cleanupfunctionset = FALSE;
@@ -107,11 +109,14 @@ SoRenderManagerP::updateClippingPlanesCB(void * COIN_UNUSED_ARG(closure), SoSens
 void
 SoRenderManagerP::setClippingPlanes(void)
 {
+#if !COIN_BUILD_LEGACY_GL_RENDERER
+  return;
+#else
   SoCamera * camera = this->camera;
   SoNode * scene = this->scene;
   if (!camera || !scene) return;
 
-  SbViewportRegion vp = this->glaction->getViewportRegion();
+  SbViewportRegion vp = this->viewport;
 
   if (!this->getbboxaction) {
     this->getbboxaction = new SoGetBoundingBoxAction(vp);
@@ -133,44 +138,21 @@ SoRenderManagerP::setClippingPlanes(void)
   xbox.transform(mat);
   SbBox3f box = xbox.project();
 
-  float sizeX, sizeY, sizeZ;
-  box.getSize(sizeX, sizeY, sizeZ);
-  float boxDiagonal = sqrtf(sizeX * sizeX + sizeY * sizeY + sizeZ * sizeZ);
-
-  // Clipping offset is 1% of the bounding box diagonal or at most 1.0 and at least std::numeric_limits<float>::epsilon()
-  float clippingOffset = SbMin(1.0f, SbMax(std::numeric_limits<float>::epsilon(), 0.01f * boxDiagonal));
-  float nearval = -box.getMax()[2] - clippingOffset;
-  float farval = -box.getMin()[2] + clippingOffset;
-
-  if (!camera->isOfType(SoOrthographicCamera::getClassTypeId()) && farval <= 0.0f) return;
-
-  if (box.isEmpty()) {
-    nearval = 1;
-    farval = 10;
+  // Shared near/far computation (diagonal offset, empty-box defaults,
+  // perspective near limit) with the Vulkan manager.
+  float nearval, farval;
+  if (!coinComputeClippingPlanes(
+        box,
+        camera->isOfType(SoOrthographicCamera::getClassTypeId()) ? true : false,
+        camera->isOfType(SoPerspectiveCamera::getClassTypeId()) ? true : false,
+        static_cast<int>(this->autoclipping),
+        this->nearplanevalue,
+        nearval,
+        farval)) {
+    return;
   }
 
-  if (camera->isOfType(SoPerspectiveCamera::getClassTypeId())) {
-    float nearlimit;
-    if (this->autoclipping == SoRenderManager::FIXED_NEAR_PLANE) {
-      nearlimit = this->nearplanevalue;
-    } else {
-      int depthbits = -1; // FIXME:   (20070628 frodo)
-      if (depthbits < 0) depthbits = 32;
-      int use_bits = (int) (float(depthbits) * (1.0f - this->nearplanevalue));
-      float r = (float) pow(2.0, double(use_bits));
-      nearlimit = farval / r;
-    }
-
-    if (nearlimit >= farval) {
-      nearlimit = farval / 5000.0f;
-    }
-
-    if (nearval < nearlimit) {
-      nearval = nearlimit;
-    }
-  }
-
-  const float SLACK = 0.001f;
+  const float SLACK = kSoClippingSlack;
   const float newnear = nearval >= 0 ? nearval * (1.0f - SLACK) : nearval * (1.0f + SLACK);
   const float newfar = farval >= 0 ? farval * (1.0f + SLACK) : farval * (1.0f - SLACK);
 
@@ -190,12 +172,17 @@ SoRenderManagerP::setClippingPlanes(void)
   if (SbAbs(oldfar - newfar) > SbAbs(fareps)) {
     camera->farDistance = newfar;
   }
+#endif
 }
 
 void
 SoRenderManagerP::getCameraCoordinateSystem(SbMatrix & matrix,
                                             SbMatrix & inverse)
 {
+#if !COIN_BUILD_LEGACY_GL_RENDERER
+  matrix = inverse = SbMatrix::identity();
+  return;
+#else
   SoCamera * camera = this->camera;
   SoNode * scene = this->scene;
   assert(camera && scene);
@@ -215,15 +202,16 @@ SoRenderManagerP::getCameraCoordinateSystem(SbMatrix & matrix,
   if (this->searchaction->getPath()) {
     if (!this->getmatrixaction) {
       this->getmatrixaction =
-        new SoGetMatrixAction(this->glaction->getViewportRegion());
+        new SoGetMatrixAction(this->viewport);
     } else {
-      this->getmatrixaction->setViewportRegion(this->glaction->getViewportRegion());
+      this->getmatrixaction->setViewportRegion(this->viewport);
     }
     this->getmatrixaction->apply(this->searchaction->getPath());
     matrix = this->getmatrixaction->getMatrix();
     inverse = this->getmatrixaction->getInverse();
   }
   this->searchaction->reset();
+#endif
 }
 
 //**********************************************************************************
@@ -274,6 +262,7 @@ SoRenderManager::Superimposition::getStateFlags(void) const
   return PRIVATE(this)->stateflags;
 }
 
+#if COIN_BUILD_LEGACY_GL_RENDERER
 void
 SoRenderManager::Superimposition::render(SoGLRenderAction * action, SbBool clearcolorbuffer)
 {
@@ -304,6 +293,7 @@ SoRenderManager::Superimposition::render(SoGLRenderAction * action, SbBool clear
     action->setTransparencyType(oldttype);
   }
 }
+#endif
 
 void
 SoRenderManager::Superimposition::setEnabled(SbBool yes)
@@ -321,11 +311,13 @@ SoRenderManager::Superimposition::changeCB(void * data, SoSensor * COIN_UNUSED_A
   }
 }
 
+#if COIN_BUILD_LEGACY_GL_RENDERER
 void
 SoRenderManager::Superimposition::setTransparencyType(SoGLRenderAction::TransparencyType type)
 {
   PRIVATE(this)->transparencytype = (int) type;
 }
+#endif
 
 void
 SoRenderManagerP::invokePreRenderCallbacks(void)

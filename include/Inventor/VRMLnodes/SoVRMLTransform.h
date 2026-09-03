@@ -77,8 +77,10 @@ public:
   void getPrimitiveCount(SoGetPrimitiveCountAction * action) override;
   void audioRender(SoAudioRenderAction * action) override;
 
+#if COIN_HAVE_LEGACY_GL_RENDERER
   void GLRenderBelowPath(SoGLRenderAction * action) override;
   void GLRenderInPath(SoGLRenderAction * action) override;
+#endif
 
   void notify(SoNotList * list) override;
 

@@ -45,6 +45,8 @@
 #error this is a private header file
 #endif // !COIN_INTERNAL
 
+#include "actions/SoActionGLP.h"
+
 // only internal nodes can use this macro and pass "inherited" as arg #4
 #define PRIVATE_INTERNAL_COMMON_INIT_CODE(_class_, _classname_, _createfunc_, _parentclass_) \
   do { \

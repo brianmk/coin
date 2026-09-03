@@ -35,7 +35,16 @@
 
 #include <Inventor/bundles/SoBundle.h>
 #include <Inventor/misc/SoNormalGenerator.h>
+#include <Inventor/elements/SoNormalElement.h>
+
+#if COIN_HAVE_LEGACY_GL_RENDERER
 #include <Inventor/elements/SoGLNormalElement.h>
+#endif
+
+class SoNormalElement;
+#if COIN_HAVE_LEGACY_GL_RENDERER
+class SoGLNormalElement;
+#endif
 
 class SoNormalBundleP;
 
@@ -65,7 +74,9 @@ public:
   
 private:
   const SoNormalElement * elem;
+#if COIN_HAVE_LEGACY_GL_RENDERER
   const SoGLNormalElement * glelem;
+#endif
   SoNode * node;
   SoNormalBundleP * pimpl; // for future use
 };

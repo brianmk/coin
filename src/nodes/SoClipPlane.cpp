@@ -111,11 +111,14 @@
 // *************************************************************************
 
 #include <Inventor/nodes/SoClipPlane.h>
+#include <Inventor/elements/SoClipPlaneElement.h>
 
 #include <Inventor/actions/SoCallbackAction.h>
 #include <Inventor/actions/SoGLRenderAction.h>
 #include <Inventor/actions/SoPickAction.h>
+#if COIN_BUILD_LEGACY_GL_RENDERER
 #include <Inventor/elements/SoGLClipPlaneElement.h>
+#endif
 #include <Inventor/elements/SoCullElement.h>
 #include <Inventor/elements/SoModelMatrixElement.h>
 
@@ -169,7 +172,7 @@ SoClipPlane::initClass(void)
 {
   SO_NODE_INTERNAL_INIT_CLASS(SoClipPlane, SO_FROM_INVENTOR_1);
 
-  SO_ENABLE(SoGLRenderAction, SoGLClipPlaneElement);
+  SO_ENABLE_LEGACY_GL(SoGLRenderAction, SoGLClipPlaneElement);
   SO_ENABLE(SoPickAction, SoClipPlaneElement);
   SO_ENABLE(SoCallbackAction, SoClipPlaneElement);
 }
@@ -184,6 +187,7 @@ SoClipPlane::doAction(SoAction * action)
 }
 
 // Doc from superclass.
+#if COIN_BUILD_LEGACY_GL_RENDERER
 void
 SoClipPlane::GLRender(SoGLRenderAction * action)
 {
@@ -195,6 +199,7 @@ SoClipPlane::GLRender(SoGLRenderAction * action)
     SoCullElement::addPlane(action->getState(), p);
   }
 }
+#endif
 
 // Doc from superclass.
 void

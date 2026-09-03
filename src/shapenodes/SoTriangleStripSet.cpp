@@ -111,6 +111,8 @@
 */
 
 #include <Inventor/nodes/SoTriangleStripSet.h>
+#include <Inventor/elements/SoCoordinateElement.h>
+#include <Inventor/elements/SoLazyElement.h>
 #include "coindefs.h"
 
 #ifdef HAVE_CONFIG_H
@@ -123,8 +125,12 @@
 #include <Inventor/actions/SoGLRenderAction.h>
 #include <Inventor/system/gl.h>
 #include <Inventor/actions/SoGetPrimitiveCountAction.h>
+#if COIN_BUILD_LEGACY_GL_RENDERER
 #include <Inventor/elements/SoGLLazyElement.h>
+#endif
+#if COIN_BUILD_LEGACY_GL_RENDERER
 #include <Inventor/elements/SoGLCoordinateElement.h>
+#endif
 #include <Inventor/elements/SoNormalBindingElement.h>
 #include <Inventor/elements/SoMaterialBindingElement.h>
 #include <Inventor/errors/SoDebugError.h>
@@ -252,6 +258,8 @@ SoTriangleStripSet::findNormalBinding(SoState * const state) const
   return binding;
 }
 
+#if COIN_BUILD_LEGACY_GL_RENDERER
+
 namespace { namespace SoGL { namespace TriStripSet {
 
   enum AttributeBinding {
@@ -378,6 +386,8 @@ namespace { namespace SoGL { namespace TriStripSet {
 
 } } } // namespace
 
+#endif
+
 /*!
   \copydetails SoEngine::initClass(void)
 */
@@ -439,6 +449,7 @@ SoTriangleStripSet::initClass(void)
   SOGL_TRISTRIPSET_GLRENDER_RESOLVE_ARG1(normalbinding, materialbinding, texturing, args)
 
 // doc from parent
+#if COIN_BUILD_LEGACY_GL_RENDERER
 void
 SoTriangleStripSet::GLRender(SoGLRenderAction * action)
 {
@@ -527,7 +538,9 @@ SoTriangleStripSet::GLRender(SoGLRenderAction * action)
   sogl_autocache_update(state, numv ?
                         (this->numVertices[0]-2)*numv : 0, FALSE);
 }
+#endif
 
+  #undef SOGL_TRISTRIPSET_GLRENDER_CALL_FUNC
 #undef SOGL_TRISTRIPSET_GLRENDER_CALL_FUNC
 #undef SOGL_TRISTRIPSET_GLRENDER_RESOLVE_ARG1
 #undef SOGL_TRISTRIPSET_GLRENDER_RESOLVE_ARG2

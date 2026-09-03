@@ -52,7 +52,9 @@ public:
   SoSFFloat dropOffRate;
   SoSFFloat cutOffAngle;
 
+#if COIN_HAVE_LEGACY_GL_RENDERER
   void GLRender(SoGLRenderAction * action) override;
+#endif
 
 protected:
   virtual ~SoSpotLight();

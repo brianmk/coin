@@ -34,6 +34,9 @@
 #include <config.h>
 #endif // HAVE_CONFIG_H
 
+#include <Inventor/elements/SoLazyElement.h>
+#include <Inventor/elements/SoMultiTextureEnabledElement.h>
+
 #ifdef HAVE_VRML97
 
 /*!
@@ -142,8 +145,12 @@
 #include <Inventor/actions/SoGetBoundingBoxAction.h>
 #include <Inventor/misc/SoChildList.h>
 #include <Inventor/sensors/SoFieldSensor.h>
+#if COIN_BUILD_LEGACY_GL_RENDERER
 #include <Inventor/elements/SoGLLazyElement.h>
+#endif
+#if COIN_BUILD_LEGACY_GL_RENDERER
 #include <Inventor/elements/SoGLMultiTextureEnabledElement.h>
+#endif
 #include <Inventor/system/gl.h>
 
 #include "nodes/SoSubNodeP.h"
@@ -413,6 +420,7 @@ SoVRMLInline::callback(SoCallbackAction * action)
 }
 
 // Doc in parent
+#if COIN_BUILD_LEGACY_GL_RENDERER
 void
 SoVRMLInline::GLRender(SoGLRenderAction * action)
 {
@@ -475,6 +483,7 @@ SoVRMLInline::GLRender(SoGLRenderAction * action)
   }
   SoVRMLInline::doAction(action);
 }
+#endif
 
 // Doc in parent
 void

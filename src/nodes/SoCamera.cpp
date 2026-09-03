@@ -115,6 +115,11 @@
 */
 
 #include <Inventor/nodes/SoCamera.h>
+#include <Inventor/elements/SoLineWidthElement.h>
+#include <Inventor/elements/SoMultiTextureEnabledElement.h>
+#include <Inventor/elements/SoProjectionMatrixElement.h>
+#include <Inventor/elements/SoShapeHintsElement.h>
+#include <Inventor/elements/SoViewingMatrixElement.h>
 
 #include <cfloat> // for FLT_EPSILON
 
@@ -127,22 +132,35 @@
 #include <Inventor/actions/SoHandleEventAction.h>
 #include <Inventor/actions/SoRayPickAction.h>
 #include <Inventor/actions/SoAudioRenderAction.h>
+#include <Inventor/actions/SoIRRenderAction.h>
 #include <Inventor/elements/SoFocalDistanceElement.h>
+#if COIN_BUILD_LEGACY_GL_RENDERER
 #include <Inventor/elements/SoGLProjectionMatrixElement.h>
+#endif
+#if COIN_BUILD_LEGACY_GL_RENDERER
 #include <Inventor/elements/SoGLViewingMatrixElement.h>
+#endif
 #include <Inventor/elements/SoModelMatrixElement.h>
 #include <Inventor/elements/SoViewVolumeElement.h>
 #include <Inventor/elements/SoViewportRegionElement.h>
 #include <Inventor/elements/SoDrawStyleElement.h>
+#if COIN_BUILD_LEGACY_GL_RENDERER
 #include <Inventor/elements/SoGLLineWidthElement.h>
+#endif
+#if COIN_BUILD_LEGACY_GL_RENDERER
 #include <Inventor/elements/SoGLShapeHintsElement.h>
+#endif
 #include <Inventor/elements/SoCullElement.h>
+#if COIN_BUILD_LEGACY_GL_RENDERER
 #include <Inventor/elements/SoGLRenderPassElement.h>
+#endif
 #include <Inventor/elements/SoListenerPositionElement.h>
 #include <Inventor/elements/SoListenerOrientationElement.h>
 #include <Inventor/elements/SoListenerDopplerElement.h>
 #include <Inventor/elements/SoListenerGainElement.h>
+#if COIN_BUILD_LEGACY_GL_RENDERER
 #include <Inventor/elements/SoGLMultiTextureEnabledElement.h>
+#endif
 #include <Inventor/misc/SoState.h>
 #include <Inventor/SbColor4f.h>
 #include <Inventor/C/glue/gl.h>
@@ -380,12 +398,12 @@ SoCamera::initClass(void)
 {
   SO_NODE_INTERNAL_INIT_ABSTRACT_CLASS(SoCamera, SO_FROM_INVENTOR_1);
 
-  SO_ENABLE(SoGLRenderAction, SoFocalDistanceElement);
-  SO_ENABLE(SoGLRenderAction, SoGLProjectionMatrixElement);
-  SO_ENABLE(SoGLRenderAction, SoViewVolumeElement);
-  SO_ENABLE(SoGLRenderAction, SoGLViewingMatrixElement);
-  SO_ENABLE(SoGLRenderAction, SoResetMatrixElement);
-  SO_ENABLE(SoGLRenderAction, SoCullElement);
+  SO_ENABLE_LEGACY_GL(SoGLRenderAction, SoFocalDistanceElement);
+  SO_ENABLE_LEGACY_GL(SoGLRenderAction, SoGLProjectionMatrixElement);
+  SO_ENABLE_LEGACY_GL(SoGLRenderAction, SoViewVolumeElement);
+  SO_ENABLE_LEGACY_GL(SoGLRenderAction, SoGLViewingMatrixElement);
+  SO_ENABLE_LEGACY_GL(SoGLRenderAction, SoResetMatrixElement);
+  SO_ENABLE_LEGACY_GL(SoGLRenderAction, SoCullElement);
 
   SO_ENABLE(SoGetBoundingBoxAction, SoFocalDistanceElement);
   SO_ENABLE(SoGetBoundingBoxAction, SoProjectionMatrixElement);
@@ -650,6 +668,7 @@ SoCamera::getViewportBounds(const SbViewportRegion & region) const
   return vp;
 }
 
+#if COIN_BUILD_LEGACY_GL_RENDERER
 // Doc in superclass.
 void
 SoCamera::GLRender(SoGLRenderAction * action)
@@ -725,6 +744,7 @@ SoCamera::GLRender(SoGLRenderAction * action)
   SoViewingMatrixElement::set(state, this, affine);
   SoFocalDistanceElement::set(state, this, this->focalDistance.getValue());
 }
+#endif
 
 // Documented in superclass.
 void
@@ -831,6 +851,17 @@ SoCamera::jitter(int numpasses, int curpass, const SbViewportRegion & vpreg,
 // Documented in superclass. Overridden to set up the viewing and
 // projection matrices.
 void
+SoCamera::IRRender(SoIRRenderAction * action)
+{
+  // Camera nodes must set the view volume and view/projection matrices
+  // for the IR render action exactly as they do for GLRenderAction,
+  // otherwise the retained draw list is built with identity transforms.
+  this->doAction(action);
+}
+
+// Documented in superclass. Overridden to set up the viewing and
+// projection matrices.
+void
 SoCamera::doAction(SoAction * action)
 {
   SoState * state = action->getState();
@@ -928,10 +959,12 @@ SoCamera::getView(SoAction * action, SbViewVolume & resultvv, SbViewportRegion &
   resultvv = this->getViewVolume(oldvp, resultvp, mm);
 
   if (resultvp != oldvp) {
+#if COIN_BUILD_LEGACY_GL_RENDERER
     // only draw if this is an SoGLRenderAction
     if (action->isOfType(SoGLRenderAction::getClassTypeId())) {
       this->drawCroppedFrame((SoGLRenderAction*)action, this->viewportMapping.getValue(), oldvp, resultvp);
     }
+#endif
     if (usevpelement) {
       SoViewportRegionElement::set(action->getState(), resultvp);
     }
@@ -941,6 +974,7 @@ SoCamera::getView(SoAction * action, SbViewVolume & resultvv, SbViewportRegion &
 //
 // private method that draws a cropped frame
 //
+#if COIN_BUILD_LEGACY_GL_RENDERER
 void
 SoCamera::drawCroppedFrame(SoGLRenderAction *action,
                            const int viewportmapping,
@@ -1046,9 +1080,9 @@ SoCamera::drawCroppedFrame(SoGLRenderAction *action,
 
   glPopMatrix();
   glPopAttrib();
-
   state->pop();
 }
+#endif
 
 /*!
   Sets the stereo mode.

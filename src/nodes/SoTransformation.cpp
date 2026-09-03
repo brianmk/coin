@@ -85,13 +85,16 @@ Separator {
 
 
 #include <Inventor/actions/SoCallbackAction.h>
+#include <Inventor/elements/SoModelMatrixElement.h>
 
 #include <Inventor/actions/SoGLRenderAction.h>
 #include <Inventor/actions/SoGetBoundingBoxAction.h>
 #include <Inventor/actions/SoGetPrimitiveCountAction.h>
 #include <Inventor/actions/SoPickAction.h>
 #include <Inventor/elements/SoBBoxModelMatrixElement.h>
+#if COIN_BUILD_LEGACY_GL_RENDERER
 #include <Inventor/elements/SoGLModelMatrixElement.h>
+#endif
 #include <Inventor/elements/SoLocalBBoxMatrixElement.h>
 
 #include "nodes/SoSubNodeP.h"
@@ -125,7 +128,7 @@ SoTransformation::initClass(void)
   SO_ENABLE(SoGetBoundingBoxAction, SoBBoxModelMatrixElement);
   SO_ENABLE(SoGetBoundingBoxAction, SoLocalBBoxMatrixElement);
 
-  SO_ENABLE(SoGLRenderAction, SoGLModelMatrixElement);
+  SO_ENABLE_LEGACY_GL(SoGLRenderAction, SoGLModelMatrixElement);
 
   SO_ENABLE(SoPickAction, SoModelMatrixElement);
 

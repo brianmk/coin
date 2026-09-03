@@ -62,7 +62,9 @@ public:
     MIDDLE  = 0x03
   };
 
+#if COIN_HAVE_LEGACY_GL_RENDERER
   void GLRender(SoGLRenderAction * action) override;
+#endif
   void getPrimitiveCount(SoGetPrimitiveCountAction * action) override;
 
   void notify(SoNotList * list) override;

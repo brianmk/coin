@@ -38,7 +38,9 @@
 // This shouldn't strictly be necessary, but the OSF1/cxx compiler
 // complains if this is left out, while using the "friend class
 // SoGLDisplayList" statement in the class definition.
+#if COIN_HAVE_LEGACY_GL_RENDERER
 class SoGLDisplayList;
+#endif
 
 typedef void SoScheduleDeleteCB(void * closure, uint32_t contextid);
 
@@ -88,8 +90,10 @@ public:
   static int getNumSeparators(SoState * state);
 
 private:
+#if COIN_HAVE_LEGACY_GL_RENDERER
   friend class SoGLDisplayList;
   static void scheduleDelete(SoState * state, SoGLDisplayList * dl);
+#endif
   static void cleanupContext(uint32_t contextid, void * closure);
 
 private:
@@ -108,8 +112,8 @@ private:
 
 // For compatibility with client code originally written with SGI/TGS
 // Inventor:
-#ifndef COIN_INTERNAL
+#if !defined(COIN_INTERNAL) && COIN_HAVE_LEGACY_GL_RENDERER
 #include <Inventor/elements/SoGLDisplayList.h>
-#endif // ! COIN_INTERNAL
+#endif // ! COIN_INTERNAL && COIN_HAVE_LEGACY_GL_RENDERER
 
 #endif // !COIN_SOGLCACHECONTEXTELEMENT_H

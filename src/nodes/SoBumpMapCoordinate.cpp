@@ -111,7 +111,7 @@ SoBumpMapCoordinate::initClass(void)
 {
   SO_NODE_INTERNAL_INIT_CLASS(SoBumpMapCoordinate, SO_FROM_COIN_2_2);
 
-  SO_ENABLE(SoGLRenderAction, SoBumpMapCoordinateElement);
+  SO_ENABLE_LEGACY_GL(SoGLRenderAction, SoBumpMapCoordinateElement);
   SO_ENABLE(SoCallbackAction, SoBumpMapCoordinateElement);
   SO_ENABLE(SoPickAction, SoBumpMapCoordinateElement);
 }
@@ -125,12 +125,14 @@ SoBumpMapCoordinate::doAction(SoAction * action)
 }
 
 // Doc from superclass.
+#if COIN_BUILD_LEGACY_GL_RENDERER
 void
 SoBumpMapCoordinate::GLRender(SoGLRenderAction * action)
 {
   SoBumpMapCoordinateElement::set(action->getState(), this,
                                   point.getNum(), point.getValues(0));
 }
+#endif
 
 // Doc from superclass.
 void

@@ -83,6 +83,10 @@
 
 #include <Inventor/nodes/SoPointSet.h>
 
+class SoVBO;
+#include <Inventor/elements/SoCoordinateElement.h>
+#include <Inventor/elements/SoLazyElement.h>
+
 #ifdef HAVE_CONFIG_H
 #include <config.h>
 #endif // HAVE_CONFIG_H
@@ -94,12 +98,18 @@
 #include <Inventor/system/gl.h>
 #include <Inventor/nodes/SoVertexProperty.h>
 #include <Inventor/actions/SoGetPrimitiveCountAction.h>
+#if COIN_BUILD_LEGACY_GL_RENDERER
 #include <Inventor/elements/SoGLCoordinateElement.h>
+#endif
 #include <Inventor/elements/SoNormalBindingElement.h>
 #include <Inventor/elements/SoMaterialBindingElement.h>
 #include <Inventor/bundles/SoMaterialBundle.h>
+#if COIN_BUILD_LEGACY_GL_RENDERER
 #include <Inventor/elements/SoGLLazyElement.h>
+#endif
+#if COIN_BUILD_LEGACY_GL_RENDERER
 #include <Inventor/elements/SoGLVBOElement.h>
+#endif
 #include <Inventor/caches/SoNormalCache.h>
 #include <Inventor/details/SoPointDetail.h>
 #include <Inventor/misc/SoGLDriverDatabase.h>
@@ -108,8 +118,11 @@
 #endif // COIN_DEBUG
 
 #include "nodes/SoSubNodeP.h"
+#include "coindefs.h"
 #include "rendering/SoGL.h"
+#if COIN_BUILD_LEGACY_GL_RENDERER
 #include "rendering/SoVBO.h"
+#endif
 
 /*!
   \var SoSFInt32 SoPointSet::numPoints
@@ -196,6 +209,7 @@ SoPointSet::findNormalBinding(SoState * const state) const
 }
 
 // doc from parent
+#if COIN_BUILD_LEGACY_GL_RENDERER
 void
 SoPointSet::GLRender(SoGLRenderAction * action)
 {
@@ -298,6 +312,7 @@ SoPointSet::GLRender(SoGLRenderAction * action)
   sogl_autocache_update(state, numpts/3, didrenderasvbo);
 
 }
+#endif
 
 // Documented in superclass.
 SbBool

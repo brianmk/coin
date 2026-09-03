@@ -166,11 +166,13 @@ SoMultipleCopy::getBoundingBox(SoGetBoundingBoxAction * action)
 }
 
 // Doc in superclass.
+#if COIN_BUILD_LEGACY_GL_RENDERER
 void
 SoMultipleCopy::GLRender(SoGLRenderAction * action)
 {
   SoMultipleCopy::doAction((SoAction*)action);
 }
+#endif
 
 // Doc in superclass
 void

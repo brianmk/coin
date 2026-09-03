@@ -33,10 +33,13 @@
  * OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 \**************************************************************************/
 
+#include <Inventor/SbBasic.h>
 #include <Inventor/actions/SoCallbackAction.h>
+#if COIN_HAVE_LEGACY_GL_RENDERER
 #include <Inventor/actions/SoGLRenderAction.h>
 #include <Inventor/actions/SoBoxHighlightRenderAction.h>
 #include <Inventor/actions/SoLineHighlightRenderAction.h>
+#endif
 #include <Inventor/actions/SoGetBoundingBoxAction.h>
 #include <Inventor/actions/SoGetMatrixAction.h>
 #include <Inventor/actions/SoGetPrimitiveCountAction.h>
@@ -44,12 +47,14 @@
 #include <Inventor/actions/SoPickAction.h>
 #include <Inventor/actions/SoRayPickAction.h>
 #include <Inventor/actions/SoSearchAction.h>
+#if COIN_HAVE_LEGACY_GL_RENDERER
 #include <Inventor/actions/SoReorganizeAction.h>
+#endif
 #include <Inventor/actions/SoWriteAction.h>
 #include <Inventor/actions/SoAudioRenderAction.h>
+#include <Inventor/actions/SoIRRenderAction.h>
 #include <Inventor/collision/SoIntersectionDetectionAction.h>
 #include <Inventor/actions/SoSimplifyAction.h>
-#include <Inventor/actions/SoReorganizeAction.h>
 #include <Inventor/actions/SoToVRMLAction.h>
 #include <Inventor/actions/SoToVRML2Action.h>
 

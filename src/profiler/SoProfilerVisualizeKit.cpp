@@ -200,6 +200,7 @@ SoProfilerVisualizeKit::GLRender(SoGLRenderAcion * action)
   }
 
 }
+#endif
 */
 
 #undef PRIVATE

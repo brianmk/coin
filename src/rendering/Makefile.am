@@ -1,4 +1,5 @@
 RegularSources = \
+	SoGLContext.cpp \
 	SoGL.cpp \
 	SoGLBigImage.cpp \
 	SoGLDriverDatabase.cpp \

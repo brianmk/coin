@@ -36,7 +36,9 @@
 #include <Inventor/bundles/SoBundle.h>
 #include <Inventor/SbBasic.h>
 
+#if COIN_HAVE_LEGACY_GL_RENDERER
 class SoGLLazyElement;
+#endif
 
 class COIN_DLL_API SoMaterialBundle : public SoBundle {
   typedef SoBundle inherited;
@@ -59,7 +61,9 @@ private:
   SbBool firsttime;
   SbBool coloronly;
   int currindex;
+#if COIN_HAVE_LEGACY_GL_RENDERER
   const SoGLLazyElement * lazyelem;
+#endif
 };
 
 #endif // !COIN_SOMATERIALBUNDLE_H

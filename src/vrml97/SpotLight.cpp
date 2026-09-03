@@ -34,6 +34,8 @@
 #include <config.h>
 #endif // HAVE_CONFIG_H
 
+#include "rendering/SoGL.h"
+
 #ifdef HAVE_VRML97
 
 /*!
@@ -194,7 +196,9 @@
 #include <Inventor/SbVec4f.h>
 #include <Inventor/actions/SoGLRenderAction.h>
 #include <Inventor/elements/SoEnvironmentElement.h>
+#if COIN_BUILD_LEGACY_GL_RENDERER
 #include <Inventor/elements/SoGLLightIdElement.h>
+#endif
 #include <Inventor/system/gl.h>
 #if COIN_DEBUG
 #include <Inventor/errors/SoDebugError.h>
@@ -236,6 +240,7 @@ SoVRMLSpotLight::~SoVRMLSpotLight()
 }
 
 // Doc in parent
+#if COIN_BUILD_LEGACY_GL_RENDERER
 void
 SoVRMLSpotLight::GLRender(SoGLRenderAction * action)
 {
@@ -284,5 +289,6 @@ SoVRMLSpotLight::GLRender(SoGLRenderAction * action)
 
   // FIXME: consider radius and beamWidth
 }
+#endif
 
 #endif // HAVE_VRML97

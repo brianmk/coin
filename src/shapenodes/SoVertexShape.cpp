@@ -45,17 +45,22 @@
 // *************************************************************************
 
 #include <Inventor/nodes/SoVertexShape.h>
+#include <Inventor/elements/SoShapeHintsElement.h>
 
 #ifdef HAVE_CONFIG_H
 #include <config.h>
 #endif // HAVE_CONFIG_H
 
+#if COIN_BUILD_LEGACY_GL_RENDERER
 #include <Inventor/actions/SoGLRenderAction.h>
+#endif
 #include <Inventor/caches/SoNormalCache.h>
 #include <Inventor/elements/SoCacheElement.h>
 #include <Inventor/elements/SoCoordinateElement.h>
 #include <Inventor/elements/SoCreaseAngleElement.h>
+#if COIN_BUILD_LEGACY_GL_RENDERER
 #include <Inventor/elements/SoGLShapeHintsElement.h>
+#endif
 #include <Inventor/elements/SoNormalElement.h>
 #include <Inventor/misc/SoState.h>
 #include <Inventor/nodes/SoVertexProperty.h>
@@ -217,11 +222,13 @@ SoVertexShape::generateDefaultNormals(SoState * /* state */,
 }
 
 // doc from superclass
+#if COIN_BUILD_LEGACY_GL_RENDERER
 SbBool
 SoVertexShape::shouldGLRender(SoGLRenderAction * action)
 {
   return SoShape::shouldGLRender(action);
 }
+#endif
 
 /*!
   Sets normal cache to contain the normals specified by \a normals and \a num,

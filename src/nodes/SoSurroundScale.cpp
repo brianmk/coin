@@ -334,11 +334,13 @@ SoSurroundScale::callback(SoCallbackAction * action)
 }
 
 // Doc in superclass.
+#if COIN_BUILD_LEGACY_GL_RENDERER
 void
 SoSurroundScale::GLRender(SoGLRenderAction * action)
 {
   SoSurroundScale::doAction((SoAction *)action);
 }
+#endif
 
 // Doc in superclass.
 void

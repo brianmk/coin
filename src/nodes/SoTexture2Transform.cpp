@@ -59,11 +59,14 @@
 // *************************************************************************
 
 #include <Inventor/nodes/SoTexture2Transform.h>
+#include <Inventor/elements/SoMultiTextureMatrixElement.h>
 
 #include <Inventor/actions/SoGLRenderAction.h>
 #include <Inventor/actions/SoPickAction.h>
 #include <Inventor/actions/SoGetMatrixAction.h>
+#if COIN_BUILD_LEGACY_GL_RENDERER
 #include <Inventor/elements/SoGLMultiTextureMatrixElement.h>
+#endif
 #include <Inventor/elements/SoTextureUnitElement.h>
 #include <Inventor/elements/SoGLCacheContextElement.h>
 #include <Inventor/elements/SoShapeStyleElement.h>
@@ -129,12 +132,13 @@ SoTexture2Transform::initClass(void)
 {
   SO_NODE_INTERNAL_INIT_CLASS(SoTexture2Transform, SO_FROM_INVENTOR_1|SoNode::VRML1);
 
-  SO_ENABLE(SoGLRenderAction, SoGLMultiTextureMatrixElement);
+  SO_ENABLE_LEGACY_GL(SoGLRenderAction, SoGLMultiTextureMatrixElement);
   SO_ENABLE(SoCallbackAction, SoMultiTextureMatrixElement);
   SO_ENABLE(SoPickAction, SoMultiTextureMatrixElement);
 }
 
 
+#if COIN_BUILD_LEGACY_GL_RENDERER
 // Documented in superclass.
 void
 SoTexture2Transform::GLRender(SoGLRenderAction * action)
@@ -161,6 +165,7 @@ SoTexture2Transform::GLRender(SoGLRenderAction * action)
     // units will be ignored. pederb, 2003-11-10
   }
 }
+#endif
 
 // Documented in superclass.
 void

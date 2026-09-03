@@ -90,9 +90,11 @@ public:
   {
     if (!SoNodeProfiling::isActive(action)) return;
 
+#if COIN_BUILD_LEGACY_GL_RENDERER
     if (action->isOfType(SoGLRenderAction::getClassTypeId()) &&
         SoProfilerP::shouldSyncGL())
       glFinish();
+#endif
 
     const SbTime duration(SbTime::getTimeOfDay() - this->pretime);
 

@@ -34,6 +34,9 @@
 #include <config.h>
 #endif // HAVE_CONFIG_H
 
+#include <Inventor/elements/SoMultiTextureEnabledElement.h>
+#include <Inventor/elements/SoMultiTextureImageElement.h>
+
 #ifdef HAVE_VRML97
 
 /*!
@@ -194,15 +197,21 @@
 #include <Inventor/actions/SoGLRenderAction.h>
 #include <Inventor/actions/SoRayPickAction.h>
 #include <Inventor/elements/SoCacheElement.h>
+#if COIN_BUILD_LEGACY_GL_RENDERER
 #include <Inventor/elements/SoGLMultiTextureEnabledElement.h>
+#endif
+#if COIN_BUILD_LEGACY_GL_RENDERER
 #include <Inventor/elements/SoGLMultiTextureImageElement.h>
+#endif
 #include <Inventor/elements/SoTextureOverrideElement.h>
 #include <Inventor/elements/SoTextureQualityElement.h>
 #include <Inventor/elements/SoTextureUnitElement.h>
 #include <Inventor/errors/SoDebugError.h>
 #include <Inventor/errors/SoReadError.h>
 #include <Inventor/lists/SbStringList.h>
+#if COIN_BUILD_LEGACY_GL_RENDERER
 #include <Inventor/misc/SoGLBigImage.h>
+#endif
 #include <Inventor/sensors/SoFieldSensor.h>
 #include <Inventor/sensors/SoOneShotSensor.h>
 #include <Inventor/sensors/SoTimerSensor.h>
@@ -384,7 +393,9 @@ SoVRMLImageTexture::~SoVRMLImageTexture()
     cc_sched_wait_all(SoVRMLImageTextureP::scheduler);
   }
 
+#if COIN_BUILD_LEGACY_GL_RENDERER
   if (PRIVATE(this)->glimage) PRIVATE(this)->glimage->unref(NULL);
+#endif
   PRIVATE(this)->clearSearchDirs();
   delete PRIVATE(this)->urlsensor;
   delete PRIVATE(this);
@@ -424,12 +435,14 @@ SoVRMLImageTexture::allowPrequalifyFile(SbBool enable)
   PRIVATE(this)->allowprequalifycb = enable;
 }
 
+#if COIN_BUILD_LEGACY_GL_RENDERER
 static SoGLImage::Wrap
 imagetexture_translate_wrap(const SbBool repeat)
 {
   if (repeat) return SoGLImage::REPEAT;
   return SoGLImage::CLAMP_TO_EDGE;
 }
+#endif
 
 // Doc in parent
 void
@@ -482,6 +495,7 @@ SoVRMLImageTexture::rayPick(SoRayPickAction * action)
 }
 
 // Doc in parent
+#if COIN_BUILD_LEGACY_GL_RENDERER
 void
 SoVRMLImageTexture::GLRender(SoGLRenderAction * action)
 {
@@ -556,6 +570,7 @@ SoVRMLImageTexture::GLRender(SoGLRenderAction * action)
     SoTextureOverrideElement::setImageOverride(state, TRUE);
   }
 }
+#endif
 
 // Doc in parent
 void
@@ -642,6 +657,7 @@ SoVRMLImageTexture::loadUrl(void)
 }
 
 // sensor callback used for deleting old GLImage instances
+#if COIN_BUILD_LEGACY_GL_RENDERER
 static void 
 imagetexture_glimage_delete(void * closure, SoSensor * s)
 {
@@ -649,10 +665,12 @@ imagetexture_glimage_delete(void * closure, SoSensor * s)
   img->unref(NULL);
   delete s;
 }
+#endif
 
 //
 // used for checking if this texture should be purged from memory
 //
+#if COIN_BUILD_LEGACY_GL_RENDERER
 void
 SoVRMLImageTexture::glimage_callback(void * closure)
 {
@@ -684,6 +702,7 @@ SoVRMLImageTexture::glimage_callback(void * closure)
   }
   PRIVATE(thisp)->unlock_glimage();
 }
+#endif
 
 SbBool
 SoVRMLImageTexture::default_prequalify_cb(const SbString & url,  void * COIN_UNUSED_ARG(closure), 

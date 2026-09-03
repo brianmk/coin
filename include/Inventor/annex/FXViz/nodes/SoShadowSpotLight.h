@@ -39,6 +39,7 @@
 #include <Inventor/fields/SoSFFloat.h>
 
 
+#if COIN_HAVE_LEGACY_GL_RENDERER
 class COIN_DLL_API SoShadowSpotLight : public SoSpotLight {
   typedef SoSpotLight inherited;
 
@@ -48,7 +49,9 @@ public:
   static void initClass(void);
   SoShadowSpotLight(void);
 
+#if COIN_HAVE_LEGACY_GL_RENDERER
   void GLRender(SoGLRenderAction * action) override;
+#endif
 
   SoSFNode shadowMapScene;
   SoSFFloat nearDistance;
@@ -57,5 +60,6 @@ public:
 protected:
   virtual ~SoShadowSpotLight();
 };
+#endif
 
 #endif // !COIN_SOSHADOWSPOTLIGHT_H

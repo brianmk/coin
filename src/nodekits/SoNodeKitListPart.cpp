@@ -465,11 +465,13 @@ SoNodeKitListPart::callback(SoCallbackAction * action)
 /*!
   This just "forwards" the call to the same method at the container node.
 */
+#if COIN_BUILD_LEGACY_GL_RENDERER
 void
 SoNodeKitListPart::GLRender(SoGLRenderAction * action)
 {
   SoNodeKitListPart::doAction((SoAction*)action);
 }
+#endif
 
 /*!
   This just "forwards" the call to the same method at the container node.

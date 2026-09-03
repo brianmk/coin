@@ -20,6 +20,7 @@ PublicHeaders = \
 	SoCullElement.h \
 	SoDecimationPercentageElement.h \
 	SoDecimationTypeElement.h \
+	SoDevicePixelRatioElement.h \
 	SoDiffuseColorElement.h \
 	SoDrawStyleElement.h \
 	SoElement.h \
