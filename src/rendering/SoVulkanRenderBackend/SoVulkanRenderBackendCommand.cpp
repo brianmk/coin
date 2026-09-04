@@ -30,6 +30,47 @@
 using namespace CoinVulkanDetail;
 
 void
+SoVulkanRenderBackend::resetBoundState()
+{
+  this->lastBoundPipeline = VK_NULL_HANDLE;
+  this->hasBoundViewport = false;
+  this->hasBoundScissor = false;
+}
+
+void
+SoVulkanRenderBackend::applyPipeline(const VkPipeline pipeline)
+{
+  if (pipeline == this->lastBoundPipeline) return;
+  vkCmdBindPipeline(this->activeCommandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS,
+                    pipeline);
+  this->lastBoundPipeline = pipeline;
+}
+
+void
+SoVulkanRenderBackend::applyViewportState(const VkViewport & viewport)
+{
+  if (this->hasBoundViewport &&
+      std::memcmp(&this->lastBoundViewport, &viewport, sizeof(viewport)) == 0) {
+    return;
+  }
+  vkCmdSetViewport(this->activeCommandBuffer, 0, 1, &viewport);
+  this->lastBoundViewport = viewport;
+  this->hasBoundViewport = true;
+}
+
+void
+SoVulkanRenderBackend::applyScissorState(const VkRect2D & scissor)
+{
+  if (this->hasBoundScissor &&
+      std::memcmp(&this->lastBoundScissor, &scissor, sizeof(scissor)) == 0) {
+    return;
+  }
+  vkCmdSetScissor(this->activeCommandBuffer, 0, 1, &scissor);
+  this->lastBoundScissor = scissor;
+  this->hasBoundScissor = true;
+}
+
+void
 SoVulkanRenderBackend::applyViewport(const SoRenderParams & params,
                                      const SoVulkanRenderTarget & target)
 {
@@ -57,7 +98,7 @@ SoVulkanRenderBackend::applyViewport(const SoRenderParams & params,
   viewport.height = static_cast<float>(size[1]);
   viewport.minDepth = 0.0f;
   viewport.maxDepth = 1.0f;
-  vkCmdSetViewport(this->activeCommandBuffer, 0, 1, &viewport);
+  this->applyViewportState(viewport);
 
   // Clamp the clear region to the target so an off-screen viewport (origin
   // outside the target, or a size exceeding the extent) never generates a
@@ -78,7 +119,7 @@ SoVulkanRenderBackend::applyViewport(const SoRenderParams & params,
   scissor.offset = {x0, y0};
   scissor.extent = {static_cast<uint32_t>(std::max(0, x1 - x0)),
                     static_cast<uint32_t>(std::max(0, y1 - y0))};
-  vkCmdSetScissor(this->activeCommandBuffer, 0, 1, &scissor);
+  this->applyScissorState(scissor);
 }
 
 // Apply a per-command viewport (recorded by the IR producer from
@@ -109,7 +150,7 @@ SoVulkanRenderBackend::applyCommandViewport(const SoRenderCommand & command,
     std::clamp(command.state.depth.range[0], 0.0f, 1.0f);
   viewport.maxDepth =
     std::clamp(command.state.depth.range[1], 0.0f, 1.0f);
-  vkCmdSetViewport(this->activeCommandBuffer, 0, 1, &viewport);
+  this->applyViewportState(viewport);
 
   // The per-command viewport also bounds the draw region; mirror the
   // scissor clamp used by applyViewport().
@@ -130,7 +171,7 @@ SoVulkanRenderBackend::applyCommandViewport(const SoRenderCommand & command,
   scissor.offset = {x0, y0};
   scissor.extent = {static_cast<uint32_t>(std::max(0, x1 - x0)),
                     static_cast<uint32_t>(std::max(0, y1 - y0))};
-  vkCmdSetScissor(this->activeCommandBuffer, 0, 1, &scissor);
+  this->applyScissorState(scissor);
 }
 
 void
@@ -155,7 +196,7 @@ SoVulkanRenderBackend::applyScissor(const SoRenderCommand & command,
     scissor.offset = {0, 0};
     scissor.extent = target.extent;
   }
-  vkCmdSetScissor(this->activeCommandBuffer, 0, 1, &scissor);
+  this->applyScissorState(scissor);
 }
 
 void
@@ -273,6 +314,124 @@ SoVulkanRenderBackend::recordOverlayDepthClear(const SoRenderCommand & command,
   vkCmdClearAttachments(this->activeCommandBuffer, 1, &attachment, 1, &rect);
 }
 
+bool
+SoVulkanRenderBackend::updateLightingSetup(const SoDrawList & drawlist)
+{
+  // Build the (usually single) lighting constant block per distinct
+  // lightingHandle once per frame, into the lighting ring, so the 8-light
+  // setup is computed once and referenced by every draw through its dynamic
+  // offset instead of being re-derived per draw.
+  this->lightingSlotOffsets.clear();
+  if (this->lightingConstMapped == nullptr || this->lightingConstStride == 0) {
+    return false;
+  }
+
+  // Ring base for this frame (fixed 8-frame ring, 8 slots per frame).
+  const uint32_t frameBase = (this->uboFrameIndex % 8u) * 8u;
+
+  static const SoLightingData emptyLighting;
+  uint32_t occupiedSlots = 0;
+
+  // Seed slot 0 with empty lighting so the handle-0 fallback in
+  // lightingOffsetFor() is always valid.
+  {
+    const VkDeviceSize offset =
+      static_cast<VkDeviceSize>(frameBase + occupiedSlots) *
+      this->lightingConstStride;
+    VulkanLightingUbo * u = reinterpret_cast<VulkanLightingUbo *>(
+      static_cast<char *>(this->lightingConstMapped) + offset);
+    std::memset(u, 0, sizeof(VulkanLightingUbo));
+    this->lightingSlotOffsets[0] = offset;
+    occupiedSlots = 1;
+  }
+
+  for (int i = 0; i < drawlist.getNumCommands(); ++i) {
+    const SoRenderCommand & command = drawlist.getCommand(i);
+    const SoLightingHandle handle = command.lightingHandle;
+    if (handle == 0 ||
+        this->lightingSlotOffsets.find(handle) !=
+          this->lightingSlotOffsets.end()) {
+      continue;
+    }
+    const SoLightingData * lighting = drawlist.getLighting(handle);
+    if (!lighting) lighting = &emptyLighting;
+
+    // Clamp to the per-frame slot budget (8); beyond that reuse the last
+    // slot (degraded but never out of bounds).
+    const uint32_t slot = std::min(occupiedSlots, 7u);
+    const VkDeviceSize offset =
+      static_cast<VkDeviceSize>(frameBase + slot) * this->lightingConstStride;
+    VulkanLightingUbo * u = reinterpret_cast<VulkanLightingUbo *>(
+      static_cast<char *>(this->lightingConstMapped) + offset);
+    std::memset(u, 0, sizeof(VulkanLightingUbo));
+
+    u->ambientLight[0] = lighting->ambient[0];
+    u->ambientLight[1] = lighting->ambient[1];
+    u->ambientLight[2] = lighting->ambient[2];
+    u->ambientLight[3] = 1.0f;
+
+    const int count = std::min<int>(
+      static_cast<int>(lighting->lights.size()), MAX_SHADER_LIGHTS);
+    for (int li = 0; li < count; ++li) {
+      const SoLightData & light = lighting->lights[static_cast<size_t>(li)];
+      float * type = u->lightType + li * 4;
+      type[0] = static_cast<float>(light.type);
+      type[1] = type[2] = 0.0f;
+      type[3] = 1.0f;
+
+      float * color = u->lightColor + li * 4;
+      color[0] = light.color[0];
+      color[1] = light.color[1];
+      color[2] = light.color[2];
+      color[3] = 1.0f;
+
+      float * direction = u->lightDirection + li * 4;
+      direction[0] = light.direction[0];
+      direction[1] = light.direction[1];
+      direction[2] = light.direction[2];
+      direction[3] = 1.0f;
+
+      float * position = u->lightPosition + li * 4;
+      position[0] = light.position[0];
+      position[1] = light.position[1];
+      position[2] = light.position[2];
+      position[3] = 1.0f;
+
+      float * attenuation = u->lightAttenuation + li * 4;
+      attenuation[0] = light.attenuation[0];
+      attenuation[1] = light.attenuation[1];
+      attenuation[2] = light.attenuation[2];
+      attenuation[3] = 1.0f;
+
+      float * spot = u->lightSpotParams + li * 4;
+      spot[0] = light.spotCutoffCos;
+      spot[1] = light.spotExponent;
+      spot[2] = 0.0f;
+      spot[3] = 1.0f;
+    }
+    this->lightingSlotOffsets[handle] = offset;
+    ++occupiedSlots;
+  }
+  return true;
+}
+
+VkDeviceSize
+SoVulkanRenderBackend::lightingOffsetFor(const SoRenderCommand & command) const
+{
+  const auto found = this->lightingSlotOffsets.find(command.lightingHandle);
+  if (found != this->lightingSlotOffsets.end()) {
+    return found->second;
+  }
+  // Handle missing from the current frame's setup (updateLightingSetup()
+  // visits every command, so this should be unreachable): fall back to the
+  // seeded handle-0 empty slot.
+  const auto zero = this->lightingSlotOffsets.find(0);
+  if (zero != this->lightingSlotOffsets.end()) {
+    return zero->second;
+  }
+  return 0;
+}
+
 void
 SoVulkanRenderBackend::updateLightingUniforms(const SoDrawList & drawlist,
                                               const SoRenderCommand & command,
@@ -280,17 +439,18 @@ SoVulkanRenderBackend::updateLightingUniforms(const SoDrawList & drawlist,
                                               const VkDeviceSize uboOffset,
                                               const bool unlit)
 {
-  VulkanVisualUbo ubo {};
+  // Per-draw block only: view/model and the per-material fields.  The
+  // lighting constant block lives in set 0 and is written once per frame by
+  // updateLightingSetup().
+  VulkanDrawUbo ubo {};
 
   SbMat m;
   // Overlay-pass geometry that spans the whole frame viewport (the
   // selection/preselection highlight) is frame-camera geometry: it must be
   // projected with the frame camera matrices, not with the scene camera's
   // own recorded matrices (whose near/far fields are stale and which lag
-  // one frame behind during navigation, making the highlight rotate at a
-  // different speed and z-fight the coplanar base).  Overlays that carry
-  // their own viewport (the navigation cube sub-scene) keep their own
-  // camera.
+  // one frame behind during navigation).  Overlays that carry their own
+  // viewport (the navigation cube sub-scene) keep their own camera.
   const SbVec2s frameSize = params.viewport.getViewportSizePixels();
   const bool frameCameraOverlay =
     command.pass == SO_RENDERPASS_OVERLAY
@@ -306,37 +466,8 @@ SoVulkanRenderBackend::updateLightingUniforms(const SoDrawList & drawlist,
   std::memcpy(ubo.view, &m[0][0], sizeof(float) * 16);
   command.modelMatrix.getValue(m);
   std::memcpy(ubo.model, &m[0][0], sizeof(float) * 16);
-  if (COIN_VULKAN_ENV_FLAG("FC_VULKAN_CLIP_DEBUG")) {
-    static int uboLog = 0;
-    if (uboLog++ < 6) {
-      fprintf(stderr, "[UBO] cmd pass=%d verts=%u model00=%.3f m11=%.3f m22=%.3f "
-                      "trans=(%.3f,%.3f,%.3f) view33=%.3f\n",
-              static_cast<int>(command.pass),
-              static_cast<unsigned>(command.geometry.vertexCount),
-              ubo.model[0], ubo.model[5], ubo.model[10],
-              ubo.model[12], ubo.model[13], ubo.model[14],
-              ubo.view[15]);
-    }
-  }
 
   const SoMaterialData & material = command.material;
-  if (COIN_VULKAN_ENV_FLAG("FC_VULKAN_BACKEND_DEBUG") &&
-      (command.geometry.topology == SO_TOPOLOGY_LINES ||
-       command.geometry.topology == SO_TOPOLOGY_LINE_STRIP ||
-       command.geometry.topology == SO_TOPOLOGY_POINTS)) {
-    fprintf(stderr,
-            "[UBO] cmd=%p pass=%d topo=%d diffuse=(%.2f,%.2f,%.2f,%.2f) "
-            "emissive=(%.2f,%.2f,%.2f) ambient=(%.2f,%.2f,%.2f) "
-            "specular=(%.2f,%.2f,%.2f) shading=%d unlit=%d\n",
-            (const void*)&command, static_cast<int>(command.pass),
-            static_cast<int>(command.geometry.topology),
-            material.diffuse[0], material.diffuse[1], material.diffuse[2],
-            material.diffuse[3],
-            material.emissive[0], material.emissive[1], material.emissive[2],
-            material.ambient[0], material.ambient[1], material.ambient[2],
-            material.specular[0], material.specular[1], material.specular[2],
-            static_cast<int>(material.shadingModel), unlit ? 1 : 0);
-  }
   ubo.emissive[0] = material.emissive[0];
   ubo.emissive[1] = material.emissive[1];
   ubo.emissive[2] = material.emissive[2];
@@ -355,132 +486,22 @@ SoVulkanRenderBackend::updateLightingUniforms(const SoDrawList & drawlist,
     ? 0.0f
     : (material.shadingModel == SO_SHADING_LEGACY_GOURAUD ? 1.0f : 0.0f);
 
+  // Light count is consumed by the fragment shader loop; it is a per-material
+  // value carried here (the lighting block itself holds the array).
   const SoLightingData * lighting = drawlist.getLighting(command.lightingHandle);
   static const SoLightingData emptyLighting;
-  if (!lighting) {
-    lighting = &emptyLighting;
-    if (command.lightingHandle != 0) {
-      static std::once_flag invalidHandleWarning;
-      std::call_once(invalidHandleWarning, []() {
-        SoDebugError::postWarning(
-          "SoVulkanRenderBackend::updateLightingUniforms",
-          "Draw command references missing lighting data; no headlight is "
-          "synthesized.");
-      });
-    }
-  }
-
-  ubo.ambientLight[0] = lighting->ambient[0];
-  ubo.ambientLight[1] = lighting->ambient[1];
-  ubo.ambientLight[2] = lighting->ambient[2];
-  ubo.ambientLight[3] = 1.0f;
-
-  const int count = std::min<int>(
-    static_cast<int>(lighting->lights.size()), MAX_SHADER_LIGHTS);
-  if (static_cast<int>(lighting->lights.size()) > MAX_SHADER_LIGHTS) {
-    static std::once_flag lightLimitWarning;
-    std::call_once(lightLimitWarning, []() {
-      SoDebugError::postWarning(
-        "SoVulkanRenderBackend::updateLightingUniforms",
-        "The Visual program supports eight lights; additional retained "
-        "lights are ignored by this executor.");
-    });
-  }
+  if (!lighting) lighting = &emptyLighting;
+  const int count = std::min<int>(static_cast<int>(lighting->lights.size()),
+                                  MAX_SHADER_LIGHTS);
   ubo.materialParams[2] = static_cast<float>(count);
-
-  for (int i = 0; i < count; ++i) {
-    const SoLightData & light = lighting->lights[static_cast<size_t>(i)];
-    float * type = ubo.lightType + i * 4;
-    type[0] = static_cast<float>(light.type);
-    type[1] = type[2] = 0.0f;
-    type[3] = 1.0f;
-
-    float * color = ubo.lightColor + i * 4;
-    color[0] = light.color[0];
-    color[1] = light.color[1];
-    color[2] = light.color[2];
-    color[3] = 1.0f;
-
-    // SoLightData::direction and ::position are already expressed in the VIEW
-    // (eye) space of the scene camera: fillLightingFromState() derives them via
-    // SoLightElement::getMatrix(), which stores the light's model*view matrix
-    // (see SoDirectionalLight::GLRender), so a directional light's "toward the
-    // light" vector and a point/spot light's position arrive in eye space.  The
-    // vertex stage outputs the normal and eye position in the SAME eye space
-    // (this u_view), so they must be used verbatim.  Re-applying the view matrix
-    // here would rotate the light a second time and make a static world light
-    // chase the camera as it orbits.
-    float * direction = ubo.lightDirection + i * 4;
-    direction[0] = light.direction[0];
-    direction[1] = light.direction[1];
-    direction[2] = light.direction[2];
-    direction[3] = 1.0f;
-
-    float * position = ubo.lightPosition + i * 4;
-    position[0] = light.position[0];
-    position[1] = light.position[1];
-    position[2] = light.position[2];
-    position[3] = 1.0f;
-
-    float * attenuation = ubo.lightAttenuation + i * 4;
-    attenuation[0] = light.attenuation[0];
-    attenuation[1] = light.attenuation[1];
-    attenuation[2] = light.attenuation[2];
-    attenuation[3] = 1.0f;
-
-    float * spot = ubo.lightSpotParams + i * 4;
-    spot[0] = light.spotCutoffCos;
-    spot[1] = light.spotExponent;
-    spot[2] = 0.0f;
-    spot[3] = 1.0f;
-  }
-
-  if (COIN_VULKAN_ENV_FLAG("FC_VULKAN_LIGHT_DEBUG") && count > 0 &&
-      s_lightLog++ < 6) {
-    fprintf(stderr,
-            "[LIT] cmd=%p pass=%d topo=%d verts=%u lightCount=%d "
-            "ambient=(%.3f,%.3f,%.3f) matAmb=(%.3f,%.3f,%.3f) "
-            "shininess=%.2f\n",
-            (const void*)&command, static_cast<int>(command.pass),
-            static_cast<int>(command.geometry.topology),
-            static_cast<unsigned>(command.geometry.vertexCount), count,
-            lighting->ambient[0], lighting->ambient[1], lighting->ambient[2],
-            material.ambient[0], material.ambient[1], material.ambient[2],
-            material.shininess);
-    for (int li = 0; li < count && li < 3; ++li) {
-      const SoLightData & l = lighting->lights[static_cast<size_t>(li)];
-      fprintf(stderr,
-              "[LIT]   light%d type=%d color=(%.2f,%.2f,%.2f) "
-              "dir=(%.3f,%.3f,%.3f) pos=(%.2f,%.2f,%.2f)\n",
-              li, static_cast<int>(l.type), l.color[0], l.color[1],
-              l.color[2], l.direction[0], l.direction[1], l.direction[2],
-              l.position[0], l.position[1], l.position[2]);
-    }
-  }
 
   if (this->lightingMapped && this->uboSlotStride > 0) {
     std::memcpy(static_cast<char *>(this->lightingMapped) + uboOffset,
                 &ubo, sizeof(ubo));
   }
-
-  if (COIN_VULKAN_ENV_FLAG("FC_VULKAN_MATRIX_DUMP") && s_debugFrame > 0
-      && (s_debugFrame % 100 == 0) && s_dumpCmdCount <= 4) {
-    fprintf(stderr,
-            "[LGT] frame=%d cmd#%d ambient=(%.2f,%.2f,%.2f) lights=%d\n",
-            s_debugFrame, s_dumpCmdCount - 1, lighting->ambient[0],
-            lighting->ambient[1], lighting->ambient[2], count);
-    for (int i = 0; i < count && i < 3; ++i) {
-      const SoLightData & light = lighting->lights[static_cast<size_t>(i)];
-      fprintf(stderr,
-              "[LGT]   light%d type=%.0f dir=(%.3f,%.3f,%.3f) "
-              "pos=(%.3f,%.3f,%.3f) color=(%.2f,%.2f,%.2f)\n",
-              i, static_cast<float>(light.type),
-              light.direction[0], light.direction[1], light.direction[2],
-              light.position[0], light.position[1], light.position[2],
-              light.color[0], light.color[1], light.color[2]);
-    }
-  }
 }
+
+
 
 void
 SoVulkanRenderBackend::recordDrawCommand(const SoDrawList & drawlist,
@@ -587,8 +608,7 @@ SoVulkanRenderBackend::recordDrawCommand(const SoDrawList & drawlist,
               overlayPass ? 1 : 0, transparent ? 1 : 0);
     }
   }
-  vkCmdBindPipeline(this->activeCommandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS,
-                    pipeline);
+  this->applyPipeline(pipeline);
   // Commands carrying their own viewport (SoViewportRegionElement) render
   // into that sub-region; otherwise the frame viewport from applyViewport()
   // stays active.
@@ -615,13 +635,23 @@ SoVulkanRenderBackend::recordDrawCommand(const SoDrawList & drawlist,
     this->uboSlotStride;
   const uint32_t uboDynamicOffset = static_cast<uint32_t>(uboOffset);
 
+  // Bind set 0 (lighting constant, dynamic offset per handle) and set 1
+  // (per-draw UBO + texture, dynamic offset) in one call.  Lighting is the
+  // same for every command sharing a handle, so its block was written once
+  // by updateLightingSetup() and is merely referenced here.
   VkDescriptorSet textureSet = this->resolveTextureSet(command);
-  if (textureSet != VK_NULL_HANDLE) {
-    vkCmdBindDescriptorSets(this->activeCommandBuffer,
-                            VK_PIPELINE_BIND_POINT_GRAPHICS,
-                            this->pipelineLayout, 0, 1, &textureSet, 1,
-                            &uboDynamicOffset);
+  if (textureSet == VK_NULL_HANDLE) {
+    textureSet = this->whiteDescriptorSet;
   }
+  const VkDescriptorSet sets[2] = {this->lightingDescriptorSet, textureSet};
+  const uint32_t dynamicOffsets[2] = {
+    static_cast<uint32_t>(this->lightingOffsetFor(command)),
+    uboDynamicOffset,
+  };
+  vkCmdBindDescriptorSets(this->activeCommandBuffer,
+                          VK_PIPELINE_BIND_POINT_GRAPHICS,
+                          this->pipelineLayout, 0, 2, sets, 2,
+                          dynamicOffsets);
 
   const VkDeviceSize vertexOffset = entry.vertexOffset;
   vkCmdBindVertexBuffers(this->activeCommandBuffer, 0, 1, &entry.vertexBuffer,

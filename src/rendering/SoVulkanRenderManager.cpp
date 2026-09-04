@@ -22,6 +22,7 @@
 #include "rendering/SoRenderIRP.h"
 #include "rendering/SoVulkanRenderBackend.h"
 #include "rendering/SoRTXRenderBackend.h"
+#include "rendering/SoVulkanShared.h"
 
 #include <chrono>
 #include <cmath>
@@ -36,16 +37,17 @@ namespace {
 // Cached environment checks for the diagnostic flags.  These sit on the
 // per-frame path and the environment does not change during a process
 // lifetime, so the getenv() lookup (not thread-safe) is performed at most
-// once instead of every frame.
+// once instead of every frame.  All flags use the shared
+// SoVulkanShared::envFlagEnabled policy (honors "0"/"false"/"off" opt-outs).
 bool clipDebugEnabled()
 {
-  static const bool enabled = std::getenv("FC_VULKAN_CLIP_DEBUG") != nullptr;
+  static const bool enabled = SoVulkanShared::envFlagEnabled("FC_VULKAN_CLIP_DEBUG");
   return enabled;
 }
 
 bool breadcrumbsEnabled()
 {
-  static const bool enabled = std::getenv("FC_VULKAN_BREADCRUMBS") != nullptr;
+  static const bool enabled = SoVulkanShared::envFlagEnabled("FC_VULKAN_BREADCRUMBS");
   return enabled;
 }
 
@@ -57,9 +59,12 @@ long vkRenderBreadcrumbNowUs()
 
 bool vkRenderBreadcrumbEnabled()
 {
-  static const bool enabled = std::getenv("FC_GUI_OPEN_BREADCRUMB") != nullptr;
+  static const bool enabled = SoVulkanShared::envFlagEnabled("FC_GUI_OPEN_BREADCRUMB");
   return enabled;
 }
+
+int vkLightFrameDbgBudget = 192;
+int vkLightFpDbgBudget = 192;
 
 void vkRenderBreadcrumb(const char* phase)
 {
@@ -90,7 +95,7 @@ void vkRenderBreadcrumbSince(long startUs, long thresholdUs, const char* phase)
 // change (the cached-bbox correctness case).
 bool clipVerboseEnabled()
 {
-  static const bool enabled = std::getenv("FC_VULKAN_CLIP_VERBOSE") != nullptr;
+  static const bool enabled = SoVulkanShared::envFlagEnabled("FC_VULKAN_CLIP_VERBOSE");
   return enabled;
 }
 
@@ -1028,6 +1033,24 @@ SoVulkanRenderManagerP::computeGraphFingerprint() const
   mixHash(h, reinterpret_cast<uintptr_t>(this->scene));
   mixHash(h, reinterpret_cast<uintptr_t>(this->overlayScene));
   mixHash(h, reinterpret_cast<uintptr_t>(this->decorationScene));
+  if (std::getenv("FC_VULKAN_LIGHTREPLAY_DBG")) {
+    uint64_t hScene = 0xcbf29ce484222325ULL;
+    uint64_t hOverlay = 0xcbf29ce484222325ULL;
+    uint64_t hDecor = 0xcbf29ce484222325ULL;
+    graphFingerprintWalk(this->scene, this->camera, hScene);
+    graphFingerprintWalk(this->overlayScene, this->camera, hOverlay);
+    graphFingerprintWalk(this->decorationScene, this->camera, hDecor);
+    if (vkLightFpDbgBudget-- > 0) {
+      fprintf(stderr,
+              "[FP] scene=%016lx overlay=%016lx decor=%016lx extRev=%llu"
+              " size=%dx%d\n",
+              (unsigned long)hScene, (unsigned long)hOverlay,
+              (unsigned long)hDecor,
+              (unsigned long long)this->externalRevision,
+              (int)this->viewportRegion.getViewportSizePixels()[0],
+              (int)this->viewportRegion.getViewportSizePixels()[1]);
+    }
+  }
   graphFingerprintWalk(this->scene, this->camera, h);
   graphFingerprintWalk(this->overlayScene, this->camera, h);
   graphFingerprintWalk(this->decorationScene, this->camera, h);
@@ -1682,6 +1705,7 @@ SoVulkanRenderManagerP::prepareRenderParams(SbBool clearwindow,
     vkRenderBreadcrumbSince(matricesBcStart, 2000, "prepare matrix build end");
   }
 
+  int dbgRestamped = -1;
   if (irReplayed) {
     // Camera-only frame: restamp the frame viewing matrix into every
     // non-overlay command that carried the previous traversal's viewing
@@ -1691,6 +1715,7 @@ SoVulkanRenderManagerP::prepareRenderParams(SbBool clearwindow,
       SbMat lastView;
       this->lastFrameView.getValue(lastView);
       const int numCommands = list.getNumCommands();
+      int restamped = 0;
       for (int i = 0; i < numCommands; ++i) {
         SoRenderCommand & command = list.getCommand(i);
         if (command.pass == SO_RENDERPASS_OVERLAY) {
@@ -1700,8 +1725,10 @@ SoVulkanRenderManagerP::prepareRenderParams(SbBool clearwindow,
         command.viewMatrix.getValue(cmdView);
         if (std::memcmp(&cmdView[0][0], &lastView[0][0], sizeof(cmdView)) == 0) {
           command.viewMatrix = params.viewMatrix;
+          ++restamped;
         }
       }
+      dbgRestamped = restamped;
       list.restrikeLighting(this->lastFrameView, params.viewMatrix);
     }
   }
@@ -1717,6 +1744,26 @@ SoVulkanRenderManagerP::prepareRenderParams(SbBool clearwindow,
         break;
       }
     }
+  }
+  if (std::getenv("FC_VULKAN_LIGHTREPLAY_DBG") && vkLightFrameDbgBudget-- > 0) {
+    const SbMatrix & v = params.viewMatrix;
+    float qx = 0, qy = 0, qz = 0, qw = 1;
+    SbVec3f camPos(0.0f, 0.0f, 0.0f);
+    if (this->camera) {
+      const SbRotation camRot = this->camera->orientation.getValue();
+      camRot.getValue(qx, qy, qz, qw);
+      camPos = this->camera->position.getValue();
+    }
+    fprintf(stderr,
+            "[VKS] fp=%016lx replayed=%d lastViewValid=%d restamped=%d"
+            " viewT=(%.2f,%.2f,%.2f) viewM00=%.3f camPos=(%.1f,%.1f,%.1f)"
+            " camQ=(%.3f,%.3f,%.3f,%.3f) scene=%p\n",
+            (unsigned long)graphFp,
+            (int)irReplayed, (int)this->lastFrameViewValid, dbgRestamped,
+            v[0][3], v[1][3], v[2][3], v[0][0],
+            camPos[0], camPos[1], camPos[2],
+            qx, qy, qz, qw,
+            reinterpret_cast<const void *>(this->scene));
   }
   const long sortBcStart = vkRenderBreadcrumbEnabled() ? vkRenderBreadcrumbNowUs() : 0;
   list.buildSortedOrder(params.viewMatrix);

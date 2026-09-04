@@ -5,6 +5,8 @@
 
 #include "rendering/SoRenderBackend.h"
 
+#include "rendering/SoVulkanShared.h"
+
 #include <Inventor/rendering/SoVulkanRenderTarget.h>
 
 #include <cstddef>
@@ -20,6 +22,77 @@ static inline size_t hashCombine(size_t hash, size_t value)
 {
   return hash ^ (value + 0x9e3779b9 + (hash << 6) + (hash >> 2));
 }
+
+/*!
+  \brief Immutable graphics-pipeline identity.
+
+  Pipelines are cached in \c pipelineCache keyed by this struct.  It is
+  defined before VulkanCachedCommand so each cached command can remember the
+  exact key it last resolved to, letting getOrCreatePipeline() skip re-hashing
+  (and the map lookup) for an unchanged command on the steady-state path.
+*/
+struct PipelineKey {
+  VkRenderPass renderPass = VK_NULL_HANDLE;
+  uint8_t topology = 0;
+  uint8_t fillMode = 0;
+  uint8_t cullMode = 0;
+  uint8_t ccwFrontFace = 1;
+  bool depthTestEnable = false;
+  bool depthWriteEnable = false;
+  uint8_t depthFunction = 0;
+  bool depthBiasEnable = false;
+  float depthBiasConstantFactor = 0.0f;
+  float depthBiasSlopeFactor = 0.0f;
+  bool blendEnable = false;
+  uint8_t blendSrcRGB = 0;
+  uint8_t blendDstRGB = 0;
+  uint8_t blendSrcAlpha = 0;
+  uint8_t blendDstAlpha = 0;
+  uint8_t blendEquationRGB = 0;
+  uint8_t blendEquationAlpha = 0;
+  bool stencilEnable = false;
+  uint8_t stencilFunction = 0;
+  uint8_t stencilReference = 0;
+  uint8_t stencilCompareMask = 0xFF;
+  uint8_t stencilWriteMask = 0xFF;
+  uint8_t stencilFailOp = 0;
+  uint8_t stencilZFailOp = 0;
+  uint8_t stencilZPassOp = 0;
+  uint32_t sampleCount = 1;
+  bool wideLine = false;
+
+  bool operator==(const PipelineKey & other) const
+  {
+    return renderPass == other.renderPass && topology == other.topology &&
+      fillMode == other.fillMode && cullMode == other.cullMode &&
+      ccwFrontFace == other.ccwFrontFace &&
+      depthTestEnable == other.depthTestEnable &&
+      depthWriteEnable == other.depthWriteEnable &&
+      depthFunction == other.depthFunction &&
+      depthBiasEnable == other.depthBiasEnable &&
+      (!depthBiasEnable ||
+       (depthBiasConstantFactor == other.depthBiasConstantFactor &&
+        depthBiasSlopeFactor == other.depthBiasSlopeFactor)) &&
+      blendEnable == other.blendEnable &&
+      (!blendEnable ||
+       (blendSrcRGB == other.blendSrcRGB &&
+        blendDstRGB == other.blendDstRGB &&
+        blendSrcAlpha == other.blendSrcAlpha &&
+        blendDstAlpha == other.blendDstAlpha &&
+        blendEquationRGB == other.blendEquationRGB &&
+        blendEquationAlpha == other.blendEquationAlpha)) &&
+      stencilEnable == other.stencilEnable &&
+      (!stencilEnable ||
+       (stencilFunction == other.stencilFunction &&
+        stencilReference == other.stencilReference &&
+        stencilCompareMask == other.stencilCompareMask &&
+        stencilWriteMask == other.stencilWriteMask &&
+        stencilFailOp == other.stencilFailOp &&
+        stencilZFailOp == other.stencilZFailOp &&
+        stencilZPassOp == other.stencilZPassOp)) &&
+      sampleCount == other.sampleCount && wideLine == other.wideLine;
+  }
+};
 
 /*!
   \brief Cached GPU geometry for one retained SoRenderCommand.
@@ -75,14 +148,14 @@ struct VulkanCachedCommand {
   // for unchanged layouts), which would otherwise serve stale geometry.
   uint64_t contentHash = 0;
 
-  // Pipeline-resolution fast path (getOrCreatePipeline()): fingerprint of
-  // the PipelineKey resolved for this command last, plus the handle it
-  // produced.  A match skips the per-frame pipelineCache unordered_map
-  // lookup (wide key hash + bucket walk + equality) for unchanged
-  // commands.  The entry lives and dies with the geometry cache, which
-  // invalidateCache() clears together with the pipeline cache, so these
-  // fields never outlive the handles they name.
-  uint64_t pipelineFingerprint = 0;
+  // Pipeline-resolution fast path (getOrCreatePipeline()).  The exact
+  // PipelineKey resolved for this command last is stored verbatim, plus the
+  // handle it produced.  A match (cheap field-by-field equality, no hashing)
+  // skips rebuilding the key and the per-frame pipelineCache unordered_map
+  // lookup for unchanged commands.  The entry lives and dies with the
+  // geometry cache, which invalidateCache() clears together with the
+  // pipeline cache, so these fields never outlive the handles they name.
+  PipelineKey resolvedKey;
   VkPipeline resolvedPipeline = VK_NULL_HANDLE;
   bool hasResolvedPipeline = false;
 };
@@ -200,6 +273,8 @@ private:
   bool createDescriptorSetLayout();
   bool createDescriptorPool();
   bool createLightingUniformBuffer();
+  bool createLightingConstBuffer();
+  bool createLightingDescriptorSet();
   bool createPipelineLayout();
   bool createRenderPass(const SoVulkanRenderTarget & target,
                         VkRenderPass & renderPass);
@@ -207,6 +282,7 @@ private:
                      VkShaderModule & fragmentModule);
   bool createWideLineShaders();
   bool createBackgroundResources();
+  bool createPipelineCache();
   bool createBackgroundPipeline(const SoVulkanRenderTarget & target,
                                 VkRenderPass renderPass,
                                 VkPipeline & pipeline);
@@ -222,11 +298,20 @@ private:
                            bool overlayPass = false);
 
   // --- Per-draw lighting ------------------------------------------------
+  // Write each distinct SoLightingHandle's constant block once into the
+  // lighting ring for the current frame, and build lightingSlotOffsets.
+  // Must run before recording draws; called at the start of renderInternal /
+  // renderExternal after beginFrame().
+  bool updateLightingSetup(const SoDrawList & drawlist);
   void updateLightingUniforms(const SoDrawList & drawlist,
                               const SoRenderCommand & command,
                               const SoRenderParams & params,
                               VkDeviceSize uboOffset,
                               bool unlit = false);
+  // Dynamic byte offset into the lighting ring for a command's handle (0 if
+  // the command references no lighting).  Uses the frame-local
+  // lightingSlotOffsets built by updateLightingSetup().
+  VkDeviceSize lightingOffsetFor(const SoRenderCommand & command) const;
 
   // --- Geometry cache ---------------------------------------------------
   void invalidateCache();
@@ -327,6 +412,17 @@ private:
                             const SoVulkanRenderTarget & target);
   void applyScissor(const SoRenderCommand & command,
                     const SoVulkanRenderTarget & target);
+  // Deduplicated dynamic-state emitters.  Each records the value last set
+  // this frame and skips the vkCmd* call when the incoming value is already
+  // active, so an opaque run of draws sharing a pipeline/viewport pays one
+  // state change instead of one per draw.  Only the value actually submitted
+  // to the command buffer is remembered, so early-return paths (e.g. a
+  // command with no per-command viewport) leave the remembered state as the
+  // real current binding.
+  void applyPipeline(VkPipeline pipeline);
+  void applyViewportState(const VkViewport & viewport);
+  void applyScissorState(const VkRect2D & scissor);
+  void resetBoundState();
   void recordOverlayDepthClear(const SoRenderCommand & command,
                                const SoVulkanRenderTarget & target);
   void recordOverlayBlock(const SoDrawList & drawlist,
@@ -360,9 +456,26 @@ private:
                                VkBuffer & buffer,
                                VkDeviceMemory & memory,
                                const void * data);
-  // Cache VkPhysicalDeviceMemoryProperties once; queried per buffer is pure
-  // driver overhead on the re-upload path.
-  void ensureDeviceMemoryProperties();
+  // Pick a memory type for `requirements` that satisfies `desired` properties
+  // and a compatible memoryTypeBits.  Uses the shared cached
+  // SoVulkanShared::MemoryProperties (memProps) so the memory-type search lives
+  // in one place.  Returns false when no suitable type exists.
+  bool selectMemoryType(const VkMemoryRequirements & requirements,
+                        VkMemoryPropertyFlags desired,
+                        uint32_t & memoryTypeIndex);
+  // Allocate device memory for an already-created `buffer` and bind it.  On
+  // failure `memory` is left null and the caller destroys `buffer`.
+  bool allocateBufferMemory(VkBuffer buffer,
+                            const VkMemoryRequirements & requirements,
+                            VkMemoryPropertyFlags desiredProperties,
+                            VkDeviceMemory & memory);
+  // Create a buffer backed by memory with the desired properties.  When
+  // `data` is non-null the host-visible contents are filled.  On failure
+  // buffer/memory are left null.
+  bool createBufferWithProperties(VkDeviceSize size, VkBufferUsageFlags usage,
+                                  VkMemoryPropertyFlags desiredProperties,
+                                  VkBuffer & buffer, VkDeviceMemory & memory,
+                                  const void * data = nullptr);
   bool growLightingUbo(uint32_t minSlots);
   bool swapLightingBuffer(VkBuffer newBuffer, VkDeviceMemory newMemory,
                           void * newMapped, uint32_t newSlotsPerFrame);
@@ -383,6 +496,10 @@ private:
   VkQueue queue = VK_NULL_HANDLE;
   uint32_t queueFamilyIndex = 0;
   const VkAllocationCallbacks * allocator = nullptr;
+  // Cached physical-device memory-properties picker (shared helper); bound to
+  // physicalDevice in initialize().  Replaces the old per-backend
+  // deviceMemoryProperties + deviceMemoryPropertiesValid cache.
+  SoVulkanShared::MemoryProperties memProps;
 
   // --- Device capabilities (probed once in initialize()) -----------------
   // VkPhysicalDeviceFeatures::fillModeNonSolid gates the wireframe/points
@@ -417,6 +534,10 @@ private:
   VkCommandBuffer activeCommandBuffer = VK_NULL_HANDLE;
 
   VkDescriptorSetLayout descriptorSetLayout = VK_NULL_HANDLE;
+  // Set-0 layout: the lighting constant ring (binding 0, UBO dynamic).  The
+  // single lightingDescriptorSet is allocated from it; the per-draw set-1
+  // descriptor (draw UBO + texture) uses descriptorSetLayout.
+  VkDescriptorSetLayout lightingSetLayout = VK_NULL_HANDLE;
   // Descriptor pools.  Sets are never reset wholesale while frames may be
   // in flight: when the active pool nears its capacity a fresh pool is
   // appended and becomes current, leaving every live set valid.  All pools
@@ -428,7 +549,7 @@ private:
   uint32_t descriptorSetCount = 0;
   VkPipelineLayout pipelineLayout = VK_NULL_HANDLE;
 
-  // Per-draw lighting/material uniform buffer (set 0, binding 0, dynamic
+  // Per-draw view/model/material uniform buffer (set 1, binding 0, dynamic
   // offset).  One large ring buffer holds maxFramesInFlight frames' worth of
   // per-command slots; every draw binds its own slot through the descriptor's
   // dynamic offset.  The GPU executes asynchronously, so a single shared
@@ -444,13 +565,31 @@ private:
   uint32_t uboFrameIndex = 0;
   uint32_t uboCmdIndex = 0;
 
+  // Lighting constant ring (set 0, binding 0, dynamic offset).  Holds a few
+  // slots per in-flight frame, one per distinct SoLightingHandle the frame
+  // references.  Each unique block is written once per frame (updateLightingSetup);
+  // every draw that shares a handle binds the same slot through its dynamic
+  // offset, so the 8-light setup is computed once, not per draw.
+  VkBuffer lightingConstBuffer = VK_NULL_HANDLE;
+  VkDeviceMemory lightingConstMemory = VK_NULL_HANDLE;
+  void * lightingConstMapped = nullptr;
+  VkDeviceSize lightingConstStride = 0;
+  uint32_t lightingConstMaxSlots = 0;
+  // The single set-0 descriptor (lighting UBO).  Bound on every draw together
+  // with the per-draw/texture set-1 descriptor.
+  VkDescriptorSet lightingDescriptorSet = VK_NULL_HANDLE;
+  // Handle -> byte offset into the lighting ring for the current frame.  Built
+  // by updateLightingSetup() before recording and consumed by
+  // updateLightingUniforms()/recordDrawCommand().
+  std::unordered_map<SoLightingHandle, VkDeviceSize> lightingSlotOffsets;
+
   // Resources replaced during recording are destroyed maxFramesInFlight
   // frames later, after the submissions that still reference them have
   // certainly completed.  Batch B holds the destroys deferred during the
   // frame recording of batch B's frame; it is flushed at the start of the
   // frame with the same ring index, N frames later.
   uint32_t maxFramesInFlight = 3;
-  std::vector<std::vector<std::function<void()>>> pendingDestroys;
+  SoVulkanShared::PendingDestroys pendingDestroys;
 
   // Vulkan-only display overlays (shaded-with-edges / show-vertices).
   // Configured through the manager; never part of the shared render params.
@@ -546,70 +685,9 @@ private:
 
   // Pipeline cache: keyed by the retained state that affects the created
   // pipeline.  Vulkan pipelines are immutable, so every topology/fill/depth/
-  // blend/sample-count combination gets its own entry.
-  struct PipelineKey {
-    VkRenderPass renderPass = VK_NULL_HANDLE;
-    uint8_t topology = 0;
-    uint8_t fillMode = 0;
-    uint8_t cullMode = 0;
-    uint8_t ccwFrontFace = 1;
-    bool depthTestEnable = false;
-    bool depthWriteEnable = false;
-    uint8_t depthFunction = 0;
-    bool depthBiasEnable = false;
-    float depthBiasConstantFactor = 0.0f;
-    float depthBiasSlopeFactor = 0.0f;
-    bool blendEnable = false;
-    uint8_t blendSrcRGB = 0;
-    uint8_t blendDstRGB = 0;
-    uint8_t blendSrcAlpha = 0;
-    uint8_t blendDstAlpha = 0;
-    uint8_t blendEquationRGB = 0;
-    uint8_t blendEquationAlpha = 0;
-    bool stencilEnable = false;
-    uint8_t stencilFunction = 0;
-    uint8_t stencilReference = 0;
-    uint8_t stencilCompareMask = 0xFF;
-    uint8_t stencilWriteMask = 0xFF;
-    uint8_t stencilFailOp = 0;
-    uint8_t stencilZFailOp = 0;
-    uint8_t stencilZPassOp = 0;
-    uint32_t sampleCount = 1;
-    bool wideLine = false;
-
-    bool operator==(const PipelineKey & other) const
-    {
-      return renderPass == other.renderPass && topology == other.topology &&
-        fillMode == other.fillMode && cullMode == other.cullMode &&
-        ccwFrontFace == other.ccwFrontFace &&
-        depthTestEnable == other.depthTestEnable &&
-        depthWriteEnable == other.depthWriteEnable &&
-        depthFunction == other.depthFunction &&
-        depthBiasEnable == other.depthBiasEnable &&
-        (!depthBiasEnable ||
-         (depthBiasConstantFactor == other.depthBiasConstantFactor &&
-          depthBiasSlopeFactor == other.depthBiasSlopeFactor)) &&
-        blendEnable == other.blendEnable &&
-        (!blendEnable ||
-         (blendSrcRGB == other.blendSrcRGB &&
-          blendDstRGB == other.blendDstRGB &&
-          blendSrcAlpha == other.blendSrcAlpha &&
-          blendDstAlpha == other.blendDstAlpha &&
-          blendEquationRGB == other.blendEquationRGB &&
-          blendEquationAlpha == other.blendEquationAlpha)) &&
-        stencilEnable == other.stencilEnable &&
-        (!stencilEnable ||
-         (stencilFunction == other.stencilFunction &&
-          stencilReference == other.stencilReference &&
-          stencilCompareMask == other.stencilCompareMask &&
-          stencilWriteMask == other.stencilWriteMask &&
-          stencilFailOp == other.stencilFailOp &&
-          stencilZFailOp == other.stencilZFailOp &&
-          stencilZPassOp == other.stencilZPassOp)) &&
-        sampleCount == other.sampleCount && wideLine == other.wideLine;
-    }
-  };
-
+  // blend/sample-count combination gets its own entry.  PipelineKey and
+  // PipelineKeyHash are defined near the top of this class so VulkanCachedCommand
+  // can store a resolved key.
   struct PipelineKeyHash
   {
     size_t operator()(const PipelineKey & key) const
@@ -649,6 +727,13 @@ private:
 
   std::unordered_map<PipelineKey, VkPipeline, PipelineKeyHash> pipelineCache;
 
+  // Persistent pipeline cache.  vkCreateGraphicsPipelines() is passed this
+  // handle so the driver can reuse shader/state blobs across the many variant
+  // pipelines the backend creates lazily on the draw path.  Without a cache
+  // (VK_NULL_HANDLE) the first appearance of each state combination on a
+  // frame stutters.  Created once in initialize(), destroyed in shutdown().
+  VkPipelineCache pipelineCacheHandle = VK_NULL_HANDLE;
+
   // Background pipeline cache: keyed on the render pass and sample count only
   // (the gradient pipeline has no retained per-command state).
   struct BackgroundPipelineKey {
@@ -673,27 +758,43 @@ private:
   std::unordered_map<BackgroundPipelineKey, VkPipeline,
                      BackgroundPipelineKeyHash> backgroundPipelineCache;
 
+  // Last dynamic state actually bound this frame (see applyPipeline /
+  // applyViewportState / applyScissorState).  Reset by resetBoundState() at
+  // each frame boundary; maxFramesInFlight is per-slot but dynamic state is
+  // per-record (the command buffer being recorded), so it is reset once per
+  // frame, not per in-flight slot.
+  VkPipeline lastBoundPipeline = VK_NULL_HANDLE;
+  VkViewport lastBoundViewport {};
+  VkRect2D lastBoundScissor {};
+  bool hasBoundViewport = false;
+  bool hasBoundScissor = false;
+
   std::vector<VulkanCachedCommand> gpuCache;
   std::unordered_map<const SoRenderCommand *, size_t> commandToCache;
   std::vector<VulkanCachedTexture> textureCache;
   std::unordered_map<const SoRenderCommand *, size_t> commandToTexture;
 
   std::vector<VulkanGeometryBlock> geometryBlocks;
+  // Released blocks are kept as reusable ids so a geometry-change burst does
+  // not grow geometryBlocks without bound; releaseGeometryBlock() returns an
+  // id here once its refCount drops to 0.
+  std::vector<uint32_t> freeGeometryBlockIds;
   VkDeviceSize nextGeometryBlockCapacity = 256u * 1024u;
 
   // Reusable scratch packing buffer for uploadGeometry().  Resized but never
   // reallocated across successive uploads, so the interleaved repack does not
   // churn the heap on every geometry change.
   std::vector<float> uploadScratch;
+  // Reusable per-draw "needs geometry upload" flag buffer for
+  // updateGeometryCache().  Grows to the largest draw list seen, then keeps
+  // its capacity so an ordinary frame does not heap-allocate a fresh vector
+  // sized by the command count.
+  std::vector<uint8_t> needsGeometryScratch;
   // Guards uploadScratch.  Geometry uploads run on the render path; if a
   // backend instance is ever driven from more than one thread (e.g. a shared
   // shape rendered by parallel camerase), this prevents two threads packing
   // into and reading out of the same scratch vector simultaneously.
   std::mutex uploadScratchMutex;
-
-  // Cached physical-device memory properties for device-local buffer creation.
-  VkPhysicalDeviceMemoryProperties deviceMemoryProperties{};
-  bool deviceMemoryPropertiesValid = false;
 };
 
 #endif // COIN_SOVULKANRENDERBACKEND_H

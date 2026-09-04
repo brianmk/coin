@@ -4,6 +4,7 @@
 #define COIN_SORTXRENDERBACKEND_H
 
 #include "rendering/SoRenderBackend.h"
+#include "rendering/SoVulkanShared.h"
 
 #include <Inventor/rendering/SoVulkanRenderTarget.h>
 
@@ -325,6 +326,10 @@ private:
                                VkBuffer & buffer, VkDeviceMemory & memory);
   bool createHostVisibleBuffer(VkDeviceSize size, VkBufferUsageFlags usage,
                                VkBuffer & buffer, VkDeviceMemory & memory);
+  // Cached memory-type pick (wraps memProps; keeps the old findMemoryType() call
+  // sites unchanged while removing the per-allocation device query).
+  uint32_t pickMemoryType(const VkMemoryRequirements & requirements,
+                          VkMemoryPropertyFlags desired) const;
   bool createScratchBuffer(VkDeviceSize size);
   bool createStorageImage(uint32_t width, uint32_t height);
   bool createPathTracingBuffers(uint32_t width, uint32_t height);
@@ -373,6 +378,10 @@ private:
   VkDevice device = VK_NULL_HANDLE;
   VkQueue queue = VK_NULL_HANDLE;
   uint32_t queueFamilyIndex = 0;
+  // Cached physical-device memory-properties picker (shared helper).  Bound to
+  // physicalDevice in initialize(); the legacy findMemoryType() free function
+  // re-queried vkGetPhysicalDeviceMemoryProperties on every allocation.
+  SoVulkanShared::MemoryProperties memProps;
   // Optional compute queue acquired at device creation (the embedding app
   // requests it via QVulkanWindow::setQueueCreateInfoModifier, typically a
   // dedicated compute-only family, and reports the family + queue index here).
@@ -815,8 +824,7 @@ private:
   // instance/material buffers, recreated present pipeline, ...) are
   // destroyed two frames later, once the caller's pending submissions that
   // may still reference them have certainly completed.
-  std::vector<std::function<void()>> pendingDestroys[2];
-  int pendingDestroyIndex = 0;
+  SoVulkanShared::PendingDestroys pendingDestroys {2};
   void flushPendingDestroys(bool waitForQueue = false);
   void deferDestroy(std::function<void()> && fn);
 

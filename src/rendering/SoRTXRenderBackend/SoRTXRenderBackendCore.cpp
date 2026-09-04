@@ -456,6 +456,7 @@ SoRTXRenderBackend::initialize(const SoRenderBackendInitParams & params)
   this->queue = deviceContext->graphicsQueue;
   this->queueFamilyIndex = deviceContext->graphicsQueueFamilyIndex;
   this->allocator = deviceContext->allocator;
+  this->memProps.setDevice(this->physicalDevice);
 
   // The async-compute queue requested at device creation (see the widget's
   // setQueueCreateInfoModifier).  probeComputeQueue() retrieves the handle
@@ -913,6 +914,16 @@ SoRTXRenderBackend::shutdown()
   if (this->positionHistoryMemory != VK_NULL_HANDLE) {
     vkFreeMemory(this->device, this->positionHistoryMemory, this->allocator);
     this->positionHistoryMemory = VK_NULL_HANDLE;
+  }
+  // The screen-space motion-vector G-buffer (read by the denoiser readback)
+  // is part of the same PT buffer pool, so it must be destroyed here too.
+  if (this->motionBuffer != VK_NULL_HANDLE) {
+    vkDestroyBuffer(this->device, this->motionBuffer, this->allocator);
+    this->motionBuffer = VK_NULL_HANDLE;
+  }
+  if (this->motionMemory != VK_NULL_HANDLE) {
+    vkFreeMemory(this->device, this->motionMemory, this->allocator);
+    this->motionMemory = VK_NULL_HANDLE;
   }
   this->ptHistoryValid = FALSE;
   this->ptReprojectFrame = FALSE;

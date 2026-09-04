@@ -1563,8 +1563,8 @@ SoRTXRenderBackend::createRtxInteropBuffer(size_t bytes,
   VkMemoryAllocateInfo ai {};
   ai.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
   ai.allocationSize = req.size;
-  ai.memoryTypeIndex = findMemoryType(this->physicalDevice, req,
-                                      VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
+  ai.memoryTypeIndex = this->pickMemoryType(
+    req, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
   ai.pNext = &allocFlags;
   if (vkAllocateMemory(this->device, &ai, this->allocator, &memory) !=
       VK_SUCCESS) {

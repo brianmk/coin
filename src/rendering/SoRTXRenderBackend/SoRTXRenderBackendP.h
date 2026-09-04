@@ -22,24 +22,12 @@
 #include <cstdlib>
 #include <cstring>
 
+#include "rendering/SoFnv1a.h"
+#include "rendering/SoVulkanShared.h"
+
 namespace SoRTXBackend {
 
-// Environment flags are enabled by presence, but honor the conventional
-// "VAR=0"/"false"/"off" opt-out values.
-inline bool
-envFlagEnabled(const char * name)
-{
-  const char * value = std::getenv(name);
-  if (value == nullptr) return false;
-  return std::strcmp(value, "0") != 0 && std::strcmp(value, "false") != 0 &&
-         std::strcmp(value, "off") != 0;
-}
-
-// Literal-name fast path: the per-call-site static resolves the flag once,
-// so per-frame hot paths pay no getenv() at all.
-#define COIN_VULKAN_ENV_FLAG(name) \
-  ([] { static const bool coin_env_flag_cached = envFlagEnabled(name); \
-        return coin_env_flag_cached; }())
+using SoVulkanShared::envFlagEnabled;
 
 // Resolve a device entry point into its concrete dispatch type.
 // vkGetDeviceProcAddr returns a generic PFN_vkVoidFunction; converting it to
@@ -120,29 +108,6 @@ constexpr int SBT_GROUP_COUNT = 5; // raygen, miss, shadow miss, chit, shadow ch
 constexpr int MAX_SHADER_LIGHTS = 8;
 constexpr int MAX_VERTEX_COUNT = 10000000;
 
-// Pick the first memory type matching the desired properties, or any type
-// the device offers for this resource as a fallback.
-inline uint32_t
-findMemoryType(VkPhysicalDevice physicalDevice,
-               const VkMemoryRequirements & requirements,
-               VkMemoryPropertyFlags desired)
-{
-  VkPhysicalDeviceMemoryProperties props;
-  vkGetPhysicalDeviceMemoryProperties(physicalDevice, &props);
-  for (uint32_t i = 0; i < props.memoryTypeCount; ++i) {
-    if ((requirements.memoryTypeBits & (1u << i)) &&
-        (props.memoryTypes[i].propertyFlags & desired) == desired) {
-      return i;
-    }
-  }
-  for (uint32_t i = 0; i < props.memoryTypeCount; ++i) {
-    if (requirements.memoryTypeBits & (1u << i)) {
-      return i;
-    }
-  }
-  return 0;
-}
-
 // FNV-1a content hash of a command's geometry, sampled so full-scene
 // hashing stays sub-millisecond.  The producer's geometry storage is a
 // per-frame arena, so this hash -- not pointer identity -- is the scene
@@ -153,8 +118,7 @@ hashGeometry(const SoGeometryDesc & geometry, uint32_t vertexStride,
 {
   uint64_t h = 1469598103934665603ull;
   const auto mix = [&h](uint64_t v) {
-    h ^= v;
-    h *= 1099511628211ull;
+    CoinRenderDetail::fnvMix(h, v);
   };
   mix(geometry.vertexCount);
   mix(geometry.indexCount);
@@ -220,8 +184,7 @@ hashGeometrySignal(const SoGeometryDesc & geometry, uint32_t vertexStride,
 {
   uint64_t h = 1469598103934665603ull;
   const auto mix = [&h](uint64_t v) {
-    h ^= v;
-    h *= 1099511628211ull;
+    CoinRenderDetail::fnvMix(h, v);
   };
   mix(geometry.vertexCount);
   mix(geometry.indexCount);
@@ -268,8 +231,7 @@ hashPositions(const SoGeometryDesc & geometry, uint32_t vertexStride)
 {
   uint64_t h = 1469598103934665603ull;
   const auto mix = [&h](uint64_t v) {
-    h ^= v;
-    h *= 1099511628211ull;
+    CoinRenderDetail::fnvMix(h, v);
   };
   const size_t posStrideFloats = vertexStride / sizeof(float);
   const size_t totalVertices = geometry.vertexCount;
@@ -292,8 +254,7 @@ hashTransformSignal(const SbMatrix & m)
 {
   uint64_t h = 1469598103934665603ull;
   const auto mix = [&h](uint64_t v) {
-    h ^= v;
-    h *= 1099511628211ull;
+    CoinRenderDetail::fnvMix(h, v);
   };
   for (int i = 0; i < 4; ++i) {
     for (int j = 0; j < 4; ++j) {
@@ -310,8 +271,7 @@ hashIndices(const SoGeometryDesc & geometry)
 {
   uint64_t h = 1469598103934665603ull;
   const auto mix = [&h](uint64_t v) {
-    h ^= v;
-    h *= 1099511628211ull;
+    CoinRenderDetail::fnvMix(h, v);
   };
   const size_t count = geometry.indexCount;
   if (count <= 65536) {

@@ -849,6 +849,12 @@ void
 SoShape::IRRender(SoIRRenderAction * action)
 {
   if (!action) return;
+  if (getenv("FC_IR_BREADCRUMB")) {
+    static int n = 0;
+    if (n++ < 10) fprintf(stderr, "[BC-IR] IRRender shape=%p type=%s\n",
+                          (void *)this,
+                          this->getTypeId().getName().getString());
+  }
 
   SoState * state = action->getState();
 

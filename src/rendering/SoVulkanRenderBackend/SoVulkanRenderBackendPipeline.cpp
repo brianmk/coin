@@ -138,7 +138,7 @@ SoVulkanRenderBackend::createBackgroundPipeline(
 
   VkPipeline created = VK_NULL_HANDLE;
   const VkResult result =
-    vkCreateGraphicsPipelines(this->device, VK_NULL_HANDLE, 1, &ci,
+    vkCreateGraphicsPipelines(this->device, this->pipelineCacheHandle, 1, &ci,
                               this->allocator, &created);
   if (result != VK_SUCCESS) {
     this->emitError("failed to create Vulkan background pipeline");
@@ -193,15 +193,14 @@ SoVulkanRenderBackend::recordBackground(const SoRenderParams & params,
   viewport.height = static_cast<float>(h);
   viewport.minDepth = 0.0f;
   viewport.maxDepth = 1.0f;
-  vkCmdSetViewport(this->activeCommandBuffer, 0, 1, &viewport);
+  this->applyViewportState(viewport);
 
   VkRect2D scissor {};
   scissor.offset = {x0, y0};
   scissor.extent = {static_cast<uint32_t>(w), static_cast<uint32_t>(h)};
-  vkCmdSetScissor(this->activeCommandBuffer, 0, 1, &scissor);
+  this->applyScissorState(scissor);
 
-  vkCmdBindPipeline(this->activeCommandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS,
-                    pipeline);
+  this->applyPipeline(pipeline);
 
   VulkanBackgroundPush push {};
   push.topColor[0] = params.backgroundTopColor[0];
@@ -414,57 +413,18 @@ SoVulkanRenderBackend::getOrCreatePipeline(const SoRenderCommand & command,
 
   // Per-command fast path: an unchanged command (same retained state -> the
   // same PipelineKey) re-resolves to the same VkPipeline without paying the
-  // unordered_map lookup every frame.  A 64-bit fingerprint of every key
-  // field stands in for full equality here; a collision would require two
-  // pipelines to alias with probability ~2^-64, and the authoritative
-  // exact-key lookup below still decides the non-fast path.  The backing
-  // geometry-cache entry is destroyed together with the pipeline cache in
-  // invalidateCache(), so the cached handle can never dangle.
-  const auto mixFp = [](uint64_t h, uint64_t v) {
-    return h ^ (v + 0x9E3779B97F4A7C15ULL + (h << 6) + (h >> 2));
-  };
-  const auto fbits = [](float f) {
-    uint32_t b = 0;
-    std::memcpy(&b, &f, sizeof(b));
-    return static_cast<uint64_t>(b);
-  };
-  uint64_t fingerprint = 0;
-  fingerprint = mixFp(fingerprint,
-                      reinterpret_cast<uintptr_t>(key.renderPass));
-  fingerprint = mixFp(fingerprint, key.topology);
-  fingerprint = mixFp(fingerprint, key.fillMode);
-  fingerprint = mixFp(fingerprint, key.cullMode);
-  fingerprint = mixFp(fingerprint, key.ccwFrontFace);
-  fingerprint = mixFp(fingerprint, key.depthTestEnable);
-  fingerprint = mixFp(fingerprint, key.depthWriteEnable);
-  fingerprint = mixFp(fingerprint, key.depthFunction);
-  fingerprint = mixFp(fingerprint, key.depthBiasEnable);
-  fingerprint = mixFp(fingerprint, fbits(key.depthBiasConstantFactor));
-  fingerprint = mixFp(fingerprint, fbits(key.depthBiasSlopeFactor));
-  fingerprint = mixFp(fingerprint, key.blendEnable);
-  fingerprint = mixFp(fingerprint, key.blendSrcRGB);
-  fingerprint = mixFp(fingerprint, key.blendDstRGB);
-  fingerprint = mixFp(fingerprint, key.blendSrcAlpha);
-  fingerprint = mixFp(fingerprint, key.blendDstAlpha);
-  fingerprint = mixFp(fingerprint, key.blendEquationRGB);
-  fingerprint = mixFp(fingerprint, key.blendEquationAlpha);
-  fingerprint = mixFp(fingerprint, key.stencilEnable);
-  fingerprint = mixFp(fingerprint, key.stencilFunction);
-  fingerprint = mixFp(fingerprint, key.stencilReference);
-  fingerprint = mixFp(fingerprint, key.stencilCompareMask);
-  fingerprint = mixFp(fingerprint, key.stencilWriteMask);
-  fingerprint = mixFp(fingerprint, key.stencilFailOp);
-  fingerprint = mixFp(fingerprint, key.stencilZFailOp);
-  fingerprint = mixFp(fingerprint, key.stencilZPassOp);
-  fingerprint = mixFp(fingerprint, key.sampleCount);
-  fingerprint = mixFp(fingerprint, key.wideLine);
-
+  // unordered_map lookup (key hash + bucket walk + equality) every frame.
+  // The key that produced the last resolved handle is stored verbatim on the
+  // geometry-cache entry, and the (cheap field-by-field, hash-free) equality
+  // below decides the hit.  The backing entry is destroyed together with the
+  // pipeline cache in invalidateCache(), so the cached handle can never
+  // dangle.
   VulkanCachedCommand * cacheEntry = nullptr;
   const auto cmdEntry = this->commandToCache.find(&command);
   if (cmdEntry != this->commandToCache.end()) {
     cacheEntry = &this->gpuCache[cmdEntry->second];
     if (cacheEntry->hasResolvedPipeline &&
-        cacheEntry->pipelineFingerprint == fingerprint) {
+        cacheEntry->resolvedKey == key) {
       pipeline = cacheEntry->resolvedPipeline;
       return pipeline != VK_NULL_HANDLE;
     }
@@ -473,7 +433,7 @@ SoVulkanRenderBackend::getOrCreatePipeline(const SoRenderCommand & command,
   const auto found = this->pipelineCache.find(key);
   if (found != this->pipelineCache.end()) {
     if (cacheEntry) {
-      cacheEntry->pipelineFingerprint = fingerprint;
+      cacheEntry->resolvedKey = key;
       cacheEntry->resolvedPipeline = found->second;
       cacheEntry->hasResolvedPipeline = true;
     }
@@ -498,7 +458,7 @@ SoVulkanRenderBackend::getOrCreatePipeline(const SoRenderCommand & command,
       "feature; wireframe and point fill modes cannot be rendered");
     this->pipelineCache[key] = VK_NULL_HANDLE;
     if (cacheEntry) {
-      cacheEntry->pipelineFingerprint = fingerprint;
+      cacheEntry->resolvedKey = key;
       cacheEntry->resolvedPipeline = VK_NULL_HANDLE;
       cacheEntry->hasResolvedPipeline = true;
     }
@@ -718,13 +678,13 @@ SoVulkanRenderBackend::getOrCreatePipeline(const SoRenderCommand & command,
 
   VkPipeline created = VK_NULL_HANDLE;
   const VkResult result =
-    vkCreateGraphicsPipelines(this->device, VK_NULL_HANDLE, 1, &ci,
+    vkCreateGraphicsPipelines(this->device, this->pipelineCacheHandle, 1, &ci,
                               this->allocator, &created);
   if (result != VK_SUCCESS) {
     this->emitError("failed to create Vulkan graphics pipeline");
     this->pipelineCache[key] = VK_NULL_HANDLE;
     if (cacheEntry) {
-      cacheEntry->pipelineFingerprint = fingerprint;
+      cacheEntry->resolvedKey = key;
       cacheEntry->resolvedPipeline = VK_NULL_HANDLE;
       cacheEntry->hasResolvedPipeline = true;
     }
@@ -733,7 +693,7 @@ SoVulkanRenderBackend::getOrCreatePipeline(const SoRenderCommand & command,
   }
   this->pipelineCache[key] = created;
   if (cacheEntry) {
-    cacheEntry->pipelineFingerprint = fingerprint;
+    cacheEntry->resolvedKey = key;
     cacheEntry->resolvedPipeline = created;
     cacheEntry->hasResolvedPipeline = true;
   }

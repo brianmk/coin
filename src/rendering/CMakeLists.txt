@@ -73,6 +73,7 @@ set(COIN_RENDERING_INTERNAL_FILES
 	SoGLRenderBackend.h
 	SoVulkanRenderBackend.h
 	SoVulkanRenderBackend/SoVulkanRenderBackendP.h
+	SoVulkanShared.h
 	SoVulkanRenderManager.h
 	SoRTXRenderBackend.h
 	SoRTXRenderBackend/SoRTXRenderBackendP.h

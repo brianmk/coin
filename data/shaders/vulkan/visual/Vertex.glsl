@@ -9,8 +9,10 @@
 //
 // A single push-constant block carries the projection matrix, the uniform
 // diffuse color, and scalar feature flags.  The view/model matrices plus the
-// per-draw lighting/material state live in a std140 uniform buffer (set 0,
-// binding 0) whose layout mirrors SoGLRenderBackend's uniform set.  Lighting
+// per-draw material state live in a std140 uniform buffer (set 1, binding 0)
+// whose layout mirrors SoGLRenderBackend's uniform set; the lighting constant
+// block (ambient + light array) lives in set 0, binding 0 and is written once
+// per lighting setup per frame, so the per-draw buffer stays small.  Lighting
 // is evaluated per-vertex (Gouraud) in eye space, matching the retained GL
 // visual program.
 
@@ -29,22 +31,27 @@ layout(push_constant) uniform PushConstants {
                           //   w = point primitive
 } pc;
 
-layout(set = 0, binding = 0, std140) uniform VisualBlock {
+// Lighting constant block (written once per lighting setup per frame).
+layout(set = 0, binding = 0, std140) uniform LightingBlock {
+    vec4  u_ambientLight;         // offset 0
+    vec4  u_lightType[8];         // offset 16
+    vec4  u_lightColor[8];        // offset 144
+    vec4  u_lightDirection[8];    // offset 272
+    vec4  u_lightPosition[8];     // offset 400
+    vec4  u_lightAttenuation[8];  // offset 528
+    vec4  u_lightSpotParams[8];   // offset 656
+} lighting;
+
+// Per-draw block (view/model/material), selected by a dynamic offset.
+layout(set = 1, binding = 0, std140) uniform DrawBlock {
     mat4  u_view;                 // offset 0
     mat4  u_model;                // offset 64
     vec4  u_emissiveColor;        // offset 128
-    vec4  u_ambientLight;         // offset 144
-    vec4  u_materialAmbient;      // offset 160
-    vec4  u_materialSpecular;     // offset 176
-    vec4  u_materialParams;       // offset 192: x=shininess, y=twoSided,
+    vec4  u_materialAmbient;      // offset 144
+    vec4  u_materialSpecular;     // offset 160
+    vec4  u_materialParams;       // offset 176: x=shininess, y=twoSided,
                                   //            z=lightCount, w=shadingModel
-    vec4  u_lightType[8];         // offset 208
-    vec4  u_lightColor[8];        // offset 336
-    vec4  u_lightDirection[8];    // offset 464
-    vec4  u_lightPosition[8];     // offset 592
-    vec4  u_lightAttenuation[8];  // offset 720
-    vec4  u_lightSpotParams[8];   // offset 848
-} visual;
+} draw;
 
 layout(location = 0) in vec3 a_position;
 layout(location = 1) in vec3 a_normal;
@@ -63,9 +70,9 @@ layout(location = 3) out vec2 v_texcoord;
 
 void main()
 {
-    vec4 worldPos = visual.u_model * vec4(a_position, 1.0);
-    vec4 eyePos = visual.u_view * worldPos;
-    mat3 normalMatrix = transpose(inverse(mat3(visual.u_view * visual.u_model)));
+    vec4 worldPos = draw.u_model * vec4(a_position, 1.0);
+    vec4 eyePos = draw.u_view * worldPos;
+    mat3 normalMatrix = transpose(inverse(mat3(draw.u_view * draw.u_model)));
     vec3 eyeNormal = normalMatrix * a_normal;
 
     vec4 clip = pc.u_proj * eyePos;
