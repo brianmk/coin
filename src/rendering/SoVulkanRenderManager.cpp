@@ -621,6 +621,25 @@ SoVulkanRenderManager::initialize(SoVulkanDeviceContext * context)
   // cost while navigating in the raster path.  Keep the live backends and
   // their caches alive; just refresh the retained context (a new stack-allocated
   // context points at the same window-owned device handles).
+  //
+  // NOTE (known Qt-side validation artifact, not a FreeCAD defect): with the
+  // Vulkan validation layer enabled, the first few frames of a freshly shown
+  // window may log
+  //   "vkQueueSubmit(): pSubmits[0].pSignalSemaphores[0] ... may still be in
+  //    use by VkSwapchainKHR ..." (VUID-vkQueueSubmit-pSignalSemaphores-00067).
+  // That submit is QVulkanWindow's OWN internal present, not one from this
+  // manager: we never call vkQueuePresentKHR/vkAcquireNextImage and never
+  // submit a signal semaphore (our submissions are fence-based; the only
+  // signal-semaphore use is the CUDA-interop external semaphores in
+  // SoRTXRenderBackendDenoise.cpp).  QVulkanWindow reuses its per-swapchain
+  // render-finished semaphore during initial swapchain/surface setup, which
+  // the validation layer flags.  It is transient (fires at viewport open
+  // before path tracing starts), is emitted only with validation enabled, and
+  // has never been observed to cause VK_ERROR_DEVICE_LOST or any functional
+  // degradation in this project.  It is unrelated to the RT descriptor-set
+  // device-lost fixed in SoRTXRenderBackend* (VUID-vkCmdDispatch-None-08114).
+  // Do not chase it: the remedy (per-swapchain-image semaphores) is a Qt/
+  // QVulkanWindow change, not a FreeCAD one.
   if (this->pimpl->backendInitialized && this->pimpl->initContext
       && this->pimpl->initContext->device == context->device) {
     this->pimpl->initContext = context;

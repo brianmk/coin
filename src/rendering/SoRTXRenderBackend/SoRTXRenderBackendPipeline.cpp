@@ -629,6 +629,12 @@ SoRTXRenderBackend::updateDescriptors()
   vkUpdateDescriptorSets(this->device,
                          static_cast<uint32_t>(writes.size()), writes.data(),
                          0, nullptr);
+  // The bindings for the current index are now written; the trace/present
+  // phases that bind this index may rely on it.  A freshly (re)allocated set
+  // that a subsequent non-dirty frame binds is only safe to dispatch against
+  // once this flag is set.
+  this->rtSetValid[this->descriptorSetIndex] = true;
+  this->presentSetValid[this->descriptorSetIndex] = true;
   return true;
 }
 

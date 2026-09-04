@@ -1082,6 +1082,13 @@ SoRTXRenderBackend::shutdown()
   this->rtDescriptorSets[1] = VK_NULL_HANDLE;
   this->presentDescriptorSets[0] = VK_NULL_HANDLE;
   this->presentDescriptorSets[1] = VK_NULL_HANDLE;
+  // The sets are invalid until updateDescriptors() rewrites them in the next
+  // engine generation; descriptorSetIndex is intentionally NOT reset here, so
+  // the first (possibly non-dirty) frame must repopulate its torn set.
+  this->rtSetValid[0] = false;
+  this->rtSetValid[1] = false;
+  this->presentSetValid[0] = false;
+  this->presentSetValid[1] = false;
 
   this->instance = VK_NULL_HANDLE;
   this->physicalDevice = VK_NULL_HANDLE;

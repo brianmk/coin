@@ -472,6 +472,17 @@ private:
   VkDescriptorSet rtDescriptorSets[2] = {VK_NULL_HANDLE, VK_NULL_HANDLE};
   VkDescriptorSet presentDescriptorSets[2] = {VK_NULL_HANDLE, VK_NULL_HANDLE};
   uint32_t descriptorSetIndex = 0;
+  // Whether rtDescriptorSets[i] / presentDescriptorSets[i] hold bindings that
+  // updateDescriptors() actually wrote in the current engine generation.  The
+  // sets are populated only on an asDirty frame (a camera-only frame reuses the
+  // last-populated set), and they are torn down (-> NULL) on resource teardown
+  // while descriptorSetIndex carries over.  A fresh set that a non-dirty frame
+  // then binds has NEVER been written -> VUID-vkCmdDispatch-None-08114 (and,
+  // on the present set, the same class of undefined sample).  These flags make
+  // that hazard explicit so recordAccelerationStructures can repopulate a torn
+  // set before it is bound.
+  bool rtSetValid[2] = {false, false};
+  bool presentSetValid[2] = {false, false};
 
   VkPipelineLayout rtPipelineLayout = VK_NULL_HANDLE;
   VkPipelineLayout presentPipelineLayout = VK_NULL_HANDLE;
@@ -848,7 +859,7 @@ private:
   // present binding 5.
   enum DenoiseKind { DenoiseNone = 0, DenoiseOidn, DenoiseRtx, DenoiseFsr };
 
-  //! Current ray-traced view mode (see the public RtxViewMode enum).
+  //! Backing store for getViewMode()/setViewMode() (see RtxViewMode).
   RtxViewMode rtxViewMode = RtxViewMode::RtxModeOff;
 
   //! Procedural IBL / environment-lit params (mirrored into the frame UBO's

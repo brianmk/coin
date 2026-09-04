@@ -152,8 +152,14 @@ SoRTXRenderBackend::createStorageImage(uint32_t width, uint32_t height)
   ci.arrayLayers = 1;
   ci.samples = VK_SAMPLE_COUNT_1_BIT;
   ci.tiling = VK_IMAGE_TILING_OPTIMAL;
+  // The storage image is read back (TRANSFER_SRC for the frame-dump and
+  // denoiser readback), sampled by the present pass (SAMPLED), written by the
+  // raygen (STORAGE), and -- on frames with no traceable geometry (tlas ==
+  // VK_NULL_HANDLE) -- filled with the background colour via
+  // vkCmdClearColorImage.  The clear requires TRANSFER_DST_BIT, which is the
+  // only usage it does not already have.
   ci.usage = VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_SAMPLED_BIT |
-             VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
+             VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT;
   ci.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
   ci.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
   if (vkCreateImage(this->device, &ci, this->allocator,
@@ -566,6 +572,10 @@ SoRTXRenderBackend::createPathTracingBuffers(uint32_t width, uint32_t height)
     this->rtDescriptorSets[1] = VK_NULL_HANDLE;
     this->presentDescriptorSets[0] = VK_NULL_HANDLE;
     this->presentDescriptorSets[1] = VK_NULL_HANDLE;
+    this->rtSetValid[0] = false;
+    this->rtSetValid[1] = false;
+    this->presentSetValid[0] = false;
+    this->presentSetValid[1] = false;
     if (!this->updateDescriptors()) {
       this->emitError(
         "createPathTracingBuffers: failed to refresh descriptors after "
