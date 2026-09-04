@@ -43,7 +43,7 @@
 using namespace SoRTXBackend;
 
 #if COIN_BUILD_RTX_DENOISER
-// PTX for the sum->average normalizer (compiled with nvcc -ptx -arch=sm_100).
+// PTX for the sum->average normalizer (compiled with nvcc -ptx -arch=sm_75).
 // Converts an accumulated radiance sum (rgb) / sample-count (w) buffer into
 // the average color (and sets w = 1 for valid pixels, 0 for empty ones) that
 // the OptiX AOV denoiser expects as its AOV beauty input.
@@ -251,15 +251,16 @@ SoRTXRenderBackend::createDenoiseBackend()
   bool stagingFailed = false;
 
   // Host-visible staging buffers: one mapped block covering color, albedo,
-  // normal and output for the current resolution.  Allocates a single
+  // normal, motion and output for the current resolution.  Allocates a single
   // host-visible buffer so the maps stay valid for the life of the backend
   // and the denoiser can read the G-buffer rows directly.  Regions are laid
-  // out as [0]=color, [1]=albedo, [2]=normal, [3]=output (the readback copies
-  // three guides and the denoiser writes one output).  A single guide slot is
-  // enough: the real per-pixel validity comes from the sample count in
-  // color[3], so the old position/guide region was never used.  Keeping the
-  // block at 4x imageBytes (not 5x) avoids wasting 20% of the host-visible
-  // barrier, which is the constrained resource that fails the allocation.
+  // out as [0]=color, [1]=albedo, [2]=normal, [3]=motion, [4]=output (the
+  // readback copies the four inputs and the denoiser writes one output).
+  // The real per-pixel validity comes from the sample count in color[3], so
+  // the position buffer is never staged.  The block is 5x imageBytes -- the
+  // four inputs plus the output -- which is the working set a host-side
+  // denoiser needs; anything larger just wastes host-visible memory, the
+  // constrained resource that fails the allocation.
   //
   // The RTX path needs no host staging: it copies the G-buffers device-to-
   // device into CUDA-Vulkan interop images and runs OptiX entirely on the
@@ -629,9 +630,9 @@ SoRTXRenderBackend::recordDenoiseReadback(VkCommandBuffer cmd)
                        VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 1, &before, 0,
                        nullptr, 0, nullptr);
 
-  // color (accum average), albedo, normal.  The position buffer is not needed:
-  // the present shader's denoised-alpha test uses the averaged color's w
-  // (set from the sample count in updateDenoise), which distinguishes empty
+  // color (accum average), albedo, normal, motion.  The position buffer is not
+  // needed: the present shader's denoised-alpha test uses the averaged color's
+  // w (set from the sample count in updateDenoise), which distinguishes empty
   // pixels from ones with a primary hit.
   VkBufferCopy c0 {0, 0, stride};
   vkCmdCopyBuffer(cmd, this->accumBuffer, this->denoiseColorBuf, 1, &c0);

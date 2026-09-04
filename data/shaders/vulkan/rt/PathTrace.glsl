@@ -682,8 +682,8 @@ void main()
         dir = normalize((frame.u_viewInverse * vec4(dirView, 0.0)).xyz);
     }
 
-    if (frame.u_state.y > 2.5) {
-        // Debug path (u_state.y == 3): trace, then write the payload.
+    if (frame.u_state.y > 3.5) {
+        // Debug path (u_state.y == 4): trace, then write the payload.
         HitInfo h = traceClosest(origin, dir, 1e30);
         imageStore(storageImage, ivec2(px),
                    h.hit ? vec4(0.9, 0.2, 0.1, 1.0) : vec4(0.1, 0.8, 0.3, 1.0));

@@ -49,8 +49,6 @@ loadDispatch(PFN_vkVoidFunction fn)
 
 // std430 mirror of the RTMaterial struct in PathTrace.glsl.  One record per
 // draw command, indexed by the instance custom index (the command index).
-// C++ packs the float arrays without padding, which matches std430: 5 vec4
-// + 6 arrays of 8 vec4 = 80 + 768 = 848 bytes.
 // (struct RTMaterial is defined in SoRTXRenderBackend.h; the static assert
 // below pins its size to the shader layout.)
 inline void checkRtlLayout() {
