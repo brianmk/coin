@@ -426,6 +426,14 @@ soshape_emit_ir_commands(SoIRRenderAction * action, SoShape * shape,
     command.geometry.normals = normals.data() + batch.first * 3;
     command.geometry.texcoords = texcoords.data() + batch.first * 4;
     command.geometry.colors = colors ? colors + batch.first * 4 : nullptr;
+    // Co-own the shape-retained stream buffers: SoShape::notify() may drop
+    // the shape's own reference (and free the chunk) on any field change, on
+    // another thread, before this command is re-emitted with a fresh buffer.
+    // The command's ownership keeps the storage -- and thus the raw pointers
+    // above -- valid until the command itself is replaced.
+    command.geometry.positionOwner = geom.positions;
+    command.geometry.normalOwner = geom.normals;
+    command.geometry.texcoordOwner = geom.texcoords;
     // The position/normal/texcoord streams are the shape-retained buffers
     // (stable pointers, new pointer on change), so the backend can trust
     // pointer identity without re-hashing.  Commands carrying per-vertex colors
