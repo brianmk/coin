@@ -125,6 +125,13 @@ struct VulkanCachedCommand {
     VkBuffer buffer = VK_NULL_HANDLE;
     VkDeviceMemory memory = VK_NULL_HANDLE;
     VkDeviceSize size = 0;
+    //! Fingerprint of the geometry/view/proj/width/viewport that produced the
+    //! quads in this slot.  A match means the buffer already holds the exact
+    //! quads for the current frame, so expandWideLines() skips the expansion
+    //! -- the dominant per-frame CPU cost for line/edge-heavy scenes on a
+    //! retained draw list with an unchanged camera.
+    uint64_t expandFingerprint = 0;
+    uint32_t expandVertexCount = 0;
   };
   std::vector<VulkanWideLineBuffer> wideLineBuffers;
   uint32_t wideLineVertexCount = 0;

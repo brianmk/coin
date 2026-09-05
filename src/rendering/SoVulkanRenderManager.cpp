@@ -10,6 +10,7 @@
 #include <Inventor/errors/SoDebugError.h>
 #include <Inventor/nodes/SoCamera.h>
 #include <Inventor/nodes/SoNode.h>
+#include <Inventor/sensors/SoNodeSensor.h>
 #include <Inventor/nodes/SoOrthographicCamera.h>
 #include <Inventor/nodes/SoPerspectiveCamera.h>
 #include <Inventor/nodes/SoSeparator.h>
@@ -23,6 +24,9 @@
 #include "rendering/SoVulkanRenderBackend.h"
 #include "rendering/SoRTXRenderBackend.h"
 #include "rendering/SoVulkanShared.h"
+
+class SoVulkanRenderManagerP;
+static void vulkanSceneGraphChangedCallback(void * data, SoSensor * sensor);
 
 #include <chrono>
 #include <cmath>
@@ -207,10 +211,23 @@ public:
     // (nav cube, axis cross), kept apart from the replayed main scene.
     this->overlayRoot = new SoSeparator;
     this->overlayRoot->ref();
+    // Dirty-tracking sensor for the graph-fingerprint fast-path: the sensor is
+    // attached to the main scene and fires whenever any descendant is notified,
+    // so computeGraphFingerprint() can skip the O(N) scene walk on frames
+    // where the scene has not changed (static / camera-only frames).
+    this->sceneGraphSensor =
+      new SoNodeSensor(vulkanSceneGraphChangedCallback, this);
   }
 
   ~SoVulkanRenderManagerP()
   {
+    // Detach/destroy the scene-dirty sensor FIRST: it is attached to the main
+    // scene node, which is unref'd below and may be destroyed here.
+    if (this->sceneGraphSensor) {
+      this->sceneGraphSensor->detach();
+      delete this->sceneGraphSensor;
+      this->sceneGraphSensor = nullptr;
+    }
     if (this->camera) {
       this->camera->unref();
     }
@@ -287,6 +304,17 @@ public:
   //! geometry/texture caches keyed on it) is still exactly reproducible.
   uint64_t graphFingerprint = 0;
   SbBool graphFingerprintValid = FALSE;
+  //! Inputs the last graph-fingerprint walk was computed from, plus an
+  //! SoNodeSensor dirty flag: the sensor fires whenever the main scene graph
+  //! is notified, so the O(N) scene walk can be skipped on frames where the
+  //! scene has not changed (camera-only / static frames).  See
+  //! prepareRenderParams.
+  SbBool lastFpValid = FALSE;
+  SoNode * lastFpScene = nullptr;
+  SbVec2s lastFpViewport = SbVec2s(0, 0);
+  float lastFpDpr = 1.0f;
+  SbBool sceneGraphDirty = TRUE;
+  SoNodeSensor * sceneGraphSensor = nullptr;
   //! Caller-published revision of state the graph walk cannot see (the
   //! selection model behind FreeCAD's highlight roots); mixed in verbatim.
   uint64_t externalRevision = 0;
@@ -377,6 +405,17 @@ public:
                              SoRenderParams & params);
 };
 
+// Mark the graph fingerprint dirty when any part of the main scene is notified
+// (a field write or child-list edit anywhere in the subtree) -- the exact
+// condition the O(N) fingerprint walk detects, so it can be skipped until the
+// scene actually changes.
+static void
+vulkanSceneGraphChangedCallback(void * data, SoSensor * /*sensor*/)
+{
+  auto * pimpl = static_cast<SoVulkanRenderManagerP *>(data);
+  pimpl->sceneGraphDirty = TRUE;
+}
+
 SoVulkanRenderManager::SoVulkanRenderManager()
   : pimpl(new SoVulkanRenderManagerP)
 {
@@ -411,6 +450,16 @@ SoVulkanRenderManager::setSceneGraph(SoNode * root)
   // The bbox is cached in world space; a different scene graph invalidates it.
   this->pimpl->sceneBBoxCached = false;
   this->pimpl->sceneBBoxScene = nullptr;
+  // Re-arm the graph-fingerprint dirty sensor on the new scene: detach from the
+  // previous scene and attach to the new one, and mark the fingerprint dirty so
+  // the next frame re-walks rather than trusting a stale cached fingerprint.
+  if (this->pimpl->sceneGraphSensor) {
+    this->pimpl->sceneGraphSensor->detach();
+    if (root) {
+      this->pimpl->sceneGraphSensor->attach(root);
+    }
+    this->pimpl->sceneGraphDirty = TRUE;
+  }
 }
 
 SoNode *
@@ -1508,7 +1557,33 @@ SoVulkanRenderManagerP::prepareRenderParams(SbBool clearwindow,
   // below.  They are re-recorded separately afterwards (cheap) and merged onto
   // this main list.
   SbBool irReplayed = FALSE;
-  const uint64_t graphFp = this->computeGraphFingerprint();
+  // Cheap fast-path: the graph fingerprint walk is O(N) over the whole scene,
+  // and on a retained (replayed) frame with no scene change it is pure waste.
+  // The walk folds scene node-ids but deliberately SKIPS the camera, so the
+  // fingerprint is invariant under camera motion; the only thing that changes
+  // it is a change to the main scene graph.  An SoNodeSensor attached to the
+  // scene root fires whenever any descendant is notified (a field write or a
+  // child-list edit), which is precisely a main-scene change -- so when the
+  // sensor has NOT fired since the last walk, the cached fingerprint is still
+  // exact and the O(N) walk is skipped.  This catches every change the walk
+  // would (Coin propagates notify() up to the root), independent of any
+  // external revision wiring, and camera-only frames still produce the same
+  // (camera-invariant) fingerprint.
+  uint64_t graphFp;
+  const SbVec2s fpVpSize = this->viewportRegion.getViewportSizePixels();
+  if (this->graphFingerprintValid && this->lastFpValid &&
+      !this->sceneGraphDirty && this->scene == this->lastFpScene &&
+      fpVpSize == this->lastFpViewport && this->devicePixelRatio == this->lastFpDpr) {
+    graphFp = this->graphFingerprint;
+  }
+  else {
+    graphFp = this->computeGraphFingerprint();
+    this->sceneGraphDirty = FALSE;
+  }
+  this->lastFpScene = this->scene;
+  this->lastFpViewport = fpVpSize;
+  this->lastFpDpr = this->devicePixelRatio;
+  this->lastFpValid = TRUE;
   if (this->scene || this->camera || this->overlayScene
       || this->decorationScene) {
     if (irReplayEnabled() && this->graphFingerprintValid &&
