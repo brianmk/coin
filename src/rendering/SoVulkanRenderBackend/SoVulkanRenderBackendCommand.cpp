@@ -35,6 +35,10 @@ SoVulkanRenderBackend::resetBoundState()
   this->lastBoundPipeline = VK_NULL_HANDLE;
   this->hasBoundViewport = false;
   this->hasBoundScissor = false;
+  this->lastLightingHandle = UINT32_MAX;
+  this->lastLightingOffset = 0;
+  this->lastBoundLightingOffset = UINT32_MAX;
+  this->lastBoundTextureSet = VK_NULL_HANDLE;
 }
 
 void
@@ -639,29 +643,54 @@ SoVulkanRenderBackend::recordDrawCommand(const SoDrawList & drawlist,
   const uint32_t uboDynamicOffset = static_cast<uint32_t>(uboOffset);
 
   // Bind set 0 (lighting constant, dynamic offset per handle) and set 1
-  // (per-draw UBO + texture, dynamic offset) in one call.  Lighting is the
-  // same for every command sharing a handle, so its block was written once
-  // by updateLightingSetup() and is merely referenced here.
+  // (per-draw UBO + texture, dynamic offset).  Lighting is the same for every
+  // command sharing a handle, so its block was written once per handle by
+  // updateLightingSetup() and is merely referenced here.
   VkDescriptorSet textureSet = this->resolveTextureSet(command);
   if (textureSet == VK_NULL_HANDLE) {
     textureSet = this->whiteDescriptorSet;
   }
-  const VkDescriptorSet sets[2] = {this->lightingDescriptorSet, textureSet};
-  const uint32_t dynamicOffsets[2] = {
-    static_cast<uint32_t>(this->lightingOffsetFor(command)),
-    uboDynamicOffset,
-  };
-  vkCmdBindDescriptorSets(this->activeCommandBuffer,
-                          VK_PIPELINE_BIND_POINT_GRAPHICS,
-                          this->pipelineLayout, 0, 2, sets, 2,
-                          dynamicOffsets);
+  // Cache the lighting dynamic offset per handle: a frame's retained commands
+  // almost always share ONE handle, so only the first draw of a new handle
+  // pays the unordered_map lookup in lightingOffsetFor().  Set 0 re-binds only
+  // when the handle (its dynamic offset) actually changes; set 1 must re-bind
+  // every draw because its dynamic offset is the per-draw UBO slot below.
+  uint32_t lightingDynamicOffset = this->lastLightingOffset;
+  if (command.lightingHandle != this->lastLightingHandle) {
+    lightingDynamicOffset =
+      static_cast<uint32_t>(this->lightingOffsetFor(command));
+    this->lastLightingHandle = command.lightingHandle;
+    this->lastLightingOffset = lightingDynamicOffset;
+  }
+  uint32_t bindingOffsets[2] = { lightingDynamicOffset, uboDynamicOffset };
+  if (this->lastBoundLightingOffset != lightingDynamicOffset ||
+      this->lastBoundTextureSet != textureSet) {
+    // First draw of a new lighting handle / texture set: bind both sets with
+    // their dynamic offsets in one call (also covers the frame's first draw).
+    const VkDescriptorSet both[2] = {this->lightingDescriptorSet, textureSet};
+    vkCmdBindDescriptorSets(this->activeCommandBuffer,
+                            VK_PIPELINE_BIND_POINT_GRAPHICS,
+                            this->pipelineLayout, 0, 2, both, 2,
+                            bindingOffsets);
+    this->lastBoundLightingOffset = lightingDynamicOffset;
+    this->lastBoundTextureSet = textureSet;
+  }
+  else {
+    // Same lighting handle + texture set as the previous draw: only the
+    // per-draw UBO dynamic offset advances.  Re-bind set 1 alone (set 0 stays
+    // bound from the last 2-set bind) instead of re-emitting both sets.
+    vkCmdBindDescriptorSets(this->activeCommandBuffer,
+                            VK_PIPELINE_BIND_POINT_GRAPHICS,
+                            this->pipelineLayout, 1, 1, &textureSet, 1,
+                            &bindingOffsets[1]);
+  }
 
   const VkDeviceSize vertexOffset = entry.vertexOffset;
-  vkCmdBindVertexBuffers(this->activeCommandBuffer, 0, 1, &entry.vertexBuffer,
-                         &vertexOffset);
   const bool indexed =
     entry.indexBuffer != VK_NULL_HANDLE && command.geometry.indexCount &&
     command.geometry.indices;
+  vkCmdBindVertexBuffers(this->activeCommandBuffer, 0, 1, &entry.vertexBuffer,
+                         &vertexOffset);
   if (indexed && !useWideLine) {
     vkCmdBindIndexBuffer(this->activeCommandBuffer, entry.indexBuffer,
                          entry.indexOffset, VK_INDEX_TYPE_UINT32);
@@ -910,13 +939,229 @@ SoVulkanRenderBackend::recordDrawCommand(const SoDrawList & drawlist,
     }
     vkCmdDraw(this->activeCommandBuffer, entry.wideLineVertexCount, 1, 0, 0);
   }
-  else if (indexed) {
-    vkCmdDrawIndexed(this->activeCommandBuffer, command.geometry.indexCount, 1, 0,
-                     0, 0);
+  else {
+    // Bind the per-instance model matrix (binding 1, rate INSTANCE) and draw
+    // with instanceCount=1.  Every visual pipeline now carries the instanced
+    // model attribute, so binding 1 must be bound for every visual draw (the
+    // shader reads the transform from it rather than the UBO).  The model is
+    // written into a per-command ring slot at the SAME element index the draw
+    // UBO uses, so the GPU reads this draw's transform even though recording
+    // completes before execution (a single shared offset would collapse every
+    // draw onto the last-committed model).  A batched group writes a run of
+    // [slotIndex .. slotIndex+N) elements and draws instanceCount=N.
+    const VkDeviceSize instElement =
+      static_cast<VkDeviceSize>((this->uboFrameIndex % this->maxFramesInFlight) *
+        this->uboSlotsPerFrame + slotIndex);
+    const VkDeviceSize instByteOffset = instElement * sizeof(float) * 16;
+    if (!this->ensureInstanceModelBuffer(instByteOffset + sizeof(float) * 16)) {
+      return;
+    }
+    SbMat mm;
+    command.modelMatrix.getValue(mm);
+    std::memcpy(static_cast<char *>(this->instanceModelMapped) + instByteOffset,
+                &mm[0][0], sizeof(float) * 16);
+    vkCmdBindVertexBuffers(this->activeCommandBuffer, 1, 1,
+                           &this->instanceModelBuffer, &instByteOffset);
+    if (indexed) {
+      vkCmdDrawIndexed(this->activeCommandBuffer, command.geometry.indexCount, 1, 0,
+                       0, 0);
+    }
+    else {
+      vkCmdDraw(this->activeCommandBuffer, command.geometry.vertexCount, 1, 0, 0);
+    }
+  }
+}
+
+bool
+SoVulkanRenderBackend::recordCommandBatch(const SoDrawList & drawlist,
+                                          const SoRenderCommand * const * commands,
+                                          int count,
+                                          const SoVulkanRenderTarget & target,
+                                          const SoRenderParams & params,
+                                          VkRenderPass pass,
+                                          const bool transparent,
+                                          const int fillModeOverride,
+                                          const float * uniformColorOverride)
+{
+  // The batch shares geometry/material/state and differs only by model matrix,
+  // so every command picks the same pipeline, descriptor sets, vertex data and
+  // push constants as commands[0].  Rendered with one instanced draw.
+  const SoRenderCommand & command = *commands[0];
+  if (count < 2 || !command.geometry.positions ||
+      command.geometry.vertexCount == 0) {
+    return false;
+  }
+  const auto found = this->commandToCache.find(&command);
+  if (found == this->commandToCache.end()) return false;
+  // Fragile: only guaranteed-correct side paths (pipeline + descriptor + push +
+  // non-instanced vertex geometry) batch.  Wide-line expands per command on the
+  // CPU, so it is not batchable here.
+  const VulkanCachedCommand & entryRef = this->gpuCache[found->second];
+  if (entryRef.vertexBuffer == VK_NULL_HANDLE) return false;
+
+  bool useWideLine = false;
+  if (command.geometry.topology == SO_TOPOLOGY_LINES ||
+      command.geometry.topology == SO_TOPOLOGY_LINE_STRIP) {
+    const bool patternedLine =
+      command.state.raster.linePattern != 0xFFFF &&
+      command.state.raster.linePattern != 0;
+    useWideLine = fillModeOverride < 0 &&
+      (command.state.raster.lineWidth > 1.0f || patternedLine);
+  }
+  if (useWideLine) {
+    // Not batchable; caller falls back to per-command draws.
+    return false;
+  }
+
+  VkPipeline pipeline = VK_NULL_HANDLE;
+  if (!this->getOrCreatePipeline(command, target, pass, pipeline, transparent,
+                                 fillModeOverride, false) ||
+      pipeline == VK_NULL_HANDLE) {
+    return false;
+  }
+  this->applyPipeline(pipeline);
+  this->applyCommandViewport(command, target);
+  this->applyScissor(command, target);
+
+  // Reserve `count` lighting-UBO slots so a batch of N instances maps to N
+  // distinct instance-model ring elements (base..base+N-1).  The prepareLighting
+  // pre-pass reserved countDrawCommands() slots, so this cannot overflow.
+  const uint32_t slotIndex = this->uboCmdIndex;
+  this->uboCmdIndex += count;
+  const VkDeviceSize uboOffset =
+    ((this->uboFrameIndex % this->maxFramesInFlight) *
+       this->uboSlotsPerFrame + slotIndex) *
+    this->uboSlotStride;
+  const uint32_t uboDynamicOffset = static_cast<uint32_t>(uboOffset);
+
+  // Descriptor set 0 (lighting constant) + set 1 (per-draw UBO + texture).
+  // Lighting and texture are group-constant (batch key guarantees it), so bind
+  // once using commands[0].
+  VkDescriptorSet textureSet = this->resolveTextureSet(command);
+  if (textureSet == VK_NULL_HANDLE) {
+    textureSet = this->whiteDescriptorSet;
+  }
+  uint32_t lightingDynamicOffset = this->lastLightingOffset;
+  if (command.lightingHandle != this->lastLightingHandle) {
+    lightingDynamicOffset =
+      static_cast<uint32_t>(this->lightingOffsetFor(command));
+    this->lastLightingHandle = command.lightingHandle;
+    this->lastLightingOffset = lightingDynamicOffset;
+  }
+  uint32_t bindingOffsets[2] = { lightingDynamicOffset, uboDynamicOffset };
+  if (this->lastBoundLightingOffset != lightingDynamicOffset ||
+      this->lastBoundTextureSet != textureSet) {
+    const VkDescriptorSet both[2] = {this->lightingDescriptorSet, textureSet};
+    vkCmdBindDescriptorSets(this->activeCommandBuffer,
+                            VK_PIPELINE_BIND_POINT_GRAPHICS,
+                            this->pipelineLayout, 0, 2, both, 2,
+                            bindingOffsets);
+    this->lastBoundLightingOffset = lightingDynamicOffset;
+    this->lastBoundTextureSet = textureSet;
   }
   else {
-    vkCmdDraw(this->activeCommandBuffer, command.geometry.vertexCount, 1, 0, 0);
+    vkCmdBindDescriptorSets(this->activeCommandBuffer,
+                            VK_PIPELINE_BIND_POINT_GRAPHICS,
+                            this->pipelineLayout, 1, 1, &textureSet, 1,
+                            &bindingOffsets[1]);
   }
+
+  // Vertex buffer (binding 0).  The whole batch shares commands[0]'s geometry,
+  // so one bind serves every instance.
+  const VkDeviceSize vertexOffset = entryRef.vertexOffset;
+  vkCmdBindVertexBuffers(this->activeCommandBuffer, 0, 1, &entryRef.vertexBuffer,
+                         &vertexOffset);
+  const bool indexed =
+    entryRef.indexBuffer != VK_NULL_HANDLE && command.geometry.indexCount &&
+    command.geometry.indices;
+  if (indexed) {
+    vkCmdBindIndexBuffer(this->activeCommandBuffer, entryRef.indexBuffer,
+                         entryRef.indexOffset, VK_INDEX_TYPE_UINT32);
+  }
+
+  this->updateLightingUniforms(drawlist, command, params, uboOffset,
+                               uniformColorOverride != nullptr);
+
+  // Push constants (group-constant).
+  VulkanPushConstants push {};
+  SbMat projValue;
+  // Batches are recorded only from the main (non-overlay) passes, so every
+  // command projects with the frame camera (mirrors recordDrawCommand's
+  // frameCameraOverlay=false branch).
+  std::memcpy(projValue, this->frameProjFloats, sizeof(float) * 16);
+  std::memcpy(push.proj, &projValue[0][0], sizeof(float) * 16);
+  const SbVec4f & color = command.material.diffuse;
+  const bool useOverrideColor = uniformColorOverride != nullptr;
+  push.color[0] = useOverrideColor ? uniformColorOverride[0] : color[0];
+  push.color[1] = useOverrideColor ? uniformColorOverride[1] : color[1];
+  push.color[2] = useOverrideColor ? uniformColorOverride[2] : color[2];
+  push.color[3] = useOverrideColor ? uniformColorOverride[3] : color[3];
+  push.flags[0] = (entryRef.colorKey && !useOverrideColor) ? 1.0f : 0.0f;
+  push.flags[1] =
+    command.material.vertexColorAlphaIncludesOpacity ? 1.0f : 0.0f;
+  const bool textured = command.material.texture.pixels &&
+                        command.material.texture.width > 0 &&
+                        command.material.texture.height > 0;
+  push.flags[2] = (textured && !useOverrideColor) ? 1.0f : 0.0f;
+  push.flags[3] = command.material.textureAlphaIncludesOpacity ? 1.0f : 0.0f;
+  push.texParams[0] = static_cast<float>(command.material.texture.model);
+  push.texParams[1] = static_cast<float>(command.state.alphaTest.function);
+  push.texParams[2] = command.state.alphaTest.reference;
+  push.texParams[3] =
+    (command.material.flags & SO_MAT_IS_PIXEL_TEXT) ? 1.0f : 0.0f;
+  const SbVec4f & blendColor = command.material.texture.blendColor;
+  push.texBlend[0] = blendColor[0];
+  push.texBlend[1] = blendColor[1];
+  push.texBlend[2] = blendColor[2];
+  push.texBlend[3] = blendColor[3];
+  const float dpr = params.devicePixelRatio > 0.0f
+    ? params.devicePixelRatio : 1.0f;
+  push.pointSize = std::max(1.0f, command.state.raster.pointSize) * dpr;
+  push.lineParams[0] = push.lineParams[1] = push.lineParams[2] = 0.0f;
+  push.lineParams[3] = 0.0f;
+  push.lineParams[1] =
+    command.state.raster.pointShape == SO_POINT_SHAPE_ROUND ? 1.0f : 0.0f;
+  if (command.geometry.topology == SO_TOPOLOGY_POINTS) {
+    push.lineParams[1] = 1.0f;
+  }
+  push.lineParams[2] = 0.0f;
+  push.lineParams[3] =
+    command.geometry.topology == SO_TOPOLOGY_POINTS ? 1.0f : 0.0f;
+
+  vkCmdPushConstants(this->activeCommandBuffer, this->pipelineLayout,
+                     VK_SHADER_STAGE_VERTEX_BIT |
+                       VK_SHADER_STAGE_FRAGMENT_BIT,
+                     0, sizeof(push), &push);
+
+  // Per-instance model matrices: commands[0..count) at consecutive ring slots.
+  const VkDeviceSize instBase =
+    static_cast<VkDeviceSize>((this->uboFrameIndex % this->maxFramesInFlight) *
+      this->uboSlotsPerFrame + slotIndex);
+  const VkDeviceSize instCountBytes = instBase * sizeof(float) * 16 +
+    static_cast<VkDeviceSize>(count) * sizeof(float) * 16;
+  if (!this->ensureInstanceModelBuffer(instCountBytes)) {
+    return false;
+  }
+  char * mapped = static_cast<char *>(this->instanceModelMapped);
+  for (int k = 0; k < count; ++k) {
+    SbMat mm;
+    commands[k]->modelMatrix.getValue(mm);
+    std::memcpy(mapped + (instBase + k) * sizeof(float) * 16,
+                &mm[0][0], sizeof(float) * 16);
+  }
+  const VkDeviceSize instOffset = instBase * sizeof(float) * 16;
+  vkCmdBindVertexBuffers(this->activeCommandBuffer, 1, 1,
+                         &this->instanceModelBuffer, &instOffset);
+
+  if (indexed) {
+    vkCmdDrawIndexed(this->activeCommandBuffer, command.geometry.indexCount,
+                     static_cast<uint32_t>(count), 0, 0, 0);
+  }
+  else {
+    vkCmdDraw(this->activeCommandBuffer, command.geometry.vertexCount,
+              static_cast<uint32_t>(count), 0, 0);
+  }
+  return true;
 }
 
 bool

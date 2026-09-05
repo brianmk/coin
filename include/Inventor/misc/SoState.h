@@ -71,6 +71,15 @@ private:
   int numstacks;
   SbBool cacheopen;
   class SoStateP * pimpl;  
+
+  // Depth is kept here (not in the pimpl) so the inline getElement() fast path
+  // below can read it without pulling the incomplete SoStateP type into the
+  // header.
+  int depth;
+
+  // Out-of-line lazy copy-on-write push branch invoked by inline getElement()
+  // when the element is stale (below the current depth).
+  SoElement * getElementPush(const int stackindex, SoElement * element);
 };
 
 // these methods are used very often, and is therefore inlined
@@ -80,6 +89,13 @@ SoState::isElementEnabled(const int stackindex) const
 {
   return (stackindex < this->numstacks) && (this->stack[stackindex] != NULL);
 }
+
+// The inline SoState::getElement() fast path (the single most-frequently
+// invoked method in the whole library) is defined at the end of
+// SoElement.h, because it dereferences SoElement to read its depth -- and
+// SoElement.h is the first place where both SoElement and SoState are
+// complete (SoElement.h includes SoState.h).  The out-of-line copy-on-write
+// push branch is SoState::getElementPush() (see SoState.cpp).
 
 inline const SoElement *
 SoState::getConstElement(const int stackindex) const
@@ -100,6 +116,5 @@ SoState::getElementNoPush(const int stackindex) const
   assert(this->isElementEnabled(stackindex));
   return this->stack[stackindex];
 }
-
 
 #endif // !COIN_SOSTATE_H

@@ -298,9 +298,11 @@ SoRTXRenderBackend::updatePathTracingState(const SoDrawList & drawlist,
   if (getenv("FC_VULKAN_RT_DEBUG") && this->ptEnabled) {
     fprintf(stderr,
             "[RTDBG] ptState frame=%u viewChanged=%d sceneChanged=%d "
-            "accum=%d frameIndex=%u idle=%u reproject=%d\n",
+            "bgChanged=%d latch=%d accum=%d frameIndex=%u idle=%u "
+            "reproject=%d\n",
             params.frame,
             viewChanged ? 1 : 0, sceneChanged ? 1 : 0,
+            backgroundChanged ? 1 : 0, this->ptStartLatch ? 1 : 0,
             this->ptAccumulating ? 1 : 0, this->ptFrameIndex,
             this->ptIdleFrames, this->ptReprojectFrame ? 1 : 0);
   }
@@ -526,8 +528,15 @@ SoRTXRenderBackend::recordAccelerationStructures(
   this->statBlasReused = 0;
   for (int i = 0; i < drawlist.getNumCommands(); ++i) {
     const SoRenderCommand & command = drawlist.getCommand(i);
-    if (command.pass == SO_RENDERPASS_TRANSPARENT ||
-        command.pass == SO_RENDERPASS_OVERLAY) continue;
+    // Transparent (SO_RENDERPASS_TRANSPARENT) commands ARE traced now (see
+    // updateGeometryCache / buildTlas) so the path tracer composites them as
+    // thin glass.  They therefore need a BLAS exactly like opaque commands:
+    // skipping them here leaves entry.blas == VK_NULL_HANDLE forever, which
+    // makes updateGeometryCache report a content change every frame (the
+    // entry can never "match" without a BLAS) and restarts the accumulation
+    // continuously.  Only the overlay/decoration commands (never TLAS
+    // eligible) are skipped.
+    if (command.pass == SO_RENDERPASS_OVERLAY) continue;
     const auto found = this->commandToCache.find(&command);
     if (found == this->commandToCache.end()) continue;
     RTXCachedGeometry & entry = this->geometryCache[found->second];
