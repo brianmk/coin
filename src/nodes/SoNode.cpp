@@ -871,6 +871,9 @@ SoNode::IRRender(SoIRRenderAction * action)
 void
 SoNode::IRRenderS(SoAction * action, SoNode * node)
 {
+  if (getenv("FC_IR_BREADCRUMB"))
+    fprintf(stderr, "[BC-IR] IRRenderS node=%p type=%s\n", (void *)node,
+            node->getTypeId().getName().getString());
   assert(action != NULL);
   assert(node != NULL);
   node->IRRender(static_cast<SoIRRenderAction *>(action));

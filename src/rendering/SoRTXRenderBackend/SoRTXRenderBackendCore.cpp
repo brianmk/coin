@@ -378,6 +378,23 @@ SoRTXRenderBackend::setDenoiserFilter(const char * denoiser)
   this->denoiseKindExplicit = true;
 }
 
+void
+SoRTXRenderBackend::setDenoiserScale(const float scale)
+{
+  // Clamp to a sane range.  1.0 == native resolution (no upscale).  A factor
+  // > 1 runs the denoiser at a reduced internal resolution and the present
+  // pass bilinearly upscales it (the shader branch is only taken for scale
+  // >= 1.5, so values in (1, 1.5) degrade to native).
+  const float s = std::max(1.0f, std::min(8.0f, scale));
+  if (s == this->denoiseScale) return;
+  this->denoiseScale = s;
+  // The denoiser buffers (host staging + device output) are sized from
+  // denoiseWidth/Height which createPathTracingBuffers computes from this
+  // scale on the next (re)create; force a backend recreate so it picks the
+  // new resolution up.
+  this->denoiseKindDirty = true;
+}
+
 bool
 SoRTXRenderBackend::probeComputeQueue(void)
 {
@@ -456,6 +473,7 @@ SoRTXRenderBackend::initialize(const SoRenderBackendInitParams & params)
   this->queue = deviceContext->graphicsQueue;
   this->queueFamilyIndex = deviceContext->graphicsQueueFamilyIndex;
   this->allocator = deviceContext->allocator;
+  this->memProps.setDevice(this->physicalDevice);
 
   // The async-compute queue requested at device creation (see the widget's
   // setQueueCreateInfoModifier).  probeComputeQueue() retrieves the handle
@@ -914,6 +932,16 @@ SoRTXRenderBackend::shutdown()
     vkFreeMemory(this->device, this->positionHistoryMemory, this->allocator);
     this->positionHistoryMemory = VK_NULL_HANDLE;
   }
+  // The screen-space motion-vector G-buffer (read by the denoiser readback)
+  // is part of the same PT buffer pool, so it must be destroyed here too.
+  if (this->motionBuffer != VK_NULL_HANDLE) {
+    vkDestroyBuffer(this->device, this->motionBuffer, this->allocator);
+    this->motionBuffer = VK_NULL_HANDLE;
+  }
+  if (this->motionMemory != VK_NULL_HANDLE) {
+    vkFreeMemory(this->device, this->motionMemory, this->allocator);
+    this->motionMemory = VK_NULL_HANDLE;
+  }
   this->ptHistoryValid = FALSE;
   this->ptReprojectFrame = FALSE;
   if (this->positionMemory != VK_NULL_HANDLE) {
@@ -962,6 +990,13 @@ SoRTXRenderBackend::shutdown()
     vkDestroyPipeline(this->device, this->computePipeline, this->allocator);
     this->computePipeline = VK_NULL_HANDLE;
   }
+  if (this->denoiseDownsamplePipeline != VK_NULL_HANDLE) {
+    vkDestroyPipeline(this->device, this->denoiseDownsamplePipeline,
+                      this->allocator);
+    this->denoiseDownsamplePipeline = VK_NULL_HANDLE;
+  }
+  this->denoiseDownsampleDescriptorSet = VK_NULL_HANDLE;
+  this->denoiseDownsampleValid = false;
   if (this->presentPipelineLayout != VK_NULL_HANDLE) {
     vkDestroyPipelineLayout(this->device, this->presentPipelineLayout,
                             this->allocator);
@@ -971,6 +1006,11 @@ SoRTXRenderBackend::shutdown()
     vkDestroyPipelineLayout(this->device, this->rtPipelineLayout,
                             this->allocator);
     this->rtPipelineLayout = VK_NULL_HANDLE;
+  }
+  if (this->denoiseDownsamplePipelineLayout != VK_NULL_HANDLE) {
+    vkDestroyPipelineLayout(this->device, this->denoiseDownsamplePipelineLayout,
+                            this->allocator);
+    this->denoiseDownsamplePipelineLayout = VK_NULL_HANDLE;
   }
   if (this->presentVertexModule != VK_NULL_HANDLE) {
     vkDestroyShaderModule(this->device, this->presentVertexModule,
@@ -986,6 +1026,11 @@ SoRTXRenderBackend::shutdown()
     vkDestroyShaderModule(this->device, this->pathTraceModule,
                           this->allocator);
     this->pathTraceModule = VK_NULL_HANDLE;
+  }
+  if (this->denoiseDownsampleModule != VK_NULL_HANDLE) {
+    vkDestroyShaderModule(this->device, this->denoiseDownsampleModule,
+                          this->allocator);
+    this->denoiseDownsampleModule = VK_NULL_HANDLE;
   }
   if (this->raygenModule != VK_NULL_HANDLE) {
     vkDestroyShaderModule(this->device, this->raygenModule, this->allocator);
@@ -1054,6 +1099,11 @@ SoRTXRenderBackend::shutdown()
                                  this->allocator);
     this->presentSetLayout = VK_NULL_HANDLE;
   }
+  if (this->denoiseDownsampleSetLayout != VK_NULL_HANDLE) {
+    vkDestroyDescriptorSetLayout(this->device, this->denoiseDownsampleSetLayout,
+                                 this->allocator);
+    this->denoiseDownsampleSetLayout = VK_NULL_HANDLE;
+  }
   if (this->offscreenFramebuffer != VK_NULL_HANDLE) {
     vkDestroyFramebuffer(this->device, this->offscreenFramebuffer,
                          this->allocator);
@@ -1071,6 +1121,13 @@ SoRTXRenderBackend::shutdown()
   this->rtDescriptorSets[1] = VK_NULL_HANDLE;
   this->presentDescriptorSets[0] = VK_NULL_HANDLE;
   this->presentDescriptorSets[1] = VK_NULL_HANDLE;
+  // The sets are invalid until updateDescriptors() rewrites them in the next
+  // engine generation; descriptorSetIndex is intentionally NOT reset here, so
+  // the first (possibly non-dirty) frame must repopulate its torn set.
+  this->rtSetValid[0] = false;
+  this->rtSetValid[1] = false;
+  this->presentSetValid[0] = false;
+  this->presentSetValid[1] = false;
 
   this->instance = VK_NULL_HANDLE;
   this->physicalDevice = VK_NULL_HANDLE;
@@ -1183,11 +1240,16 @@ SoRTXRenderBackend::render(const SoDrawList & drawlist,
     subpass.pColorAttachments = &colorRef;
     subpass.pDepthStencilAttachment = hasDepth ? &depthRef : nullptr;
     VkRenderPassCreateInfo rpCI {};
+    // C99 compound literals ((Type[]){...}) are invalid in C++, so build the
+    // render-pass attachment array on the stack instead of using one on the
+    // branch (the framebuffer code below reuses the name 'attachments').
+    VkAttachmentDescription renderPassAttachments[2] = {
+      attachment,
+      depthAttachment
+    };
     rpCI.sType = VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO;
     rpCI.attachmentCount = attachmentCount;
-    rpCI.pAttachments = hasDepth
-      ? (const VkAttachmentDescription[]){attachment, depthAttachment}
-      : &attachment;
+    rpCI.pAttachments = hasDepth ? renderPassAttachments : &attachment;
     rpCI.subpassCount = 1;
     rpCI.pSubpasses = &subpass;
     if (vkCreateRenderPass(this->device, &rpCI, this->allocator,

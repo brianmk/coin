@@ -344,7 +344,13 @@ SoRTXRenderBackend::updatePathTracingState(const SoDrawList & drawlist,
   this->lastCameraVersion = params.cameraVersion;
   this->haveLastCameraVersion = params.cameraVersion != 0;
   this->haveLastView = TRUE;
-  this->cacheChanged = false;
+  // NOTE: cacheChanged is NOT consumed here.  recordAccelerationStructures()
+  // reads it again after this call to decide the AS rebuild (asDirty);
+  // clearing it here used to leave that check seeing a stale false, skipping
+  // the TLAS build and the descriptor update on the first frame of a freshly
+  // initialized backend -- the trace then dispatched against a never-updated
+  // descriptor set (VUID-vkCmdDispatch-None-08114) and hung the GPU until the
+  // driver reset the device.  It is consumed at the asDirty computation.
 
   // A zero frame index means a fresh accumulation: clear the accumulation
   // and sums-of-squares buffers with a fill recorded here (still outside
@@ -567,7 +573,12 @@ SoRTXRenderBackend::recordAccelerationStructures(
   // descriptor phase is skipped and the previous frame's AS + descriptors are
   // reused for the re-trace.  After a camera move of a static scene this drops
   // the per-frame TLAS build (asGpu) to zero.
+  //
+  // Both flags are consumed HERE: cacheChanged was read (but kept) by
+  // updatePathTracingState() above for its scene-change restart, and the AS
+  // rebuild decision below is its other -- and final -- consumer.
   this->asDirty = this->cacheChanged || this->asTransformChanged;
+  this->cacheChanged = false;
   this->asTransformChanged = false;
 
   if (this->asDirty) {
@@ -600,6 +611,31 @@ SoRTXRenderBackend::recordAccelerationStructures(
     // Barrier: BLAS/TLAS builds -> ray tracing shaders.  Recorded here, still
     // outside the render pass (acceleration-structure builds and buffer copies
     // are not allowed inside one).
+    VkMemoryBarrier asBarrier {};
+    asBarrier.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
+    asBarrier.srcAccessMask = VK_ACCESS_ACCELERATION_STRUCTURE_WRITE_BIT_KHR;
+    asBarrier.dstAccessMask = VK_ACCESS_ACCELERATION_STRUCTURE_READ_BIT_KHR;
+    vkCmdPipelineBarrier(cmd,
+                         VK_PIPELINE_STAGE_ACCELERATION_STRUCTURE_BUILD_BIT_KHR,
+                         VK_PIPELINE_STAGE_RAY_TRACING_SHADER_BIT_KHR |
+                           VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                         0, 1, &asBarrier, 0, nullptr, 0, nullptr);
+  }
+
+  // Guard the descriptor-validity invariant.  The trace phase below binds
+  // rtDescriptorSets[descriptorSetIndex]; that set is written only inside the
+  // asDirty block above, and a camera-only (non-dirty) frame reuses the
+  // last-written set.  A resource teardown (device lost / re-init) resets the
+  // sets to NULL while descriptorSetIndex carries over, so the first frame of
+  // the new generation can be non-dirty and bind a freshly (re)allocated but
+  // never-written set -> VUID-vkCmdDispatch-None-08114.  The torn set cannot be
+  // referenced by an in-flight submission, so repopulating it here (still
+  // outside the render pass) is legal and closes that window.
+  if (this->tlas != VK_NULL_HANDLE && !this->rtSetValid[this->descriptorSetIndex]) {
+    if (!this->updateDescriptors()) {
+      this->emitError("recordAccelerationStructures: descriptor update failed");
+      return false;
+    }
     VkMemoryBarrier asBarrier {};
     asBarrier.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
     asBarrier.srcAccessMask = VK_ACCESS_ACCELERATION_STRUCTURE_WRITE_BIT_KHR;
@@ -805,7 +841,26 @@ SoRTXRenderBackend::recordAccelerationStructures(
   // allowed inside one).  The raygen receives its frame state through the
   // 16-byte push constant block; the descriptor set stays as updated after
   // the TLAS (re)build above.
-  if (this->useSbtPipeline) {
+  if (this->tlas == VK_NULL_HANDLE) {
+    // No traceable geometry (empty scene; the view's zero-scaled anchor cube
+    // is filtered out upstream): the TLAS was never built and the descriptor
+    // set was never populated, so recording the trace would dispatch against
+    // an invalid acceleration-structure binding.  Clear the storage image to
+    // the background color instead so the present pass shows the viewport
+    // backdrop rather than undefined memory.
+    VkClearColorValue clearColor {};
+    clearColor.float32[0] = this->lastBgTopColors[0];
+    clearColor.float32[1] = this->lastBgTopColors[1];
+    clearColor.float32[2] = this->lastBgTopColors[2];
+    clearColor.float32[3] = 1.0f;
+    VkImageSubresourceRange fullRange {};
+    fullRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+    fullRange.levelCount = 1;
+    fullRange.layerCount = 1;
+    vkCmdClearColorImage(cmd, this->storageImage, VK_IMAGE_LAYOUT_GENERAL,
+                         &clearColor, 1, &fullRange);
+  }
+  else if (this->useSbtPipeline) {
     RTXRaygenPush raygenPush;
     raygenPush.frameIndex = this->ptFrameIndex;
     raygenPush.flags = (this->ptEnabled ? 1u : 0u) |
@@ -928,12 +983,23 @@ SoRTXRenderBackend::recordTraceAndPresent(const SoRenderParams & params,
   // accum branch reads a never-written buffer and shows black.  Gate the
   // accum branch on the path-traced mode, not on ptEnabled (which is also
   // true for AO/Environment).
+  //
+  // The accumulation buffer is written ONLY while the run is actively
+  // accumulating (ptAccumulating) or has converged (ptConverged).  During the
+  // pre-settle preview and the post-move 1-spp preview (and when geometry is
+  // missing so the run never starts) the raygen writes the storage image, not
+  // the accumulation buffer.  Selecting the accum branch in that state reads a
+  // never-written buffer and presents pure black, so require the accum state
+  // here too.  This is the "screen goes black" guard: a preview or an invalid
+  // (empty-cache) run falls through to the storage-image branch.
   const bool pathTraceMode =
     this->rtxViewMode == RtxViewMode::RtxModePathTrace;
+  const bool accumBufferValid = this->ptAccumulating || this->ptConverged;
   const float presentPush[12] = {
     static_cast<float>(size[0]),
     static_cast<float>(size[1]),
-    pathTraceMode && this->ptEnabled && this->ptDenoise ? 1.0f : 0.0f,
+    pathTraceMode && this->ptEnabled && this->ptDenoise && accumBufferValid
+      ? 1.0f : 0.0f,
     static_cast<float>(this->ptFrameIndex),
     static_cast<float>(origin[0]),
     static_cast<float>(origin[1]),
@@ -941,7 +1007,7 @@ SoRTXRenderBackend::recordTraceAndPresent(const SoRenderParams & params,
     0.0f,
     (this->denoiseResultReady && (this->ptAccumulating || this->ptConverged))
       ? 1.0f : 0.0f,
-    this->denoiseScale,
+    this->denoiseEffectiveScale,
     0.0f,
     0.0f};
   if (getenv("FC_VULKAN_PT_DENOISE_TIMING")) {

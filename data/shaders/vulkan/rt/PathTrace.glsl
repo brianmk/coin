@@ -474,7 +474,6 @@ vec3 coin_rtx_gouraud(vec3 eyePos, vec3 eyeNormal, vec3 baseColor,
 
         vec3 Ln = normalize(L);
         float NdotL = max(dot(N, Ln), 0.0);
-        if (NdotL <= 0.0) continue;
         vec3 H = normalize(Ln + V);
         float NdotH = max(dot(N, H), 0.0);
         float shininess = max(mat.params.x * 128.0, 0.0);
@@ -683,8 +682,8 @@ void main()
         dir = normalize((frame.u_viewInverse * vec4(dirView, 0.0)).xyz);
     }
 
-    if (frame.u_state.y > 2.5) {
-        // Debug path (u_state.y == 3): trace, then write the payload.
+    if (frame.u_state.y > 3.5) {
+        // Debug path (u_state.y == 4): trace, then write the payload.
         HitInfo h = traceClosest(origin, dir, 1e30);
         imageStore(storageImage, ivec2(px),
                    h.hit ? vec4(0.9, 0.2, 0.1, 1.0) : vec4(0.1, 0.8, 0.3, 1.0));

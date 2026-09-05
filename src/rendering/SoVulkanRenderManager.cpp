@@ -10,6 +10,7 @@
 #include <Inventor/errors/SoDebugError.h>
 #include <Inventor/nodes/SoCamera.h>
 #include <Inventor/nodes/SoNode.h>
+#include <Inventor/sensors/SoNodeSensor.h>
 #include <Inventor/nodes/SoOrthographicCamera.h>
 #include <Inventor/nodes/SoPerspectiveCamera.h>
 #include <Inventor/nodes/SoSeparator.h>
@@ -22,6 +23,10 @@
 #include "rendering/SoRenderIRP.h"
 #include "rendering/SoVulkanRenderBackend.h"
 #include "rendering/SoRTXRenderBackend.h"
+#include "rendering/SoVulkanShared.h"
+
+class SoVulkanRenderManagerP;
+static void vulkanSceneGraphChangedCallback(void * data, SoSensor * sensor);
 
 #include <chrono>
 #include <cmath>
@@ -36,16 +41,17 @@ namespace {
 // Cached environment checks for the diagnostic flags.  These sit on the
 // per-frame path and the environment does not change during a process
 // lifetime, so the getenv() lookup (not thread-safe) is performed at most
-// once instead of every frame.
+// once instead of every frame.  All flags use the shared
+// SoVulkanShared::envFlagEnabled policy (honors "0"/"false"/"off" opt-outs).
 bool clipDebugEnabled()
 {
-  static const bool enabled = std::getenv("FC_VULKAN_CLIP_DEBUG") != nullptr;
+  static const bool enabled = SoVulkanShared::envFlagEnabled("FC_VULKAN_CLIP_DEBUG");
   return enabled;
 }
 
 bool breadcrumbsEnabled()
 {
-  static const bool enabled = std::getenv("FC_VULKAN_BREADCRUMBS") != nullptr;
+  static const bool enabled = SoVulkanShared::envFlagEnabled("FC_VULKAN_BREADCRUMBS");
   return enabled;
 }
 
@@ -57,9 +63,12 @@ long vkRenderBreadcrumbNowUs()
 
 bool vkRenderBreadcrumbEnabled()
 {
-  static const bool enabled = std::getenv("FC_GUI_OPEN_BREADCRUMB") != nullptr;
+  static const bool enabled = SoVulkanShared::envFlagEnabled("FC_GUI_OPEN_BREADCRUMB");
   return enabled;
 }
+
+int vkLightFrameDbgBudget = 192;
+int vkLightFpDbgBudget = 192;
 
 void vkRenderBreadcrumb(const char* phase)
 {
@@ -90,7 +99,7 @@ void vkRenderBreadcrumbSince(long startUs, long thresholdUs, const char* phase)
 // change (the cached-bbox correctness case).
 bool clipVerboseEnabled()
 {
-  static const bool enabled = std::getenv("FC_VULKAN_CLIP_VERBOSE") != nullptr;
+  static const bool enabled = SoVulkanShared::envFlagEnabled("FC_VULKAN_CLIP_VERBOSE");
   return enabled;
 }
 
@@ -189,7 +198,8 @@ void graphFingerprintWalk(SoNode * node, const SoNode * skip, uint64_t & h)
 class SoVulkanRenderManagerP {
 public:
   SoVulkanRenderManagerP()
-    : irAction(SbViewportRegion())
+    : irAction(SbViewportRegion()),
+      overlayIrAction(SbViewportRegion())
   {
     this->viewportRegion.setWindowSize(1, 1);
     // Persist one traversal root so prepareRenderParams() does not heap-allocate
@@ -197,10 +207,27 @@ public:
     // re-added each frame; only the root node itself is retained.
     this->frameRoot = new SoSeparator;
     this->frameRoot->ref();
+    // A separate root for the always-re-recorded overlay/decoration scenes
+    // (nav cube, axis cross), kept apart from the replayed main scene.
+    this->overlayRoot = new SoSeparator;
+    this->overlayRoot->ref();
+    // Dirty-tracking sensor for the graph-fingerprint fast-path: the sensor is
+    // attached to the main scene and fires whenever any descendant is notified,
+    // so computeGraphFingerprint() can skip the O(N) scene walk on frames
+    // where the scene has not changed (static / camera-only frames).
+    this->sceneGraphSensor =
+      new SoNodeSensor(vulkanSceneGraphChangedCallback, this);
   }
 
   ~SoVulkanRenderManagerP()
   {
+    // Detach/destroy the scene-dirty sensor FIRST: it is attached to the main
+    // scene node, which is unref'd below and may be destroyed here.
+    if (this->sceneGraphSensor) {
+      this->sceneGraphSensor->detach();
+      delete this->sceneGraphSensor;
+      this->sceneGraphSensor = nullptr;
+    }
     if (this->camera) {
       this->camera->unref();
     }
@@ -216,6 +243,9 @@ public:
     if (this->frameRoot) {
       this->frameRoot->unref();
     }
+    if (this->overlayRoot) {
+      this->overlayRoot->unref();
+    }
   }
 
   SoNode * scene = nullptr;
@@ -224,6 +254,10 @@ public:
   SoCamera * camera = nullptr;
   // Persistent traversal root (see the constructor comment).
   SoSeparator * frameRoot = nullptr;
+  //! Persistent root for the always-re-recorded overlay/decoration scenes.
+  SoSeparator * overlayRoot = nullptr;
+  SoNode * overlayRootChildren[3] = {nullptr, nullptr, nullptr};
+  SbBool overlayRootChildrenValid = FALSE;
   SbViewportRegion viewportRegion;
   SbColor4f backgroundColor = SbColor4f(0.0f, 0.0f, 0.0f, 1.0f);
   SbBool backgroundGradient = FALSE;
@@ -270,6 +304,17 @@ public:
   //! geometry/texture caches keyed on it) is still exactly reproducible.
   uint64_t graphFingerprint = 0;
   SbBool graphFingerprintValid = FALSE;
+  //! Inputs the last graph-fingerprint walk was computed from, plus an
+  //! SoNodeSensor dirty flag: the sensor fires whenever the main scene graph
+  //! is notified, so the O(N) scene walk can be skipped on frames where the
+  //! scene has not changed (camera-only / static frames).  See
+  //! prepareRenderParams.
+  SbBool lastFpValid = FALSE;
+  SoNode * lastFpScene = nullptr;
+  SbVec2s lastFpViewport = SbVec2s(0, 0);
+  float lastFpDpr = 1.0f;
+  SbBool sceneGraphDirty = TRUE;
+  SoNodeSensor * sceneGraphSensor = nullptr;
   //! Caller-published revision of state the graph walk cannot see (the
   //! selection model behind FreeCAD's highlight roots); mixed in verbatim.
   uint64_t externalRevision = 0;
@@ -328,6 +373,13 @@ public:
   bool sceneBBoxCached = false;
 
   SoIRRenderAction irAction;
+  //! Second IR action used to re-record the overlay/decoration scenes every
+  //! frame (their node-ids churn with the camera, so they cannot be retained);
+  //! its commands are appended onto the replayed main list in prepareRenderParams.
+  SoIRRenderAction overlayIrAction;
+  //! Number of main (non-overlay) commands retained in irAction's draw list,
+  //! used to separate the replayed main region from the fresh overlay region.
+  uint32_t mainCommandCount = 0;
   SoVulkanRenderBackend backend;
   SoRTXRenderBackend rtxBackend;
   SbBool backendInitialized = FALSE;
@@ -352,6 +404,17 @@ public:
                              SoDrawList *& drawlist,
                              SoRenderParams & params);
 };
+
+// Mark the graph fingerprint dirty when any part of the main scene is notified
+// (a field write or child-list edit anywhere in the subtree) -- the exact
+// condition the O(N) fingerprint walk detects, so it can be skipped until the
+// scene actually changes.
+static void
+vulkanSceneGraphChangedCallback(void * data, SoSensor * /*sensor*/)
+{
+  auto * pimpl = static_cast<SoVulkanRenderManagerP *>(data);
+  pimpl->sceneGraphDirty = TRUE;
+}
 
 SoVulkanRenderManager::SoVulkanRenderManager()
   : pimpl(new SoVulkanRenderManagerP)
@@ -387,6 +450,16 @@ SoVulkanRenderManager::setSceneGraph(SoNode * root)
   // The bbox is cached in world space; a different scene graph invalidates it.
   this->pimpl->sceneBBoxCached = false;
   this->pimpl->sceneBBoxScene = nullptr;
+  // Re-arm the graph-fingerprint dirty sensor on the new scene: detach from the
+  // previous scene and attach to the new one, and mark the fingerprint dirty so
+  // the next frame re-walks rather than trusting a stale cached fingerprint.
+  if (this->pimpl->sceneGraphSensor) {
+    this->pimpl->sceneGraphSensor->detach();
+    if (root) {
+      this->pimpl->sceneGraphSensor->attach(root);
+    }
+    this->pimpl->sceneGraphDirty = TRUE;
+  }
 }
 
 SoNode *
@@ -616,6 +689,25 @@ SoVulkanRenderManager::initialize(SoVulkanDeviceContext * context)
   // cost while navigating in the raster path.  Keep the live backends and
   // their caches alive; just refresh the retained context (a new stack-allocated
   // context points at the same window-owned device handles).
+  //
+  // NOTE (known Qt-side validation artifact, not a FreeCAD defect): with the
+  // Vulkan validation layer enabled, the first few frames of a freshly shown
+  // window may log
+  //   "vkQueueSubmit(): pSubmits[0].pSignalSemaphores[0] ... may still be in
+  //    use by VkSwapchainKHR ..." (VUID-vkQueueSubmit-pSignalSemaphores-00067).
+  // That submit is QVulkanWindow's OWN internal present, not one from this
+  // manager: we never call vkQueuePresentKHR/vkAcquireNextImage and never
+  // submit a signal semaphore (our submissions are fence-based; the only
+  // signal-semaphore use is the CUDA-interop external semaphores in
+  // SoRTXRenderBackendDenoise.cpp).  QVulkanWindow reuses its per-swapchain
+  // render-finished semaphore during initial swapchain/surface setup, which
+  // the validation layer flags.  It is transient (fires at viewport open
+  // before path tracing starts), is emitted only with validation enabled, and
+  // has never been observed to cause VK_ERROR_DEVICE_LOST or any functional
+  // degradation in this project.  It is unrelated to the RT descriptor-set
+  // device-lost fixed in SoRTXRenderBackend* (VUID-vkCmdDispatch-None-08114).
+  // Do not chase it: the remedy (per-swapchain-image semaphores) is a Qt/
+  // QVulkanWindow change, not a FreeCAD one.
   if (this->pimpl->backendInitialized && this->pimpl->initContext
       && this->pimpl->initContext->device == context->device) {
     this->pimpl->initContext = context;
@@ -919,6 +1011,18 @@ SoVulkanRenderManager::setPathTracingDenoiser(const char * denoiser)
 }
 
 void
+SoVulkanRenderManager::setPathTracingDenoiserScale(const float scale)
+{
+  if (!this->pimpl->rtxBackendInitialized) {
+    SoDebugError::postWarning(
+      "SoVulkanRenderManager::setPathTracingDenoiserScale",
+      "ray-tracing backend is not initialized; setting ignored");
+    return;
+  }
+  this->pimpl->rtxBackend.setDenoiserScale(scale);
+}
+
+void
 SoVulkanRenderManager::setRenderTarget(void * target)
 {
   this->pimpl->renderTarget = target;
@@ -1028,9 +1132,35 @@ SoVulkanRenderManagerP::computeGraphFingerprint() const
   mixHash(h, reinterpret_cast<uintptr_t>(this->scene));
   mixHash(h, reinterpret_cast<uintptr_t>(this->overlayScene));
   mixHash(h, reinterpret_cast<uintptr_t>(this->decorationScene));
+  if (std::getenv("FC_VULKAN_LIGHTREPLAY_DBG")) {
+    uint64_t hScene = 0xcbf29ce484222325ULL;
+    uint64_t hOverlay = 0xcbf29ce484222325ULL;
+    uint64_t hDecor = 0xcbf29ce484222325ULL;
+    graphFingerprintWalk(this->scene, this->camera, hScene);
+    graphFingerprintWalk(this->overlayScene, this->camera, hOverlay);
+    graphFingerprintWalk(this->decorationScene, this->camera, hDecor);
+    if (vkLightFpDbgBudget-- > 0) {
+      fprintf(stderr,
+              "[FP] scene=%016lx overlay=%016lx decor=%016lx extRev=%llu"
+              " size=%dx%d\n",
+              (unsigned long)hScene, (unsigned long)hOverlay,
+              (unsigned long)hDecor,
+              (unsigned long long)this->externalRevision,
+              (int)this->viewportRegion.getViewportSizePixels()[0],
+              (int)this->viewportRegion.getViewportSizePixels()[1]);
+    }
+  }
+  // The replay gate is keyed on the MAIN scene only (plus the viewport and the
+  // caller-published revision).  The overlay/decoration scene node-ids churn
+  // every frame -- the navigation cube and the axis cross mirror the camera,
+  // so their nodes are re-touched each frame even when the geometry they draw
+  // is unchanged.  Folding those ids into the same hash made the fingerprint
+  // change every frame and forced a full re-traversal of an otherwise-stable
+  // main scene (the held hotspot).  The overlay/decoration are now re-recorded
+  // separately every frame (cheap) and the main scene is replayed when THIS
+  // fingerprint is stable; their pointer mixes below stay constant so an
+  // overlay-scene swap still invalidates.
   graphFingerprintWalk(this->scene, this->camera, h);
-  graphFingerprintWalk(this->overlayScene, this->camera, h);
-  graphFingerprintWalk(this->decorationScene, this->camera, h);
   const SbVec2s size = this->viewportRegion.getViewportSizePixels();
   mixHash(h, static_cast<uint32_t>(size[0]));
   mixHash(h, static_cast<uint32_t>(size[1]));
@@ -1416,21 +1546,50 @@ SoVulkanRenderManagerP::prepareRenderParams(SbBool clearwindow,
   // must be traversed in a single apply() call.  The managed scene graph is
   // geometry-only: the camera is stored as a separate member (matching
   // SoRenderManager/SoSceneManager, which apply the camera independently of
-  // the scene root).  Build a path [camera, scene, overlayScene] so
-  // SoCamera::doAction() installs the projection/viewing matrix elements
-  // before any geometry is recorded; otherwise every command carries identity
-  // matrices and the view renders at the origin with an identity projection
-  // (blank/wrong view, invisible geometry, and a camera that appears not to
-  // follow navigation).  The overlay scene is traversed last so its commands
-  // record after the main scene and render in the overlay pass.
+  // the scene root).  Build a path [camera, scene] so SoCamera::doAction()
+  // installs the projection/viewing matrix elements before any geometry is
+  // recorded; otherwise every command carries identity matrices and the view
+  // renders at the origin with an identity projection (blank/wrong view,
+  // invisible geometry, and a camera that appears not to follow navigation).
+  // The overlay/decoration scenes are NOT traversed here: their node-ids churn
+  // every frame with the camera, and folding them into this traversal would
+  // both re-record the (stable) main geometry and defeat the retained-IR replay
+  // below.  They are re-recorded separately afterwards (cheap) and merged onto
+  // this main list.
   SbBool irReplayed = FALSE;
-  const uint64_t graphFp = this->computeGraphFingerprint();
+  // Cheap fast-path: the graph fingerprint walk is O(N) over the whole scene,
+  // and on a retained (replayed) frame with no scene change it is pure waste.
+  // The walk folds scene node-ids but deliberately SKIPS the camera, so the
+  // fingerprint is invariant under camera motion; the only thing that changes
+  // it is a change to the main scene graph.  An SoNodeSensor attached to the
+  // scene root fires whenever any descendant is notified (a field write or a
+  // child-list edit), which is precisely a main-scene change -- so when the
+  // sensor has NOT fired since the last walk, the cached fingerprint is still
+  // exact and the O(N) walk is skipped.  This catches every change the walk
+  // would (Coin propagates notify() up to the root), independent of any
+  // external revision wiring, and camera-only frames still produce the same
+  // (camera-invariant) fingerprint.
+  uint64_t graphFp;
+  const SbVec2s fpVpSize = this->viewportRegion.getViewportSizePixels();
+  if (this->graphFingerprintValid && this->lastFpValid &&
+      !this->sceneGraphDirty && this->scene == this->lastFpScene &&
+      fpVpSize == this->lastFpViewport && this->devicePixelRatio == this->lastFpDpr) {
+    graphFp = this->graphFingerprint;
+  }
+  else {
+    graphFp = this->computeGraphFingerprint();
+    this->sceneGraphDirty = FALSE;
+  }
+  this->lastFpScene = this->scene;
+  this->lastFpViewport = fpVpSize;
+  this->lastFpDpr = this->devicePixelRatio;
+  this->lastFpValid = TRUE;
   if (this->scene || this->camera || this->overlayScene
       || this->decorationScene) {
     if (irReplayEnabled() && this->graphFingerprintValid &&
         graphFp == this->graphFingerprint) {
-      // Camera-only frame: every graph node, the viewport, and the
-      // caller-published revision are unchanged, so the retained IR draw
+      // Camera-only frame: the main graph, the viewport, and the
+      // caller-published revision are unchanged, so the retained main IR draw
       // list is exactly what a full traversal would produce -- keep it (and
       // the geometry/texture caches keyed on it) and restamp the frame view
       // after the matrices are built below.
@@ -1442,7 +1601,7 @@ SoVulkanRenderManagerP::prepareRenderParams(SbBool clearwindow,
       // navigation frames stop re-triggering child-list notifications.
       SoSeparator * root = this->frameRoot;
       SoNode * const want[4] = { this->camera, this->scene,
-                                 this->overlayScene, this->decorationScene };
+                                 nullptr, nullptr };
       const SbBool sameChildren = this->rootChildrenValid &&
         this->rootChildren[0] == want[0] &&
         this->rootChildren[1] == want[1] &&
@@ -1450,9 +1609,6 @@ SoVulkanRenderManagerP::prepareRenderParams(SbBool clearwindow,
         this->rootChildren[3] == want[3];
       if (!sameChildren) {
         root->removeAllChildren();
-        // Decorations (axis cross) record after the overlay scene so their
-        // overlay-pass commands draw on top of the navigation cube, matching
-        // GL's foreground/decoration render order.
         for (int i = 0; i < 4; ++i) {
           if (want[i]) {
             root->addChild(want[i]);
@@ -1464,6 +1620,8 @@ SoVulkanRenderManagerP::prepareRenderParams(SbBool clearwindow,
         this->rootChildrenValid = TRUE;
       }
       action.apply(root);
+      this->mainCommandCount =
+        action.getDrawList().getNumCommands();
       this->graphFingerprint = graphFp;
       this->graphFingerprintValid = TRUE;
       this->lastFrameViewValid = FALSE;
@@ -1480,6 +1638,65 @@ SoVulkanRenderManagerP::prepareRenderParams(SbBool clearwindow,
 
   const long matricesBcStart = vkRenderBreadcrumbEnabled() ? vkRenderBreadcrumbNowUs() : 0;
   SoDrawList & list = action.getMutableDrawList();
+
+  // ---- Always re-record the overlay/decoration (cheap) and merge ----------
+  // The nav cube and the axis cross mirror the camera, so their scene node-ids
+  // are re-touched every frame.  They cannot be retained with the stable main
+  // list, so re-traverse them here into a separate IR action and append their
+  // fresh commands onto the (retained) main list.  Truncate the previous
+  // frame's overlay region first -- it references geometry storage owned by the
+  // overlay action, which apply() just reset -- so the draw list the backend
+  // sees is [main..., overlay...] with no stale/dangling overlay commands.
+  SbBool overlayApplied = FALSE;
+  {
+    SoSeparator * oroot = this->overlayRoot;
+    SoNode * const owant[3] = { this->camera, this->overlayScene,
+                                this->decorationScene };
+    const SbBool oSame = this->overlayRootChildrenValid &&
+      this->overlayRootChildren[0] == owant[0] &&
+      this->overlayRootChildren[1] == owant[1] &&
+      this->overlayRootChildren[2] == owant[2];
+    if (!oSame) {
+      oroot->removeAllChildren();
+      // Decorations (axis cross) are added after the overlay scene so their
+      // overlay-pass commands draw on top of the navigation cube, matching GL's
+      // foreground/decoration render order.
+      for (int i = 0; i < 3; ++i) {
+        if (owant[i]) {
+          oroot->addChild(owant[i]);
+        }
+      }
+      for (int i = 0; i < 3; ++i) {
+        this->overlayRootChildren[i] = owant[i];
+      }
+      this->overlayRootChildrenValid = TRUE;
+    }
+    this->overlayIrAction.setViewportRegion(this->viewportRegion);
+    if (oroot->getNumChildren() > 0) {
+      // apply() resets the frame first (beginFrame), so the overlay action's
+      // previous draw list/geometry pool is released before re-recording.
+      this->overlayIrAction.apply(oroot);
+      overlayApplied = TRUE;
+    }
+    else {
+      // No overlay/decoration this frame: clear the previous frame's overlay
+      // list so the merge below does not append stale commands.
+      this->overlayIrAction.beginFrame();
+    }
+  }
+  {
+    const int numMain = static_cast<int>(this->mainCommandCount);
+    if (numMain < list.getNumCommands()) {
+      list.truncate(numMain);
+    }
+    if (overlayApplied) {
+      const SoDrawList & ovl = this->overlayIrAction.getDrawList();
+      const int ovlCount = ovl.getNumCommands();
+      for (int i = 0; i < ovlCount; ++i) {
+        list.addCommand(ovl.getCommand(i));
+      }
+    }
+  }
 
   // The frame view/projection matrices drive every non-overlay command, so
   // they must come from the camera this manager was told to use
@@ -1682,6 +1899,7 @@ SoVulkanRenderManagerP::prepareRenderParams(SbBool clearwindow,
     vkRenderBreadcrumbSince(matricesBcStart, 2000, "prepare matrix build end");
   }
 
+  int dbgRestamped = -1;
   if (irReplayed) {
     // Camera-only frame: restamp the frame viewing matrix into every
     // non-overlay command that carried the previous traversal's viewing
@@ -1691,6 +1909,7 @@ SoVulkanRenderManagerP::prepareRenderParams(SbBool clearwindow,
       SbMat lastView;
       this->lastFrameView.getValue(lastView);
       const int numCommands = list.getNumCommands();
+      int restamped = 0;
       for (int i = 0; i < numCommands; ++i) {
         SoRenderCommand & command = list.getCommand(i);
         if (command.pass == SO_RENDERPASS_OVERLAY) {
@@ -1700,8 +1919,10 @@ SoVulkanRenderManagerP::prepareRenderParams(SbBool clearwindow,
         command.viewMatrix.getValue(cmdView);
         if (std::memcmp(&cmdView[0][0], &lastView[0][0], sizeof(cmdView)) == 0) {
           command.viewMatrix = params.viewMatrix;
+          ++restamped;
         }
       }
+      dbgRestamped = restamped;
       list.restrikeLighting(this->lastFrameView, params.viewMatrix);
     }
   }
@@ -1717,6 +1938,26 @@ SoVulkanRenderManagerP::prepareRenderParams(SbBool clearwindow,
         break;
       }
     }
+  }
+  if (std::getenv("FC_VULKAN_LIGHTREPLAY_DBG") && vkLightFrameDbgBudget-- > 0) {
+    const SbMatrix & v = params.viewMatrix;
+    float qx = 0, qy = 0, qz = 0, qw = 1;
+    SbVec3f camPos(0.0f, 0.0f, 0.0f);
+    if (this->camera) {
+      const SbRotation camRot = this->camera->orientation.getValue();
+      camRot.getValue(qx, qy, qz, qw);
+      camPos = this->camera->position.getValue();
+    }
+    fprintf(stderr,
+            "[VKS] fp=%016lx replayed=%d lastViewValid=%d restamped=%d"
+            " viewT=(%.2f,%.2f,%.2f) viewM00=%.3f camPos=(%.1f,%.1f,%.1f)"
+            " camQ=(%.3f,%.3f,%.3f,%.3f) scene=%p\n",
+            (unsigned long)graphFp,
+            (int)irReplayed, (int)this->lastFrameViewValid, dbgRestamped,
+            v[0][3], v[1][3], v[2][3], v[0][0],
+            camPos[0], camPos[1], camPos[2],
+            qx, qy, qz, qw,
+            reinterpret_cast<const void *>(this->scene));
   }
   const long sortBcStart = vkRenderBreadcrumbEnabled() ? vkRenderBreadcrumbNowUs() : 0;
   list.buildSortedOrder(params.viewMatrix);

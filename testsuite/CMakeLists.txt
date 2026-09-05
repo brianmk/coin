@@ -502,6 +502,19 @@ if(HAVE_EGL)
 		add_test(NAME VulkanBackendClearTest COMMAND VulkanBackendClearTest)
 		set_tests_properties(VulkanBackendClearTest PROPERTIES SKIP_RETURN_CODE 77)
 
+		add_executable(VulkanBackendYFlipTest vulkan/vulkan-backend-yflip-test.cpp)
+		target_link_libraries(VulkanBackendYFlipTest Coin ${COIN_TARGET_LINK_LIBRARIES})
+		target_compile_definitions(VulkanBackendYFlipTest PRIVATE COIN_INTERNAL)
+		target_include_directories(VulkanBackendYFlipTest PRIVATE
+			${PROJECT_SOURCE_DIR}/src
+			${PROJECT_SOURCE_DIR}/include
+			${PROJECT_BINARY_DIR}/include
+			${PROJECT_SOURCE_DIR}/testsuite
+			${COIN_TARGET_INCLUDE_DIRECTORIES}
+		)
+		add_test(NAME VulkanBackendYFlipTest COMMAND VulkanBackendYFlipTest)
+		set_tests_properties(VulkanBackendYFlipTest PROPERTIES SKIP_RETURN_CODE 77)
+
 		add_executable(VulkanBackendVertexColorTest vulkan/vulkan-backend-vertex-color-test.cpp)
 		target_link_libraries(VulkanBackendVertexColorTest Coin ${COIN_TARGET_LINK_LIBRARIES})
 		target_compile_definitions(VulkanBackendVertexColorTest PRIVATE COIN_INTERNAL)

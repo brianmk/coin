@@ -43,7 +43,7 @@
 using namespace SoRTXBackend;
 
 #if COIN_BUILD_RTX_DENOISER
-// PTX for the sum->average normalizer (compiled with nvcc -ptx -arch=sm_100).
+// PTX for the sum->average normalizer (compiled with nvcc -ptx -arch=sm_75).
 // Converts an accumulated radiance sum (rgb) / sample-count (w) buffer into
 // the average color (and sets w = 1 for valid pixels, 0 for empty ones) that
 // the OptiX AOV denoiser expects as its AOV beauty input.
@@ -234,12 +234,13 @@ SoRTXRenderBackend::createDenoiseBackend()
             this->ptEnabled ? 1 : 0);
   }
 
-  // Compute the denoiser working resolution.  A scale factor >1 lets the
-  // denoiser run at reduced resolution (cheaper) and the raster present pass
-  // upscales; the present push constant carries denoiseScale.  For now we
-  // denoise at native resolution (scale 1) so guides align 1:1 with the
-  // present shader's pixel grid.
-  this->denoiseScale = 1.0f;
+  // The denoiser working resolution was already computed by
+  // createPathTracingBuffers() from denoiseScale (setDenoiserScale): a scale
+  // > 1 runs the host-side filter at reduced resolution (cheaper) and the
+  // present pass bilinearly upscales it back to the viewport.  denoiseScale
+  // itself is preserved here (the present push constant carries it), so do
+  // NOT reset it to 1.0 -- createDenoiseBackend() is re-entered on every
+  // (re)create and would otherwise clobber the user's scale.
 
   if (this->denoiseKind == DenoiseNone || !this->ptEnabled) {
     return true;
@@ -251,15 +252,16 @@ SoRTXRenderBackend::createDenoiseBackend()
   bool stagingFailed = false;
 
   // Host-visible staging buffers: one mapped block covering color, albedo,
-  // normal and output for the current resolution.  Allocates a single
+  // normal, motion and output for the current resolution.  Allocates a single
   // host-visible buffer so the maps stay valid for the life of the backend
   // and the denoiser can read the G-buffer rows directly.  Regions are laid
-  // out as [0]=color, [1]=albedo, [2]=normal, [3]=output (the readback copies
-  // three guides and the denoiser writes one output).  A single guide slot is
-  // enough: the real per-pixel validity comes from the sample count in
-  // color[3], so the old position/guide region was never used.  Keeping the
-  // block at 4x imageBytes (not 5x) avoids wasting 20% of the host-visible
-  // barrier, which is the constrained resource that fails the allocation.
+  // out as [0]=color, [1]=albedo, [2]=normal, [3]=motion, [4]=output (the
+  // readback copies the four inputs and the denoiser writes one output).
+  // The real per-pixel validity comes from the sample count in color[3], so
+  // the position buffer is never staged.  The block is 5x imageBytes -- the
+  // four inputs plus the output -- which is the working set a host-side
+  // denoiser needs; anything larger just wastes host-visible memory, the
+  // constrained resource that fails the allocation.
   //
   // The RTX path needs no host staging: it copies the G-buffers device-to-
   // device into CUDA-Vulkan interop images and runs OptiX entirely on the
@@ -267,11 +269,24 @@ SoRTXRenderBackend::createDenoiseBackend()
   // exact allocation that can run the driver out of host-visible memory) and
   // only allocate it for the host-side OIDN/FSR backends.
   const VkDeviceSize pixelBytes = 4 * sizeof(float);
+  // Denoiser working resolution (scaled by denoiseScale) -- the size of the
+  // OIDN filter inputs/output and of the denoisedBuffer the present pass
+  // upscales from.
   const VkDeviceSize imageBytes =
     static_cast<VkDeviceSize>(this->denoiseWidth) * this->denoiseHeight *
     pixelBytes;
+  // The G-buffer readback copies are FULL path-tracing resolution (the raygen
+  // writes the accum/albedo/normal/motion buffers at the viewport size); only
+  // the denoiser's internal working set and its output are scaled.  So the
+  // host staging block is 4 full-res input regions plus, when scaled, a
+  // low-res OIDN working set (color+albedo+normal+motion+output), else a
+  // single full-res output region.
+  const bool scaled = this->denoiseEffectiveScale > 1.5f;
+  const VkDeviceSize gbBytes =
+    static_cast<VkDeviceSize>(this->ptBufferWidth) * this->ptBufferHeight *
+    pixelBytes;
   if (this->denoiseKind != DenoiseRtx) {
-    const VkDeviceSize totalBytes = imageBytes * 5; // color+albedo+normal+motion+out
+    const VkDeviceSize totalBytes = gbBytes * 4 + (scaled ? 5 : 1) * imageBytes;
     if (!this->createHostVisibleBuffer(
           totalBytes, VK_BUFFER_USAGE_TRANSFER_DST_BIT |
             VK_BUFFER_USAGE_TRANSFER_SRC_BIT |
@@ -324,11 +339,13 @@ SoRTXRenderBackend::createDenoiseBackend()
 
   // Albedo G-buffer (binding 14): written by the raygen and read back as the
   // albedo guide.  Device-local STORAGE + TRANSFER_SRC so the readback can
-  // copy it to host staging.  Refresh descriptors once after both it and the
-  // denoised output exist so no descriptor is left unwritten/undefined.
+  // copy it to host staging.  This is a RAYGEN G-BUFFER and is always FULL
+  // resolution (ptBufferWidth/Height), regardless of the denoiser scale.
+  // Refresh descriptors once after both it and the denoised output exist so
+  // no descriptor is left unwritten/undefined.
   if (this->albedoBuffer == VK_NULL_HANDLE) {
     if (!this->createDeviceLocalBuffer(
-          imageBytes, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT |
+          gbBytes, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT |
             VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
           this->albedoBuffer, this->albedoMemory)) {
       this->emitError("failed to create albedo G-buffer");
@@ -564,8 +581,12 @@ void
 SoRTXRenderBackend::recordDenoiseReadback(VkCommandBuffer cmd)
 {
   if (!this->denoiserActive) return;
+  // Input copies are FULL path-tracing resolution (the raygen writes the
+  // accum/albedo/normal/motion G-buffers at the viewport size); only the
+  // denoiser's internal working set and output are scaled.  ptBufferWidth/Height
+  // are the full PT buffer dims and are what the G-buffer readback must copy.
   const VkDeviceSize stride =
-    static_cast<VkDeviceSize>(this->denoiseWidth) * this->denoiseHeight * 16;
+    static_cast<VkDeviceSize>(this->ptBufferWidth) * this->ptBufferHeight * 16;
 
 #if COIN_BUILD_RTX_DENOISER
   // RTX reads the G-buffers through the CUDA-Vulkan interop images: the
@@ -629,32 +650,108 @@ SoRTXRenderBackend::recordDenoiseReadback(VkCommandBuffer cmd)
                        VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 1, &before, 0,
                        nullptr, 0, nullptr);
 
-  // color (accum average), albedo, normal.  The position buffer is not needed:
-  // the present shader's denoised-alpha test uses the averaged color's w
-  // (set from the sample count in updateDenoise), which distinguishes empty
+  // color (accum average), albedo, normal, motion.  The position buffer is not
+  // needed: the present shader's denoised-alpha test uses the averaged color's
+  // w (set from the sample count in updateDenoise), which distinguishes empty
   // pixels from ones with a primary hit.
-  VkBufferCopy c0 {0, 0, stride};
-  vkCmdCopyBuffer(cmd, this->accumBuffer, this->denoiseColorBuf, 1, &c0);
-  if (this->albedoBuffer != VK_NULL_HANDLE) {
-    VkBufferCopy c1 {0, stride, stride};
-    vkCmdCopyBuffer(cmd, this->albedoBuffer, this->denoiseColorBuf, 1, &c1);
-  }
-  if (this->normalBuffer != VK_NULL_HANDLE) {
-    VkBufferCopy c2 {0, 2 * stride, stride};
-    vkCmdCopyBuffer(cmd, this->normalBuffer, this->denoiseColorBuf, 1, &c2);
-  }
-  if (this->motionBuffer != VK_NULL_HANDLE) {
-    VkBufferCopy cM {0, 3 * stride, stride};
-    vkCmdCopyBuffer(cmd, this->motionBuffer, this->denoiseColorBuf, 1, &cM);
-  }
+  //
+  // Preferred path: the denoiser G-buffer normalize/downsample compute pass
+  // reads the device-local G-buffers and writes the (optionally downsampled,
+  // always normalized) working set straight into the mapped staging block, so
+  // the CPU OIDN worker only runs the filter.  This avoids a host round-trip
+  // of the full-res G-buffers and swaps a serial 2M-fragment CPU normalize/
+  // downsample for a parallel GPU dispatch.  Fall back to the device->host
+  // copy (worker does the normalize/downsample) when the pass is unavailable.
+  const bool useGpuDownsample = this->denoiseDownsampleValid &&
+    this->denoiseStagingPtr != nullptr;
+  if (useGpuDownsample) {
+    const uint32_t gbW = this->ptBufferWidth;
+    const uint32_t gbH = this->ptBufferHeight;
+    const uint32_t w = this->denoiseWidth;
+    const uint32_t h = this->denoiseHeight;
+    const bool scaled = this->denoiseEffectiveScale > 1.5f;
+    // Sub-sample factors (nearest), matching the host worker: gx = x*sx clamped.
+    const uint32_t sx = std::max(1u, (gbW + w - 1) / w);
+    const uint32_t sy = std::max(1u, (gbH + h - 1) / h);
+    const VkDeviceSize outStride = static_cast<VkDeviceSize>(w) * h * 16;
+    const VkDeviceSize gbStride = static_cast<VkDeviceSize>(gbW) * gbH * 16;
+    // vec4-element (byte/16) offsets of the four working-set regions.
+    const VkDeviceSize baseBytes = scaled ? 4 * gbStride : 0;
+    const VkDeviceSize b0 = baseBytes;
+    const VkDeviceSize b1 = scaled ? baseBytes + outStride : gbStride;
+    const VkDeviceSize b2 = scaled ? baseBytes + 2 * outStride : 2 * gbStride;
+    const VkDeviceSize b3 = scaled ? baseBytes + 3 * outStride : 3 * gbStride;
 
-  VkMemoryBarrier afterStaging {};
-  afterStaging.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
-  afterStaging.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
-  afterStaging.dstAccessMask = VK_ACCESS_HOST_READ_BIT | VK_ACCESS_HOST_WRITE_BIT;
-  vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_TRANSFER_BIT,
-                       VK_PIPELINE_STAGE_HOST_BIT, 0, 1, &afterStaging, 0,
-                       nullptr, 0, nullptr);
+    DenoiseDownsamplePush push;
+    push.full[0] = gbW;
+    push.full[1] = gbH;
+    push.full[2] = sx;
+    push.full[3] = sy;
+    push.reg[0] = static_cast<uint32_t>(b0 / 16);
+    push.reg[1] = static_cast<uint32_t>(b1 / 16);
+    push.reg[2] = static_cast<uint32_t>(b2 / 16);
+    push.reg[3] = static_cast<uint32_t>(b3 / 16);
+    push.num[0] = w * h;
+
+    // The G-buffers were written by the raygen/compute tracer earlier in this
+    // command buffer; make the writes visible to this compute dispatch.
+    VkMemoryBarrier gpuBefore {};
+    gpuBefore.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
+    gpuBefore.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
+    gpuBefore.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+    vkCmdPipelineBarrier(cmd,
+                         VK_PIPELINE_STAGE_RAY_TRACING_SHADER_BIT_KHR |
+                           VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                         VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, 1,
+                         &gpuBefore, 0, nullptr, 0, nullptr);
+
+    vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE,
+                      this->denoiseDownsamplePipeline);
+    vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE,
+                            this->denoiseDownsamplePipelineLayout, 0, 1,
+                            &this->denoiseDownsampleDescriptorSet, 0, nullptr);
+    vkCmdPushConstants(cmd, this->denoiseDownsamplePipelineLayout,
+                       VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(push), &push);
+    vkCmdDispatch(cmd, (w + 7) / 8, (h + 7) / 8, 1);
+
+    // Make the working-set writes visible to the host (the worker reads them
+    // from the HOST_COHERENT staging block).
+
+    VkMemoryBarrier gpuAfter {};
+    gpuAfter.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
+    gpuAfter.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
+    gpuAfter.dstAccessMask = VK_ACCESS_HOST_READ_BIT | VK_ACCESS_HOST_WRITE_BIT;
+    vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                         VK_PIPELINE_STAGE_HOST_BIT, 0, 1, &gpuAfter, 0,
+                         nullptr, 0, nullptr);
+    // The worker must NOT re-apply the normalize/downsample the GPU did.
+    this->oidnGpuPrepared = true;
+  }
+  else {
+    this->oidnGpuPrepared = false;
+    VkBufferCopy c0 {0, 0, stride};
+    vkCmdCopyBuffer(cmd, this->accumBuffer, this->denoiseColorBuf, 1, &c0);
+    if (this->albedoBuffer != VK_NULL_HANDLE) {
+      VkBufferCopy c1 {0, stride, stride};
+      vkCmdCopyBuffer(cmd, this->albedoBuffer, this->denoiseColorBuf, 1, &c1);
+    }
+    if (this->normalBuffer != VK_NULL_HANDLE) {
+      VkBufferCopy c2 {0, 2 * stride, stride};
+      vkCmdCopyBuffer(cmd, this->normalBuffer, this->denoiseColorBuf, 1, &c2);
+    }
+    if (this->motionBuffer != VK_NULL_HANDLE) {
+      VkBufferCopy cM {0, 3 * stride, stride};
+      vkCmdCopyBuffer(cmd, this->motionBuffer, this->denoiseColorBuf, 1, &cM);
+    }
+
+    VkMemoryBarrier afterStaging {};
+    afterStaging.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
+    afterStaging.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+    afterStaging.dstAccessMask = VK_ACCESS_HOST_READ_BIT | VK_ACCESS_HOST_WRITE_BIT;
+    vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_TRANSFER_BIT,
+                         VK_PIPELINE_STAGE_HOST_BIT, 0, 1, &afterStaging, 0,
+                         nullptr, 0, nullptr);
+  }
   this->oidnReadbackPending = TRUE;
 }
 
@@ -677,7 +774,12 @@ SoRTXRenderBackend::updateDenoise()
     // well is stable for the life of the backend).
     const uint32_t w = this->denoiseWidth;
     const uint32_t h = this->denoiseHeight;
-    const VkDeviceSize stride = static_cast<VkDeviceSize>(w) * h * 16;
+    const VkDeviceSize outStride = static_cast<VkDeviceSize>(w) * h * 16;
+    const VkDeviceSize gbStride =
+      static_cast<VkDeviceSize>(this->ptBufferWidth) * this->ptBufferHeight * 16;
+    const bool scaled = this->denoiseEffectiveScale > 1.5f;
+    const VkDeviceSize outOffset = scaled
+      ? (4 * gbStride + 4 * outStride) : 4 * gbStride;
     if (this->oidnWorker.joinable()) {
       this->oidnWorker.join();
     }
@@ -697,7 +799,7 @@ SoRTXRenderBackend::updateDenoise()
         vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_HOST_BIT,
                              VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 1, &hostBar, 0,
                              nullptr, 0, nullptr);
-        VkBufferCopy cOut {4 * stride, 0, stride};
+        VkBufferCopy cOut {outOffset, 0, outStride};
         vkCmdCopyBuffer(cmd, this->denoiseOutBuf, this->denoisedBuffer, 1,
                         &cOut);
         VkMemoryBarrier outBar {};
@@ -716,20 +818,30 @@ SoRTXRenderBackend::updateDenoise()
 
         if (COIN_VULKAN_ENV_FLAG("FC_VULKAN_BLACK_DEBUG")) {
           float * dbg = static_cast<float *>(this->denoiseStagingPtr);
-          float * albR = dbg + stride / 4;
-          float * nrmR = dbg + 2 * stride / 4;
+          // The color/albedo regions the worker read.  On the GPU-prepared path
+          // the working set lives at the scaled/lower region (4*gbStride, k*outStride
+          // apart), not the full-res input regions the old CPU path filled; point
+          // the debug at the same base the worker used so accumMid/litRow are
+          // truthful instead of reading the stale offset-0 staging.
+          float * colorR = dbg;
+          float * albR = dbg + gbStride / 4;
+          if (this->oidnGpuPrepared && scaled) {
+            colorR = dbg + (4 * gbStride) / 4;
+            albR = dbg + (4 * gbStride + outStride) / 4;
+          }
+          float * nrmR = dbg + 2 * gbStride / 4;
           const int mid = ((h / 2) * w + w / 2) * 4;
           // scan a horizontal strip at mid-height for lit (alpha>0) color runs
           int litPixels = 0;
           for (int x = 0; x < w; ++x) {
-            if (dbg[((h / 2) * w + x) * 4 + 3] > 0.0f) { litPixels++; }
+            if (colorR[((h / 2) * w + x) * 4 + 3] > 0.0f) { litPixels++; }
           }
           // vertical extent of lit pixels
           int litTop = -1, litBottom = -1;
           for (int y = 0; y < h; ++y) {
             int rowLit = 0;
             for (int x = 0; x < w; x += 8) {
-              if (dbg[(y * w + x) * 4 + 3] > 0.0f) { rowLit++; }
+              if (colorR[(y * w + x) * 4 + 3] > 0.0f) { rowLit++; }
             }
             if (rowLit > 0) { if (litTop < 0) litTop = y; litBottom = y; }
           }
@@ -737,13 +849,13 @@ SoRTXRenderBackend::updateDenoise()
                   "[BLACKOIDN] %ux%u accumMid=(%.3f,%.3f,%.3f,%.1f) "
                   "albedoMid=(%.3f,%.3f,%.3f,%.1f) litRow=%d/%u litTop=%d litBottom=%d outMid=(%.3f,%.3f,%.3f,%.1f)\n",
                   w, h,
-                  dbg[mid], dbg[mid + 1], dbg[mid + 2], dbg[mid + 3],
+                  colorR[mid], colorR[mid + 1], colorR[mid + 2], colorR[mid + 3],
                   albR[mid], albR[mid + 1], albR[mid + 2], albR[mid + 3],
                   litPixels, w, litTop, litBottom,
-                  (dbg + 4 * stride / 4)[mid],
-                  (dbg + 4 * stride / 4)[mid + 1],
-                  (dbg + 4 * stride / 4)[mid + 2],
-                  (dbg + 4 * stride / 4)[mid + 3]);
+                  (dbg + outOffset / 4)[mid],
+                  (dbg + outOffset / 4)[mid + 1],
+                  (dbg + outOffset / 4)[mid + 2],
+                  (dbg + outOffset / 4)[mid + 3]);
         }
 
         this->convergeAfterDenoise();
@@ -903,18 +1015,24 @@ SoRTXRenderBackend::updateDenoise()
   }
   const uint32_t w = this->denoiseWidth;
   const uint32_t h = this->denoiseHeight;
-  const VkDeviceSize stride =
-    static_cast<VkDeviceSize>(w) * h * 16;
-  // Region pointers into the single mapping.
-  float * color = static_cast<float *>(this->denoiseStagingPtr);
-  float * albedo = reinterpret_cast<float *>(
-    static_cast<uint8_t *>(this->denoiseStagingPtr) + stride);
-  float * normal = reinterpret_cast<float *>(
-    static_cast<uint8_t *>(this->denoiseStagingPtr) + 2 * stride);
-  float * motion = reinterpret_cast<float *>(
-    static_cast<uint8_t *>(this->denoiseStagingPtr) + 3 * stride);
-  float * out = reinterpret_cast<float *>(
-    static_cast<uint8_t *>(this->denoiseStagingPtr) + 4 * stride);
+  const VkDeviceSize outStride = static_cast<VkDeviceSize>(w) * h * 16;
+  // The G-buffer readback copied FULL-resolution inputs; the denoiser's own
+  // working set (and its output) live at the scaled resolution at/after
+  // offset 4*gbStride.
+  const uint32_t gbW = this->ptBufferWidth;
+  const uint32_t gbH = this->ptBufferHeight;
+  const VkDeviceSize gbStride =
+    static_cast<VkDeviceSize>(gbW) * gbH * 16;
+  const bool scaled = this->denoiseEffectiveScale > 1.5f;
+  uint8_t * wbase = static_cast<uint8_t *>(this->denoiseStagingPtr);
+  // Full-res G-buffer inputs (from the readback).
+  float * color = reinterpret_cast<float *>(wbase);
+  float * albedo = reinterpret_cast<float *>(wbase + gbStride);
+  float * normal = reinterpret_cast<float *>(wbase + 2 * gbStride);
+  float * motion = reinterpret_cast<float *>(wbase + 3 * gbStride);
+  // Denoiser output region (scaled).
+  float * out = reinterpret_cast<float *>(wbase + (scaled
+    ? 4 * gbStride + 4 * outStride : 4 * gbStride));
 #if COIN_BUILD_OIDN
   if (this->denoiseKind == DenoiseOidn && this->oidnFilter) {
     // Confirm the readback request was actually issued (it is recorded on the
@@ -945,22 +1063,75 @@ SoRTXRenderBackend::updateDenoise()
         this->oidnWorker.join();
       }
       this->oidnWorker = std::thread([this, color, albedo, normal, motion, out,
-                                      w, h, pixels]() {
+                                      w, h, pixels, scaled, gbW, gbH]() {
+        const auto wStart = std::chrono::steady_clock::now();
+        // Effective OIDN input pointers.  At native resolution (scale 1) the
+        // filter reads the full-res G-buffer regions directly.  At reduced
+        // scale the readback staged full-res G-buffers; downsample them into
+        // a low-res scratch working set (nearest-neighbour subsample -- the
+        // denoiser only needs approximate guides and will smooth the sampled
+        // noise) because the filter itself runs at the scaled resolution.
+        float * cIn = color;
+        float * aIn = albedo;
+        float * nIn = normal;
+        float * mIn = motion;
+        if (scaled) {
+          uint8_t * sb = static_cast<uint8_t *>(this->denoiseStagingPtr)
+                     + 4 * (static_cast<VkDeviceSize>(gbW) * gbH * 16);
+          const VkDeviceSize oStride = static_cast<VkDeviceSize>(w) * h * 16;
+          float * lColor = reinterpret_cast<float *>(sb);
+          float * lAlbedo = reinterpret_cast<float *>(sb + oStride);
+          float * lNormal = reinterpret_cast<float *>(sb + 2 * oStride);
+          float * lMotion = reinterpret_cast<float *>(sb + 3 * oStride);
+          const uint32_t sx = std::max(1u, (gbW + w - 1) / w);
+          const uint32_t sy = std::max(1u, (gbH + h - 1) / h);
+          if (!this->oidnGpuPrepared) {
+            for (uint32_t y = 0; y < h; ++y) {
+              const uint32_t gy = std::min(gbH - 1u, y * sy);
+              for (uint32_t x = 0; x < w; ++x) {
+                const uint32_t gx = std::min(gbW - 1u, x * sx);
+                const uint32_t gi = gy * gbW + gx;
+                const uint32_t oi = y * w + x;
+                const float * c = color + gi * 4;
+                const float * a = albedo + gi * 4;
+                const float * n = normal + gi * 4;
+                const float * mo = motion + gi * 4;
+                float * lc = lColor + oi * 4;
+                float * la = lAlbedo + oi * 4;
+                float * ln = lNormal + oi * 4;
+                float * lm = lMotion + oi * 4;
+                lc[0]=c[0]; lc[1]=c[1]; lc[2]=c[2]; lc[3]=c[3];
+                la[0]=a[0]; la[1]=a[1]; la[2]=a[2]; la[3]=a[3];
+                ln[0]=n[0]; ln[1]=n[1]; ln[2]=n[2]; ln[3]=n[3];
+                lm[0]=mo[0]; lm[1]=mo[1]; lm[2]=mo[2]; lm[3]=mo[3];
+              }
+            }
+          }
+          cIn = lColor; aIn = lAlbedo; nIn = lNormal; mIn = lMotion;
+        }
         // Normalize the accum sum -> average: the sample count sits in the
         // w channel of each color texel and is consumed here; the present
         // shader's denoised-alpha test uses the normalized w (1.0 = hit) to
         // reject denoised pixels with no primary hit.
-        for (uint64_t i = 0; i < pixels; ++i) {
-          float * base = color + i * 4;
-          const float count = std::fabs(base[3]) > 1e-5f ? base[3] : 0.0f;
-          if (count > 0.0f) {
-            base[0] /= count;
-            base[1] /= count;
-            base[2] /= count;
-            base[3] = 1.0f;
-          }
-          else {
-            base[3] = 0.0f;
+        //
+        // This is a hot loop over the whole (reduced-res) image, so keep it
+        // cheap: a sample count is never negative, so test w directly instead
+        // of the libm std::fabs (a debug/-O0 build turns that into a call),
+        // and turn the three divides into a single reciprocal + multiplies.
+        if (!this->oidnGpuPrepared) {
+          for (uint64_t i = 0, s4 = 0; i < pixels; ++i, s4 += 4) {
+            float * base = cIn + s4;
+            const float count = base[3] > 1.0e-5f ? base[3] : 0.0f;
+            if (count > 0.0f) {
+              const float inv = 1.0f / count;
+              base[0] *= inv;
+              base[1] *= inv;
+              base[2] *= inv;
+              base[3] = 1.0f;
+            }
+            else {
+              base[3] = 0.0f;
+            }
           }
         }
         // OIDN 2.x's "RT" filter rejects OIDN_FORMAT_FLOAT4 for these inputs
@@ -969,13 +1140,13 @@ SoRTXRenderBackend::updateDenoise()
         // pixel stride; presenting the leading 3 components as FLOAT3 with the
         // same stride makes OIDN read only RGB and skip the packed alpha, so
         // the downstream float4 indexing below is still valid.
-        oidnSetSharedFilterImage(this->oidnFilter, "color", color,
+        oidnSetSharedFilterImage(this->oidnFilter, "color", cIn,
                                  OIDN_FORMAT_FLOAT3, w, h, 0, 16,
                                  static_cast<size_t>(w) * 16);
-        oidnSetSharedFilterImage(this->oidnFilter, "albedo", albedo,
+        oidnSetSharedFilterImage(this->oidnFilter, "albedo", aIn,
                                  OIDN_FORMAT_FLOAT3, w, h, 0, 16,
                                  static_cast<size_t>(w) * 16);
-        oidnSetSharedFilterImage(this->oidnFilter, "normal", normal,
+        oidnSetSharedFilterImage(this->oidnFilter, "normal", nIn,
                                  OIDN_FORMAT_FLOAT3, w, h, 0, 16,
                                  static_cast<size_t>(w) * 16);
         // Motion-vector guide: the RT filter's optional 'motion' input is a
@@ -984,7 +1155,7 @@ SoRTXRenderBackend::updateDenoise()
         // 16-byte pixel/row stride presents the leading 2 components so OIDN
         // consumes only x,y.  The validity flag (z) is unused by OIDN 2.x's
         // motion input; a zero vector means "no motion".
-        oidnSetSharedFilterImage(this->oidnFilter, "motion", motion,
+        oidnSetSharedFilterImage(this->oidnFilter, "motion", mIn,
                                  OIDN_FORMAT_FLOAT2, w, h, 0, 16,
                                  static_cast<size_t>(w) * 16);
         oidnSetSharedFilterImage(this->oidnFilter, "output", out,
@@ -1012,9 +1183,22 @@ SoRTXRenderBackend::updateDenoise()
         // color region so the present shader can reject denoised pixels with
         // no primary hit (its DenoisedBuffer alpha test).
         for (uint64_t i = 0; i < pixels; ++i) {
-          out[i * 4 + 3] = color[i * 4 + 3];
+          out[i * 4 + 3] = cIn[i * 4 + 3];
         }
-        this->oidnWorkerRunning = FALSE;
+        // Publish completion with a single signal.  oidnWorkerRunning is NOT
+        // cleared here: it is owned by the render thread, which clears it in
+        // the oidnWorkerDone branch (after join) and in releaseDenoiseStaging().
+        // Writing running=FALSE before done=TRUE left a window in which the
+        // render thread could observe running=FALSE AND done=FALSE (the two
+        // atomics are independent), fall through the worker-running guard, and
+        // convergeAfterDenoise() with denoiseResultReady=FALSE -- publishing no
+        // denoised result so the run idled on the raw/edge-stopped image.
+        if (getenv("FC_VULKAN_PT_DENOISE_TIMING")) {
+          const auto wEnd = std::chrono::steady_clock::now();
+          fprintf(stderr, "[DENOISE] OIDN async worker total=%.1fms (%ux%u)\n",
+                  std::chrono::duration<double, std::milli>(wEnd - wStart).count(),
+                  w, h);
+        }
         this->oidnWorkerDone = TRUE;
       });
       // The worker owns the staging block and the filter now; do not block
@@ -1170,6 +1354,8 @@ SoRTXRenderBackend::destroyDenoiser()
   this->denoiseStagedWidth = 0;
   this->denoiseStagedHeight = 0;
   this->oidnReadbackPending = FALSE;
+  this->oidnGpuPrepared = false;
+  this->denoiseDownsampleValid = false;
 }
 
 void
@@ -1563,8 +1749,8 @@ SoRTXRenderBackend::createRtxInteropBuffer(size_t bytes,
   VkMemoryAllocateInfo ai {};
   ai.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
   ai.allocationSize = req.size;
-  ai.memoryTypeIndex = findMemoryType(this->physicalDevice, req,
-                                      VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
+  ai.memoryTypeIndex = this->pickMemoryType(
+    req, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
   ai.pNext = &allocFlags;
   if (vkAllocateMemory(this->device, &ai, this->allocator, &memory) !=
       VK_SUCCESS) {

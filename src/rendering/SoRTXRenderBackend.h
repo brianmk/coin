@@ -4,6 +4,7 @@
 #define COIN_SORTXRENDERBACKEND_H
 
 #include "rendering/SoRenderBackend.h"
+#include "rendering/SoVulkanShared.h"
 
 #include <Inventor/rendering/SoVulkanRenderTarget.h>
 
@@ -292,6 +293,18 @@ public:
   void setDenoiserFilter(const char * denoiser);
 
   /*!
+    \brief Set the denoiser upscale factor (>= 1.0, default 1.0).
+
+    A factor > 1 makes the denoiser run at a lower internal resolution
+    (width/scale x height/scale) and the present pass bilinearly upscales the
+    denoised result back to the viewport, trading denoise accuracy for speed
+    (roughly scale^2 fewer pixels).  Clamped to [1, 8].  Applied on the next
+    path-tracing buffer (re)creation, so a running denoiser is recreated at
+    the new scale.
+  */
+  void setDenoiserScale(float scale);
+
+  /*!
     \brief Record the draw list into a caller-owned command buffer/render pass.
 
     Same contract as SoVulkanRenderBackend::renderExternal(): the caller has
@@ -319,12 +332,24 @@ private:
   bool createShaderModules();
   bool createFrameBuffer();
   bool updateDescriptors();
+  // Denoiser G-buffer normalize/downsample compute pass: a small compute
+  // shader that reads the full-res accum/albedo/normal/motion G-buffers after
+  // the trace and writes the (optionally downsampled, always normalized)
+  // working set into the host staging block, so the CPU OIDN worker only runs
+  // the filter.  Owns its own descriptor set + pipeline (separate binding 4
+  // output), and is re-created whenever the G-buffers/staging change.
+  bool createDenoiseDownsampleSetLayout();
+  bool createDenoiseDownsamplePipeline();
 
   // --- Buffer helpers -----------------------------------------------------
   bool createDeviceLocalBuffer(VkDeviceSize size, VkBufferUsageFlags usage,
                                VkBuffer & buffer, VkDeviceMemory & memory);
   bool createHostVisibleBuffer(VkDeviceSize size, VkBufferUsageFlags usage,
                                VkBuffer & buffer, VkDeviceMemory & memory);
+  // Cached memory-type pick (wraps memProps; keeps the old findMemoryType() call
+  // sites unchanged while removing the per-allocation device query).
+  uint32_t pickMemoryType(const VkMemoryRequirements & requirements,
+                          VkMemoryPropertyFlags desired) const;
   bool createScratchBuffer(VkDeviceSize size);
   bool createStorageImage(uint32_t width, uint32_t height);
   bool createPathTracingBuffers(uint32_t width, uint32_t height);
@@ -373,6 +398,10 @@ private:
   VkDevice device = VK_NULL_HANDLE;
   VkQueue queue = VK_NULL_HANDLE;
   uint32_t queueFamilyIndex = 0;
+  // Cached physical-device memory-properties picker (shared helper).  Bound to
+  // physicalDevice in initialize(); the legacy findMemoryType() free function
+  // re-queried vkGetPhysicalDeviceMemoryProperties on every allocation.
+  SoVulkanShared::MemoryProperties memProps;
   // Optional compute queue acquired at device creation (the embedding app
   // requests it via QVulkanWindow::setQueueCreateInfoModifier, typically a
   // dedicated compute-only family, and reports the family + queue index here).
@@ -456,18 +485,36 @@ private:
   //    (verified against RADV, which runs the SBT path correctly).
   VkDescriptorSetLayout rtSetLayout = VK_NULL_HANDLE;
   VkDescriptorSetLayout presentSetLayout = VK_NULL_HANDLE;
+  VkDescriptorSetLayout denoiseDownsampleSetLayout = VK_NULL_HANDLE;
   VkDescriptorPool descriptorPool = VK_NULL_HANDLE;
   // Double-buffered descriptor sets: one frame's sets are bound while the
   // previous frame's submission may still be pending, so each frame updates
   // the inactive pair (VUID-vkUpdateDescriptorSets-None-03047).
   VkDescriptorSet rtDescriptorSets[2] = {VK_NULL_HANDLE, VK_NULL_HANDLE};
   VkDescriptorSet presentDescriptorSets[2] = {VK_NULL_HANDLE, VK_NULL_HANDLE};
+  VkDescriptorSet denoiseDownsampleDescriptorSet = VK_NULL_HANDLE;
+  //! Whether denoiseDownsampleDescriptorSet currently holds the valid staging/
+  //! G-buffer bindings (reset on teardown so a stale set is never dispatched).
+  bool denoiseDownsampleValid = false;
   uint32_t descriptorSetIndex = 0;
+  // Whether rtDescriptorSets[i] / presentDescriptorSets[i] hold bindings that
+  // updateDescriptors() actually wrote in the current engine generation.  The
+  // sets are populated only on an asDirty frame (a camera-only frame reuses the
+  // last-populated set), and they are torn down (-> NULL) on resource teardown
+  // while descriptorSetIndex carries over.  A fresh set that a non-dirty frame
+  // then binds has NEVER been written -> VUID-vkCmdDispatch-None-08114 (and,
+  // on the present set, the same class of undefined sample).  These flags make
+  // that hazard explicit so recordAccelerationStructures can repopulate a torn
+  // set before it is bound.
+  bool rtSetValid[2] = {false, false};
+  bool presentSetValid[2] = {false, false};
 
   VkPipelineLayout rtPipelineLayout = VK_NULL_HANDLE;
   VkPipelineLayout presentPipelineLayout = VK_NULL_HANDLE;
+  VkPipelineLayout denoiseDownsamplePipelineLayout = VK_NULL_HANDLE;
   VkPipeline rtPipeline = VK_NULL_HANDLE; //!< ray tracing pipeline (SBT mode)
   VkPipeline computePipeline = VK_NULL_HANDLE; //!< ray-query compute pipeline
+  VkPipeline denoiseDownsamplePipeline = VK_NULL_HANDLE; //!< normalize/downsample
   VkPipeline presentPipeline = VK_NULL_HANDLE;
   VkRenderPass presentRenderPass = VK_NULL_HANDLE; //!< cache key for present pipeline
   VkSampleCountFlagBits presentSampleCount =
@@ -493,6 +540,7 @@ private:
   VkShaderModule shadowClosestHitModule = VK_NULL_HANDLE;
   VkShaderModule presentVertexModule = VK_NULL_HANDLE;
   VkShaderModule presentFragmentModule = VK_NULL_HANDLE;
+  VkShaderModule denoiseDownsampleModule = VK_NULL_HANDLE; //!< G-buffer normalize/downsample
 
   //! Dispatch mode: TRUE = ray tracing pipeline + SBT, FALSE = ray-query
   //! compute (default; see the resource section comment for why).
@@ -815,8 +863,7 @@ private:
   // instance/material buffers, recreated present pipeline, ...) are
   // destroyed two frames later, once the caller's pending submissions that
   // may still reference them have certainly completed.
-  std::vector<std::function<void()>> pendingDestroys[2];
-  int pendingDestroyIndex = 0;
+  SoVulkanShared::PendingDestroys pendingDestroys {2};
   void flushPendingDestroys(bool waitForQueue = false);
   void deferDestroy(std::function<void()> && fn);
 
@@ -840,7 +887,7 @@ private:
   // present binding 5.
   enum DenoiseKind { DenoiseNone = 0, DenoiseOidn, DenoiseRtx, DenoiseFsr };
 
-  //! Current ray-traced view mode (see the public RtxViewMode enum).
+  //! Backing store for getViewMode()/setViewMode() (see RtxViewMode).
   RtxViewMode rtxViewMode = RtxViewMode::RtxModeOff;
 
   //! Procedural IBL / environment-lit params (mirrored into the frame UBO's
@@ -940,6 +987,11 @@ private:
   //! Scale factor baked into the present shader's denoise branch (1.0 =
   //! native resolution; >1 when the denoiser runs at reduced resolution).
   float denoiseScale = 1.0f;
+  //! The denoiser scale actually applied to the buffers (denoiseScale, but
+  //! forced to 1.0 for the RTX/OptiX path which cannot downsample its
+  //! device-to-device G-buffer readback).  The present pass and the worker
+  //! layout use THIS so a scaled setting cannot mismatch the buffer sizes.
+  float denoiseEffectiveScale = 1.0f;
   //! Minimum accumulated samples before the denoiser output is published.
   //! The denoiser is trained on partially converged images; feeding it a
   //! one- or two-sample frame produces a blurred/junk result (NVIDIA's
@@ -957,9 +1009,13 @@ private:
 #if COIN_BUILD_OIDN
   OIDNDevice oidnDevice = nullptr;
   OIDNFilter oidnFilter = nullptr;
+#endif
+  // Defined unconditionally in SoRTXRenderBackendDenoise.cpp; the bodies are
+  // compiled out when COIN_BUILD_OIDN=0, so the declarations must not be
+  // guarded (a guarded declaration with an unguarded definition produces a
+  // "no declaration matches" compile error for denose builds).
   void setupOidnDevice();
   bool configureOidnFilter();
-#endif
 
   // Async OIDN execution.  OIDN's oidnExecuteFilter() on the CPU device can
   // take tens of milliseconds and, because the render (and denoise) run on the
@@ -983,6 +1039,10 @@ private:
   std::atomic<bool> oidnWorkerDone {false};
   //! The worker joinable handle (one shot per denoise-at-target).
   std::thread oidnWorker;
+  //! True when the denoise GPU-downsample pass already wrote the normalized
+  //! (and, at scale>1, downsampled) working set into the staging block, so the
+  //! worker skips its own CPU normalize/downsample and only runs OIDN/FSR.
+  bool oidnGpuPrepared = false;
 
 
   // --- RTX (OptiX + CUDA) backend -----------------------------------------
@@ -1101,9 +1161,11 @@ private:
   //! semaphore is available, signal it before the stream synchronize so the
   //! caller's Vulkan copy-back can wait on the CUDA writes.
   bool updateRtxDenoise(uint32_t w, uint32_t h, bool signalCudaToVulkan);
-  //! Free the CUDA context + OptiX denoiser state (keeps Vulkan staging).
-  void teardownRtxDenoiser();
 #endif
+  //! Free the CUDA context + OptiX denoiser state (keeps Vulkan staging).
+  //! Defined unconditionally in SoRTXRenderBackendDenoise.cpp (body compiled
+  //! out when COIN_BUILD_RTX_DENOISER=0), so the declaration is unguarded.
+  void teardownRtxDenoiser();
 };
 
 #endif // COIN_SORTXRENDERBACKEND_H

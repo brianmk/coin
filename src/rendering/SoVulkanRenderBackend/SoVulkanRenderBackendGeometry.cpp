@@ -13,6 +13,7 @@
 
 #include "rendering/SoVulkanRenderBackend.h"
 #include "rendering/SoVulkanRenderBackend/SoVulkanRenderBackendP.h"
+#include "rendering/SoVulkanShared.h"
 
 #include <Inventor/elements/SoDrawStyleElement.h>
 #include <Inventor/errors/SoDebugError.h>
@@ -130,64 +131,62 @@ SoVulkanRenderBackend::getOrCreateCache(const SoRenderCommand * command)
 }
 
 bool
-SoVulkanRenderBackend::createBuffer(VkDeviceSize size,
-                                    VkBufferUsageFlags usage,
-                                    VkBuffer & buffer,
-                                    VkDeviceMemory & memory,
-                                    const void * data)
+SoVulkanRenderBackend::selectMemoryType(const VkMemoryRequirements & requirements,
+                                        const VkMemoryPropertyFlags desired,
+                                        uint32_t & memoryTypeIndex)
 {
-  VkBufferCreateInfo ci {};
-  ci.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
-  ci.size = size;
-  ci.usage = usage;
-  ci.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
-  if (vkCreateBuffer(this->device, &ci, this->allocator, &buffer) !=
-      VK_SUCCESS) {
-    return false;
-  }
-
-  VkMemoryRequirements requirements;
-  vkGetBufferMemoryRequirements(this->device, buffer, &requirements);
-
-  VkMemoryAllocateInfo ai {};
-  ai.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
-  ai.allocationSize = requirements.size;
-  // Milestone: no per-memory-type discovery; assume a host-visible coherent
-  // heap.  A follow-up replaces this with a memory-type index lookup.
-  VkPhysicalDeviceMemoryProperties memoryProperties;
-  vkGetPhysicalDeviceMemoryProperties(this->physicalDevice, &memoryProperties);
-  uint32_t memoryTypeIndex = 0;
-  const VkMemoryPropertyFlags desired =
-    VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT |
-    VK_MEMORY_PROPERTY_HOST_COHERENT_BIT;
-  bool found = false;
-  for (uint32_t i = 0; i < memoryProperties.memoryTypeCount; ++i) {
+  const VkPhysicalDeviceMemoryProperties & props = this->memProps.properties();
+  for (uint32_t i = 0; i < props.memoryTypeCount; ++i) {
     if ((requirements.memoryTypeBits & (1u << i)) &&
-        (memoryProperties.memoryTypes[i].propertyFlags & desired) == desired) {
+        (props.memoryTypes[i].propertyFlags & desired) == desired) {
       memoryTypeIndex = i;
-      found = true;
-      break;
+      return true;
     }
   }
-  if (!found) {
-    vkDestroyBuffer(this->device, buffer, this->allocator);
-    buffer = VK_NULL_HANDLE;
-    return false;
-  }
-  ai.memoryTypeIndex = memoryTypeIndex;
+  memoryTypeIndex = 0;
+  return false;
+}
 
-  if (vkAllocateMemory(this->device, &ai, this->allocator, &memory) !=
-      VK_SUCCESS) {
-    vkDestroyBuffer(this->device, buffer, this->allocator);
-    buffer = VK_NULL_HANDLE;
+bool
+SoVulkanRenderBackend::allocateBufferMemory(VkBuffer buffer,
+                                            const VkMemoryRequirements & requirements,
+                                            const VkMemoryPropertyFlags desiredProperties,
+                                            VkDeviceMemory & memory)
+{
+  // Memory-type policy stays with this backend (exact-match, no fallback);
+  // only the allocate+bind boilerplate is shared.
+  return SoVulkanShared::bindBufferMemory(
+    this->device, this->allocator, buffer, requirements, desiredProperties,
+    [this](const VkMemoryRequirements & req, VkMemoryPropertyFlags desired,
+           uint32_t & memoryTypeIndex) {
+      return this->selectMemoryType(req, desired, memoryTypeIndex);
+    }, memory);
+}
+
+bool
+SoVulkanRenderBackend::createBufferWithProperties(const VkDeviceSize size,
+                                                  const VkBufferUsageFlags usage,
+                                                  const VkMemoryPropertyFlags desiredProperties,
+                                                  VkBuffer & buffer,
+                                                  VkDeviceMemory & memory,
+                                                  const void * data)
+{
+  buffer = VK_NULL_HANDLE;
+  memory = VK_NULL_HANDLE;
+  if (!SoVulkanShared::createBufferAllocated(
+        this->device, this->allocator, size, usage, desiredProperties,
+        /*deviceAddress*/ false,
+        [this](const VkMemoryRequirements & req, VkMemoryPropertyFlags desired,
+               uint32_t & memoryTypeIndex) {
+          return this->selectMemoryType(req, desired, memoryTypeIndex);
+        }, buffer, memory)) {
     return false;
   }
-  vkBindBufferMemory(this->device, buffer, memory, 0);
 
   if (data) {
     void * mapped = nullptr;
     if (vkMapMemory(this->device, memory, 0, size, 0, &mapped) != VK_SUCCESS) {
-      this->emitError("createBuffer: vkMapMemory failed");
+      this->emitError("createBufferWithProperties: vkMapMemory failed");
       vkDestroyBuffer(this->device, buffer, this->allocator);
       vkFreeMemory(this->device, memory, this->allocator);
       buffer = VK_NULL_HANDLE;
@@ -200,14 +199,17 @@ SoVulkanRenderBackend::createBuffer(VkDeviceSize size,
   return true;
 }
 
-void
-SoVulkanRenderBackend::ensureDeviceMemoryProperties()
+bool
+SoVulkanRenderBackend::createBuffer(VkDeviceSize size,
+                                    VkBufferUsageFlags usage,
+                                    VkBuffer & buffer,
+                                    VkDeviceMemory & memory,
+                                    const void * data)
 {
-  if (!this->deviceMemoryPropertiesValid) {
-    vkGetPhysicalDeviceMemoryProperties(this->physicalDevice,
-                                        &this->deviceMemoryProperties);
-    this->deviceMemoryPropertiesValid = true;
-  }
+  return this->createBufferWithProperties(
+    size, usage,
+    VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+    buffer, memory, data);
 }
 
 bool
@@ -226,45 +228,17 @@ SoVulkanRenderBackend::createBufferDeviceLocal(VkDeviceSize size,
   // This is only invoked from the geometry-change path (not steady-state), so
   // the synchronous transfer is acceptable.  On any failure the buffer/memory
   // are left null and the caller falls back to the host-visible createBuffer().
-  VkBufferCreateInfo ci {};
-  ci.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
-  ci.size = size;
-  ci.usage = usage | VK_BUFFER_USAGE_TRANSFER_DST_BIT;
-  ci.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
-  if (vkCreateBuffer(this->device, &ci, this->allocator, &buffer) != VK_SUCCESS) {
+  if (!SoVulkanShared::createBufferAllocated(
+        this->device, this->allocator, size,
+        usage | VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+        VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT,
+        /*deviceAddress*/ false,
+        [this](const VkMemoryRequirements & req, VkMemoryPropertyFlags desired,
+               uint32_t & memoryTypeIndex) {
+          return this->selectMemoryType(req, desired, memoryTypeIndex);
+        }, buffer, memory)) {
     return false;
   }
-
-  VkMemoryRequirements requirements;
-  vkGetBufferMemoryRequirements(this->device, buffer, &requirements);
-
-  this->ensureDeviceMemoryProperties();
-  uint32_t memoryTypeIndex = UINT32_MAX;
-  for (uint32_t i = 0; i < this->deviceMemoryProperties.memoryTypeCount; ++i) {
-    if ((requirements.memoryTypeBits & (1u << i)) &&
-        (this->deviceMemoryProperties.memoryTypes[i].propertyFlags &
-         VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT)) {
-      memoryTypeIndex = i;
-      break;
-    }
-  }
-  if (memoryTypeIndex == UINT32_MAX) {
-    vkDestroyBuffer(this->device, buffer, this->allocator);
-    buffer = VK_NULL_HANDLE;
-    return false;
-  }
-
-  VkMemoryAllocateInfo ai {};
-  ai.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
-  ai.allocationSize = requirements.size;
-  ai.memoryTypeIndex = memoryTypeIndex;
-  if (vkAllocateMemory(this->device, &ai, this->allocator, &memory) !=
-      VK_SUCCESS) {
-    vkDestroyBuffer(this->device, buffer, this->allocator);
-    buffer = VK_NULL_HANDLE;
-    return false;
-  }
-  vkBindBufferMemory(this->device, buffer, memory, 0);
 
   if (!data) return true;
 
@@ -306,20 +280,10 @@ SoVulkanRenderBackend::createBufferDeviceLocal(VkDeviceSize size,
     // does not establish a memory dependency for the buffer being read as
     // vertex/index attributes in a subsequent submit.  This barrier transitions
     // it from TRANSFER_WRITE to VERTEX_ATTRIBUTE/INDEX read.
-    VkBufferMemoryBarrier bufBarrier {};
-    bufBarrier.sType = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER;
-    bufBarrier.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
-    bufBarrier.dstAccessMask = VK_ACCESS_VERTEX_ATTRIBUTE_READ_BIT |
-                               VK_ACCESS_INDEX_READ_BIT;
-    bufBarrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-    bufBarrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-    bufBarrier.buffer = buffer;
-    bufBarrier.offset = 0;
-    bufBarrier.size = size;
-    vkCmdPipelineBarrier(transfer,
-                         VK_PIPELINE_STAGE_TRANSFER_BIT,
-                         VK_PIPELINE_STAGE_VERTEX_INPUT_BIT,
-                         0, 0, nullptr, 1, &bufBarrier, 0, nullptr);
+    SoVulkanShared::bufferTransition(
+      transfer, buffer, 0, size, VK_ACCESS_TRANSFER_WRITE_BIT,
+      VK_ACCESS_VERTEX_ATTRIBUTE_READ_BIT | VK_ACCESS_INDEX_READ_BIT,
+      VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_VERTEX_INPUT_BIT);
     ok = vkEndCommandBuffer(transfer) == VK_SUCCESS;
   }
 
@@ -423,6 +387,14 @@ SoVulkanRenderBackend::uploadGeometry(VulkanCachedCommand & entry,
     }
     if (!indexCreated) {
       this->emitError("uploadGeometry: failed to create index buffer");
+      if (entry.vertexBuffer != VK_NULL_HANDLE) {
+        vkDestroyBuffer(this->device, entry.vertexBuffer, this->allocator);
+        entry.vertexBuffer = VK_NULL_HANDLE;
+      }
+      if (entry.vertexMemory != VK_NULL_HANDLE) {
+        vkFreeMemory(this->device, entry.vertexMemory, this->allocator);
+        entry.vertexMemory = VK_NULL_HANDLE;
+      }
       return;
     }
   }
@@ -578,41 +550,17 @@ SoVulkanRenderBackend::allocateGeometryBlock(VkDeviceSize capacity)
   VkMemoryRequirements requirements {};
   vkGetBufferMemoryRequirements(this->device, buffer, &requirements);
 
-  this->ensureDeviceMemoryProperties();
-  uint32_t memoryTypeIndex = UINT32_MAX;
-  const VkMemoryPropertyFlags desired =
-    VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT |
-    VK_MEMORY_PROPERTY_HOST_COHERENT_BIT;
-  for (uint32_t i = 0; i < this->deviceMemoryProperties.memoryTypeCount; ++i) {
-    if ((requirements.memoryTypeBits & (1u << i)) &&
-        (this->deviceMemoryProperties.memoryTypes[i].propertyFlags & desired) == desired) {
-      memoryTypeIndex = i;
-      break;
-    }
-  }
-  if (memoryTypeIndex == UINT32_MAX) {
-    vkDestroyBuffer(this->device, buffer, this->allocator);
-    return 0;
-  }
-
-  const VkDeviceSize allocationSize =
-    std::max<VkDeviceSize>(capacity, requirements.size);
-  VkMemoryAllocateInfo ai {};
-  ai.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
-  ai.allocationSize = allocationSize;
-  ai.memoryTypeIndex = memoryTypeIndex;
   VkDeviceMemory memory = VK_NULL_HANDLE;
-  if (vkAllocateMemory(this->device, &ai, this->allocator, &memory) != VK_SUCCESS) {
+  if (!this->allocateBufferMemory(buffer, requirements,
+                                  VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT |
+                                    VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+                                  memory)) {
     vkDestroyBuffer(this->device, buffer, this->allocator);
-    return 0;
-  }
-  if (vkBindBufferMemory(this->device, buffer, memory, 0) != VK_SUCCESS) {
-    vkDestroyBuffer(this->device, buffer, this->allocator);
-    vkFreeMemory(this->device, memory, this->allocator);
     return 0;
   }
 
   void * mapped = nullptr;
+  const VkDeviceSize allocationSize = requirements.size;
   if (vkMapMemory(this->device, memory, 0, allocationSize, 0, &mapped) != VK_SUCCESS ||
       mapped == nullptr) {
     vkDestroyBuffer(this->device, buffer, this->allocator);
@@ -627,6 +575,14 @@ SoVulkanRenderBackend::allocateGeometryBlock(VkDeviceSize capacity)
   block.capacity = allocationSize;
   block.used = 0;
   block.refCount = 0;
+  if (!this->freeGeometryBlockIds.empty()) {
+    const uint32_t recycled = this->freeGeometryBlockIds.back();
+    this->freeGeometryBlockIds.pop_back();
+    this->geometryBlocks[recycled - 1] = block;
+    this->nextGeometryBlockCapacity =
+      std::min<VkDeviceSize>(this->nextGeometryBlockCapacity * 2u, 16u * 1024u * 1024u);
+    return recycled;
+  }
   this->geometryBlocks.push_back(block);
 
   this->nextGeometryBlockCapacity =
@@ -685,6 +641,7 @@ SoVulkanRenderBackend::releaseGeometryBlock(uint32_t blockId)
   }
   block.capacity = 0;
   block.used = 0;
+  this->freeGeometryBlockIds.push_back(blockId);
 }
 
 void
@@ -719,6 +676,7 @@ SoVulkanRenderBackend::destroyAllGeometryBlocks()
     block.refCount = 0;
   }
   this->geometryBlocks.clear();
+  this->freeGeometryBlockIds.clear();
   this->nextGeometryBlockCapacity = 256u * 1024u;
 }
 
@@ -758,8 +716,9 @@ SoVulkanRenderBackend::updateGeometryCache(const SoDrawList & drawlist,
 
   const uint32_t generation = drawlist.getGeneration();
 
-  std::vector<uint8_t> needsGeometry(
+  this->needsGeometryScratch.assign(
     static_cast<size_t>(std::max(0, drawlist.getNumCommands())), 0);
+  std::vector<uint8_t> & needsGeometry = this->needsGeometryScratch;
   int retainedUploads = 0;
   VkDeviceSize retainedUploadBytes = 0;
   for (int i = 0; i < drawlist.getNumCommands(); ++i) {
@@ -792,8 +751,7 @@ SoVulkanRenderBackend::updateGeometryCache(const SoDrawList & drawlist,
       entry.vertexStride == vertexStride &&
       entry.texcoordStride == geometry.texcoordStride;
     const bool geometryMatches = identityMatches &&
-      (geometry.retained ||
-       entry.contentHash == hashGeometryContent(geometry));
+      entry.contentHash == hashGeometryContent(geometry);
     if (!geometryMatches) {
       needsGeometry[static_cast<size_t>(i)] = 1;
       if (geometry.retained) {
@@ -856,37 +814,16 @@ SoVulkanRenderBackend::updateGeometryCache(const SoDrawList & drawlist,
     bcIndices += geometry.indexCount;
 
     VulkanCachedCommand & entry = this->getOrCreateCache(&command);
-    const uint32_t vertexStride = geometry.vertexStride
-      ? geometry.vertexStride : sizeof(float) * 3;
     // The draw-list generation changes every frame (clear() bumps it), so
     // it is only a visit stamp for cache eviction below -- never a signal
     // to re-upload.  Re-uploads are driven purely by the producer-owned
     // content keys.
     //
-    // Identity is the primary change signal.  For retained geometry (the
-    // shape-owned retained buffers produced by SoShape::IRRender) the pointers
-    // are stable across frames for an unchanged shape and change whenever the
-    // shape re-tessellates, so a full identity match means the content is
-    // unchanged and the content hash (recomputed on upload) is authoritative --
-    // no need to re-hash every command every frame.  For non-retained geometry
-    // (per-frame arena pools such as SoText2/SoImage, which rewrite the same
-    // pointer in place) the content hash is still verified each frame to catch
-    // in-place edits.
-    const bool identityMatches = entry.vertexBuffer != VK_NULL_HANDLE &&
-      entry.posKey == geometry.positions &&
-      entry.normalKey == geometry.normals &&
-      entry.colorKey == geometry.colors &&
-      entry.texcoordKey == geometry.texcoords &&
-      entry.idxKey == geometry.indices &&
-      entry.vertexCount == geometry.vertexCount &&
-      entry.indexCount == geometry.indexCount &&
-      entry.normalCount == geometry.normalCount &&
-      entry.vertexStride == vertexStride &&
-      entry.texcoordStride == geometry.texcoordStride;
-    const bool geometryMatches = identityMatches &&
-      (geometry.retained ||
-       entry.contentHash == hashGeometryContent(geometry));
-    if (!geometryMatches) {
+    // Content (not just pointer identity) is always re-verified, because a
+    // producer may edit retained buffers in place (same pointer, new data);
+    // the sampled content hash is bounded and cheap, so it is authoritative
+    // for every command, retained or per-frame.
+    if (needsGeometry[static_cast<size_t>(i)]) {
       ++bcGeometryUploads;
       this->deferDestroyCacheEntry(entry);
       bool uploadedShared = false;

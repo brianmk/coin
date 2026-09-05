@@ -15,6 +15,7 @@
 
 #include "rendering/SoVulkanRenderBackend.h"
 #include "rendering/SoVulkanRenderBackend/SoVulkanRenderBackendP.h"
+#include "rendering/SoVulkanShared.h"
 
 #include <Inventor/elements/SoDrawStyleElement.h>
 #include <Inventor/errors/SoDebugError.h>
@@ -40,7 +41,7 @@ using namespace CoinVulkanDetail;
 
 SoVulkanRenderBackend::SoVulkanRenderBackend()
 {
-  this->pendingDestroys.resize(this->maxFramesInFlight);
+  this->pendingDestroys.setBatchCount(this->maxFramesInFlight);
 }
 
 SoVulkanRenderBackend::~SoVulkanRenderBackend()
@@ -61,15 +62,8 @@ SoVulkanRenderBackend::setMaxFramesInFlight(const uint32_t count)
     this->waitForInFlightFrames();
   }
 
-  const size_t oldSize = this->pendingDestroys.size();
-  for (size_t i = count; i < oldSize; ++i) {
-    for (auto & fn : this->pendingDestroys[i]) {
-      if (fn) fn();
-    }
-  }
-
   this->maxFramesInFlight = count;
-  this->pendingDestroys.resize(count);
+  this->pendingDestroys.setBatchCount(count);
 
   // Re-allocate the per-frame-slot command buffers/fences at the new count.
   // Only valid while the queue is idle (guaranteed by the wait above).
@@ -158,6 +152,7 @@ SoVulkanRenderBackend::initialize(const SoRenderBackendInitParams & params)
   this->queue = deviceContext->graphicsQueue;
   this->queueFamilyIndex = deviceContext->graphicsQueueFamilyIndex;
   this->allocator = deviceContext->allocator;
+  this->memProps.setDevice(this->physicalDevice);
 
   // Cache the device capabilities the backend relies on.  Vulkan has no API
   // to read back which features an already-created device enabled, so query
@@ -208,6 +203,18 @@ SoVulkanRenderBackend::initialize(const SoRenderBackendInitParams & params)
     return FALSE;
   }
 
+  if (!this->createLightingConstBuffer()) {
+    this->emitError("failed to create Vulkan lighting constant buffer");
+    this->shutdown();
+    return FALSE;
+  }
+
+  if (!this->createLightingDescriptorSet()) {
+    this->emitError("failed to create Vulkan lighting descriptor set");
+    this->shutdown();
+    return FALSE;
+  }
+
   if (!this->createWhiteTexture()) {
     this->emitError("failed to create Vulkan white fallback texture");
     this->shutdown();
@@ -238,8 +245,27 @@ SoVulkanRenderBackend::initialize(const SoRenderBackendInitParams & params)
     return FALSE;
   }
 
+  if (!this->createPipelineCache()) {
+    this->emitError("failed to create Vulkan pipeline cache");
+    this->shutdown();
+    return FALSE;
+  }
+
   this->emitLog("initialized");
   return TRUE;
+}
+
+bool
+SoVulkanRenderBackend::createPipelineCache()
+{
+  // Pipelines are created lazily on the draw path (the first time a state
+  // combination is seen).  A persistent cache lets the driver keep the
+  // compiled/reused shader-and-state blobs between those creations, so the
+  // first frames of a scene transition do not stutter on pipeline builds.
+  VkPipelineCacheCreateInfo ci {};
+  ci.sType = VK_STRUCTURE_TYPE_PIPELINE_CACHE_CREATE_INFO;
+  return vkCreatePipelineCache(this->device, &ci, this->allocator,
+                               &this->pipelineCacheHandle) == VK_SUCCESS;
 }
 
 bool
@@ -344,12 +370,31 @@ SoVulkanRenderBackend::waitForInFlightFrames()
 bool
 SoVulkanRenderBackend::createDescriptorSetLayout()
 {
+  // Set 0: lighting constant ring (binding 0, UBO dynamic).  Visible to both
+  // stages because lighting is evaluated per fragment (Phong).
+  VkDescriptorSetLayoutBinding lightingBinding {};
+  lightingBinding.binding = 0;
+  lightingBinding.descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC;
+  lightingBinding.descriptorCount = 1;
+  lightingBinding.stageFlags =
+    VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT;
+  lightingBinding.pImmutableSamplers = nullptr;
+
+  VkDescriptorSetLayoutCreateInfo lightingCi {};
+  lightingCi.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
+  lightingCi.bindingCount = 1;
+  lightingCi.pBindings = &lightingBinding;
+  if (vkCreateDescriptorSetLayout(this->device, &lightingCi, this->allocator,
+                                  &this->lightingSetLayout) != VK_SUCCESS) {
+    return false;
+  }
+
+  // Set 1: per-draw view/model/material UBO (binding 0, dynamic) plus the
+  // embedded texture (binding 1).
   VkDescriptorSetLayoutBinding bindings[2] {};
   bindings[0].binding = 0;
   bindings[0].descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC;
   bindings[0].descriptorCount = 1;
-  // Lighting is evaluated per fragment (Phong), so the view/model/lighting
-  // UBO must be visible to both stages.
   bindings[0].stageFlags =
     VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT;
   bindings[0].pImmutableSamplers = nullptr;
@@ -373,14 +418,14 @@ SoVulkanRenderBackend::createDescriptorPool()
 {
   VkDescriptorPoolSize poolSizes[2] {};
   poolSizes[0].type = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC;
-  poolSizes[0].descriptorCount = 1024;
+  poolSizes[0].descriptorCount = 2048;
   poolSizes[1].type = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-  poolSizes[1].descriptorCount = 1024;
+  poolSizes[1].descriptorCount = 2048;
 
   VkDescriptorPoolCreateInfo ci {};
   ci.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
   ci.flags = VK_DESCRIPTOR_POOL_CREATE_FREE_DESCRIPTOR_SET_BIT;
-  ci.maxSets = 1024;
+  ci.maxSets = 2048;
   ci.poolSizeCount = 2;
   ci.pPoolSizes = poolSizes;
 
@@ -452,7 +497,7 @@ SoVulkanRenderBackend::createLightingUniformBuffer()
   const VkDeviceSize alignment = std::max<VkDeviceSize>(
     1, deviceProps.limits.minUniformBufferOffsetAlignment);
   this->uboSlotStride =
-    (sizeof(VulkanVisualUbo) + alignment - 1) / alignment * alignment;
+    (sizeof(VulkanDrawUbo) + alignment - 1) / alignment * alignment;
   this->uboSlotsPerFrame = 4096;
   const VkDeviceSize totalBytes =
     static_cast<VkDeviceSize>(this->maxFramesInFlight) *
@@ -471,6 +516,76 @@ SoVulkanRenderBackend::createLightingUniformBuffer()
     this->lightingMemory = VK_NULL_HANDLE;
     return false;
   }
+  return true;
+}
+
+bool
+SoVulkanRenderBackend::createLightingConstBuffer()
+{
+  // A few slots per in-flight frame, one per distinct lighting handle the
+  // frame references (typically one).  Each slot holds one VulkanLightingUbo
+  // (ambient + 8 lights); writing it once per handle per frame is what makes
+  // the shared lighting setup cost O(#handles) instead of O(#draws).
+  VkPhysicalDeviceProperties deviceProps;
+  vkGetPhysicalDeviceProperties(this->physicalDevice, &deviceProps);
+  const VkDeviceSize alignment = std::max<VkDeviceSize>(
+    1, deviceProps.limits.minUniformBufferOffsetAlignment);
+  this->lightingConstStride =
+    (sizeof(VulkanLightingUbo) + alignment - 1) / alignment * alignment;
+  // Fixed 8-frame ring with 8 unique-handle slots per frame.  This is
+  // independent of maxFramesInFlight (which can change after init in
+  // initSwapChainResources) so no resize path is needed; it is safe as long
+  // as the in-flight frame count stays <= 8 (QVulkanWindow swapchains are
+  // 2-3 images, +1 margin).
+  this->lightingConstMaxSlots = 8u * 8u;
+  const VkDeviceSize totalBytes =
+    static_cast<VkDeviceSize>(this->lightingConstMaxSlots) *
+    this->lightingConstStride;
+  if (!this->createBuffer(totalBytes, VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT,
+                          this->lightingConstBuffer, this->lightingConstMemory,
+                          nullptr)) {
+    return false;
+  }
+  if (vkMapMemory(this->device, this->lightingConstMemory, 0, totalBytes, 0,
+                  &this->lightingConstMapped) != VK_SUCCESS) {
+    this->emitError("createLightingConstBuffer: vkMapMemory failed");
+    vkDestroyBuffer(this->device, this->lightingConstBuffer, this->allocator);
+    vkFreeMemory(this->device, this->lightingConstMemory, this->allocator);
+    this->lightingConstBuffer = VK_NULL_HANDLE;
+    this->lightingConstMemory = VK_NULL_HANDLE;
+    return false;
+  }
+  return true;
+}
+
+bool
+SoVulkanRenderBackend::createLightingDescriptorSet()
+{
+  VkDescriptorSetAllocateInfo ai {};
+  ai.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
+  ai.descriptorPool = this->descriptorPool;
+  ai.descriptorSetCount = 1;
+  ai.pSetLayouts = &this->lightingSetLayout;
+  if (vkAllocateDescriptorSets(this->device, &ai,
+                               &this->lightingDescriptorSet) != VK_SUCCESS) {
+    return false;
+  }
+  ++this->descriptorSetCount;
+
+  VkDescriptorBufferInfo bufferInfo {};
+  bufferInfo.buffer = this->lightingConstBuffer;
+  bufferInfo.offset = 0;
+  bufferInfo.range = this->lightingConstStride;
+
+  VkWriteDescriptorSet write {};
+  write.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+  write.dstSet = this->lightingDescriptorSet;
+  write.dstBinding = 0;
+  write.dstArrayElement = 0;
+  write.descriptorCount = 1;
+  write.descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC;
+  write.pBufferInfo = &bufferInfo;
+  vkUpdateDescriptorSets(this->device, 1, &write, 0, nullptr);
   return true;
 }
 
@@ -611,6 +726,11 @@ SoVulkanRenderBackend::beginFrame()
     vkResetFences(this->device, 1, &this->frameFences[slot]);
     this->frameFencePending[slot] = 0;
   }
+  // Dynamic state is per-recording: the previous frame's command buffer (the
+  // other slot) may have left a different pipeline/viewport/scissor bound.
+  // Forget it so this frame's first apply* emits, and so accidental reuse
+  // from the slot's prior content cannot wrongly skip a needed change.
+  this->resetBoundState();
   this->flushPendingDestroys();
 }
 
@@ -618,30 +738,19 @@ void
 SoVulkanRenderBackend::flushPendingDestroys()
 {
   if (this->pendingDestroys.empty()) return;
-  auto & batch =
-    this->pendingDestroys[this->uboFrameIndex % this->pendingDestroys.size()];
-  for (const auto & fn : batch) {
-    if (fn) fn();
-  }
-  batch.clear();
+  this->pendingDestroys.flushAt(this->uboFrameIndex);
 }
 
 void
 SoVulkanRenderBackend::flushAllPendingDestroys()
 {
-  for (auto & batch : this->pendingDestroys) {
-    for (const auto & fn : batch) {
-      if (fn) fn();
-    }
-    batch.clear();
-  }
+  this->pendingDestroys.flushAll();
 }
 
 void
 SoVulkanRenderBackend::deferDestroy(std::function<void()> && fn)
 {
-  this->pendingDestroys[this->uboFrameIndex % this->pendingDestroys.size()]
-    .push_back(std::move(fn));
+  this->pendingDestroys.deferAt(this->uboFrameIndex, std::move(fn));
 }
 
 void
@@ -779,26 +888,16 @@ SoVulkanRenderBackend::createWhiteTexture()
 
   VkMemoryRequirements requirements;
   vkGetImageMemoryRequirements(this->device, this->whiteImage, &requirements);
-  VkMemoryAllocateInfo ai {};
-  ai.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
-  ai.allocationSize = requirements.size;
-  ai.memoryTypeIndex = 0;
-  VkPhysicalDeviceMemoryProperties props;
-  vkGetPhysicalDeviceMemoryProperties(this->physicalDevice, &props);
-  bool found = false;
-  for (uint32_t i = 0; i < props.memoryTypeCount; ++i) {
-    if ((requirements.memoryTypeBits & (1u << i)) &&
-        (props.memoryTypes[i].propertyFlags &
-         VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT)) {
-      ai.memoryTypeIndex = i;
-      found = true;
-      break;
-    }
-  }
-  if (!found) {
+  uint32_t memoryTypeIndex = 0;
+  if (!this->selectMemoryType(requirements, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT,
+                              memoryTypeIndex)) {
     this->emitError("createWhiteTexture: no device-local memory type");
     return false;
   }
+  VkMemoryAllocateInfo ai {};
+  ai.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
+  ai.allocationSize = requirements.size;
+  ai.memoryTypeIndex = memoryTypeIndex;
   if (vkAllocateMemory(this->device, &ai, this->allocator,
                        &this->whiteImageMemory) != VK_SUCCESS) {
     return false;
@@ -812,71 +911,35 @@ SoVulkanRenderBackend::createWhiteTexture()
     return false;
   }
 
-  VkCommandBufferAllocateInfo allocInfo {};
-  allocInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
-  allocInfo.commandPool = this->commandPool;
-  allocInfo.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
-  allocInfo.commandBufferCount = 1;
-  VkCommandBuffer uploadBuffer = VK_NULL_HANDLE;
-  if (vkAllocateCommandBuffers(this->device, &allocInfo, &uploadBuffer) !=
-      VK_SUCCESS) {
-    this->emitError("createWhiteTexture: failed to allocate upload buffer");
+  // One-shot upload: stage buffer -> image (white 1x1), transitioning the image
+  // UNDEFINED -> TRANSFER_DST -> SHADER_READ_ONLY.  The shared helper waits for
+  // the queue to go idle so the staging buffer below is safe to destroy.
+  if (!SoVulkanShared::withOneShotSubmit(
+        this->device, this->queue, this->commandPool, this->allocator,
+        [this, staging](VkCommandBuffer uploadBuffer) {
+          SoVulkanShared::imageTransition(
+            uploadBuffer, this->whiteImage,
+            VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+            0, VK_ACCESS_TRANSFER_WRITE_BIT,
+            VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT);
+          VkBufferImageCopy region {};
+          region.imageSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+          region.imageSubresource.layerCount = 1;
+          region.imageExtent = {extent, extent, 1};
+          vkCmdCopyBufferToImage(uploadBuffer, staging, this->whiteImage,
+                                 VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &region);
+          SoVulkanShared::imageTransition(
+            uploadBuffer, this->whiteImage,
+            VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+            VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+            VK_ACCESS_TRANSFER_WRITE_BIT, VK_ACCESS_SHADER_READ_BIT,
+            VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT);
+        })) {
+    this->emitError("createWhiteTexture: one-shot upload failed");
     vkDestroyBuffer(this->device, staging, this->allocator);
     vkFreeMemory(this->device, stagingMemory, this->allocator);
     return false;
   }
-  VkCommandBufferBeginInfo bi {};
-  bi.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
-  bi.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
-  vkBeginCommandBuffer(uploadBuffer, &bi);
-
-  VkImageMemoryBarrier barrier {};
-  barrier.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
-  barrier.oldLayout = VK_IMAGE_LAYOUT_UNDEFINED;
-  barrier.newLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
-  barrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-  barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-  barrier.image = this->whiteImage;
-  barrier.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
-  barrier.subresourceRange.baseMipLevel = 0;
-  barrier.subresourceRange.levelCount = 1;
-  barrier.subresourceRange.baseArrayLayer = 0;
-  barrier.subresourceRange.layerCount = 1;
-  barrier.srcAccessMask = 0;
-  barrier.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
-  vkCmdPipelineBarrier(uploadBuffer, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
-                       VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, nullptr, 0,
-                       nullptr, 1, &barrier);
-
-  VkBufferImageCopy region {};
-  region.imageSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
-  region.imageSubresource.layerCount = 1;
-  region.imageExtent = {extent, extent, 1};
-  vkCmdCopyBufferToImage(uploadBuffer, staging, this->whiteImage,
-                         VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &region);
-
-  barrier.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
-  barrier.newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
-  barrier.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
-  barrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
-  vkCmdPipelineBarrier(uploadBuffer, VK_PIPELINE_STAGE_TRANSFER_BIT,
-                       VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, 0, 0, nullptr,
-                       0, nullptr, 1, &barrier);
-
-  vkEndCommandBuffer(uploadBuffer);
-  VkSubmitInfo submit {};
-  submit.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
-  submit.commandBufferCount = 1;
-  submit.pCommandBuffers = &uploadBuffer;
-  const VkResult submitResult =
-    vkQueueSubmit(this->queue, 1, &submit, VK_NULL_HANDLE);
-  if (submitResult == VK_SUCCESS) {
-    vkQueueWaitIdle(this->queue);
-  }
-  else {
-    this->emitError("createWhiteTexture: vkQueueSubmit failed");
-  }
-  vkFreeCommandBuffers(this->device, this->commandPool, 1, &uploadBuffer);
   vkDestroyBuffer(this->device, staging, this->allocator);
   vkFreeMemory(this->device, stagingMemory, this->allocator);
 
@@ -920,10 +983,20 @@ SoVulkanRenderBackend::createPipelineLayout()
     sizeof(VulkanPushConstants)
   };
 
+  // Set 0 = lighting constant, set 1 = per-draw UBO + texture.
+  const VkDescriptorSetLayout setLayouts[2] = {
+    this->lightingSetLayout,
+    this->descriptorSetLayout,
+  };
+  const uint32_t setCount =
+    (this->lightingSetLayout != VK_NULL_HANDLE &&
+     this->descriptorSetLayout != VK_NULL_HANDLE)
+      ? 2u : (this->descriptorSetLayout != VK_NULL_HANDLE ? 1u : 0u);
+
   VkPipelineLayoutCreateInfo ci {};
   ci.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
-  ci.setLayoutCount = this->descriptorSetLayout != VK_NULL_HANDLE ? 1u : 0u;
-  ci.pSetLayouts = &this->descriptorSetLayout;
+  ci.setLayoutCount = setCount;
+  ci.pSetLayouts = setLayouts;
   ci.pushConstantRangeCount = 1;
   ci.pPushConstantRanges = &range;
   return vkCreatePipelineLayout(this->device, &ci, this->allocator,

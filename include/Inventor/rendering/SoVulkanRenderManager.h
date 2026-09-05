@@ -334,6 +334,10 @@ public:
   //! forwarded to the RT backend and applied on the next buffer create.
   void setPathTracingDenoiser(const char * denoiser);
 
+  //! Denoiser upscale factor (>= 1); forwarded to the RT backend and applied
+  //! on the next buffer create.
+  void setPathTracingDenoiserScale(float scale);
+
   SoVulkanRenderBackend * getBackend(void) const;
 
   //! The RT backend, or NULL when ray tracing is unavailable.

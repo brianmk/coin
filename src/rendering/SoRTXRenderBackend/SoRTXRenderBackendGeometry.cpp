@@ -388,21 +388,19 @@ SoRTXRenderBackend::freePendingStagingDestroys()
 void
 SoRTXRenderBackend::flushPendingDestroys(bool waitForQueue)
 {
-  const int batch = this->pendingDestroyIndex;
-  if (waitForQueue && this->queue != VK_NULL_HANDLE && !this->pendingDestroys[batch].empty()) {
+  const int batch = this->pendingDestroys.index();
+  if (waitForQueue && this->queue != VK_NULL_HANDLE &&
+      !this->pendingDestroys.batch(batch).empty()) {
     vkQueueWaitIdle(this->queue);
   }
-  this->pendingDestroyIndex = batch ^ 1;
-  for (const auto & fn : this->pendingDestroys[batch]) {
-    if (fn) fn();
-  }
-  this->pendingDestroys[batch].clear();
+  this->pendingDestroys.setIndex(batch ^ 1);
+  this->pendingDestroys.flushAt(batch);
 }
 
 void
 SoRTXRenderBackend::deferDestroy(std::function<void()> && fn)
 {
-  this->pendingDestroys[this->pendingDestroyIndex].push_back(std::move(fn));
+  this->pendingDestroys.defer(std::move(fn));
 }
 
 bool

@@ -12,8 +12,18 @@
 #include <cstring>
 #include <string>
 #include <rendering/SoRTXRenderBackend/SoRTXRenderBackendP.h>
+#include <rendering/SoVulkanShared.h>
 
 using namespace SoRTXBackend;
+
+uint32_t
+SoRTXRenderBackend::pickMemoryType(const VkMemoryRequirements & requirements,
+                                   VkMemoryPropertyFlags desired) const
+{
+  uint32_t memoryTypeIndex = 0;
+  this->memProps.pick(requirements, desired, memoryTypeIndex);
+  return memoryTypeIndex;
+}
 
 bool
 SoRTXRenderBackend::createDeviceLocalBuffer(VkDeviceSize size,
@@ -21,39 +31,14 @@ SoRTXRenderBackend::createDeviceLocalBuffer(VkDeviceSize size,
                                             VkBuffer & buffer,
                                             VkDeviceMemory & memory)
 {
-  VkBufferCreateInfo ci {};
-  ci.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
-  ci.size = size;
-  ci.usage = usage;
-  ci.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
-  if (vkCreateBuffer(this->device, &ci, this->allocator, &buffer) !=
-      VK_SUCCESS) {
-    return false;
-  }
-
-  VkMemoryRequirements requirements;
-  vkGetBufferMemoryRequirements(this->device, buffer, &requirements);
-  VkMemoryAllocateFlagsInfo allocFlags {};
-  allocFlags.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_FLAGS_INFO;
-  allocFlags.flags = VK_MEMORY_ALLOCATE_DEVICE_ADDRESS_BIT;
-  VkMemoryAllocateInfo ai {};
-  ai.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
-  ai.allocationSize = requirements.size;
-  ai.memoryTypeIndex = findMemoryType(this->physicalDevice, requirements,
-                                      VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
-  // Buffers carrying SHADER_DEVICE_ADDRESS_BIT must be allocated with the
-  // device-address memory flag (VUID-VkMemoryAllocateInfo-flags-03339).
-  if (usage & VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT) {
-    ai.pNext = &allocFlags;
-  }
-  if (vkAllocateMemory(this->device, &ai, this->allocator, &memory) !=
-      VK_SUCCESS) {
-    vkDestroyBuffer(this->device, buffer, this->allocator);
-    buffer = VK_NULL_HANDLE;
-    return false;
-  }
-  vkBindBufferMemory(this->device, buffer, memory, 0);
-  return true;
+  return SoVulkanShared::createBufferAllocated(
+    this->device, this->allocator, size, usage,
+    VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT,
+    (usage & VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT) != 0,
+    [this](const VkMemoryRequirements & req, VkMemoryPropertyFlags desired,
+           uint32_t & memoryTypeIndex) {
+      return this->memProps.pick(req, desired, memoryTypeIndex);
+    }, buffer, memory);
 }
 
 // Host-visible + host-coherent buffer (frame UBO, material buffer, instances,
@@ -64,39 +49,14 @@ SoRTXRenderBackend::createHostVisibleBuffer(VkDeviceSize size,
                                             VkBuffer & buffer,
                                             VkDeviceMemory & memory)
 {
-  VkBufferCreateInfo ci {};
-  ci.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
-  ci.size = size;
-  ci.usage = usage;
-  ci.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
-  if (vkCreateBuffer(this->device, &ci, this->allocator, &buffer) !=
-      VK_SUCCESS) {
-    return false;
-  }
-  VkMemoryRequirements requirements;
-  vkGetBufferMemoryRequirements(this->device, buffer, &requirements);
-  VkMemoryAllocateFlagsInfo allocFlags {};
-  allocFlags.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_FLAGS_INFO;
-  allocFlags.flags = VK_MEMORY_ALLOCATE_DEVICE_ADDRESS_BIT;
-  VkMemoryAllocateInfo ai {};
-  ai.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
-  ai.allocationSize = requirements.size;
-  ai.memoryTypeIndex = findMemoryType(
-    this->physicalDevice, requirements,
-    VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
-  // Buffers carrying SHADER_DEVICE_ADDRESS_BIT must be allocated with the
-  // device-address memory flag (VUID-VkMemoryAllocateInfo-flags-03339).
-  if (usage & VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT) {
-    ai.pNext = &allocFlags;
-  }
-  if (vkAllocateMemory(this->device, &ai, this->allocator, &memory) !=
-      VK_SUCCESS) {
-    vkDestroyBuffer(this->device, buffer, this->allocator);
-    buffer = VK_NULL_HANDLE;
-    return false;
-  }
-  vkBindBufferMemory(this->device, buffer, memory, 0);
-  return true;
+  return SoVulkanShared::createBufferAllocated(
+    this->device, this->allocator, size, usage,
+    VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+    (usage & VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT) != 0,
+    [this](const VkMemoryRequirements & req, VkMemoryPropertyFlags desired,
+           uint32_t & memoryTypeIndex) {
+      return this->memProps.pick(req, desired, memoryTypeIndex);
+    }, buffer, memory);
 }
 
 VkDeviceAddress
@@ -192,8 +152,14 @@ SoRTXRenderBackend::createStorageImage(uint32_t width, uint32_t height)
   ci.arrayLayers = 1;
   ci.samples = VK_SAMPLE_COUNT_1_BIT;
   ci.tiling = VK_IMAGE_TILING_OPTIMAL;
+  // The storage image is read back (TRANSFER_SRC for the frame-dump and
+  // denoiser readback), sampled by the present pass (SAMPLED), written by the
+  // raygen (STORAGE), and -- on frames with no traceable geometry (tlas ==
+  // VK_NULL_HANDLE) -- filled with the background colour via
+  // vkCmdClearColorImage.  The clear requires TRANSFER_DST_BIT, which is the
+  // only usage it does not already have.
   ci.usage = VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_SAMPLED_BIT |
-             VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
+             VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT;
   ci.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
   ci.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
   if (vkCreateImage(this->device, &ci, this->allocator,
@@ -208,8 +174,8 @@ SoRTXRenderBackend::createStorageImage(uint32_t width, uint32_t height)
   VkMemoryAllocateInfo ai {};
   ai.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
   ai.allocationSize = requirements.size;
-  ai.memoryTypeIndex = findMemoryType(this->physicalDevice, requirements,
-                                      VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
+  ai.memoryTypeIndex = this->pickMemoryType(
+    requirements, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
   if (vkAllocateMemory(this->device, &ai, this->allocator,
                        &this->storageImageMemory) != VK_SUCCESS) {
     vkDestroyImage(this->device, this->storageImage, this->allocator);
@@ -550,8 +516,22 @@ SoRTXRenderBackend::createPathTracingBuffers(uint32_t width, uint32_t height)
   // OIDN/RTX/FSR device+filter themselves.  When a denoiser is active the
   // raygen writes an albedo G-buffer (binding 14) that createDenoiseBackend()
   // also allocates and uploads for the albedo guide.
-  this->denoiseWidth = width;
-  this->denoiseHeight = height;
+  //
+  // denoiseWidth/Height are the DENOISER's internal resolution, not the full
+  // viewport: a denoiseScale > 1 (setDenoiserScale) runs the filter at
+  // reduced resolution and the present pass upscales the result.  The host
+  // readback still stages the full-resolution G-buffers and the worker
+  // downsamples them (see recordDenoiseReadback / updateDenoise); only the
+  // host-side OIDN/FSR backends support scaling -- the RTX interop path stays
+  // native (scale 1) because it reads the G-buffers device-to-device and
+  // needs a GPU downsample that does not exist there.
+  const float scale = (this->denoiseKindPref != DenoiseRtx)
+    ? this->denoiseScale : 1.0f;
+  this->denoiseEffectiveScale = scale;
+  this->denoiseWidth = std::max(1u, static_cast<uint32_t>(
+    std::ceil(static_cast<double>(width) / (scale > 1.5f ? scale : 1.0f))));
+  this->denoiseHeight = std::max(1u, static_cast<uint32_t>(
+    std::ceil(static_cast<double>(height) / (scale > 1.5f ? scale : 1.0f))));
   if (!this->createDenoiseBackend()) {
     this->emitError("createPathTracingBuffers: failed to create denoiser backend");
     if (this->queue != VK_NULL_HANDLE) {
@@ -606,6 +586,10 @@ SoRTXRenderBackend::createPathTracingBuffers(uint32_t width, uint32_t height)
     this->rtDescriptorSets[1] = VK_NULL_HANDLE;
     this->presentDescriptorSets[0] = VK_NULL_HANDLE;
     this->presentDescriptorSets[1] = VK_NULL_HANDLE;
+    this->rtSetValid[0] = false;
+    this->rtSetValid[1] = false;
+    this->presentSetValid[0] = false;
+    this->presentSetValid[1] = false;
     if (!this->updateDescriptors()) {
       this->emitError(
         "createPathTracingBuffers: failed to refresh descriptors after "

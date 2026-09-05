@@ -96,6 +96,11 @@ SoVulkanRenderBackend::shutdown()
     }
   }
   this->pipelineCache.clear();
+  if (this->pipelineCacheHandle != VK_NULL_HANDLE) {
+    vkDestroyPipelineCache(this->device, this->pipelineCacheHandle,
+                           this->allocator);
+    this->pipelineCacheHandle = VK_NULL_HANDLE;
+  }
 
   for (auto & entry : this->backgroundPipelineCache) {
     if (entry.second != VK_NULL_HANDLE) {
@@ -162,6 +167,19 @@ SoVulkanRenderBackend::shutdown()
     vkFreeMemory(this->device, this->lightingMemory, this->allocator);
     this->lightingMemory = VK_NULL_HANDLE;
   }
+  if (this->lightingConstMapped != nullptr) {
+    vkUnmapMemory(this->device, this->lightingConstMemory);
+    this->lightingConstMapped = nullptr;
+  }
+  if (this->lightingConstBuffer != VK_NULL_HANDLE) {
+    vkDestroyBuffer(this->device, this->lightingConstBuffer, this->allocator);
+    this->lightingConstBuffer = VK_NULL_HANDLE;
+  }
+  if (this->lightingConstMemory != VK_NULL_HANDLE) {
+    vkFreeMemory(this->device, this->lightingConstMemory, this->allocator);
+    this->lightingConstMemory = VK_NULL_HANDLE;
+  }
+  this->lightingDescriptorSet = VK_NULL_HANDLE;
   if (this->whiteSampler != VK_NULL_HANDLE) {
     vkDestroySampler(this->device, this->whiteSampler, this->allocator);
     this->whiteSampler = VK_NULL_HANDLE;
@@ -191,6 +209,11 @@ SoVulkanRenderBackend::shutdown()
     vkDestroyDescriptorSetLayout(this->device, this->descriptorSetLayout,
                                  this->allocator);
     this->descriptorSetLayout = VK_NULL_HANDLE;
+  }
+  if (this->lightingSetLayout != VK_NULL_HANDLE) {
+    vkDestroyDescriptorSetLayout(this->device, this->lightingSetLayout,
+                                 this->allocator);
+    this->lightingSetLayout = VK_NULL_HANDLE;
   }
   this->releaseFrameResources();
   if (this->commandPool != VK_NULL_HANDLE) {
@@ -276,6 +299,10 @@ SoVulkanRenderBackend::renderInternal(const SoDrawList & drawlist,
   // One frame boundary: advances the ring cursor and releases resources
   // deferred maxFramesInFlight frames ago.
   this->beginFrame();
+
+  // Write the lighting constant block(s) into the ring once per frame so the
+  // shared lighting setup is referenced, not re-derived, per draw.
+  this->updateLightingSetup(drawlist);
 
   // Render passes are cached by their attachment identity (formats, sample
   // count, image layouts), not by the target's images: swapchain targets
@@ -466,6 +493,7 @@ SoVulkanRenderBackend::renderExternal(const SoDrawList & drawlist,
 
   const long externalBcStart = vkBackendRenderBreadcrumbEnabled() ? vkBackendRenderNowUs() : 0;
   this->beginFrame();
+  this->updateLightingSetup(drawlist);
   const long geometryBcStart = vkBackendRenderBreadcrumbEnabled() ? vkBackendRenderNowUs() : 0;
   this->updateGeometryCache(drawlist);
   vkBackendRenderBreadcrumbSince(geometryBcStart, 5000, "renderExternal updateGeometryCache end");
@@ -523,6 +551,7 @@ SoVulkanRenderBackend::renderExternalOverlay(const SoDrawList & drawlist,
   }
 
   this->beginFrame();
+  this->updateLightingSetup(drawlist);
   this->updateGeometryCache(drawlist, true);
 
   // This path never goes through recordFrame(), so reserve the slots it will

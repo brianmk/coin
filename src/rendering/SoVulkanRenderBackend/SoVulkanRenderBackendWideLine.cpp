@@ -128,6 +128,52 @@ SoVulkanRenderBackend::expandWideLines(VulkanCachedCommand & entry,
   const float vpHeight = static_cast<float>(viewportSize[1] > 0
     ? viewportSize[1] : 1);
 
+  // ---- Expand-once cache ------------------------------------------------
+  // The quad expansion (clip transform + per-segment geometry + distance
+  // accumulation below) is the dominant per-frame CPU cost for line and edge
+  // heavy scenes, and on a retained (replayed) draw list with an unchanged
+  // camera the positions, view, projection, width and viewport are
+  // byte-identical every frame -- so the already-expanded quads in this slot
+  // are still exact.  Key the slot on the authoritative geometry content hash
+  // (the same one updateGeometryCache uses, so in-place edits invalidate here
+  // too) plus view/proj/width/viewport; on a match reuse the buffer instead of
+  // re-expanding and re-uploading it.
+  if (entry.wideLineBuffers.size() < this->maxFramesInFlight) {
+    entry.wideLineBuffers.resize(this->maxFramesInFlight);
+  }
+  VulkanCachedCommand::VulkanWideLineBuffer & slot =
+    entry.wideLineBuffers[this->uboFrameIndex % this->maxFramesInFlight];
+  uint64_t wfp = entry.contentHash;
+  auto mixWide = [&wfp](uint32_t bits) {
+    wfp ^= bits + 0x9E3779B97F4A7C15ULL + (wfp << 6) + (wfp >> 2);
+  };
+  for (int r = 0; r < 4; ++r) {
+    for (int c = 0; c < 4; ++c) {
+      uint32_t bits;
+      std::memcpy(&bits, &view[r][c], sizeof(bits));
+      mixWide(bits);
+      std::memcpy(&bits, &proj[r][c], sizeof(bits));
+      mixWide(bits);
+    }
+  }
+  uint32_t lwBits;
+  std::memcpy(&lwBits, &lineWidth, sizeof(lwBits));
+  mixWide(lwBits);
+  mixWide(static_cast<uint32_t>(viewportSize[0]));
+  mixWide(static_cast<uint32_t>(viewportSize[1]));
+  if (slot.buffer != VK_NULL_HANDLE && slot.size > 0 &&
+      slot.expandFingerprint == wfp) {
+    entry.wideLineVertexCount = slot.expandVertexCount;
+    if (COIN_VULKAN_ENV_FLAG("FC_VULKAN_BACKEND_DEBUG")) {
+      static uint64_t wlineHits = 0;
+      if (++wlineHits % 200 == 0) {
+        fprintf(stderr, "[WLINE-cache] hits=%llu cmd=%p\n",
+                (unsigned long long)wlineHits, (const void*)&command);
+      }
+    }
+    return true;
+  }
+
   // Transform a position to clip space with the same Y-flip and depth remap
   // as the visual vertex shader, so the wide-line vertex shader can pass the
   // quad corners through unchanged.
@@ -393,17 +439,10 @@ SoVulkanRenderBackend::expandWideLines(VulkanCachedCommand & entry,
   const VkDeviceSize needed =
     static_cast<VkDeviceSize>(outIndex) * sizeof(float);
   // Ring of host-visible scratch buffers, one per in-flight frame slot: the
-  // quad expansion is recomputed every frame (it depends on the projection
-  // matrix), so the slot selected for the current frame index is reused only
-  // after the same slot's previous submission has completed (beginFrame
-  // waits the slot fence).  Growth defers the old buffer's destruction
-  // instead of destroying it synchronously, since a still-executing frame
-  // may reference it.
-  if (entry.wideLineBuffers.size() < this->maxFramesInFlight) {
-    entry.wideLineBuffers.resize(this->maxFramesInFlight);
-  }
-  VulkanCachedCommand::VulkanWideLineBuffer & slot =
-    entry.wideLineBuffers[this->uboFrameIndex % this->maxFramesInFlight];
+  // slot selected for the current frame index is reused only after the same
+  // slot's previous submission has completed (beginFrame waits the slot
+  // fence).  Growth defers the old buffer's destruction instead of destroying
+  // it synchronously, since a still-executing frame may reference it.
   if (slot.size < needed) {
     if (slot.buffer != VK_NULL_HANDLE || slot.memory != VK_NULL_HANDLE) {
       const VkDevice device = this->device;
@@ -441,6 +480,8 @@ SoVulkanRenderBackend::expandWideLines(VulkanCachedCommand & entry,
     vkUnmapMemory(this->device, slot.memory);
   }
 
+  slot.expandFingerprint = wfp;
+  slot.expandVertexCount = static_cast<uint32_t>(outIndex / 9);
   entry.wideLineVertexCount = static_cast<uint32_t>(outIndex / 9);
   return true;
 }

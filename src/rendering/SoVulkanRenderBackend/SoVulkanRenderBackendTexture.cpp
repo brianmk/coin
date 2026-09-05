@@ -13,6 +13,7 @@
 
 #include "rendering/SoVulkanRenderBackend.h"
 #include "rendering/SoVulkanRenderBackend/SoVulkanRenderBackendP.h"
+#include "rendering/SoVulkanShared.h"
 
 #include <Inventor/elements/SoDrawStyleElement.h>
 #include <Inventor/errors/SoDebugError.h>
@@ -182,27 +183,17 @@ SoVulkanRenderBackend::prepareTextureUpload(VulkanCachedTexture & entry,
 
   VkMemoryRequirements requirements;
   vkGetImageMemoryRequirements(this->device, entry.image, &requirements);
-  VkMemoryAllocateInfo ai {};
-  ai.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
-  ai.allocationSize = requirements.size;
-  ai.memoryTypeIndex = 0;
-  VkPhysicalDeviceMemoryProperties props;
-  vkGetPhysicalDeviceMemoryProperties(this->physicalDevice, &props);
-  bool found = false;
-  for (uint32_t i = 0; i < props.memoryTypeCount; ++i) {
-    if ((requirements.memoryTypeBits & (1u << i)) &&
-        (props.memoryTypes[i].propertyFlags &
-         VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT)) {
-      ai.memoryTypeIndex = i;
-      found = true;
-      break;
-    }
-  }
-  if (!found) {
+  uint32_t memoryTypeIndex = 0;
+  if (!this->selectMemoryType(requirements, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT,
+                              memoryTypeIndex)) {
     this->emitError("prepareTextureUpload: no device-local memory type");
     this->destroyTextureEntry(entry);
     return false;
   }
+  VkMemoryAllocateInfo ai {};
+  ai.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
+  ai.allocationSize = requirements.size;
+  ai.memoryTypeIndex = memoryTypeIndex;
   if (vkAllocateMemory(this->device, &ai, this->allocator, &entry.memory) !=
       VK_SUCCESS) {
     this->emitError("prepareTextureUpload: vkAllocateMemory failed");
@@ -227,45 +218,26 @@ SoVulkanRenderBackend::recordTextureUpload(
   const SoTextureData & texture,
   VkBuffer staging)
 {
-  VkImageMemoryBarrier barrier {};
-  barrier.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
-  barrier.oldLayout = VK_IMAGE_LAYOUT_UNDEFINED;
-  barrier.newLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
-  barrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-  barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-  barrier.image = entry.image;
-  barrier.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
-  barrier.subresourceRange.baseMipLevel = 0;
-  barrier.subresourceRange.levelCount = 1;
-  barrier.subresourceRange.baseArrayLayer = 0;
-  barrier.subresourceRange.layerCount = 1;
-  barrier.srcAccessMask = 0;
-  barrier.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
-  vkCmdPipelineBarrier(commandBuffer, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
-                       VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, nullptr, 0,
-                       nullptr, 1, &barrier);
+  SoVulkanShared::imageTransition(
+    commandBuffer, entry.image,
+    VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+    0, VK_ACCESS_TRANSFER_WRITE_BIT,
+    VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT);
 
   VkBufferImageCopy region {};
-  region.bufferOffset = 0;
-  region.bufferRowLength = 0;
-  region.bufferImageHeight = 0;
   region.imageSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
-  region.imageSubresource.mipLevel = 0;
-  region.imageSubresource.baseArrayLayer = 0;
   region.imageSubresource.layerCount = 1;
-  region.imageOffset = {0, 0, 0};
   region.imageExtent = {static_cast<uint32_t>(texture.width),
                         static_cast<uint32_t>(texture.height), 1};
   vkCmdCopyBufferToImage(commandBuffer, staging, entry.image,
                          VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &region);
 
-  barrier.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
-  barrier.newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
-  barrier.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
-  barrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
-  vkCmdPipelineBarrier(commandBuffer, VK_PIPELINE_STAGE_TRANSFER_BIT,
-                       VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, 0, 0, nullptr,
-                       0, nullptr, 1, &barrier);
+  SoVulkanShared::imageTransition(
+    commandBuffer, entry.image,
+    VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+    VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+    VK_ACCESS_TRANSFER_WRITE_BIT, VK_ACCESS_SHADER_READ_BIT,
+    VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT);
 }
 
 bool
@@ -367,59 +339,19 @@ SoVulkanRenderBackend::flushPendingTextureUploadsExternal()
   // retires any in-flight frames submitted by the external caller, which
   // keeps ring-buffer reuse in renderExternal() safe even when the caller
   // pipelines more frames than maxFramesInFlight.
-  VkCommandBufferAllocateInfo allocInfo {};
-  allocInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
-  allocInfo.commandPool = this->commandPool;
-  allocInfo.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
-  allocInfo.commandBufferCount = 1;
-  VkCommandBuffer uploadBuffer = VK_NULL_HANDLE;
-  if (vkAllocateCommandBuffers(this->device, &allocInfo, &uploadBuffer) !=
-      VK_SUCCESS) {
+  if (!SoVulkanShared::withOneShotSubmit(
+        this->device, this->queue, this->commandPool, this->allocator,
+        [this](VkCommandBuffer uploadBuffer) {
+          for (const PendingTextureUpload & upload : this->pendingUploads) {
+            if (upload.index >= this->textureCache.size()) continue;
+            this->recordTextureUpload(uploadBuffer,
+                                      this->textureCache[upload.index],
+                                      *upload.texture, upload.staging);
+          }
+        })) {
     this->emitError(
-      "flushPendingTextureUploadsExternal: failed to allocate upload "
-      "command buffer");
+      "flushPendingTextureUploadsExternal: one-shot upload failed");
     goto fail;
-  }
-
-  {
-    VkCommandBufferBeginInfo bi {};
-    bi.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
-    bi.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
-    if (vkBeginCommandBuffer(uploadBuffer, &bi) != VK_SUCCESS) {
-      this->emitError(
-        "flushPendingTextureUploadsExternal: failed to begin upload buffer");
-      vkFreeCommandBuffers(this->device, this->commandPool, 1, &uploadBuffer);
-      goto fail;
-    }
-  }
-
-  for (const PendingTextureUpload & upload : this->pendingUploads) {
-    if (upload.index >= this->textureCache.size()) continue;
-    this->recordTextureUpload(uploadBuffer, this->textureCache[upload.index],
-                              *upload.texture, upload.staging);
-  }
-
-  if (vkEndCommandBuffer(uploadBuffer) != VK_SUCCESS) {
-    this->emitError(
-      "flushPendingTextureUploadsExternal: failed to end upload buffer");
-    vkFreeCommandBuffers(this->device, this->commandPool, 1, &uploadBuffer);
-    goto fail;
-  }
-
-  {
-    VkSubmitInfo submit {};
-    submit.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
-    submit.commandBufferCount = 1;
-    submit.pCommandBuffers = &uploadBuffer;
-    const VkResult submitResult =
-      vkQueueSubmit(this->queue, 1, &submit, VK_NULL_HANDLE);
-    vkQueueWaitIdle(this->queue);
-    vkFreeCommandBuffers(this->device, this->commandPool, 1, &uploadBuffer);
-    if (submitResult != VK_SUCCESS) {
-      this->emitError("flushPendingTextureUploadsExternal: vkQueueSubmit "
-                      "failed");
-      goto fail;
-    }
   }
 
   // Staging buffers are no longer referenced by the completed submission.

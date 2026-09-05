@@ -38,7 +38,6 @@ vec3 coin_material_compute_gouraud_color(vec3 eyePos, vec3 eyeNormal,
 
     vec3 Ln = normalize(L);
     float NdotL = max(dot(N, Ln), 0.0);
-    if (NdotL <= 0.0) continue;
     vec3 H = normalize(Ln + V);
     float NdotH = max(dot(N, H), 0.0);
     float shininess = max(u_materialShininess * 128.0, 0.0);

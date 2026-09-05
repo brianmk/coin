@@ -5,9 +5,9 @@
 // it can be shared across the split SoVulkanRenderBackend*.cpp translation
 // units (in the CoinVulkanDetail namespace).  Provides:
 //
-//   - Debug counters + env-flag cache (envFlagEnabled)
+//   - Debug counters
 //   - Push-constant / lighting-UBO structs (VulkanPushConstants,
-//     VulkanBackgroundPush, VulkanVisualUbo)
+//     VulkanBackgroundPush, VulkanLightingUbo, VulkanDrawUbo)
 //   - Vulkan enum-conversion helpers
 //   - FNV content-hash helpers (hashFloats, hashUint32, hashGeometryContent,
 //     hashTextureContent)
@@ -22,11 +22,10 @@
 #include <cstdint>
 #include <cstdlib>
 #include <cstring>
-#include <string>
-#include <unordered_map>
 
 #include <vulkan/vulkan.h>
 #include <Inventor/rendering/SoRenderIR.h>
+#include <rendering/SoFnv1a.h>
 
 namespace CoinVulkanDetail {
 
@@ -91,14 +90,6 @@ countCompositeCommands(const SoDrawList & drawlist)
   return draws;
 }
 
-// FNV-1a mixing step.
-inline void
-mix64(uint64_t & hash, uint64_t value)
-{
-  hash ^= value;
-  hash *= 1099511628211ULL;
-}
-
 // FNV-1a over a float stream, sampling up to sampleCount elements spread
 // uniformly across the buffer (the first and last elements are always
 // included).  The producer's per-frame arena hands out the same pointers
@@ -110,12 +101,12 @@ hashFloats(const float * values, size_t count, size_t sampleCount)
 {
   uint64_t hash = 1469598103934665603ULL;
   if (!values || count == 0) return hash;
-  mix64(hash, static_cast<uint64_t>(count));
+  CoinRenderDetail::fnvMix(hash, static_cast<uint64_t>(count));
   if (count <= sampleCount) {
     for (size_t i = 0; i < count; ++i) {
       uint32_t bits = 0;
       std::memcpy(&bits, &values[i], sizeof(bits));
-      mix64(hash, static_cast<uint64_t>(bits));
+      CoinRenderDetail::fnvMix(hash, static_cast<uint64_t>(bits));
     }
     return hash;
   }
@@ -123,7 +114,7 @@ hashFloats(const float * values, size_t count, size_t sampleCount)
     const size_t i = s * (count - 1) / (sampleCount - 1);
     uint32_t bits = 0;
     std::memcpy(&bits, &values[i], sizeof(bits));
-    mix64(hash, static_cast<uint64_t>(bits));
+    CoinRenderDetail::fnvMix(hash, static_cast<uint64_t>(bits));
   }
   return hash;
 }
@@ -133,16 +124,16 @@ hashUint32(const uint32_t * values, size_t count, size_t sampleCount)
 {
   uint64_t hash = 1469598103934665603ULL;
   if (!values || count == 0) return hash;
-  mix64(hash, static_cast<uint64_t>(count));
+  CoinRenderDetail::fnvMix(hash, static_cast<uint64_t>(count));
   if (count <= sampleCount) {
     for (size_t i = 0; i < count; ++i) {
-      mix64(hash, static_cast<uint64_t>(values[i]));
+      CoinRenderDetail::fnvMix(hash, static_cast<uint64_t>(values[i]));
     }
     return hash;
   }
   for (size_t s = 0; s < sampleCount; ++s) {
     const size_t i = s * (count - 1) / (sampleCount - 1);
-    mix64(hash, static_cast<uint64_t>(values[i]));
+    CoinRenderDetail::fnvMix(hash, static_cast<uint64_t>(values[i]));
   }
   return hash;
 }
@@ -153,9 +144,27 @@ hashGeometryContent(const SoGeometryDesc & geometry)
   uint64_t hash = 1469598103934665603ULL;
   const uint32_t vertexStride =
     geometry.vertexStride ? geometry.vertexStride : sizeof(float) * 3;
+  const uint32_t posStrideFloats = vertexStride / sizeof(float);
   const size_t posCount =
-    static_cast<size_t>(geometry.vertexCount) * vertexStride / sizeof(float);
+    static_cast<size_t>(geometry.vertexCount) * posStrideFloats;
   hash ^= hashFloats(geometry.positions, posCount, 1024);
+  if (geometry.normals && geometry.normalCount > 0) {
+    const size_t normalCount =
+      static_cast<size_t>(geometry.normalCount) * posStrideFloats;
+    hash ^= hashFloats(geometry.normals, normalCount, 512);
+  }
+  if (geometry.colors) {
+    const size_t colorCount = static_cast<size_t>(geometry.vertexCount) * 4;
+    hash ^= hashFloats(geometry.colors, colorCount, 512);
+  }
+  if (geometry.texcoords) {
+    const uint32_t texcoordStrideFloats =
+      (geometry.texcoordStride ? geometry.texcoordStride : sizeof(float) * 4)
+      / sizeof(float);
+    const size_t texcoordCount =
+      static_cast<size_t>(geometry.vertexCount) * texcoordStrideFloats;
+    hash ^= hashFloats(geometry.texcoords, texcoordCount, 512);
+  }
   hash ^= hashUint32(geometry.indices, geometry.indexCount, 512);
   hash = hash * 1099511628211ULL ^
     static_cast<uint64_t>(geometry.vertexCount);
@@ -182,46 +191,27 @@ hashTextureContent(const SoTextureData & texture)
     if (sampleCount > 0) {
       if (count <= sampleCount) {
         for (size_t i = 0; i < count; ++i) {
-          mix64(hash, static_cast<uint64_t>(texture.pixels[i]));
+          CoinRenderDetail::fnvMix(hash, static_cast<uint64_t>(texture.pixels[i]));
         }
       }
       else {
         for (size_t s = 0; s < sampleCount; ++s) {
           const size_t i = s * (count - 1) / (sampleCount - 1);
-          mix64(hash, static_cast<uint64_t>(texture.pixels[i]));
+          CoinRenderDetail::fnvMix(hash, static_cast<uint64_t>(texture.pixels[i]));
         }
       }
     }
   }
-  mix64(hash, static_cast<uint64_t>(texture.width));
-  mix64(hash, static_cast<uint64_t>(texture.height));
-  mix64(hash, static_cast<uint64_t>(texture.numComponents));
+  CoinRenderDetail::fnvMix(hash, static_cast<uint64_t>(texture.width));
+  CoinRenderDetail::fnvMix(hash, static_cast<uint64_t>(texture.height));
+  CoinRenderDetail::fnvMix(hash, static_cast<uint64_t>(texture.numComponents));
   return hash;
 }
 
-// Environment flags are enabled by presence, but honor the conventional
-// "VAR=0"/"false"/"off" opt-out values.  Results are cached on first use:
-// these are diagnostic switches, and the call sites sit in per-frame hot
-// paths where a getenv() per call is pure overhead.
-  inline bool
-envFlagEnabled(const char * name)
-{
-  static std::unordered_map<std::string, bool> cache;
-  const auto found = cache.find(name);
-  if (found != cache.end()) return found->second;
-  const char * value = getenv(name);
-  const bool enabled = value != nullptr && std::strcmp(value, "0") != 0 &&
-    std::strcmp(value, "false") != 0 && std::strcmp(value, "off") != 0;
-  cache[name] = enabled;
-  return enabled;
-}
-
-// Literal-name fast path: the per-call-site static resolves the flag once,
-// so per-frame hot paths pay neither getenv() nor the map hash.  Use for
-// every call site that passes a string literal.
-#define COIN_VULKAN_ENV_FLAG(name) \
-  ([] { static const bool coin_env_flag_cached = envFlagEnabled(name); \
-        return coin_env_flag_cached; }())
+// COIN_VULKAN_ENV_FLAG and envFlagEnabled() are provided by SoVulkanShared.h,
+// which every consumer of this header includes transitively (via
+// SoVulkanRenderBackend.h).  Defining them here again would both redefine the
+// macro (with a different body) and double the env-flag cache.
 
 // Fixed interleaved vertex layout shared by every retained command.
 //
@@ -268,26 +258,39 @@ struct alignas(16) VulkanBackgroundPush {
 static_assert(sizeof(VulkanBackgroundPush) == 48,
               "VulkanBackgroundPush must match BackgroundPush layout");
 
-// std140 mirror of the VisualBlock uniform in Vertex.glsl.  The layout must
-// match the shader byte-for-byte; the C++ side uses plain float arrays with
-// alignas(16) so vec3 members consume 16 bytes like std140 vec4s.
-struct alignas(16) VulkanVisualUbo {
+// std140 mirror of the LightingBlock uniform (set 0, binding 0) in the
+// visual Vertex/Fragment shaders.  The lighting constant block is written
+// ONCE per unique lightingHandle per frame into a small ring; every draw that
+// references the same handle binds that same slot through a dynamic offset,
+// so the 8-light setup is never recomputed or re-written per draw.  The
+// layout must match the shader byte-for-byte; vec3 members consume 16 bytes
+// like std140 vec4s.
+struct alignas(16) VulkanLightingUbo {
+  float ambientLight[4];                   // offset 0
+  float lightType[MAX_SHADER_LIGHTS * 4];        // offset 16
+  float lightColor[MAX_SHADER_LIGHTS * 4];       // offset 144
+  float lightDirection[MAX_SHADER_LIGHTS * 4];   // offset 272
+  float lightPosition[MAX_SHADER_LIGHTS * 4];    // offset 400
+  float lightAttenuation[MAX_SHADER_LIGHTS * 4]; // offset 528
+  float lightSpotParams[MAX_SHADER_LIGHTS * 4];  // offset 656
+};
+static_assert(sizeof(VulkanLightingUbo) == 784,
+              "VulkanLightingUbo must match LightingBlock std140 layout");
+
+// std140 mirror of the DrawBlock uniform (set 1, binding 0) in the visual
+// shaders.  This is the per-draw member that actually varies per command
+// (view/model/material); it is pointed at through a dynamic offset into the
+// per-draw UBO ring.
+struct alignas(16) VulkanDrawUbo {
   float view[16];                 // offset 0
   float model[16];                // offset 64
   float emissive[4];              // offset 128
-  float ambientLight[4];          // offset 144
-  float materialAmbient[4];       // offset 160
-  float materialSpecular[4];      // offset 176
-  float materialParams[4];        // offset 192
-  float lightType[MAX_SHADER_LIGHTS * 4];        // offset 208
-  float lightColor[MAX_SHADER_LIGHTS * 4];       // offset 336
-  float lightDirection[MAX_SHADER_LIGHTS * 4];   // offset 464
-  float lightPosition[MAX_SHADER_LIGHTS * 4];    // offset 592
-  float lightAttenuation[MAX_SHADER_LIGHTS * 4]; // offset 720
-  float lightSpotParams[MAX_SHADER_LIGHTS * 4];  // offset 848
+  float materialAmbient[4];       // offset 144
+  float materialSpecular[4];      // offset 160
+  float materialParams[4];        // offset 176
 };
-static_assert(sizeof(VulkanVisualUbo) == 976,
-              "VulkanVisualUbo must match VisualBlock std140 layout");
+static_assert(sizeof(VulkanDrawUbo) == 192,
+              "VulkanDrawUbo must match DrawBlock std140 layout");
 
   inline VkCompareOp
 depthFunctionToVk(const SoDepthFunction function)
