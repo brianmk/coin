@@ -735,6 +735,18 @@ SoVulkanRenderBackend::beginFrame()
 }
 
 void
+SoVulkanRenderBackend::cacheFrameMatrices(const SoRenderParams & params)
+{
+  // SbMatrix stores exactly float[4][4], so the raw storage IS the float
+  // matrix: copying the 16 floats once per render lets every draw reuse the
+  // result instead of re-converting per draw.
+  std::memcpy(this->frameViewFloats, &params.viewMatrix[0][0],
+              sizeof(float) * 16);
+  std::memcpy(this->frameProjFloats, &params.projMatrix[0][0],
+              sizeof(float) * 16);
+}
+
+void
 SoVulkanRenderBackend::flushPendingDestroys()
 {
   if (this->pendingDestroys.empty()) return;

@@ -322,7 +322,12 @@ private:
 
   // --- Geometry cache ---------------------------------------------------
   void invalidateCache();
-  void updateGeometryCache(const SoDrawList & drawlist, bool overlaysOnly = false);
+  // \a geometryContentUnchanged (SoRenderParams::geometryContentUnchanged):
+  // on a retained-IR replay frame the main geometry content is bit-identical
+  // to the previous frame, so for commands whose pointer identity already
+  // matches the cache the sampled content re-hash is skipped.
+  void updateGeometryCache(const SoDrawList & drawlist, bool overlaysOnly = false,
+                           bool geometryContentUnchanged = false);
   VulkanCachedCommand & getOrCreateCache(const SoRenderCommand * command);
   void uploadGeometry(VulkanCachedCommand & entry,
                       const SoRenderCommand & command);
@@ -571,6 +576,14 @@ private:
   uint32_t uboSlotsPerFrame = 0;
   uint32_t uboFrameIndex = 0;
   uint32_t uboCmdIndex = 0;
+  // Per-frame pre-conversion of the frame camera matrices (double -> float).
+  // The main pass draws every command with the frame view/projection (only
+  // scissor overlays carry their own matrices), so converting once per render
+  // via cacheFrameMatrices() avoids a 16-value double -> float conversion in
+  // updateLightingUniforms() and recordDrawCommand() on every draw.
+  float frameViewFloats[16] = {};
+  float frameProjFloats[16] = {};
+  void cacheFrameMatrices(const SoRenderParams & params);
 
   // Lighting constant ring (set 0, binding 0, dynamic offset).  Holds a few
   // slots per in-flight frame, one per distinct SoLightingHandle the frame

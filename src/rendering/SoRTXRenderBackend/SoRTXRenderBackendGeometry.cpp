@@ -800,12 +800,17 @@ SoRTXRenderBackend::updateGeometryCache(const SoDrawList & drawlist)
     // Instance-transform change detection: a moved object (same geometry)
     // must rebuild the TLAS, but the camera never does.  Only the traced
     // opaque commands reach here, so a selection pass-flip (OPAQUE<->OVERLAY)
-    // of an unchanged object does not dirty the TLAS.
+    // of an unchanged object does not dirty the TLAS.  The SbMatrix storage
+    // is exactly float[4][4], so a 64-byte memcmp against the raw bits
+    // last seen is a cheaper, collision-free stand-in for the old FNV
+    // transform hash.
     {
-      const uint64_t tsig = hashTransformSignal(command.modelMatrix);
-      if (entryPtr->transformSignal != tsig) {
+      const float * m = &command.modelMatrix[0][0];
+      if (std::memcmp(entryPtr->transformBits, m,
+                      sizeof(entryPtr->transformBits)) != 0) {
         this->asTransformChanged = true;
-        entryPtr->transformSignal = tsig;
+        std::memcpy(entryPtr->transformBits, m,
+                    sizeof(entryPtr->transformBits));
       }
     }
     entryPtr->commandKey = &command;

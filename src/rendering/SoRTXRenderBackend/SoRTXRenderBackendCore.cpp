@@ -1589,7 +1589,11 @@ SbBool
   // and waited on here.  Queue submission is strictly ordered and the wait
   // makes the AS writes visible to the trace recorded below, so no explicit
   // synchronization with the caller's buffer is required.
-  const bool wantTiming = getenv("FC_VULKAN_FRAME_TIMING") != nullptr;
+  const bool wantTiming = [] {
+    static const bool enabled =
+      SoVulkanShared::envFlagEnabled("FC_VULKAN_FRAME_TIMING");
+    return enabled;
+  }();
   const double t0 = wantTiming ? vkNowMs() : 0.0;
   VkCommandBuffer cmd = this->beginTransientCommandBuffer();
   if (cmd == VK_NULL_HANDLE) {
@@ -1657,8 +1661,9 @@ SbBool
     this->lastFrameStartMs = t4;
     fprintf(stderr,
             "[RTDBG] frameTiming interval=%.2f asRecord=%.2f asGpu=%.2f "
-            "denoise=%.2f traceRecord=%.2f\n",
-            interval, t1 - t0, t2 - t1, t3 - t2, t4 - t3);
+            "denoise=%.2f traceRecord=%.2f geomScan=%.2f\n",
+            interval, t1 - t0, t2 - t1, t3 - t2, t4 - t3,
+            this->lastGeomScanMs);
   }
   return presentOk ? TRUE : FALSE;
 }

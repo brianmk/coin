@@ -28,6 +28,7 @@
 class SoVulkanRenderManagerP;
 static void vulkanSceneGraphChangedCallback(void * data, SoSensor * sensor);
 
+#include <algorithm>
 #include <chrono>
 #include <cmath>
 #include <cstdio>
@@ -52,6 +53,16 @@ bool clipDebugEnabled()
 bool breadcrumbsEnabled()
 {
   static const bool enabled = SoVulkanShared::envFlagEnabled("FC_VULKAN_BREADCRUMBS");
+  return enabled;
+}
+
+// Per-phase CPU timing for the fcprobe profile harness.  Gated by the same
+// FC_VULKAN_FRAME_TIMING flag as the RTX [RTDBG] frameTiming line; the manager
+// emits its own [RTDBG] cpuTiming line (clip/apply/restamp/sort) so the
+// existing frameTiming regex in vk_profile_probe.check.py is untouched.
+bool frameTimingEnabled()
+{
+  static const bool enabled = SoVulkanShared::envFlagEnabled("FC_VULKAN_FRAME_TIMING");
   return enabled;
 }
 
@@ -103,21 +114,26 @@ bool clipVerboseEnabled()
   return enabled;
 }
 
-// Cheap content fingerprint over the IR draw list: the world model transform
-// and geometry identity of every command.  The scene bbox (and thus the
-// auto-clipping near/far planes) depends on geometry + world transform, so a
-// change in any command's model matrix (an object or ancestor moved/rotated),
-// its geometry streams, or its counts means the world extent can differ and
-// the cache must refresh.  Command count alone is not a sound proxy: moving a
+// Cheap content fingerprint over the MAIN part of the IR draw list: the
+// world model transform and geometry identity of the first \a mainCount
+// commands.  The scene bbox (and thus the auto-clipping near/far planes)
+// depends on the main scene's geometry + world transform, so a change in any
+// main command's model matrix (an object or ancestor moved/rotated), its
+// geometry streams, or its counts means the world extent can differ and the
+// cache must refresh.  Command count alone is not a sound proxy: moving a
 // body keeps the same number of draw commands but changes its world extent.
-// This is far cheaper than re-running SoGetBoundingBoxAction over the whole
-// scene every frame, and it is a sound signal -- any extent change
-// necessarily implies a geometry or model-transform change here.
-uint64_t computeSceneFingerprint(const SoIRRenderAction & action)
+// Only the main commands are hashed: the overlay/decoration commands appended
+// after index mainCommandCount are re-recorded every frame with
+// camera-dependent model matrices, so hashing them would change the
+// fingerprint on pure camera moves and defeat the cache.  This is far cheaper
+// than re-running SoGetBoundingBoxAction over the whole scene every frame,
+// and it is a sound signal -- any main-scene extent change necessarily
+// implies a geometry or model-transform change in these commands.
+uint64_t computeSceneFingerprint(const SoIRRenderAction & action, int mainCount)
 {
   const SoDrawList & drawList = action.getDrawList();
   uint64_t h = 0x7f4a7c159e3779b9ULL;
-  const int n = drawList.getNumCommands();
+  const int n = std::min(mainCount, drawList.getNumCommands());
   for (int i = 0; i < n; ++i) {
     const SoRenderCommand & c = drawList.getCommand(i);
     const SoGeometryDesc & g = c.geometry;
@@ -322,6 +338,11 @@ public:
   //! of the last full traversal; the replay restrike key.
   SbMatrix lastFrameView;
   SbBool lastFrameViewValid = FALSE;
+  //! Viewing matrix the retained list's painter's-algorithm order was last
+  //! built for (SoDrawList::buildSortedOrder); a bit-match with a replayed
+  //! list means the previous frame's sorted order is still exact.
+  SbMatrix lastSortView;
+  SbBool lastSortValid = FALSE;
   //! Child pointers last installed in frameRoot, so navigation frames stop
   //! churning the separator's child list (and its notifications).
   SoNode * rootChildren[4] = {nullptr, nullptr, nullptr, nullptr};
@@ -371,6 +392,15 @@ public:
   SoNode * sceneBBoxScene = nullptr;
   uint64_t sceneBBoxFingerprint = 0;
   bool sceneBBoxCached = false;
+  //! Cached scene fingerprint (see cachedSceneFingerprint): on camera-only
+  //! frames the main draw list is retained verbatim and the scene sensor has
+  //! not fired, so the O(main-commands) hash is invariant and the walk is
+  //! skipped.  Revalidated against the scene pointer and the retained main
+  //! command count, both of which any content change must disturb.
+  uint64_t sceneFpCached = 0;
+  SoNode * sceneFpScene = nullptr;
+  uint32_t sceneFpMainCount = 0;
+  SbBool sceneFpValid = FALSE;
 
   SoIRRenderAction irAction;
   //! Second IR action used to re-record the overlay/decoration scenes every
@@ -1254,25 +1284,49 @@ SoVulkanRenderManagerP::setClippingPlanes(void)
   if (!camera || !this->scene) return;
 
   // Recompute the world-space bounding box only when the scene pointer changed
-  // or the previous frame's command fingerprint differs.  The fingerprint
-  // covers the world transform AND geometry identity of every command, so a
-  // moved/rotated object (same command count) still invalidates the cache.
-  // The camera pose is applied below every frame; the whole-scene bbox
-  // traversal is the expensive part and is now skipped on unchanged scenes.
+  // or the previous frame's main-command fingerprint differs.  The fingerprint
+  // covers the world transform AND geometry identity of every main command, so
+  // a moved/rotated object (same command count) still invalidates the cache.
+  // Only the main commands are hashed: overlay/decoration commands (appended
+  // after mainCommandCount) are re-recorded every frame with camera-dependent
+  // model matrices, so including them would invalidate the cache on pure
+  // camera moves.  The camera pose is applied below every frame; the
+  // whole-scene bbox traversal is the expensive part and is now skipped on
+  // unchanged scenes.
+  const int mainCount = static_cast<int>(this->mainCommandCount);
+  // Reuse the cached fingerprint when the retained main list provably has
+  // not changed: the scene pointer and the retained main command count are
+  // the same, and the scene sensor has not fired since the last full walk
+  // (any main-scene change notifies the scene root, which raises
+  // sceneGraphDirty).  On those camera-only frames the O(main-commands)
+  // model-matrix/geometry hash would just reproduce last frame's value.
+  uint64_t sceneFp;
+  if (this->sceneFpValid && !this->sceneGraphDirty &&
+      this->scene == this->sceneFpScene &&
+      this->mainCommandCount == this->sceneFpMainCount) {
+    sceneFp = this->sceneFpCached;
+  }
+  else {
+    sceneFp = computeSceneFingerprint(this->irAction, mainCount);
+    this->sceneFpCached = sceneFp;
+    this->sceneFpScene = this->scene;
+    this->sceneFpMainCount = this->mainCommandCount;
+    this->sceneFpValid = TRUE;
+  }
   if (!this->sceneBBoxCached) {
     SoGetBoundingBoxAction bboxaction(this->viewportRegion);
     bboxaction.apply(this->scene);
     this->sceneWorldBBox = bboxaction.getXfBoundingBox();
     this->sceneBBoxScene = this->scene;
-    this->sceneBBoxFingerprint = computeSceneFingerprint(this->irAction);
+    this->sceneBBoxFingerprint = sceneFp;
     this->sceneBBoxCached = true;
   } else if (this->sceneBBoxScene != this->scene ||
-             this->sceneBBoxFingerprint != computeSceneFingerprint(this->irAction)) {
+             this->sceneBBoxFingerprint != sceneFp) {
     SoGetBoundingBoxAction bboxaction(this->viewportRegion);
     bboxaction.apply(this->scene);
     this->sceneWorldBBox = bboxaction.getXfBoundingBox();
     this->sceneBBoxScene = this->scene;
-    this->sceneBBoxFingerprint = computeSceneFingerprint(this->irAction);
+    this->sceneBBoxFingerprint = sceneFp;
   }
   SbXfBox3f xbox = this->sceneWorldBBox;
 
@@ -1458,6 +1512,8 @@ SoVulkanRenderManagerP::prepareRenderParams(SbBool clearwindow,
   }
 
   const long prepBcStart = vkRenderBreadcrumbEnabled() ? vkRenderBreadcrumbNowUs() : 0;
+  const bool wantCpuTiming = frameTimingEnabled();
+  double cpuClipMs = 0.0, cpuApplyMs = 0.0, cpuReplayMs = 0.0, cpuSortMs = 0.0;
   // The scene graph is the single camera authority.  Refresh the retained
   // camera pointer (and the generation counter) from the camera node inside
   // the scene every frame so auto-clipping and the matrix build always track
@@ -1474,8 +1530,12 @@ SoVulkanRenderManagerP::prepareRenderParams(SbBool clearwindow,
   // faces when the camera is far (FreeCAD's hidden GL viewer never renders,
   // so its auto-clipping never runs).
   const long clipBcStart = vkRenderBreadcrumbEnabled() ? vkRenderBreadcrumbNowUs() : 0;
+  const long clipT0 = wantCpuTiming ? vkRenderBreadcrumbNowUs() : 0;
   if (this->autoClipping != SoVulkanRenderManager::NO_AUTO_CLIPPING) {
     this->setClippingPlanes();
+  }
+  if (wantCpuTiming) {
+    cpuClipMs = (vkRenderBreadcrumbNowUs() - clipT0) * 0.001;
   }
   if (clipBcStart) {
     vkRenderBreadcrumbSince(clipBcStart, 2000, "prepare setClippingPlanes end");
@@ -1619,12 +1679,16 @@ SoVulkanRenderManagerP::prepareRenderParams(SbBool clearwindow,
         }
         this->rootChildrenValid = TRUE;
       }
-      action.apply(root);
-      this->mainCommandCount =
-        action.getDrawList().getNumCommands();
-      this->graphFingerprint = graphFp;
-      this->graphFingerprintValid = TRUE;
-      this->lastFrameViewValid = FALSE;
+       const long applyT0 = wantCpuTiming ? vkRenderBreadcrumbNowUs() : 0;
+       action.apply(root);
+       if (wantCpuTiming) {
+         cpuApplyMs = (vkRenderBreadcrumbNowUs() - applyT0) * 0.001;
+       }
+       this->mainCommandCount =
+         action.getDrawList().getNumCommands();
+       this->graphFingerprint = graphFp;
+       this->graphFingerprintValid = TRUE;
+       this->lastFrameViewValid = FALSE;
     }
   }
   else {
@@ -1632,9 +1696,17 @@ SoVulkanRenderManagerP::prepareRenderParams(SbBool clearwindow,
     this->graphFingerprintValid = FALSE;
     this->rootChildrenValid = FALSE;
   }
-  if (applyBcStart) {
+   if (applyBcStart) {
     vkRenderBreadcrumbSince(applyBcStart, 2000, "prepare action.apply end");
   }
+
+  // A replayed frame retains the main list verbatim and no traversal ran, so
+  // the retained main geometry content is bit-identical to the previous
+  // frame: backends may skip re-hashing geometry whose pointer identity
+  // already matches (the content hash exists to catch in-place edits, which
+  // only a traversal produces).  Freshly recorded overlay/decoration commands
+  // are out of scope for this guarantee.
+  params.geometryContentUnchanged = irReplayed;
 
   const long matricesBcStart = vkRenderBreadcrumbEnabled() ? vkRenderBreadcrumbNowUs() : 0;
   SoDrawList & list = action.getMutableDrawList();
@@ -1906,24 +1978,39 @@ SoVulkanRenderManagerP::prepareRenderParams(SbBool clearwindow,
     // element (commands stamped by a sub-camera keep their own matrix), and
     // re-derive the eye-space lighting entries that were filled with it.
     if (this->lastFrameViewValid) {
-      SbMat lastView;
-      this->lastFrameView.getValue(lastView);
-      const int numCommands = list.getNumCommands();
-      int restamped = 0;
-      for (int i = 0; i < numCommands; ++i) {
-        SoRenderCommand & command = list.getCommand(i);
-        if (command.pass == SO_RENDERPASS_OVERLAY) {
-          continue;
+      const long replayT0 = wantCpuTiming ? vkRenderBreadcrumbNowUs() : 0;
+      // SbMatrix stores exactly float[4][4] (16 contiguous floats), so a
+      // full-storage bit-compare says whether the viewing matrix changed at
+      // all.  On a static camera (idle scene, no navigation) the replay
+      // frame's view is bit-identical to the previous one: nothing to
+      // restamp and nothing to relight, so the O(N) per-command getValue +
+      // memcmp + matrix-copy loop (and the eye-space lighting restrike) is
+      // skipped entirely.
+      if (std::memcmp(&this->lastFrameView[0][0], &params.viewMatrix[0][0],
+                      sizeof(float) * 16) != 0) {
+        SbMat lastView;
+        this->lastFrameView.getValue(lastView);
+        const int numCommands = list.getNumCommands();
+        int restamped = 0;
+        for (int i = 0; i < numCommands; ++i) {
+          SoRenderCommand & command = list.getCommand(i);
+          if (command.pass == SO_RENDERPASS_OVERLAY) {
+            continue;
+          }
+          SbMat cmdView;
+          command.viewMatrix.getValue(cmdView);
+          if (std::memcmp(&cmdView[0][0], &lastView[0][0], sizeof(cmdView)) == 0) {
+            command.viewMatrix = params.viewMatrix;
+            ++restamped;
+          }
         }
-        SbMat cmdView;
-        command.viewMatrix.getValue(cmdView);
-        if (std::memcmp(&cmdView[0][0], &lastView[0][0], sizeof(cmdView)) == 0) {
-          command.viewMatrix = params.viewMatrix;
-          ++restamped;
-        }
+        dbgRestamped = restamped;
+        list.restrikeLighting(this->lastFrameView, params.viewMatrix);
+        this->lastFrameView = params.viewMatrix;
       }
-      dbgRestamped = restamped;
-      list.restrikeLighting(this->lastFrameView, params.viewMatrix);
+      if (wantCpuTiming) {
+        cpuReplayMs = (vkRenderBreadcrumbNowUs() - replayT0) * 0.001;
+      }
     }
   }
   else if (!this->lastFrameViewValid) {
@@ -1960,7 +2047,37 @@ SoVulkanRenderManagerP::prepareRenderParams(SbBool clearwindow,
             reinterpret_cast<const void *>(this->scene));
   }
   const long sortBcStart = vkRenderBreadcrumbEnabled() ? vkRenderBreadcrumbNowUs() : 0;
-  list.buildSortedOrder(params.viewMatrix);
+  const long sortT0 = wantCpuTiming ? vkRenderBreadcrumbNowUs() : 0;
+  const bool rtActive = this->rayTracing && this->rtxBackendInitialized;
+  if (rtActive) {
+    // The path-traced frame consumes no painter's-algorithm order: the trace
+    // is draw-order independent, and the raster overlay composite
+    // (recordTracedComposite/recordOverlayBlock) iterates the list in
+    // insertion order.  Re-sorting every RT frame is pure CPU waste, and the
+    // staleness flag makes the first non-RT frame re-sort unconditionally.
+    this->lastSortValid = FALSE;
+  }
+  else if (irReplayed && this->lastSortValid &&
+           std::memcmp(&this->lastSortView[0][0], &params.viewMatrix[0][0],
+                       sizeof(float) * 16) == 0) {
+    // A retained (replayed) list with a bit-identical view sorts exactly as
+    // the previous frame: reuse the previous frame's sorted order instead of
+    // re-deriving every command's sort key and re-running the stable sort.
+  }
+  else {
+    list.buildSortedOrder(params.viewMatrix);
+    this->lastSortView = params.viewMatrix;
+    this->lastSortValid = TRUE;
+  }
+  if (wantCpuTiming) {
+    cpuSortMs = (vkRenderBreadcrumbNowUs() - sortT0) * 0.001;
+    std::fprintf(stderr,
+                 "[RTDBG] cpuTiming clip=%.2f apply=%.2f restamp=%.2f "
+                 "sort=%.2f cmds=%d rt=%d\n",
+                 cpuClipMs, cpuApplyMs, cpuReplayMs, cpuSortMs,
+                 list.getNumCommands(), rtActive ? 1 : 0);
+    std::fflush(stderr);
+  }
   vkRenderBreadcrumbSince(sortBcStart, 2000, "prepare buildSortedOrder end");
   drawlist = &list;
 

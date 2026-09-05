@@ -39,6 +39,21 @@ long vkBackendRenderNowUs()
     std::chrono::steady_clock::now().time_since_epoch()).count();
 }
 
+double vkBackendRenderNowMs()
+{
+  return vkBackendRenderNowUs() * 0.001;
+}
+
+// Phase timing for the fcprobe profile harness ([RTDBG] cpuTimingRaster),
+// gated by the same FC_VULKAN_FRAME_TIMING flag as the manager and RTX
+// [RTDBG] lines.  Cached: the environment does not change mid-process.
+bool vkBackendFrameTimingEnabled()
+{
+  static const bool enabled =
+    SoVulkanShared::envFlagEnabled("FC_VULKAN_FRAME_TIMING");
+  return enabled;
+}
+
 bool vkBackendRenderBreadcrumbEnabled()
 {
   static const bool enabled = std::getenv("FC_GUI_OPEN_BREADCRUMB") != nullptr;
@@ -285,6 +300,8 @@ SoVulkanRenderBackend::renderInternal(const SoDrawList & drawlist,
     return FALSE;
   }
 
+  this->cacheFrameMatrices(params);
+
   if (overlaysOnly) {
     bool hasOverlay = false;
     for (int i = 0; i < drawlist.getNumCommands(); ++i) {
@@ -315,7 +332,8 @@ SoVulkanRenderBackend::renderInternal(const SoDrawList & drawlist,
     return FALSE;
   }
 
-  this->updateGeometryCache(drawlist, overlaysOnly);
+  this->updateGeometryCache(drawlist, overlaysOnly,
+                            params.geometryContentUnchanged);
 
   // Composite renders skip recordFrame(), so reserve the ring slots here;
   // beginFrame() above already advanced the frame cursor.  This covers both
@@ -491,12 +509,18 @@ SoVulkanRenderBackend::renderExternal(const SoDrawList & drawlist,
     return FALSE;
   }
 
+  this->cacheFrameMatrices(params);
   const long externalBcStart = vkBackendRenderBreadcrumbEnabled() ? vkBackendRenderNowUs() : 0;
+  const bool wantCpuTiming = vkBackendFrameTimingEnabled();
+  double setupMs = 0.0, geomMs = 0.0, texMs = 0.0, recordMs = 0.0;
+  const double cpuT0 = wantCpuTiming ? vkBackendRenderNowMs() : 0.0;
   this->beginFrame();
   this->updateLightingSetup(drawlist);
+  const double cpuT1 = wantCpuTiming ? vkBackendRenderNowMs() : 0.0;
   const long geometryBcStart = vkBackendRenderBreadcrumbEnabled() ? vkBackendRenderNowUs() : 0;
-  this->updateGeometryCache(drawlist);
+  this->updateGeometryCache(drawlist, false, params.geometryContentUnchanged);
   vkBackendRenderBreadcrumbSince(geometryBcStart, 5000, "renderExternal updateGeometryCache end");
+  const double cpuT2 = wantCpuTiming ? vkBackendRenderNowMs() : 0.0;
   const long textureBcStart = vkBackendRenderBreadcrumbEnabled() ? vkBackendRenderNowUs() : 0;
   if (!this->flushPendingTextureUploadsExternal()) {
     this->emitError("renderExternal: texture upload failed");
@@ -504,11 +528,23 @@ SoVulkanRenderBackend::renderExternal(const SoDrawList & drawlist,
   }
   vkBackendRenderBreadcrumbSince(textureBcStart, 5000, "renderExternal flushPendingTextureUploadsExternal end");
 
+  const double cpuT3 = wantCpuTiming ? vkBackendRenderNowMs() : 0.0;
   const long recordBcStart = vkBackendRenderBreadcrumbEnabled() ? vkBackendRenderNowUs() : 0;
   this->activeCommandBuffer = commandBuffer;
   const bool recorded = this->recordFrame(drawlist, params, *target, renderPass);
   vkBackendRenderBreadcrumbSince(recordBcStart, 5000, "renderExternal recordFrame end");
   this->activeCommandBuffer = VK_NULL_HANDLE;
+  if (wantCpuTiming) {
+    setupMs = cpuT1 - cpuT0;
+    geomMs = cpuT2 - cpuT1;
+    texMs = cpuT3 - cpuT2;
+    recordMs = vkBackendRenderNowMs() - cpuT3;
+    std::fprintf(stderr,
+                 "[RTDBG] cpuTimingRaster mode=full setup=%.2f geom=%.2f "
+                 "tex=%.2f record=%.2f\n",
+                 setupMs, geomMs, texMs, recordMs);
+    std::fflush(stderr);
+  }
   vkBackendRenderBreadcrumbSince(externalBcStart, 5000, "renderExternal end");
   return recorded ? TRUE : FALSE;
 }
@@ -550,9 +586,15 @@ SoVulkanRenderBackend::renderExternalOverlay(const SoDrawList & drawlist,
     return FALSE;
   }
 
+  this->cacheFrameMatrices(params);
+  const bool wantCpuTiming = vkBackendFrameTimingEnabled();
+  double setupMs = 0.0, geomMs = 0.0, texMs = 0.0, recordMs = 0.0;
+  const double cpuT0 = wantCpuTiming ? vkBackendRenderNowMs() : 0.0;
   this->beginFrame();
   this->updateLightingSetup(drawlist);
-  this->updateGeometryCache(drawlist, true);
+  const double cpuT1 = wantCpuTiming ? vkBackendRenderNowMs() : 0.0;
+  this->updateGeometryCache(drawlist, true, params.geometryContentUnchanged);
+  const double cpuT2 = wantCpuTiming ? vkBackendRenderNowMs() : 0.0;
 
   // This path never goes through recordFrame(), so reserve the slots it will
   // otherwise the cursor keeps climbing across frames and eventually
@@ -566,10 +608,22 @@ SoVulkanRenderBackend::renderExternalOverlay(const SoDrawList & drawlist,
     return FALSE;
   }
 
+  const double cpuT3 = wantCpuTiming ? vkBackendRenderNowMs() : 0.0;
   this->activeCommandBuffer = commandBuffer;
   this->recordTracedComposite(drawlist, params, *target, renderPass);
   this->recordOverlayBlock(drawlist, params, *target, renderPass);
   this->activeCommandBuffer = VK_NULL_HANDLE;
+  if (wantCpuTiming) {
+    setupMs = cpuT1 - cpuT0;
+    geomMs = cpuT2 - cpuT1;
+    texMs = cpuT3 - cpuT2;
+    recordMs = vkBackendRenderNowMs() - cpuT3;
+    std::fprintf(stderr,
+                 "[RTDBG] cpuTimingRaster mode=overlay setup=%.2f geom=%.2f "
+                 "tex=%.2f record=%.2f\n",
+                 setupMs, geomMs, texMs, recordMs);
+    std::fflush(stderr);
+  }
   return TRUE;
 }
 
