@@ -545,6 +545,17 @@ SoRTXRenderBackend::compactBlas(RTXCachedGeometry & entry)
   entry.devAddr = vkGetAccelerationStructureDeviceAddressKHR(this->device, &ai);
   entry.compacted = true;
   entry.wantsCompact = false;
+  // The TLAS instances reference the BLAS device address, which just changed.
+  // A static scene does NOT rebuild the TLAS (asDirty == false), so without
+  // this the next frame reuses the previous TLAS that points at the old
+  // (pre-compaction) BLAS address -- while the old BLAS is freed by the
+  // deferred destroy at the start of that very frame.  That use-after-free
+  // drove the driver to VK_ERROR_DEVICE_LOST on the frame after compaction.
+  // Force the next frame's asDirty so buildTlas() re-points the TLAS at the
+  // compacted BLASes before the old ones are released.  (asTransformChanged is
+  // consumed by recordAccelerationStructures to compute asDirty and is the
+  // "instance set changed" signal, which is exactly what this is.)
+  this->asTransformChanged = true;
   if (getenv("FC_VULKAN_RT_DEBUG")) {
     fprintf(stderr, "[RTDBG] compact size=%llu -> %llu saved=1\n",
             static_cast<unsigned long long>(origSize),
@@ -1109,13 +1120,25 @@ SoRTXRenderBackend::buildBlas(RTXCachedGeometry & entry,
   // ALLOW_UPDATE: lets position-only edits refit this BLAS in place (see
   // refitBlas()) instead of destroying and rebuilding it.  ALLOW_COMPACTION
   // (FC_VULKAN_AS_COMPACT) lets a later pass shrink the AS residency copy.
+  // They are mutually exclusive: NVIDIA's compaction docs note that
+  // ALLOW_UPDATE "must leave room for updated triangles" and that
+  // PREFER_FAST_TRACE "uses its own compaction method and results can differ
+  // from ALLOW_COMPACTION".  Building a BLAS with ALLOW_UPDATE + PREFER_FAST_TRACE
+  // and then COMPACT-copying it into the queried compacted-size buffer produced
+  // a malformed AS whose first use drove the driver to VK_ERROR_DEVICE_LOST.
+  // So when compaction is requested the BLAS is built with ALLOW_COMPACTION
+  // ALONE (the NVIDIA "max compaction" recipe); a compacted BLAS loses its
+  // ALLOW_UPDATE refit capability, and recordAccelerationStructures already
+  // rebuilds (instead of refits) any compacted entry that needs a position fix.
   const bool compactGate = getenv("FC_VULKAN_AS_COMPACT") != nullptr;
-  buildInfo.flags = VK_BUILD_ACCELERATION_STRUCTURE_PREFER_FAST_TRACE_BIT_KHR |
-                    VK_BUILD_ACCELERATION_STRUCTURE_ALLOW_UPDATE_BIT_KHR;
   if (compactGate) {
-    buildInfo.flags |= VK_BUILD_ACCELERATION_STRUCTURE_ALLOW_COMPACTION_BIT_KHR;
+    buildInfo.flags = VK_BUILD_ACCELERATION_STRUCTURE_ALLOW_COMPACTION_BIT_KHR;
     entry.wantsCompact = true;
     entry.compacted = false;
+  }
+  else {
+    buildInfo.flags = VK_BUILD_ACCELERATION_STRUCTURE_PREFER_FAST_TRACE_BIT_KHR |
+                      VK_BUILD_ACCELERATION_STRUCTURE_ALLOW_UPDATE_BIT_KHR;
   }
   buildInfo.mode = VK_BUILD_ACCELERATION_STRUCTURE_MODE_BUILD_KHR;
   buildInfo.geometryCount = 1;
