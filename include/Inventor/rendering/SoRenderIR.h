@@ -11,6 +11,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <memory>
 #include <vector>
 
 /*!
@@ -79,6 +80,20 @@ struct SoGeometryDesc {
 
   uint32_t            vertexStride = 0;   //!< Position/normal stride in bytes.
   uint32_t            texcoordStride = 0; //!< Texture-coordinate stride in bytes.
+
+  //!< Lifetime owners for the borrowed streams above.  When set, this command
+  //!< co-owns the storage its raw pointers refer to (the pointers may be
+  //!< offsets into these buffers), so the storage outlives the command even
+  //!< if the producer (e.g. a shape's retained tessellation cache, which is
+  //!< invalidated on any field change via SoShape::notify()) releases its own
+  //!< reference before this command is re-emitted or replaced.  Without these
+  //!< owners a retained drawlist command can hold a dangling pointer to a
+  //!< freed-and-reused chunk and read garbage (a false geometry change).
+  //!< Leave null for per-frame arena storage that is only valid for the frame.
+  std::shared_ptr<const std::vector<float>>    positionOwner;
+  std::shared_ptr<const std::vector<float>>    normalOwner;
+  std::shared_ptr<const std::vector<float>>    texcoordOwner;
+  std::shared_ptr<const std::vector<uint32_t>> indexOwner;
 
   //!< Producer guarantees the geometry streams are stable, shape-retained
   //!< buffers whose pointers change exactly when the content changes.  When
