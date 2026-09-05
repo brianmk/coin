@@ -425,6 +425,15 @@ SoVulkanRenderBackend::ensureDescriptorPoolSpace()
 VkDescriptorSet
 SoVulkanRenderBackend::resolveTextureSet(const SoRenderCommand & command)
 {
+  // Fast path for the overwhelmingly common untextured case: most retained
+  // commands (default CAD surfaces, edges, points) carry no texture, so fall
+  // straight through to the white set without touching the commandToTexture
+  // unordered_map (a hash + bucket walk per draw otherwise).
+  const SoTextureData & tex = command.material.texture;
+  if (!tex.pixels || tex.width == 0 || tex.height == 0 ||
+      tex.numComponents == 0) {
+    return this->whiteDescriptorSet;
+  }
   const auto found = this->commandToTexture.find(&command);
   if (found != this->commandToTexture.end() &&
       this->textureCache[found->second].descriptorSet != VK_NULL_HANDLE) {

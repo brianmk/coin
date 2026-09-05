@@ -9,12 +9,16 @@
 #include <Inventor/actions/SoSearchAction.h>
 #include <Inventor/errors/SoDebugError.h>
 #include <Inventor/nodes/SoCamera.h>
+#include <Inventor/nodes/SoLight.h>
+#include <Inventor/nodes/SoEnvironment.h>
 #include <Inventor/nodes/SoNode.h>
 #include <Inventor/sensors/SoNodeSensor.h>
 #include <Inventor/nodes/SoOrthographicCamera.h>
 #include <Inventor/nodes/SoPerspectiveCamera.h>
+#include <Inventor/nodes/SoRotation.h>
 #include <Inventor/nodes/SoSeparator.h>
 #include <Inventor/nodes/SoScale.h>
+#include <Inventor/nodes/SoTransformSeparator.h>
 #include <Inventor/rendering/SoRenderIR.h>
 #include <Inventor/rendering/SoVulkanRenderTarget.h>
 
@@ -189,16 +193,40 @@ void mixHash(uint64_t & h, uint64_t v)
 // retained command was produced from exactly the current graph.  Group
 // children are folded via SoGroup; non-group child containers would have to
 // route through SoChildList notifications, which bump the owning node's id
-// and are caught by its own entry.  The active camera is skipped: its pose
-// is the camera-only change replay exists for (its eye-space lighting
-// entries are re-derived via SoDrawList::restrikeLighting).
+// and are caught by its own entry.
+//
+// NODE-ID EXCLUSIONS (camera-coupled infra): Coin propagates a notification
+// up the parent chain, so any changed node re-bumps every ancestor's node-id.
+// Two classes of node must be excluded or the fingerprint changes on every
+// camera-only frame and defeats the retained-IR replay:
+//   * SoCamera                                     -- its pose is the very
+//      change replay exists for (restamped/re-lit after a frame-view change).
+//   * The headlight envelope (SoRotation / SoTransformSeparator / SoLight /
+//      SoEnvironment) plus bare SoGroup/SoSeparator aggregation containers.
+//      FreeCAD re-aims the headlight ROTATION to follow the camera every
+//      navigation frame, and the container's node-ids are re-bumped purely by
+//      propagation.  None of these nodes produce the rasterized fill-geometry
+//      in the draw list -- lighting is re-derived every frame by the backend's
+//      updateLightingSetup() -- so excluding their ids only suppresses the
+//      camera-coupled chatter.  Real geometry edits use SoTransform/SoMatrix
+//      /shape/selection nodes, which still fold their ids, so an in-place
+//      edit, a move, an add/remove or a material/texture swap still
+//      invalidates the draw list and forces a re-record.
 void graphFingerprintWalk(SoNode * node, const SoNode * skip, uint64_t & h)
 {
-  if (!node || node == skip) {
-    return;
-  }
+  if (!node || node == skip) return;
   mixHash(h, reinterpret_cast<uintptr_t>(node));
-  mixHash(h, static_cast<uint64_t>(node->getNodeId()));
+  const bool skipId =
+    node->isOfType(SoCamera::getClassTypeId()) ||
+    node->isOfType(SoLight::getClassTypeId()) ||
+    node->isOfType(SoEnvironment::getClassTypeId()) ||
+    node->isOfType(SoRotation::getClassTypeId()) ||
+    node->isOfType(SoTransformSeparator::getClassTypeId()) ||
+    node->getTypeId() == SoGroup::getClassTypeId() ||
+    node->getTypeId() == SoSeparator::getClassTypeId();
+  if (!skipId) {
+    mixHash(h, static_cast<uint64_t>(node->getNodeId()));
+  }
   if (node->isOfType(SoGroup::getClassTypeId())) {
     const SoGroup * group = static_cast<const SoGroup *>(node);
     const int num = group->getNumChildren();

@@ -35,6 +35,10 @@ SoVulkanRenderBackend::resetBoundState()
   this->lastBoundPipeline = VK_NULL_HANDLE;
   this->hasBoundViewport = false;
   this->hasBoundScissor = false;
+  this->lastLightingHandle = UINT32_MAX;
+  this->lastLightingOffset = 0;
+  this->lastBoundLightingOffset = UINT32_MAX;
+  this->lastBoundTextureSet = VK_NULL_HANDLE;
 }
 
 void
@@ -639,29 +643,54 @@ SoVulkanRenderBackend::recordDrawCommand(const SoDrawList & drawlist,
   const uint32_t uboDynamicOffset = static_cast<uint32_t>(uboOffset);
 
   // Bind set 0 (lighting constant, dynamic offset per handle) and set 1
-  // (per-draw UBO + texture, dynamic offset) in one call.  Lighting is the
-  // same for every command sharing a handle, so its block was written once
-  // by updateLightingSetup() and is merely referenced here.
+  // (per-draw UBO + texture, dynamic offset).  Lighting is the same for every
+  // command sharing a handle, so its block was written once per handle by
+  // updateLightingSetup() and is merely referenced here.
   VkDescriptorSet textureSet = this->resolveTextureSet(command);
   if (textureSet == VK_NULL_HANDLE) {
     textureSet = this->whiteDescriptorSet;
   }
-  const VkDescriptorSet sets[2] = {this->lightingDescriptorSet, textureSet};
-  const uint32_t dynamicOffsets[2] = {
-    static_cast<uint32_t>(this->lightingOffsetFor(command)),
-    uboDynamicOffset,
-  };
-  vkCmdBindDescriptorSets(this->activeCommandBuffer,
-                          VK_PIPELINE_BIND_POINT_GRAPHICS,
-                          this->pipelineLayout, 0, 2, sets, 2,
-                          dynamicOffsets);
+  // Cache the lighting dynamic offset per handle: a frame's retained commands
+  // almost always share ONE handle, so only the first draw of a new handle
+  // pays the unordered_map lookup in lightingOffsetFor().  Set 0 re-binds only
+  // when the handle (its dynamic offset) actually changes; set 1 must re-bind
+  // every draw because its dynamic offset is the per-draw UBO slot below.
+  uint32_t lightingDynamicOffset = this->lastLightingOffset;
+  if (command.lightingHandle != this->lastLightingHandle) {
+    lightingDynamicOffset =
+      static_cast<uint32_t>(this->lightingOffsetFor(command));
+    this->lastLightingHandle = command.lightingHandle;
+    this->lastLightingOffset = lightingDynamicOffset;
+  }
+  uint32_t bindingOffsets[2] = { lightingDynamicOffset, uboDynamicOffset };
+  if (this->lastBoundLightingOffset != lightingDynamicOffset ||
+      this->lastBoundTextureSet != textureSet) {
+    // First draw of a new lighting handle / texture set: bind both sets with
+    // their dynamic offsets in one call (also covers the frame's first draw).
+    const VkDescriptorSet both[2] = {this->lightingDescriptorSet, textureSet};
+    vkCmdBindDescriptorSets(this->activeCommandBuffer,
+                            VK_PIPELINE_BIND_POINT_GRAPHICS,
+                            this->pipelineLayout, 0, 2, both, 2,
+                            bindingOffsets);
+    this->lastBoundLightingOffset = lightingDynamicOffset;
+    this->lastBoundTextureSet = textureSet;
+  }
+  else {
+    // Same lighting handle + texture set as the previous draw: only the
+    // per-draw UBO dynamic offset advances.  Re-bind set 1 alone (set 0 stays
+    // bound from the last 2-set bind) instead of re-emitting both sets.
+    vkCmdBindDescriptorSets(this->activeCommandBuffer,
+                            VK_PIPELINE_BIND_POINT_GRAPHICS,
+                            this->pipelineLayout, 1, 1, &textureSet, 1,
+                            &bindingOffsets[1]);
+  }
 
   const VkDeviceSize vertexOffset = entry.vertexOffset;
-  vkCmdBindVertexBuffers(this->activeCommandBuffer, 0, 1, &entry.vertexBuffer,
-                         &vertexOffset);
   const bool indexed =
     entry.indexBuffer != VK_NULL_HANDLE && command.geometry.indexCount &&
     command.geometry.indices;
+  vkCmdBindVertexBuffers(this->activeCommandBuffer, 0, 1, &entry.vertexBuffer,
+                         &vertexOffset);
   if (indexed && !useWideLine) {
     vkCmdBindIndexBuffer(this->activeCommandBuffer, entry.indexBuffer,
                          entry.indexOffset, VK_INDEX_TYPE_UINT32);
