@@ -101,6 +101,26 @@ inline void checkRtlRaygenPushLayout() {
                 "RTXRaygenPush must match RaygenPush layout");
 }
 
+// Push constant block of the G-buffer normalize/downsample compute pass
+// (DenoiseDownsample.glsl).  Three 16-byte vec4 words matching the shader's
+// uvec4 pcFull / pcReg / pcNum, so the block is 48 bytes:
+//    pcFull.x = fullW,   .y = fullH,   .z = sx,      .w = sy
+//    pcReg.x  = colorElem, .y = albedoElem, .z = normalElem, .w = motionElem
+//    pcNum.x  = outPixels, .yz = unused
+// The *Elem offsets are the vec4-index (byteOffset/16) of each working-set
+// region inside the shared host staging allocation, so a single shader serves
+// both native resolution (sx=sy=1, regions at 0/gbStride/2gbStride/3gbStride)
+// and reduced resolution (regions at 4gbStride + k*outStride).
+struct alignas(16) DenoiseDownsamplePush {
+  uint32_t full[4] = {0, 0, 1, 1};
+  uint32_t reg[4] = {0, 0, 0, 0};   // color/albedo/normal/motion vec4 element offsets
+  uint32_t num[4] = {0, 0, 0, 0};   // x = outPixels (outW*outH)
+};
+inline void checkDenoiseDownsampleLayout() {
+  static_assert(sizeof(DenoiseDownsamplePush) == 48,
+                "DenoiseDownsamplePush must match DenoiseDownsample layout");
+}
+
 constexpr int SBT_GROUP_COUNT = 5; // raygen, miss, shadow miss, chit, shadow chit
 
 constexpr int MAX_SHADER_LIGHTS = 8;

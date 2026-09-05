@@ -516,8 +516,22 @@ SoRTXRenderBackend::createPathTracingBuffers(uint32_t width, uint32_t height)
   // OIDN/RTX/FSR device+filter themselves.  When a denoiser is active the
   // raygen writes an albedo G-buffer (binding 14) that createDenoiseBackend()
   // also allocates and uploads for the albedo guide.
-  this->denoiseWidth = width;
-  this->denoiseHeight = height;
+  //
+  // denoiseWidth/Height are the DENOISER's internal resolution, not the full
+  // viewport: a denoiseScale > 1 (setDenoiserScale) runs the filter at
+  // reduced resolution and the present pass upscales the result.  The host
+  // readback still stages the full-resolution G-buffers and the worker
+  // downsamples them (see recordDenoiseReadback / updateDenoise); only the
+  // host-side OIDN/FSR backends support scaling -- the RTX interop path stays
+  // native (scale 1) because it reads the G-buffers device-to-device and
+  // needs a GPU downsample that does not exist there.
+  const float scale = (this->denoiseKindPref != DenoiseRtx)
+    ? this->denoiseScale : 1.0f;
+  this->denoiseEffectiveScale = scale;
+  this->denoiseWidth = std::max(1u, static_cast<uint32_t>(
+    std::ceil(static_cast<double>(width) / (scale > 1.5f ? scale : 1.0f))));
+  this->denoiseHeight = std::max(1u, static_cast<uint32_t>(
+    std::ceil(static_cast<double>(height) / (scale > 1.5f ? scale : 1.0f))));
   if (!this->createDenoiseBackend()) {
     this->emitError("createPathTracingBuffers: failed to create denoiser backend");
     if (this->queue != VK_NULL_HANDLE) {

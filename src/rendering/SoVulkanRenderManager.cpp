@@ -194,7 +194,8 @@ void graphFingerprintWalk(SoNode * node, const SoNode * skip, uint64_t & h)
 class SoVulkanRenderManagerP {
 public:
   SoVulkanRenderManagerP()
-    : irAction(SbViewportRegion())
+    : irAction(SbViewportRegion()),
+      overlayIrAction(SbViewportRegion())
   {
     this->viewportRegion.setWindowSize(1, 1);
     // Persist one traversal root so prepareRenderParams() does not heap-allocate
@@ -202,6 +203,10 @@ public:
     // re-added each frame; only the root node itself is retained.
     this->frameRoot = new SoSeparator;
     this->frameRoot->ref();
+    // A separate root for the always-re-recorded overlay/decoration scenes
+    // (nav cube, axis cross), kept apart from the replayed main scene.
+    this->overlayRoot = new SoSeparator;
+    this->overlayRoot->ref();
   }
 
   ~SoVulkanRenderManagerP()
@@ -221,6 +226,9 @@ public:
     if (this->frameRoot) {
       this->frameRoot->unref();
     }
+    if (this->overlayRoot) {
+      this->overlayRoot->unref();
+    }
   }
 
   SoNode * scene = nullptr;
@@ -229,6 +237,10 @@ public:
   SoCamera * camera = nullptr;
   // Persistent traversal root (see the constructor comment).
   SoSeparator * frameRoot = nullptr;
+  //! Persistent root for the always-re-recorded overlay/decoration scenes.
+  SoSeparator * overlayRoot = nullptr;
+  SoNode * overlayRootChildren[3] = {nullptr, nullptr, nullptr};
+  SbBool overlayRootChildrenValid = FALSE;
   SbViewportRegion viewportRegion;
   SbColor4f backgroundColor = SbColor4f(0.0f, 0.0f, 0.0f, 1.0f);
   SbBool backgroundGradient = FALSE;
@@ -333,6 +345,13 @@ public:
   bool sceneBBoxCached = false;
 
   SoIRRenderAction irAction;
+  //! Second IR action used to re-record the overlay/decoration scenes every
+  //! frame (their node-ids churn with the camera, so they cannot be retained);
+  //! its commands are appended onto the replayed main list in prepareRenderParams.
+  SoIRRenderAction overlayIrAction;
+  //! Number of main (non-overlay) commands retained in irAction's draw list,
+  //! used to separate the replayed main region from the fresh overlay region.
+  uint32_t mainCommandCount = 0;
   SoVulkanRenderBackend backend;
   SoRTXRenderBackend rtxBackend;
   SbBool backendInitialized = FALSE;
@@ -943,6 +962,18 @@ SoVulkanRenderManager::setPathTracingDenoiser(const char * denoiser)
 }
 
 void
+SoVulkanRenderManager::setPathTracingDenoiserScale(const float scale)
+{
+  if (!this->pimpl->rtxBackendInitialized) {
+    SoDebugError::postWarning(
+      "SoVulkanRenderManager::setPathTracingDenoiserScale",
+      "ray-tracing backend is not initialized; setting ignored");
+    return;
+  }
+  this->pimpl->rtxBackend.setDenoiserScale(scale);
+}
+
+void
 SoVulkanRenderManager::setRenderTarget(void * target)
 {
   this->pimpl->renderTarget = target;
@@ -1070,9 +1101,17 @@ SoVulkanRenderManagerP::computeGraphFingerprint() const
               (int)this->viewportRegion.getViewportSizePixels()[1]);
     }
   }
+  // The replay gate is keyed on the MAIN scene only (plus the viewport and the
+  // caller-published revision).  The overlay/decoration scene node-ids churn
+  // every frame -- the navigation cube and the axis cross mirror the camera,
+  // so their nodes are re-touched each frame even when the geometry they draw
+  // is unchanged.  Folding those ids into the same hash made the fingerprint
+  // change every frame and forced a full re-traversal of an otherwise-stable
+  // main scene (the held hotspot).  The overlay/decoration are now re-recorded
+  // separately every frame (cheap) and the main scene is replayed when THIS
+  // fingerprint is stable; their pointer mixes below stay constant so an
+  // overlay-scene swap still invalidates.
   graphFingerprintWalk(this->scene, this->camera, h);
-  graphFingerprintWalk(this->overlayScene, this->camera, h);
-  graphFingerprintWalk(this->decorationScene, this->camera, h);
   const SbVec2s size = this->viewportRegion.getViewportSizePixels();
   mixHash(h, static_cast<uint32_t>(size[0]));
   mixHash(h, static_cast<uint32_t>(size[1]));
@@ -1458,21 +1497,24 @@ SoVulkanRenderManagerP::prepareRenderParams(SbBool clearwindow,
   // must be traversed in a single apply() call.  The managed scene graph is
   // geometry-only: the camera is stored as a separate member (matching
   // SoRenderManager/SoSceneManager, which apply the camera independently of
-  // the scene root).  Build a path [camera, scene, overlayScene] so
-  // SoCamera::doAction() installs the projection/viewing matrix elements
-  // before any geometry is recorded; otherwise every command carries identity
-  // matrices and the view renders at the origin with an identity projection
-  // (blank/wrong view, invisible geometry, and a camera that appears not to
-  // follow navigation).  The overlay scene is traversed last so its commands
-  // record after the main scene and render in the overlay pass.
+  // the scene root).  Build a path [camera, scene] so SoCamera::doAction()
+  // installs the projection/viewing matrix elements before any geometry is
+  // recorded; otherwise every command carries identity matrices and the view
+  // renders at the origin with an identity projection (blank/wrong view,
+  // invisible geometry, and a camera that appears not to follow navigation).
+  // The overlay/decoration scenes are NOT traversed here: their node-ids churn
+  // every frame with the camera, and folding them into this traversal would
+  // both re-record the (stable) main geometry and defeat the retained-IR replay
+  // below.  They are re-recorded separately afterwards (cheap) and merged onto
+  // this main list.
   SbBool irReplayed = FALSE;
   const uint64_t graphFp = this->computeGraphFingerprint();
   if (this->scene || this->camera || this->overlayScene
       || this->decorationScene) {
     if (irReplayEnabled() && this->graphFingerprintValid &&
         graphFp == this->graphFingerprint) {
-      // Camera-only frame: every graph node, the viewport, and the
-      // caller-published revision are unchanged, so the retained IR draw
+      // Camera-only frame: the main graph, the viewport, and the
+      // caller-published revision are unchanged, so the retained main IR draw
       // list is exactly what a full traversal would produce -- keep it (and
       // the geometry/texture caches keyed on it) and restamp the frame view
       // after the matrices are built below.
@@ -1484,7 +1526,7 @@ SoVulkanRenderManagerP::prepareRenderParams(SbBool clearwindow,
       // navigation frames stop re-triggering child-list notifications.
       SoSeparator * root = this->frameRoot;
       SoNode * const want[4] = { this->camera, this->scene,
-                                 this->overlayScene, this->decorationScene };
+                                 nullptr, nullptr };
       const SbBool sameChildren = this->rootChildrenValid &&
         this->rootChildren[0] == want[0] &&
         this->rootChildren[1] == want[1] &&
@@ -1492,9 +1534,6 @@ SoVulkanRenderManagerP::prepareRenderParams(SbBool clearwindow,
         this->rootChildren[3] == want[3];
       if (!sameChildren) {
         root->removeAllChildren();
-        // Decorations (axis cross) record after the overlay scene so their
-        // overlay-pass commands draw on top of the navigation cube, matching
-        // GL's foreground/decoration render order.
         for (int i = 0; i < 4; ++i) {
           if (want[i]) {
             root->addChild(want[i]);
@@ -1506,6 +1545,8 @@ SoVulkanRenderManagerP::prepareRenderParams(SbBool clearwindow,
         this->rootChildrenValid = TRUE;
       }
       action.apply(root);
+      this->mainCommandCount =
+        action.getDrawList().getNumCommands();
       this->graphFingerprint = graphFp;
       this->graphFingerprintValid = TRUE;
       this->lastFrameViewValid = FALSE;
@@ -1522,6 +1563,65 @@ SoVulkanRenderManagerP::prepareRenderParams(SbBool clearwindow,
 
   const long matricesBcStart = vkRenderBreadcrumbEnabled() ? vkRenderBreadcrumbNowUs() : 0;
   SoDrawList & list = action.getMutableDrawList();
+
+  // ---- Always re-record the overlay/decoration (cheap) and merge ----------
+  // The nav cube and the axis cross mirror the camera, so their scene node-ids
+  // are re-touched every frame.  They cannot be retained with the stable main
+  // list, so re-traverse them here into a separate IR action and append their
+  // fresh commands onto the (retained) main list.  Truncate the previous
+  // frame's overlay region first -- it references geometry storage owned by the
+  // overlay action, which apply() just reset -- so the draw list the backend
+  // sees is [main..., overlay...] with no stale/dangling overlay commands.
+  SbBool overlayApplied = FALSE;
+  {
+    SoSeparator * oroot = this->overlayRoot;
+    SoNode * const owant[3] = { this->camera, this->overlayScene,
+                                this->decorationScene };
+    const SbBool oSame = this->overlayRootChildrenValid &&
+      this->overlayRootChildren[0] == owant[0] &&
+      this->overlayRootChildren[1] == owant[1] &&
+      this->overlayRootChildren[2] == owant[2];
+    if (!oSame) {
+      oroot->removeAllChildren();
+      // Decorations (axis cross) are added after the overlay scene so their
+      // overlay-pass commands draw on top of the navigation cube, matching GL's
+      // foreground/decoration render order.
+      for (int i = 0; i < 3; ++i) {
+        if (owant[i]) {
+          oroot->addChild(owant[i]);
+        }
+      }
+      for (int i = 0; i < 3; ++i) {
+        this->overlayRootChildren[i] = owant[i];
+      }
+      this->overlayRootChildrenValid = TRUE;
+    }
+    this->overlayIrAction.setViewportRegion(this->viewportRegion);
+    if (oroot->getNumChildren() > 0) {
+      // apply() resets the frame first (beginFrame), so the overlay action's
+      // previous draw list/geometry pool is released before re-recording.
+      this->overlayIrAction.apply(oroot);
+      overlayApplied = TRUE;
+    }
+    else {
+      // No overlay/decoration this frame: clear the previous frame's overlay
+      // list so the merge below does not append stale commands.
+      this->overlayIrAction.beginFrame();
+    }
+  }
+  {
+    const int numMain = static_cast<int>(this->mainCommandCount);
+    if (numMain < list.getNumCommands()) {
+      list.truncate(numMain);
+    }
+    if (overlayApplied) {
+      const SoDrawList & ovl = this->overlayIrAction.getDrawList();
+      const int ovlCount = ovl.getNumCommands();
+      for (int i = 0; i < ovlCount; ++i) {
+        list.addCommand(ovl.getCommand(i));
+      }
+    }
+  }
 
   // The frame view/projection matrices drive every non-overlay command, so
   // they must come from the camera this manager was told to use

@@ -293,6 +293,18 @@ public:
   void setDenoiserFilter(const char * denoiser);
 
   /*!
+    \brief Set the denoiser upscale factor (>= 1.0, default 1.0).
+
+    A factor > 1 makes the denoiser run at a lower internal resolution
+    (width/scale x height/scale) and the present pass bilinearly upscales the
+    denoised result back to the viewport, trading denoise accuracy for speed
+    (roughly scale^2 fewer pixels).  Clamped to [1, 8].  Applied on the next
+    path-tracing buffer (re)creation, so a running denoiser is recreated at
+    the new scale.
+  */
+  void setDenoiserScale(float scale);
+
+  /*!
     \brief Record the draw list into a caller-owned command buffer/render pass.
 
     Same contract as SoVulkanRenderBackend::renderExternal(): the caller has
@@ -320,6 +332,14 @@ private:
   bool createShaderModules();
   bool createFrameBuffer();
   bool updateDescriptors();
+  // Denoiser G-buffer normalize/downsample compute pass: a small compute
+  // shader that reads the full-res accum/albedo/normal/motion G-buffers after
+  // the trace and writes the (optionally downsampled, always normalized)
+  // working set into the host staging block, so the CPU OIDN worker only runs
+  // the filter.  Owns its own descriptor set + pipeline (separate binding 4
+  // output), and is re-created whenever the G-buffers/staging change.
+  bool createDenoiseDownsampleSetLayout();
+  bool createDenoiseDownsamplePipeline();
 
   // --- Buffer helpers -----------------------------------------------------
   bool createDeviceLocalBuffer(VkDeviceSize size, VkBufferUsageFlags usage,
@@ -465,12 +485,17 @@ private:
   //    (verified against RADV, which runs the SBT path correctly).
   VkDescriptorSetLayout rtSetLayout = VK_NULL_HANDLE;
   VkDescriptorSetLayout presentSetLayout = VK_NULL_HANDLE;
+  VkDescriptorSetLayout denoiseDownsampleSetLayout = VK_NULL_HANDLE;
   VkDescriptorPool descriptorPool = VK_NULL_HANDLE;
   // Double-buffered descriptor sets: one frame's sets are bound while the
   // previous frame's submission may still be pending, so each frame updates
   // the inactive pair (VUID-vkUpdateDescriptorSets-None-03047).
   VkDescriptorSet rtDescriptorSets[2] = {VK_NULL_HANDLE, VK_NULL_HANDLE};
   VkDescriptorSet presentDescriptorSets[2] = {VK_NULL_HANDLE, VK_NULL_HANDLE};
+  VkDescriptorSet denoiseDownsampleDescriptorSet = VK_NULL_HANDLE;
+  //! Whether denoiseDownsampleDescriptorSet currently holds the valid staging/
+  //! G-buffer bindings (reset on teardown so a stale set is never dispatched).
+  bool denoiseDownsampleValid = false;
   uint32_t descriptorSetIndex = 0;
   // Whether rtDescriptorSets[i] / presentDescriptorSets[i] hold bindings that
   // updateDescriptors() actually wrote in the current engine generation.  The
@@ -486,8 +511,10 @@ private:
 
   VkPipelineLayout rtPipelineLayout = VK_NULL_HANDLE;
   VkPipelineLayout presentPipelineLayout = VK_NULL_HANDLE;
+  VkPipelineLayout denoiseDownsamplePipelineLayout = VK_NULL_HANDLE;
   VkPipeline rtPipeline = VK_NULL_HANDLE; //!< ray tracing pipeline (SBT mode)
   VkPipeline computePipeline = VK_NULL_HANDLE; //!< ray-query compute pipeline
+  VkPipeline denoiseDownsamplePipeline = VK_NULL_HANDLE; //!< normalize/downsample
   VkPipeline presentPipeline = VK_NULL_HANDLE;
   VkRenderPass presentRenderPass = VK_NULL_HANDLE; //!< cache key for present pipeline
   VkSampleCountFlagBits presentSampleCount =
@@ -513,6 +540,7 @@ private:
   VkShaderModule shadowClosestHitModule = VK_NULL_HANDLE;
   VkShaderModule presentVertexModule = VK_NULL_HANDLE;
   VkShaderModule presentFragmentModule = VK_NULL_HANDLE;
+  VkShaderModule denoiseDownsampleModule = VK_NULL_HANDLE; //!< G-buffer normalize/downsample
 
   //! Dispatch mode: TRUE = ray tracing pipeline + SBT, FALSE = ray-query
   //! compute (default; see the resource section comment for why).
@@ -959,6 +987,11 @@ private:
   //! Scale factor baked into the present shader's denoise branch (1.0 =
   //! native resolution; >1 when the denoiser runs at reduced resolution).
   float denoiseScale = 1.0f;
+  //! The denoiser scale actually applied to the buffers (denoiseScale, but
+  //! forced to 1.0 for the RTX/OptiX path which cannot downsample its
+  //! device-to-device G-buffer readback).  The present pass and the worker
+  //! layout use THIS so a scaled setting cannot mismatch the buffer sizes.
+  float denoiseEffectiveScale = 1.0f;
   //! Minimum accumulated samples before the denoiser output is published.
   //! The denoiser is trained on partially converged images; feeding it a
   //! one- or two-sample frame produces a blurred/junk result (NVIDIA's
@@ -1006,6 +1039,10 @@ private:
   std::atomic<bool> oidnWorkerDone {false};
   //! The worker joinable handle (one shot per denoise-at-target).
   std::thread oidnWorker;
+  //! True when the denoise GPU-downsample pass already wrote the normalized
+  //! (and, at scale>1, downsampled) working set into the staging block, so the
+  //! worker skips its own CPU normalize/downsample and only runs OIDN/FSR.
+  bool oidnGpuPrepared = false;
 
 
   // --- RTX (OptiX + CUDA) backend -----------------------------------------

@@ -1007,7 +1007,7 @@ SoRTXRenderBackend::recordTraceAndPresent(const SoRenderParams & params,
     0.0f,
     (this->denoiseResultReady && (this->ptAccumulating || this->ptConverged))
       ? 1.0f : 0.0f,
-    this->denoiseScale,
+    this->denoiseEffectiveScale,
     0.0f,
     0.0f};
   if (getenv("FC_VULKAN_PT_DENOISE_TIMING")) {

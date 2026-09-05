@@ -19,6 +19,7 @@
 #include "rendering/vulkan/rt/ShadowClosestHit.spv.h"
 #include "rendering/vulkan/rt/PresentVertex.spv.h"
 #include "rendering/vulkan/rt/PresentFragment.spv.h"
+#include "rendering/vulkan/rt/DenoiseDownsample.spv.h"
 #include <rendering/SoRTXRenderBackend/SoRTXRenderBackendP.h>
 
 using namespace SoRTXBackend;
@@ -151,8 +152,34 @@ SoRTXRenderBackend::createDescriptorSetLayout()
   pci.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
   pci.bindingCount = 6;
   pci.pBindings = presentBindings;
-  return vkCreateDescriptorSetLayout(this->device, &pci, this->allocator,
-                                     &this->presentSetLayout) == VK_SUCCESS;
+  if (vkCreateDescriptorSetLayout(this->device, &pci, this->allocator,
+                                  &this->presentSetLayout) != VK_SUCCESS) {
+    return false;
+  }
+  return this->createDenoiseDownsampleSetLayout();
+}
+
+bool
+SoRTXRenderBackend::createDenoiseDownsampleSetLayout()
+{
+  // Four full-res G-buffer inputs (binding 0-3) plus the single host staging
+  // allocation the shader writes the normalized working set into (binding 4).
+  // All are storage buffers at this set's index 0; the shader addresses the
+  // output regions via push-constant vec4 element offsets.
+  VkDescriptorSetLayoutBinding bindings[5] {};
+  for (uint32_t b = 0; b < 5; ++b) {
+    bindings[b].binding = b;
+    bindings[b].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+    bindings[b].descriptorCount = 1;
+    bindings[b].stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+  }
+  VkDescriptorSetLayoutCreateInfo ci {};
+  ci.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
+  ci.bindingCount = 5;
+  ci.pBindings = bindings;
+  return vkCreateDescriptorSetLayout(this->device, &ci, this->allocator,
+                                     &this->denoiseDownsampleSetLayout) ==
+    VK_SUCCESS;
 }
 
 bool
@@ -168,11 +195,11 @@ SoRTXRenderBackend::createDescriptorPool()
   sizes[3].type = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
   sizes[3].descriptorCount = 2;
   sizes[4].type = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
-  sizes[4].descriptorCount = 48;
+  sizes[4].descriptorCount = 64;
 
   VkDescriptorPoolCreateInfo ci {};
   ci.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
-  ci.maxSets = 4;
+  ci.maxSets = 5;
   ci.poolSizeCount = 5;
   ci.pPoolSizes = sizes;
   return vkCreateDescriptorPool(this->device, &ci, this->allocator,
@@ -224,6 +251,11 @@ SoRTXRenderBackend::createShaderModules()
   if (!load(coin_vulkan_rt_presentfragment_spirv,
             coin_vulkan_rt_presentfragment_spirv_count,
             this->presentFragmentModule)) {
+    return false;
+  }
+  if (!load(coin_vulkan_rt_denoisedownsample_spirv,
+            coin_vulkan_rt_denoisedownsample_spirv_count,
+            this->denoiseDownsampleModule)) {
     return false;
   }
   return true;
@@ -290,6 +322,19 @@ SoRTXRenderBackend::updateDescriptors()
     if (vkAllocateDescriptorSets(this->device, &ai,
                                  &this->presentDescriptorSets[pair]) !=
         VK_SUCCESS) {
+      return false;
+    }
+  }
+  if (this->denoiseDownsampleDescriptorSet == VK_NULL_HANDLE) {
+    VkDescriptorSetAllocateInfo ai {};
+    ai.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
+    ai.descriptorPool = this->descriptorPool;
+    ai.descriptorSetCount = 1;
+    ai.pSetLayouts = &this->denoiseDownsampleSetLayout;
+    if (vkAllocateDescriptorSets(this->device, &ai,
+                                 &this->denoiseDownsampleDescriptorSet) !=
+        VK_SUCCESS) {
+      this->denoiseDownsampleDescriptorSet = VK_NULL_HANDLE;
       return false;
     }
   }
@@ -635,6 +680,49 @@ SoRTXRenderBackend::updateDescriptors()
   // once this flag is set.
   this->rtSetValid[this->descriptorSetIndex] = true;
   this->presentSetValid[this->descriptorSetIndex] = true;
+
+  // Denoiser G-buffer normalize/downsample binding: the four full-res G-buffers
+  // (binding 0-3) and the host staging allocation the shader writes the
+  // normalized working set into (binding 4).  Rewritten on every descriptor
+  // refresh after a buffer (re)creation so handles stay valid across resizes.
+  if (this->denoiseDownsampleDescriptorSet != VK_NULL_HANDLE &&
+      this->accumBuffer != VK_NULL_HANDLE &&
+      this->albedoBuffer != VK_NULL_HANDLE &&
+      this->normalBuffer != VK_NULL_HANDLE &&
+      this->motionBuffer != VK_NULL_HANDLE &&
+      this->denoiseColorBuf != VK_NULL_HANDLE) {
+    VkDescriptorBufferInfo dsAccum {};
+    dsAccum.buffer = this->accumBuffer;
+    dsAccum.range = VK_WHOLE_SIZE;
+    VkDescriptorBufferInfo dsAlbedo {};
+    dsAlbedo.buffer = this->albedoBuffer;
+    dsAlbedo.range = VK_WHOLE_SIZE;
+    VkDescriptorBufferInfo dsNormal {};
+    dsNormal.buffer = this->normalBuffer;
+    dsNormal.range = VK_WHOLE_SIZE;
+    VkDescriptorBufferInfo dsMotion {};
+    dsMotion.buffer = this->motionBuffer;
+    dsMotion.range = VK_WHOLE_SIZE;
+    VkDescriptorBufferInfo dsStaging {};
+    dsStaging.buffer = this->denoiseColorBuf;
+    dsStaging.range = VK_WHOLE_SIZE;
+    VkWriteDescriptorSet dwrites[5] {};
+    const VkDescriptorBufferInfo * dinfos[5] = {
+      &dsAccum, &dsAlbedo, &dsNormal, &dsMotion, &dsStaging};
+    for (uint32_t b = 0; b < 5; ++b) {
+      dwrites[b].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+      dwrites[b].dstSet = this->denoiseDownsampleDescriptorSet;
+      dwrites[b].dstBinding = b;
+      dwrites[b].descriptorCount = 1;
+      dwrites[b].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+      dwrites[b].pBufferInfo = dinfos[b];
+    }
+    vkUpdateDescriptorSets(this->device, 5, dwrites, 0, nullptr);
+    this->denoiseDownsampleValid = true;
+  }
+  else {
+    this->denoiseDownsampleValid = false;
+  }
   return true;
 }
 
@@ -738,9 +826,47 @@ SoRTXRenderBackend::createPipelines()
   computeCI.stage.module = this->pathTraceModule;
   computeCI.stage.pName = "main";
   computeCI.layout = this->rtPipelineLayout;
-  return vkCreateComputePipelines(this->device, VK_NULL_HANDLE, 1, &computeCI,
-                                  this->allocator,
-                                  &this->computePipeline) == VK_SUCCESS;
+  if (vkCreateComputePipelines(this->device, VK_NULL_HANDLE, 1, &computeCI,
+                               this->allocator,
+                               &this->computePipeline) != VK_SUCCESS) {
+    return false;
+  }
+  return this->createDenoiseDownsamplePipeline();
+}
+
+bool
+SoRTXRenderBackend::createDenoiseDownsamplePipeline()
+{
+  VkPipelineLayoutCreateInfo layoutCI {};
+  layoutCI.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
+  layoutCI.setLayoutCount = 1;
+  layoutCI.pSetLayouts = &this->denoiseDownsampleSetLayout;
+  VkPushConstantRange push {};
+  push.stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+  push.offset = 0;
+  push.size = sizeof(DenoiseDownsamplePush);
+  layoutCI.pPushConstantRanges = &push;
+  layoutCI.pushConstantRangeCount = 1;
+  if (vkCreatePipelineLayout(this->device, &layoutCI, this->allocator,
+                             &this->denoiseDownsamplePipelineLayout) !=
+      VK_SUCCESS) {
+    return false;
+  }
+  VkComputePipelineCreateInfo computeCI {};
+  computeCI.sType = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO;
+  computeCI.stage.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+  computeCI.stage.stage = VK_SHADER_STAGE_COMPUTE_BIT;
+  computeCI.stage.module = this->denoiseDownsampleModule;
+  computeCI.stage.pName = "main";
+  computeCI.layout = this->denoiseDownsamplePipelineLayout;
+  if (vkCreateComputePipelines(this->device, VK_NULL_HANDLE, 1, &computeCI,
+                               this->allocator,
+                               &this->denoiseDownsamplePipeline) !=
+      VK_SUCCESS) {
+    return false;
+  }
+  checkDenoiseDownsampleLayout();
+  return true;
 }
 
 bool

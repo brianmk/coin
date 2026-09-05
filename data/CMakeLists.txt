@@ -176,6 +176,8 @@ if(COIN_BUILD_VULKAN_RENDERER)
       data/shaders/vulkan/rt/PresentVertex.glsl vert)
     coin_embed_vulkan_spirv(vulkan_rt_presentfragment
       data/shaders/vulkan/rt/PresentFragment.glsl frag)
+    coin_embed_vulkan_spirv(vulkan_rt_denoisedownsample
+      data/shaders/vulkan/rt/DenoiseDownsample.glsl comp)
 
     add_custom_target(coin_regenerate_vulkan_spirv
       DEPENDS ${COIN_VULKAN_SPIRV_REGENERATE_TARGETS}
@@ -192,7 +194,8 @@ if(COIN_BUILD_VULKAN_RENDERER)
       ShadowMiss.spv.h
       ShadowClosestHit.spv.h
       PresentVertex.spv.h
-      PresentFragment.spv.h)
+      PresentFragment.spv.h
+      DenoiseDownsample.spv.h)
     set(COIN_RT_SPIRV_COPY_COMMANDS)
     foreach(_rt_spv ${COIN_RT_SPIRV_FILES})
       list(APPEND COIN_RT_SPIRV_COPY_COMMANDS
