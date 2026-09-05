@@ -262,26 +262,6 @@ hashPositions(const SoGeometryDesc & geometry, uint32_t vertexStride)
   return h;
 }
 
-// FNV-1a of a command's model matrix (object-to-world).  Used to detect
-// instance-transform changes that require a TLAS rebuild without any geometry
-// content change.  The camera (view/proj) is intentionally NOT part of this:
-// the AS lives in world space, so an orbit of a static scene never dirties the
-// TLAS.
-inline uint64_t
-hashTransformSignal(const SbMatrix & m)
-{
-  uint64_t h = 1469598103934665603ull;
-  const auto mix = [&h](uint64_t v) {
-    CoinRenderDetail::fnvMix(h, v);
-  };
-  for (int i = 0; i < 4; ++i) {
-    for (int j = 0; j < 4; ++j) {
-      mix(std::bit_cast<uint32_t>(m[i][j]));
-    }
-  }
-  return h;
-}
-
 // FNV-1a hash of a command's index data only (full walk up to the same
 // 65536 threshold as hashGeometry, uniform sampling beyond).
 inline uint64_t

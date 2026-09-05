@@ -66,11 +66,16 @@ struct RTXCachedGeometry {
   // Cheap per-frame change signal (hashGeometrySignal).  When it matches
   // contentHash is reused; only a mismatch triggers the full hashGeometry().
   uint64_t changeSignal = 0;
-  // Signal of the command's modelMatrix, used to decide whether the TLAS
-  // instance set (and the NEE/material world transforms) changed even though
-  // the geometry content did not.  Camera movement does NOT touch this (the
-  // AS is world-space), so an orbit of a static scene can skip the TLAS build.
-  uint64_t transformSignal = 0;
+  // Raw storage of the command's modelMatrix (SbMatrix is exactly
+  // float[4][4]) as of the last time this entry was seen, compared with a
+  // 64-byte memcmp to decide whether the TLAS instance set (and the
+  // NEE/material world transforms) changed even though the geometry content
+  // did not.  A direct bit-compare instead of an FNV hash: no per-frame
+  // hashing cost, no collision risk, and an all-zero sentinel can never
+  // match a real (non-singular) matrix.  Camera movement does NOT touch
+  // this (the AS is world-space), so an orbit of a static scene can skip
+  // the TLAS build.
+  float transformBits[16] = {};
   // Command that last touched this entry (per-frame arena pointer; used
   // only as an identity key for map rebuilds after cache eviction).
   const SoRenderCommand * commandKey = nullptr;
@@ -848,6 +853,12 @@ private:
   // A count > 0 means the TLAS instance set differs from last frame, so the
   // MODE_UPDATE refit path is suppressed in favour of a full MODE_BUILD.
   uint32_t statTlasCulled = 0;
+  // CPU cost of this frame's updateGeometryCache() scan (per-command
+  // topology/transform/geometry change detection), in milliseconds.  Feeds
+  // the [RTDBG] frameTiming geomScan= field under FC_VULKAN_FRAME_TIMING so
+  // the profile harness can see the retained-AS bookkeeping cost separately
+  // from the BLAS/TLAS build (asRecord) cost.
+  double lastGeomScanMs = 0.0;
   // Change-detection for the [RTDBG] buildTlas line (log only on a change).
   bool lastTlasDebugLogged = false;
   size_t lastTlasTotal = 0;

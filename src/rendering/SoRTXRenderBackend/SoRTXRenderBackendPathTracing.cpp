@@ -464,7 +464,15 @@ SoRTXRenderBackend::recordAccelerationStructures(
   // The geometry cache update must run first: it computes cacheChanged,
   // which the path tracing state machine consumes as the scene-change
   // signal (see updatePathTracingState()).
-  this->updateGeometryCache(drawlist);
+  {
+    const long geomScanUs0 = (long)std::chrono::duration_cast<std::chrono::microseconds>(
+      std::chrono::steady_clock::now().time_since_epoch()).count();
+    this->updateGeometryCache(drawlist);
+    this->lastGeomScanMs =
+      (std::chrono::duration_cast<std::chrono::microseconds>(
+         std::chrono::steady_clock::now().time_since_epoch()).count() -
+       geomScanUs0) * 0.001;
+  }
   this->updatePathTracingState(drawlist, params, target, cmd);
   // An accumulated result is only valid while accumulating; a camera move or
   // scene change (which updatePathTracingState may turn into a non-

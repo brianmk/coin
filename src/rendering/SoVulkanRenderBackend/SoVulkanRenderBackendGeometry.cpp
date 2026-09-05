@@ -682,7 +682,8 @@ SoVulkanRenderBackend::destroyAllGeometryBlocks()
 
 void
 SoVulkanRenderBackend::updateGeometryCache(const SoDrawList & drawlist,
-                                           const bool overlaysOnly)
+                                           const bool overlaysOnly,
+                                           const bool geometryContentUnchanged)
 {
   // The frame boundary was handled by beginFrame() at the entry point.
 
@@ -750,8 +751,14 @@ SoVulkanRenderBackend::updateGeometryCache(const SoDrawList & drawlist,
       entry.normalCount == geometry.normalCount &&
       entry.vertexStride == vertexStride &&
       entry.texcoordStride == geometry.texcoordStride;
+    // The sampled content re-hash only guards against in-place edits of a
+    // retained buffer, and those can only be produced by a traversal.  On a
+    // replayed frame (geometryContentUnchanged) no traversal ran, so
+    // pointer-identical retained geometry is guaranteed unchanged and the
+    // per-command FNV walk (up to ~3k sampled values) is skipped.
     const bool geometryMatches = identityMatches &&
-      entry.contentHash == hashGeometryContent(geometry);
+      (geometryContentUnchanged ||
+       entry.contentHash == hashGeometryContent(geometry));
     if (!geometryMatches) {
       needsGeometry[static_cast<size_t>(i)] = 1;
       if (geometry.retained) {

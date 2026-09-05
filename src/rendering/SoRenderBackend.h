@@ -67,6 +67,18 @@ struct SoRenderParams {
   //! debug traces (RTDBG lines), captured frame dumps and probe phase
   //! markers.  0 means "not supplied".
   uint32_t frame = 0;
+
+  //! Set by the embedding (SoVulkanRenderManager) when this frame is a
+  //! retained-IR replay: the main scene graph was unchanged, no full
+  //! traversal ran, and the main retained geometry content is therefore
+  //! bit-identical to the previous frame.  A backend may use this to skip
+  //! re-verifying the sampled content hash of geometry whose pointer
+  //! identity already matches its cache (the hash exists to catch in-place
+  //! edits, which can only be produced by a traversal, and none ran).  It
+  //! says nothing about freshly-recorded overlay/decoration commands, which
+  //! are re-produced every frame and must still be verified.  FALSE by
+  //! default so a backend that ignores it is always correct.
+  SbBool geometryContentUnchanged = FALSE;
 };
 
 /*!

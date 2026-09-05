@@ -461,7 +461,10 @@ SoVulkanRenderBackend::updateLightingUniforms(const SoDrawList & drawlist,
     command.viewMatrix.getValue(m);
   }
   else {
-    params.viewMatrix.getValue(m);
+    // Frame view, converted once per render (cacheFrameMatrices): the main
+    // pass draws every command with the frame camera, so no per-draw
+    // double -> float conversion.
+    std::memcpy(m, this->frameViewFloats, sizeof(float) * 16);
   }
   std::memcpy(ubo.view, &m[0][0], sizeof(float) * 16);
   command.modelMatrix.getValue(m);
@@ -684,7 +687,9 @@ SoVulkanRenderBackend::recordDrawCommand(const SoDrawList & drawlist,
     command.projMatrix.getValue(projValue);
   }
   else {
-    params.projMatrix.getValue(projValue);
+    // Frame projection, converted once per render (cacheFrameMatrices): the
+    // main pass projects every command with the frame camera.
+    std::memcpy(projValue, this->frameProjFloats, sizeof(float) * 16);
   }
   if (COIN_VULKAN_ENV_FLAG("FC_VULKAN_OVERLAY_CAM_DEBUG")
       && command.pass == SO_RENDERPASS_OVERLAY
