@@ -76,6 +76,16 @@ struct RTXCachedGeometry {
   // this (the AS is world-space), so an orbit of a static scene can skip
   // the TLAS build.
   float transformBits[16] = {};
+  // Hash of the command's render-affecting material fields (diffuse,
+  // ambient, specular, emissive, shininess, opacity, shading model,
+  // two-sided, metalness/roughness) as of the last time this entry was
+  // seen.  The material buffer is re-uploaded every frame, so a pure
+  // material edit (same geometry, same transform) does not change the
+  // geometry content hash above and would otherwise never signal a scene
+  // change -- the path tracer would keep its stale accumulation until the
+  // camera moved.  Comparing this hash fires cacheChanged on a material
+  // edit so the accumulation restarts.  0 is never produced by the hash.
+  uint64_t materialHash = 0;
   // Command that last touched this entry (per-frame arena pointer; used
   // only as an identity key for map rebuilds after cache eviction).
   const SoRenderCommand * commandKey = nullptr;
@@ -308,6 +318,22 @@ public:
     the new scale.
   */
   void setDenoiserScale(float scale);
+
+  /*!
+    \brief Provide the authoritative scene lighting from the GL host.
+
+    The GL viewport owns the real light state (the viewer headlight plus any
+    document SoLight nodes).  The IR draw-list lighting capture
+    (SoLightElement::getLights) is unreliable for the retained path tracer --
+    the light count can drop to zero once the scene is replayed, leaving the
+    ray tracer with no lights and rendering surfaces at ambient-only
+    (near-black).  Instead of deriving lights from the IR, the host pushes the
+    effective eye-space light set here and updateMaterials() uses it verbatim.
+    Passing an empty set returns the backend to the per-command IR lighting.
+    The \a ambient is the scene ambient (already intensity-scaled).
+  */
+  void setSceneLights(const std::vector<SoLightData> & lights,
+                      const SbVec3f & ambient);
 
   /*!
     \brief Record the draw list into a caller-owned command buffer/render pass.
@@ -778,6 +804,15 @@ private:
   // Reusable scratch for updateMaterials(), grown on demand instead of
   // allocating a fresh std::vector<RTMaterial> every frame.
   std::vector<RTMaterial> materialScratch;
+  // Authoritative scene lighting pushed by the GL host via setSceneLights().
+  // When non-empty, updateMaterials() uses these eye-space lights instead of
+  // the per-command IR SoLightingData (whose captured light count can drop to
+  // zero on the retained/replayed path tracer, rendering surfaces black).
+  // The eye-space convention matches the IR fill (view-fixed, the RT shader
+  // converts back through frame.u_viewInverse), so a camera orbit keeps the
+  // headlight pointing at the camera without a per-frame re-derive.
+  std::vector<SoLightData> sceneLights;
+  SbVec3f sceneAmbient = SbVec3f(0.2f, 0.2f, 0.2f);
   // Cached PBR/lighting env overrides.  These are loop-invariant per frame;
   // reading them once avoids a getenv()/envFlagEnabled() per command.
   bool rtPbrEnabled = false;

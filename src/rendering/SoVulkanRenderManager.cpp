@@ -949,6 +949,16 @@ SoVulkanRenderManager::setEnvMap(const int index)
   this->pimpl->rtxBackend.setEnvMap(index);
 }
 
+void
+SoVulkanRenderManager::setSceneLights(const std::vector<SoLightData> & lights,
+                                      const SbVec3f & ambient)
+{
+  if (!this->pimpl->rtxBackendInitialized) {
+    return;
+  }
+  this->pimpl->rtxBackend.setSceneLights(lights, ambient);
+}
+
 int
 SoVulkanRenderManager::getEnvMap(void) const
 {

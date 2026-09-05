@@ -11,6 +11,7 @@
 #include <cmath>
 #include <cstring>
 #include <string>
+#include <thread>
 #include "rendering/vulkan/rt/PathTrace.spv.h"
 #include "rendering/vulkan/rt/Raygen.spv.h"
 #include "rendering/vulkan/rt/Miss.spv.h"
@@ -631,8 +632,13 @@ SoRTXRenderBackend::updateGeometryCache(const SoDrawList & drawlist)
       ? geometry.vertexStride : sizeof(float) * 3;
     const bool indexed = geometry.indexCount > 0 && geometry.indices != nullptr;
 
-    const bool traced = (command.pass != SO_RENDERPASS_TRANSPARENT &&
-                         command.pass != SO_RENDERPASS_OVERLAY);
+    const bool traced = (command.pass != SO_RENDERPASS_OVERLAY);
+    if (!traced && getenv("FC_VULKAN_RT_GEO") &&
+        geometry.vertexCount == 6 && geometry.indexCount == 0) {
+      fprintf(stderr, "[GCR] FR fr=%u OVERLAY vc=6 cmd=%p pos=%p\n", frame,
+              static_cast<const void *>(&command),
+              static_cast<const void *>(geometry.positions));
+    }
     if (!traced) {
       // A traced base command that the selection highlight temporarily
       // promotes out of the OPAQUE pass (OPAQUE -> OVERLAY on select, back on
@@ -643,8 +649,10 @@ SoRTXRenderBackend::updateGeometryCache(const SoDrawList & drawlist)
       // Keep the matching entry alive by content signal (the cheap probe used
       // by the traced path below) so it re-keys, with no rebuild and no
       // cacheChanged, when the command returns to the traced pass.  Pure
-      // non-traced commands (nav cube, axis cross, transparent shells) that
-      // were never traced have no matching entry and are ignored here.
+      // non-traced commands (nav cube, axis cross) that were never traced have
+      // no matching entry and are ignored here.  Transparent commands (SO_
+      // RENDERPASS_TRANSPARENT) ARE traced now so the path tracer sees the
+      // translucent geometry and composites it as thin glass.
       const uint64_t signal = hashGeometrySignal(geometry, vertexStride, indexed);
       const auto found = this->commandToCache.find(&command);
       if (found != this->commandToCache.end()) {
@@ -674,6 +682,27 @@ SoRTXRenderBackend::updateGeometryCache(const SoDrawList & drawlist)
       continue;
     }
 
+    // TEMP breadcrumb: per-frame pointer/thread/retained trace for the probe
+    // box so we can see whether the geometry pointer is stable across frames
+    // and on which thread updateGeometryCache reads it.
+    if (getenv("FC_VULKAN_RT_GEO") &&
+        geometry.indexCount == 0 &&
+        (geometry.vertexCount == 36 || geometry.vertexCount == 6)) {
+      const float * tp = geometry.positions;
+      const float * tm = &command.modelMatrix[0][0];
+      fprintf(stderr,
+              "[GCR] FR fr=%u tid=%llx cmd=%p pos=%p ret=%d pass=%d "
+              "v0=(%.3f,%.3f,%.3f) m00=%.3f m11=%.3f m22=%.3f "
+              "t=(%.3f,%.3f,%.3f)\n",
+              frame,
+              static_cast<unsigned long long>(std::hash<std::thread::id>{}(std::this_thread::get_id())),
+              static_cast<const void *>(&command),
+              static_cast<const void *>(tp),
+              geometry.retained ? 1 : 0,
+              static_cast<int>(command.pass),
+              tp[0], tp[1], tp[2],
+              tm[0], tm[5], tm[10], tm[12], tm[13], tm[14]);
+    }
     // A singular (degenerate) model matrix means the command collapses to a
     // point or line -- e.g. the view's hidden anchor cube, which FreeCAD
     // hides by scaling it to (0,0,0) (see View3DInventorViewer::construct*).
@@ -698,6 +727,29 @@ SoRTXRenderBackend::updateGeometryCache(const SoDrawList & drawlist)
       if (det < 1e-9 && det > -1e-9) {
         continue;
       }
+    }
+
+    // A degenerate GEOmetry (all positions collapsed to a point) is the
+    // geometry counterpart of the singular-transform guard above: FreeCAD's
+    // selection/preselection highlight momentarily swaps a shape's base
+    // geometry for a degenerate placeholder, so the base OPAQUE command may be
+    // re-recorded with all vertices piled at a single point for a frame or
+    // two.  Treating that as a real content change would (a) set cacheChanged,
+    // restarting the path-tracing accumulation on every hover ("the lights
+    // re-calc"), and (b) refit the BLAS with the collapsed point so a ray
+    // transmitting through glass misses the surface and reads black.  Skip it
+    // without hitting the content/transform/material hashing: re-stamp the
+    // existing cache entry's liveness so it is NOT evicted when the valid
+    // geometry returns next frame, and leave cacheChanged untouched so the
+    // tracer keeps its settled image through the transient.
+    if (geometryDegenerate(geometry, vertexStride)) {
+      const auto dFound = this->commandToCache.find(&command);
+      if (dFound != this->commandToCache.end()) {
+        RTXCachedGeometry & e = this->geometryCache[dFound->second];
+        e.cacheGeneration = frame;
+        e.commandKey = &command;
+      }
+      continue;
     }
 
     // Cheap probe first: only run the full index hash when the change signal
@@ -733,6 +785,45 @@ SoRTXRenderBackend::updateGeometryCache(const SoDrawList & drawlist)
           ((entry.idxKey != nullptr) == indexed) &&
           entry.indexHash == indexHash;
         this->cacheChanged = true;
+        if (getenv("FC_VULKAN_RT_GEO")) {
+          const float * p0 = static_cast<const float *>(geometry.positions);
+          fprintf(stderr,
+                  "[GCR] CONTENT fr=%u tid=%llx cmd=%p pass=%d vc=%u ic=%u "
+                  "stride=%u ret=%d old=%016llx new=%016llx "
+                  "vhash %016llx -> %016llx "
+                  "ihash %016llx -> %016llx p0=(%.4f,%.4f,%.4f) "
+                  "plast=(%.4f,%.4f,%.4f) posKey=%p new=%p idxKey=%p new=%p "
+                  "topologyStable=%d\n",
+                  frame,
+                  static_cast<unsigned long long>(std::hash<std::thread::id>{}(std::this_thread::get_id())),
+                  static_cast<const void *>(&command),
+                  static_cast<int>(command.pass), geometry.vertexCount,
+                  geometry.indexCount, vertexStride,
+                  geometry.retained ? 1 : 0,
+                  static_cast<unsigned long long>(entry.contentHash),
+                  static_cast<unsigned long long>(hash),
+                  static_cast<unsigned long long>(entry.vertexHash),
+                  static_cast<unsigned long long>(vertexHash),
+                  static_cast<unsigned long long>(entry.indexHash),
+                  static_cast<unsigned long long>(indexHash),
+                  p0[0], p0[1], p0[2],
+                  p0[3 * (geometry.vertexCount - 1)],
+                  p0[3 * (geometry.vertexCount - 1) + 1],
+                  p0[3 * (geometry.vertexCount - 1) + 2],
+                  static_cast<const void *>(entry.posKey),
+                  static_cast<const void *>(geometry.positions),
+                  static_cast<const void *>(entry.idxKey),
+                  static_cast<const void *>(geometry.indices),
+                  topologyStable ? 1 : 0);
+          for (uint32_t vi = 0; vi < geometry.vertexCount; ++vi) {
+            fprintf(stderr, "[GCR] V %u (%.4f,%.4f,%.4f) bits=%08x:%08x:%08x\n",
+                    vi,
+                    p0[3 * vi], p0[3 * vi + 1], p0[3 * vi + 2],
+                    std::bit_cast<uint32_t>(p0[3 * vi]),
+                    std::bit_cast<uint32_t>(p0[3 * vi + 1]),
+                    std::bit_cast<uint32_t>(p0[3 * vi + 2]));
+          }
+        }
         if (topologyStable) {
           // In-place UPDATE build (see refitBlas()); keep buffers and BLAS.
           entry.refitPending = true;
@@ -784,6 +875,19 @@ SoRTXRenderBackend::updateGeometryCache(const SoDrawList & drawlist)
       }
       else {
         this->cacheChanged = true;
+        if (getenv("FC_VULKAN_RT_GEO")) {
+          fprintf(stderr,
+                  "[GCR] NEW fr=%u tid=%llx cmd=%p pass=%d vc=%u ic=%u "
+                  "stride=%u ret=%d pos=%p hash=%016llx\n",
+                  frame,
+                  static_cast<unsigned long long>(std::hash<std::thread::id>{}(std::this_thread::get_id())),
+                  static_cast<const void *>(&command),
+                  static_cast<int>(command.pass), geometry.vertexCount,
+                  geometry.indexCount, vertexStride,
+                  geometry.retained ? 1 : 0,
+                  static_cast<const void *>(geometry.positions),
+                  static_cast<unsigned long long>(hash));
+        }
         RTXCachedGeometry & entry = this->getOrCreateCache(&command);
         entry.posKey = geometry.positions;
         entry.idxKey = geometry.indices;
@@ -794,6 +898,7 @@ SoRTXRenderBackend::updateGeometryCache(const SoDrawList & drawlist)
         entry.changeSignal = signal;
         entry.vertexHash = hashPositions(geometry, vertexStride);
         entry.indexHash = indexed ? hashIndices(geometry) : 0;
+        entry.materialHash = hashMaterial(command.material);
         entryPtr = &entry;
       }
     }
@@ -809,8 +914,35 @@ SoRTXRenderBackend::updateGeometryCache(const SoDrawList & drawlist)
       if (std::memcmp(entryPtr->transformBits, m,
                       sizeof(entryPtr->transformBits)) != 0) {
         this->asTransformChanged = true;
+        if (getenv("FC_VULKAN_RT_GEO")) {
+          fprintf(stderr, "[GCR] TRANSFORM cmd=%p pass=%d vc=%u\n",
+                  static_cast<const void *>(&command),
+                  static_cast<int>(command.pass), geometry.vertexCount);
+        }
         std::memcpy(entryPtr->transformBits, m,
                     sizeof(entryPtr->transformBits));
+      }
+    }
+    // Material-content change detection: a pure material edit (recolor,
+    // Transparency change) keeps the geometry content and transform hash
+    // above identical, so none of {cacheChanged, asTransformChanged} would
+    // fire -- and because the path tracer's scene-change signal IS
+    // cacheChanged (see updatePathTracingState), a converged run would keep
+    // its stale accumulation until the camera moved.  The material buffer is
+    // still re-uploaded each frame with the new values, so this only needs to
+    // flag the scene change so the tracer restarts; no cache entry is rebuilt.
+    {
+      const uint64_t mh = hashMaterial(command.material);
+      if (mh != 0 && mh != entryPtr->materialHash) {
+        this->cacheChanged = true;
+        if (getenv("FC_VULKAN_RT_GEO")) {
+          fprintf(stderr, "[GCR] MATERIAL cmd=%p pass=%d vc=%u old=%016llx new=%016llx\n",
+                  static_cast<const void *>(&command),
+                  static_cast<int>(command.pass), geometry.vertexCount,
+                  static_cast<unsigned long long>(entryPtr->materialHash),
+                  static_cast<unsigned long long>(mh));
+        }
+        entryPtr->materialHash = mh;
       }
     }
     entryPtr->commandKey = &command;
@@ -830,6 +962,18 @@ SoRTXRenderBackend::updateGeometryCache(const SoDrawList & drawlist)
     }
   }
   if (anyStale) {
+    if (getenv("FC_VULKAN_RT_GEO")) {
+      size_t nstale = 0;
+      for (size_t i = 0; i < this->geometryCache.size(); ++i) {
+        if (this->geometryCache[i].cacheGeneration != frame) {
+          ++nstale;
+          fprintf(stderr, "[GCR] EVICT idx=%zu vc=%u ic=%u\n", i,
+                  this->geometryCache[i].vertexCount,
+                  this->geometryCache[i].indexCount);
+        }
+      }
+      fprintf(stderr, "[GCR] EVICT total=%zu\n", nstale);
+    }
     // Removing geometry is a scene change: the TLAS must be rebuilt (not
     // MODE_UPDATE refit) so the instance set reflects the liveness above,
     // and the accumulation/history reset.
@@ -859,11 +1003,9 @@ SoRTXRenderBackend::updateGeometryCache(const SoDrawList & drawlist)
       if (c.geometry.topology != SO_TOPOLOGY_TRIANGLES) continue;
       tri++;
       if (c.geometry.vertexCount) vertsAll += c.geometry.vertexCount;
-      const bool traced = (c.pass != SO_RENDERPASS_TRANSPARENT &&
-                           c.pass != SO_RENDERPASS_OVERLAY);
+      const bool traced = (c.pass != SO_RENDERPASS_OVERLAY);
       if (traced) { triTraced++; vertsTraced += c.geometry.vertexCount; }
       else if (c.pass == SO_RENDERPASS_OVERLAY) triOverlay++;
-      else if (c.pass == SO_RENDERPASS_TRANSPARENT) triTrans++;
     }
     int live = 0, blasLive = 0;
     for (const RTXCachedGeometry & e : this->geometryCache) {
@@ -1454,8 +1596,7 @@ SoRTXRenderBackend::buildTlas(const SoDrawList & drawlist,
   }
   for (int i = 0; i < drawlist.getNumCommands(); ++i) {
     const SoRenderCommand & command = drawlist.getCommand(i);
-    if (command.pass == SO_RENDERPASS_TRANSPARENT ||
-        command.pass == SO_RENDERPASS_OVERLAY) continue;
+    if (command.pass == SO_RENDERPASS_OVERLAY) continue;
     const auto found = this->commandToCache.find(&command);
     if (found == this->commandToCache.end()) continue;
     const RTXCachedGeometry & entry = this->geometryCache[found->second];
@@ -1528,7 +1669,13 @@ SoRTXRenderBackend::buildTlas(const SoDrawList & drawlist,
     instance.instanceCustomIndex = static_cast<uint32_t>(i);
     instance.mask = 0xFF;
     instance.instanceShaderBindingTableRecordOffset = 0;
-    instance.flags = 0;
+    // Force-opaque at the instance level: the geometry is opaque triangles
+    // (translucency is composited deterministically in the path loop, not via
+    // any-hit), so instruct the driver to skip any-hit processing for this
+    // instance even if a ray did not set the OPAQUE flag.  This lets traversal
+    // use the opaque fast path and avoids any-hit shader invocation overhead
+    // on primary/shadow rays.
+    instance.flags = VK_GEOMETRY_INSTANCE_FORCE_OPAQUE_BIT_KHR;
     // The BLAS device address is stable for the BLAS lifetime and was
     // captured at build time, so querying it here every frame is wasted work.
     // Fall back to a query only if the cached address is missing.
@@ -1711,6 +1858,14 @@ SoRTXRenderBackend::buildTlas(const SoDrawList & drawlist,
 // --- Material buffer ------------------------------------------------------
 
 void
+SoRTXRenderBackend::setSceneLights(const std::vector<SoLightData> & lights,
+                                   const SbVec3f & ambient)
+{
+  this->sceneLights = lights;
+  this->sceneAmbient = ambient;
+}
+
+void
 SoRTXRenderBackend::updateMaterials(const SoDrawList & drawlist)
 {
   const int count = drawlist.getNumCommands();
@@ -1841,16 +1996,31 @@ SoRTXRenderBackend::updateMaterials(const SoDrawList & drawlist)
 
     // Fold the scene ambient into the material ambient (matches the raster
     // shader: litColor += ambientLight * materialAmbient).
-    out.ambient[0] = lighting->ambient[0] * material.ambient[0];
-    out.ambient[1] = lighting->ambient[1] * material.ambient[1];
-    out.ambient[2] = lighting->ambient[2] * material.ambient[2];
+    // When the GL host pushed an authoritative light set (setSceneLights),
+    // use its ambient; otherwise use the per-command IR lighting ambient.
+    const SbVec3f & sceneAmbient = this->sceneLights.empty()
+      ? lighting->ambient : this->sceneAmbient;
+    out.ambient[0] = sceneAmbient[0] * material.ambient[0];
+    out.ambient[1] = sceneAmbient[1] * material.ambient[1];
+    out.ambient[2] = sceneAmbient[2] * material.ambient[2];
     out.ambient[3] = 1.0f;
 
+    // Light list: the GL-pushed authoritative set (the viewer headlight +
+    // document lights) when present, else the per-command IR capture.  The
+    // IR capture can drop to zero lights on the retained/replayed path
+    // tracer (SoLightElement::getLights goes empty after the first frames),
+    // which renders surfaces at ambient-only (near-black).  The pushed set
+    // is the reliable source and keeps the headlight view-fixed in eye
+    // space (the RT shader converts back through frame.u_viewInverse).
+    const std::vector<SoLightData> * lightSource = &lighting->lights;
+    if (!this->sceneLights.empty()) {
+      lightSource = &this->sceneLights;
+    }
     const int lightCount = std::min<int>(
-      static_cast<int>(lighting->lights.size()), MAX_SHADER_LIGHTS);
+      static_cast<int>(lightSource->size()), MAX_SHADER_LIGHTS);
     out.params[2] = static_cast<float>(lightCount);
     for (int l = 0; l < lightCount; ++l) {
-      const SoLightData & light = lighting->lights[static_cast<size_t>(l)];
+      const SoLightData & light = (*lightSource)[static_cast<size_t>(l)];
       float * type = out.lightType + l * 4;
       type[0] = static_cast<float>(light.type);
       type[1] = type[2] = 0.0f;
