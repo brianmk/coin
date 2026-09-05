@@ -788,38 +788,26 @@ int cc_gzm_close(void * file)
 static int
 cc_gzm_fseek(cc_gzm_file * file, long offset, int whence)
 {
+  off_t base;
+  off_t pos;
+
   switch (whence) {
-  case SEEK_SET:
-    if (offset > 0 && offset <= (long) file->buflen) {
-      file->currpos = offset;
-      return 0;
-    }
-    assert(0 && "illegal seek");
-    return -1;
-    break;
-  case SEEK_CUR:
-    if ((file->currpos + offset > 0) &&
-        (file->currpos + offset <= file->buflen)) {
-      file->currpos += offset;
-      return 0;
-    }
-    assert(0 && "illegal seek");
-    return -1;
-    break;
-  case SEEK_END:
-    if ((file->buflen + offset > 0) &&
-        (file->buflen + offset <= file->buflen)) {
-      file->currpos = file->buflen + offset;
-      return 0;
-    }
-    assert(0 && "illegal seek");
-    return -1;
-    break;
+  case SEEK_SET: base = 0; break;
+  case SEEK_CUR: base = (off_t) file->currpos; break;
+  case SEEK_END: base = (off_t) file->buflen; break;
   default:
     assert(0 && "illegal whence");
     return -1;
   }
-  return 0;
+
+  pos = base + (off_t) offset;
+
+  if (pos >= 0 && pos <= (off_t) file->buflen) {
+    file->currpos = (unsigned int) pos;
+    return 0;
+  }
+  assert(0 && "illegal seek");
+  return -1;
 }
 
 static int
