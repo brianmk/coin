@@ -29,6 +29,47 @@
 using namespace CoinVulkanDetail;
 
 bool
+SoVulkanRenderBackend::ensureInstanceModelBuffer(VkDeviceSize bytes)
+{
+  if (this->instanceModelBuffer != VK_NULL_HANDLE &&
+      this->instanceModelCapacity >= bytes) {
+    return true;
+  }
+  if (this->instanceModelBuffer != VK_NULL_HANDLE) {
+    const VkDevice device = this->device;
+    const VkAllocationCallbacks * allocator = this->allocator;
+    const VkBuffer oldBuffer = this->instanceModelBuffer;
+    const VkDeviceMemory oldMemory = this->instanceModelMemory;
+    this->instanceModelBuffer = VK_NULL_HANDLE;
+    this->instanceModelMemory = VK_NULL_HANDLE;
+    this->instanceModelMapped = nullptr;
+    this->instanceModelCapacity = 0;
+    this->deferDestroy([device, allocator, oldBuffer, oldMemory]() {
+      if (oldBuffer != VK_NULL_HANDLE) {
+        vkDestroyBuffer(device, oldBuffer, allocator);
+      }
+      if (oldMemory != VK_NULL_HANDLE) {
+        vkFreeMemory(device, oldMemory, allocator);
+      }
+    });
+  }
+  const VkDeviceSize cap = std::max<VkDeviceSize>(bytes, 64u);
+  if (!this->createBuffer(cap, VK_BUFFER_USAGE_VERTEX_BUFFER_BIT,
+                          this->instanceModelBuffer, this->instanceModelMemory,
+                          nullptr)) {
+    this->emitError("ensureInstanceModelBuffer: failed to create buffer");
+    return false;
+  }
+  if (vkMapMemory(this->device, this->instanceModelMemory, 0, cap, 0,
+                  &this->instanceModelMapped) != VK_SUCCESS) {
+    this->emitError("ensureInstanceModelBuffer: vkMapMemory failed");
+    return false;
+  }
+  this->instanceModelCapacity = cap;
+  return true;
+}
+
+bool
 SoVulkanRenderBackend::expandWideLines(VulkanCachedCommand & entry,
                                        const SoRenderCommand & command,
                                        const SoRenderParams & params,

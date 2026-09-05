@@ -27,6 +27,7 @@
 #include <cstring>
 #include <limits>
 #include <mutex>
+#include <unordered_map>
 #include <vector>
 
 using namespace CoinVulkanDetail;
@@ -75,6 +76,142 @@ void vkBackendRenderBreadcrumbSince(long startUs, long thresholdUs, const char* 
 }
 
 } // namespace
+
+// True when a command draws through the CPU wide-line expansion path (which is
+// not batchable -- each instance needs its own clip-space expansion).
+static bool vkIsWideLine(const SoRenderCommand & c)
+{
+  const bool line =
+    c.geometry.topology == SO_TOPOLOGY_LINES ||
+    c.geometry.topology == SO_TOPOLOGY_LINE_STRIP;
+  if (!line) return false;
+  const bool patterned =
+    c.state.raster.linePattern != 0xFFFF && c.state.raster.linePattern != 0;
+  return c.state.raster.lineWidth > 1.0f || patterned;
+}
+
+// Two commands can be drawn as ONE instanced draw only when they share every
+// pipeline, descriptor-set and push-constant input and differ solely by their
+// model matrix.  `hashA`/`hashB` are the cached geometry content hashes.
+// `pass` equality plus the caller rejecting overlay/wide-line commands keeps
+// the batch inside the shared frame-camera main pass.
+static bool vkCommandBatchable(const SoRenderCommand & a,
+                               const SoRenderCommand & b,
+                               uint64_t hashA, uint64_t hashB)
+{
+  if (a.geometry.topology != b.geometry.topology) return false;
+  if (a.geometry.vertexCount != b.geometry.vertexCount) return false;
+  if (a.geometry.indexCount != b.geometry.indexCount) return false;
+  if (a.geometry.vertexStride != b.geometry.vertexStride) return false;
+  if (a.geometry.texcoordStride != b.geometry.texcoordStride) return false;
+  if (a.lightingHandle != b.lightingHandle) return false;
+  if (a.pass != b.pass) return false;
+  if (hashA != hashB) return false;
+  // Compare the pipeline/push-determining state FIELD BY FIELD.  memcmp of the
+  // sub-structs is unsafe: SbBool is an int and the enum fields leave padding
+  // bytes that are not deterministically zeroed, so two identical cube states
+  // could compare unequal.  The position-dependent sort keys
+  // (SoRenderState::opaqueKey/translucentKey) are deliberately not compared --
+  // identical geometry at different locations must still batch.
+  const SoDepthState & da = a.state.depth, &db = b.state.depth;
+  if (da.enabled != db.enabled || da.writeEnabled != db.writeEnabled ||
+      da.func != db.func || da.range[0] != db.range[0] ||
+      da.range[1] != db.range[1]) return false;
+  const SoBlendState & ba = a.state.blend, &bb = b.state.blend;
+  if (ba.enabled != bb.enabled ||
+      ba.srcRGBFactor != bb.srcRGBFactor ||
+      ba.dstRGBFactor != bb.dstRGBFactor ||
+      ba.srcAlphaFactor != bb.srcAlphaFactor ||
+      ba.dstAlphaFactor != bb.dstAlphaFactor ||
+      ba.rgbEquation != bb.rgbEquation ||
+      ba.alphaEquation != bb.alphaEquation) return false;
+  const SoStencilState & sa = a.state.stencil, &sb = b.state.stencil;
+  if (sa.enabled != sb.enabled || sa.function != sb.function ||
+      sa.reference != sb.reference || sa.compareMask != sb.compareMask ||
+      sa.writeMask != sb.writeMask || sa.failOp != sb.failOp ||
+      sa.zfailOp != sb.zfailOp || sa.zpassOp != sb.zpassOp) return false;
+  const SoAlphaTestState & aa = a.state.alphaTest, &ab = b.state.alphaTest;
+  if (aa.policy != ab.policy || aa.function != ab.function ||
+      aa.reference != ab.reference) return false;
+  const SoRasterState & ra = a.state.raster, &rb = b.state.raster;
+  if (ra.fillMode != rb.fillMode || ra.pointShape != rb.pointShape ||
+      ra.cullMode != rb.cullMode || ra.ccwFrontFace != rb.ccwFrontFace ||
+      ra.scissorEnabled != rb.scissorEnabled ||
+      ra.viewportEnabled != rb.viewportEnabled ||
+      ra.viewportX != rb.viewportX || ra.viewportY != rb.viewportY ||
+      ra.viewportWidth != rb.viewportWidth ||
+      ra.viewportHeight != rb.viewportHeight ||
+      ra.scissorX != rb.scissorX || ra.scissorY != rb.scissorY ||
+      ra.scissorWidth != rb.scissorWidth ||
+      ra.scissorHeight != rb.scissorHeight ||
+      ra.lineWidth != rb.lineWidth || ra.pointSize != rb.pointSize ||
+      ra.linePattern != rb.linePattern ||
+      ra.linePatternScale != rb.linePatternScale ||
+      ra.polygonOffsetFactor != rb.polygonOffsetFactor ||
+      ra.polygonOffsetUnits != rb.polygonOffsetUnits) return false;
+  const SoMaterialData & ma = a.material;
+  const SoMaterialData & mb = b.material;
+  if (memcmp(&ma.diffuse[0], &mb.diffuse[0], sizeof(SbVec4f)) != 0) return false;
+  if (memcmp(&ma.ambient[0], &mb.ambient[0], sizeof(SbVec4f)) != 0) return false;
+  if (memcmp(&ma.specular[0], &mb.specular[0], sizeof(SbVec4f)) != 0) return false;
+  if (memcmp(&ma.emissive[0], &mb.emissive[0], sizeof(SbVec4f)) != 0) return false;
+  if (ma.shininess != mb.shininess) return false;
+  if (ma.opacity != mb.opacity) return false;
+  if (ma.twoSidedLighting != mb.twoSidedLighting) return false;
+  if (ma.shadingModel != mb.shadingModel) return false;
+  if (ma.vertexColorAlphaIncludesOpacity != mb.vertexColorAlphaIncludesOpacity)
+    return false;
+  if (ma.textureAlphaIncludesOpacity != mb.textureAlphaIncludesOpacity)
+    return false;
+  if ((ma.flags & (SO_MAT_HAS_TEXTURE | SO_MAT_IS_PIXEL_TEXT)) !=
+      (mb.flags & (SO_MAT_HAS_TEXTURE | SO_MAT_IS_PIXEL_TEXT))) return false;
+  if (ma.texture.pixels != mb.texture.pixels) return false;
+  if (ma.texture.width != mb.texture.width) return false;
+  if (ma.texture.height != mb.texture.height) return false;
+  if (ma.texture.model != mb.texture.model) return false;
+  if (ma.texture.minFilter != mb.texture.minFilter) return false;
+  if (ma.texture.magFilter != mb.texture.magFilter) return false;
+  if (ma.texture.wrapS != mb.texture.wrapS) return false;
+  if (ma.texture.wrapT != mb.texture.wrapT) return false;
+  if (memcmp(&ma.texture.blendColor[0], &mb.texture.blendColor[0],
+             sizeof(SbVec4f)) != 0) return false;
+  return true;
+}
+
+// Coarse grouping key for the opaque batching pass: two commands with the same
+// key MIGHT be batchable (vkCommandBatchable re-verifies and splits any
+// collision).  Hashes the fields that determine pipeline/descriptor/push state
+// plus the cached geometry content hash.  Not intended to be collision-free;
+// the pairwise re-verification is what guarantees correctness.
+static uint64_t vkBatchKey(const SoRenderCommand & a, uint64_t contentHash)
+{
+  uint64_t h = contentHash;
+  h ^= (uint64_t)a.geometry.topology << 0;
+  h ^= (uint64_t)a.geometry.vertexCount << 8;
+  h ^= (uint64_t)a.geometry.indexCount << 24;
+  h ^= (uint64_t)a.lightingHandle << 40;
+  h ^= (uint64_t)a.material.shadingModel << 56;
+  const SoRasterState & r = a.state.raster;
+  uint32_t s = (uint32_t)a.state.depth.func |
+    ((uint32_t)(a.state.depth.enabled ? 1 : 0) << 3) |
+    ((uint32_t)r.fillMode << 4) | ((uint32_t)r.cullMode << 6) |
+    ((uint32_t)r.ccwFrontFace << 8) |
+    ((uint32_t)r.linePattern << 9) |
+    ((uint32_t)(a.state.blend.enabled ? 1 : 0) << 25);
+  h ^= (uint64_t)s << 1;
+  auto xu = [](uint32_t * out, const float * in) {
+    std::memcpy(out, in, sizeof(uint32_t));
+  };
+  const float * dif = &a.material.diffuse[0];
+  uint32_t d0, d1, d2, d3, shin, alphaRef, lw;
+  xu(&d0, &dif[0]); xu(&d1, &dif[1]); xu(&d2, &dif[2]); xu(&d3, &dif[3]);
+  xu(&shin, &a.material.shininess);
+  xu(&alphaRef, &a.state.alphaTest.reference);
+  xu(&lw, &r.lineWidth);
+  h ^= (uint64_t)(d0 ^ d1 ^ d2 ^ d3 ^ shin ^ alphaRef ^ lw) << 17;
+  return h;
+}
+
 
 // --- Lifecycle ------------------------------------------------------------
 
@@ -170,6 +307,19 @@ SoVulkanRenderBackend::shutdown()
     vkDestroyPipelineLayout(this->device, this->pipelineLayout, this->allocator);
     this->pipelineLayout = VK_NULL_HANDLE;
   }
+  if (this->instanceModelMapped != nullptr) {
+    vkUnmapMemory(this->device, this->instanceModelMemory);
+    this->instanceModelMapped = nullptr;
+  }
+  if (this->instanceModelBuffer != VK_NULL_HANDLE) {
+    vkDestroyBuffer(this->device, this->instanceModelBuffer, this->allocator);
+    this->instanceModelBuffer = VK_NULL_HANDLE;
+  }
+  if (this->instanceModelMemory != VK_NULL_HANDLE) {
+    vkFreeMemory(this->device, this->instanceModelMemory, this->allocator);
+    this->instanceModelMemory = VK_NULL_HANDLE;
+  }
+  this->instanceModelCapacity = 0;
   if (this->lightingMapped != nullptr) {
     vkUnmapMemory(this->device, this->lightingMemory);
     this->lightingMapped = nullptr;
@@ -736,17 +886,76 @@ SoVulkanRenderBackend::recordFrame(const SoDrawList & drawlist,
   // matrices and viewport, so recording them here with the main camera
   // matrices would draw garbage into the scene depth buffer.
   const std::vector<int> & order = drawlist.getSortedOrder();
+  // Geometry content identity for batching: reuse the content hash the geometry
+  // cache already computed when the command's buffer was uploaded (a map
+  // lookup), instead of re-walking every vertex stream each frame (which
+  // dominates record time on command-heavy scenes).
+  auto contentHashOf = [this](const SoRenderCommand & c) -> uint64_t {
+    const auto it = this->commandToCache.find(&c);
+    if (it == this->commandToCache.end()) return 0;
+    return this->gpuCache[it->second].contentHash;
+  };
+
   for (int passIndex = 0; passIndex < 2; ++passIndex) {
     const bool transparent = passIndex == 1;
-    for (int i = 0; i < drawlist.getNumCommands(); ++i) {
-      const int index =
-        i < static_cast<int>(order.size()) ? order[i] : i;
-      const SoRenderCommand & command = drawlist.getCommand(index);
-      if (command.pass == SO_RENDERPASS_OVERLAY) continue;
-      const bool isTransparent = command.pass == SO_RENDERPASS_TRANSPARENT;
-      if (isTransparent != transparent) continue;
-      this->recordDrawCommand(drawlist, command, target, params, renderPass,
-                              transparent);
+    if (transparent) {
+      // Transparent geometry must preserve painter's order, so never batch it.
+      for (int i = 0; i < drawlist.getNumCommands(); ++i) {
+        const int index =
+          i < static_cast<int>(order.size()) ? order[i] : i;
+        const SoRenderCommand & command = drawlist.getCommand(index);
+        if (command.pass == SO_RENDERPASS_OVERLAY) continue;
+        if (command.pass != SO_RENDERPASS_TRANSPARENT) continue;
+        this->recordDrawCommand(drawlist, command, target, params, renderPass,
+                                true);
+      }
+    }
+    else {
+      // Only depth-tested opaque geometry (depth test ON) is render-order
+      // independent, so those commands can be reordered and batched (identical
+      // pipeline/descriptor/push/material, differing only by model matrix).
+      // Depth-test-off commands are handled by the on-top annotation pass and
+      // the CPU-expanded wide-line path must keep per-command expansion, so
+      // neither is batched here.  Consecutive runs do not exist (the sort order
+      // interleaves objects), so bucket by a batch key and re-verify pairwise
+      // compatibility (splitting any accidental key collision).
+      std::unordered_map<uint64_t, std::vector<const SoRenderCommand*>> buckets;
+      for (int i = 0; i < drawlist.getNumCommands(); ++i) {
+        const int index =
+          i < static_cast<int>(order.size()) ? order[i] : i;
+        const SoRenderCommand & command = drawlist.getCommand(index);
+        if (command.pass == SO_RENDERPASS_OVERLAY) continue;
+        if (command.pass == SO_RENDERPASS_TRANSPARENT) continue;
+        if (!command.state.depth.enabled) continue; // on-top annotation (later)
+        if (!command.geometry.positions || command.geometry.vertexCount == 0)
+          continue;
+        if (vkIsWideLine(command)) continue;        // CPU-expanded per command
+        buckets[vkBatchKey(command, contentHashOf(command))].push_back(&command);
+      }
+      for (auto & kv : buckets) {
+        std::vector<const SoRenderCommand*> & v = kv.second;
+        int start = 0;
+        while (start < static_cast<int>(v.size())) {
+          int end = start + 1;
+          const uint64_t hStart = contentHashOf(*v[start]);
+          while (end < static_cast<int>(v.size()) &&
+                 vkCommandBatchable(*v[start], *v[end], hStart,
+                                    contentHashOf(*v[end]))) {
+            ++end;
+          }
+          const int cnt = end - start;
+          if (cnt > 1 &&
+              this->recordCommandBatch(drawlist, &v[start], cnt, target, params,
+                                       renderPass, false)) {
+            // Batched into one instanced draw; nothing further to do.
+          }
+          else {
+            this->recordDrawCommand(drawlist, *v[start], target, params,
+                                    renderPass, false);
+          }
+          start = end;
+        }
+      }
     }
 
     // Wireframe/point overlay: re-draw opaque geometry in the requested fill

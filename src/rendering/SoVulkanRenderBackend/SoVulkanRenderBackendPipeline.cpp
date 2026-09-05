@@ -478,12 +478,25 @@ SoVulkanRenderBackend::getOrCreatePipeline(const SoRenderCommand & command,
                                   : this->fragmentModule;
   stages[1].pName = "main";
 
-  VkVertexInputBindingDescription binding {};
-  binding.binding = 0;
-  binding.stride = key.wideLine ? 36u : VULKAN_VERTEX_STRIDE;
-  binding.inputRate = VK_VERTEX_INPUT_RATE_VERTEX;
+  // Binding 0: the interleaved position/normal/color/texcoord stream.  The
+  // wide-line path substitutes its own 36-byte clip-space layout at binding 0.
+  VkVertexInputBindingDescription binding[2] {};
+  binding[0].binding = 0;
+  binding[0].stride = key.wideLine ? 36u : VULKAN_VERTEX_STRIDE;
+  binding[0].inputRate = VK_VERTEX_INPUT_RATE_VERTEX;
+  // Binding 1 (visual pipelines only): the per-instance model matrix, four
+  // R32G32B32A32 rows advanced per instance (rate INSTANCE).  This lets a
+  // group of commands sharing geometry/material but differing only by model
+  // matrix be drawn as one instanced vkCmdDraw.  A one-element instance buffer
+  // is bound for ordinary non-instanced draws, so every visual draw carries
+  // the attribute.  Wide-line pipelines keep their own layout (no instancing).
+  if (!key.wideLine) {
+    binding[1].binding = 1;
+    binding[1].stride = sizeof(float) * 16; // mat4, 4 x vec4
+    binding[1].inputRate = VK_VERTEX_INPUT_RATE_INSTANCE;
+  }
 
-  VkVertexInputAttributeDescription attributes[4] {};
+  VkVertexInputAttributeDescription attributes[8] {};
   attributes[0].location = 0;
   attributes[0].binding = 0;
   attributes[0].format = VK_FORMAT_R32G32B32_SFLOAT;
@@ -500,6 +513,23 @@ SoVulkanRenderBackend::getOrCreatePipeline(const SoRenderCommand & command,
   attributes[3].binding = 0;
   attributes[3].format = VK_FORMAT_R32G32_SFLOAT;
   attributes[3].offset = 40;
+  // Instance model matrix rows (binding 1, rate INSTANCE).
+  attributes[4].location = 4;
+  attributes[4].binding = 1;
+  attributes[4].format = VK_FORMAT_R32G32B32A32_SFLOAT;
+  attributes[4].offset = 0;
+  attributes[5].location = 5;
+  attributes[5].binding = 1;
+  attributes[5].format = VK_FORMAT_R32G32B32A32_SFLOAT;
+  attributes[5].offset = 16;
+  attributes[6].location = 6;
+  attributes[6].binding = 1;
+  attributes[6].format = VK_FORMAT_R32G32B32A32_SFLOAT;
+  attributes[6].offset = 32;
+  attributes[7].location = 7;
+  attributes[7].binding = 1;
+  attributes[7].format = VK_FORMAT_R32G32B32A32_SFLOAT;
+  attributes[7].offset = 48;
 
   // Wide-line layout: clip-space position (0), color (16), polyline
   // distance (32).
@@ -520,9 +550,9 @@ SoVulkanRenderBackend::getOrCreatePipeline(const SoRenderCommand & command,
   VkPipelineVertexInputStateCreateInfo vertexInput {};
   vertexInput.sType =
     VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO;
-  vertexInput.vertexBindingDescriptionCount = 1;
-  vertexInput.pVertexBindingDescriptions = &binding;
-  vertexInput.vertexAttributeDescriptionCount = key.wideLine ? 3u : 4u;
+  vertexInput.vertexBindingDescriptionCount = key.wideLine ? 1u : 2u;
+  vertexInput.pVertexBindingDescriptions = binding;
+  vertexInput.vertexAttributeDescriptionCount = key.wideLine ? 3u : 8u;
   vertexInput.pVertexAttributeDescriptions =
     key.wideLine ? wideLineAttributes : attributes;
 

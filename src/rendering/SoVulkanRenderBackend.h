@@ -420,6 +420,19 @@ private:
                          int fillModeOverride = -1,
                          const float * uniformColorOverride = nullptr,
                          bool overlayPass = false);
+  // Instanced batch: draw `count` commands that share geometry/material/state
+  // and differ only by model matrix as ONE vkCmdDraw(instanceCount=count).
+  // `commands` is an array of pointers into the draw list.  Returns false if
+  // the first command cannot be drawn (missing cache entry) or any command is
+  // not batchable.
+  bool recordCommandBatch(const SoDrawList & drawlist,
+                          const SoRenderCommand * const * commands, int count,
+                          const SoVulkanRenderTarget & target,
+                          const SoRenderParams & params,
+                          VkRenderPass renderPass,
+                          bool transparent,
+                          int fillModeOverride = -1,
+                          const float * uniformColorOverride = nullptr);
   bool expandWideLines(VulkanCachedCommand & entry,
                        const SoRenderCommand & command,
                        const SoRenderParams & params,
@@ -496,6 +509,10 @@ private:
                                   VkMemoryPropertyFlags desiredProperties,
                                   VkBuffer & buffer, VkDeviceMemory & memory,
                                   const void * data = nullptr);
+  // Ensure the per-instance model-matrix buffer holds at least `bytes`
+  // (HOST_VISIBLE | HOST_COHERENT, persistently mapped).  Recreates + remaps
+  // on growth; the old buffer is released through the deferred ring.
+  bool ensureInstanceModelBuffer(VkDeviceSize bytes);
   bool growLightingUbo(uint32_t minSlots);
   bool swapLightingBuffer(VkBuffer newBuffer, VkDeviceMemory newMemory,
                           void * newMapped, uint32_t newSlotsPerFrame);
@@ -584,6 +601,18 @@ private:
   uint32_t uboSlotsPerFrame = 0;
   uint32_t uboFrameIndex = 0;
   uint32_t uboCmdIndex = 0;
+
+  // Host-visible, persistently-mapped buffer holding the per-instance model
+  // matrices for instanced drawing (binding 1, rate INSTANCE).  A group of
+  // commands sharing geometry/material and differing only by model matrix is
+  // drawn with a single vkCmdDraw(instanceCount=N); the N model matrices are
+  // memcpy'd here and the attribute reads them per instance.  A one-element
+  // buffer serves ordinary non-instanced draws.  Grows on demand; freed in
+  // shutdown().
+  VkBuffer instanceModelBuffer = VK_NULL_HANDLE;
+  VkDeviceMemory instanceModelMemory = VK_NULL_HANDLE;
+  void * instanceModelMapped = nullptr;
+  VkDeviceSize instanceModelCapacity = 0;
   // Per-frame pre-conversion of the frame camera matrices (double -> float).
   // The main pass draws every command with the frame view/projection (only
   // scissor overlays carry their own matrices), so converting once per render
