@@ -154,6 +154,13 @@ SoVulkanRenderBackend::initialize(const SoRenderBackendInitParams & params)
   this->allocator = deviceContext->allocator;
   this->memProps.setDevice(this->physicalDevice);
 
+  // Opt-in device-memory sub-allocator (FC_VULKAN_MEM_POOL).  Default off so
+  // the behaviour is byte-for-byte the legacy path unless explicitly enabled.
+  if (SoVulkanShared::envFlagEnabled("FC_VULKAN_MEM_POOL")) {
+    this->memPool = std::make_unique<SoVulkanMemPool>(
+      this->device, this->allocator);
+  }
+
   // Cache the device capabilities the backend relies on.  Vulkan has no API
   // to read back which features an already-created device enabled, so query
   // what the physical device *supports* and rely on the embedding
@@ -870,9 +877,16 @@ SoVulkanRenderBackend::deferDestroyTextureEntry(VulkanCachedTexture & entry)
   const VkAllocationCallbacks * allocator = this->allocator;
   const VkImage image = entry.image;
   const VkDeviceMemory memory = entry.memory;
+  const VkDeviceSize imageSize = entry.memorySize;
+  const VkDeviceSize memoryOffset = entry.memoryOffset;
   const VkImageView view = entry.view;
   const VkSampler sampler = entry.sampler;
-  this->deferDestroy([device, allocator, image, memory, view, sampler]() {
+  // Capture `this` so the memory is returned to the sub-allocator (when
+  // enabled) inside the deferred lambda, by which point the frame's
+  // submission is complete and the range is safe to reuse.
+  SoVulkanRenderBackend * self = this;
+  this->deferDestroy([self, device, allocator, image, memory, imageSize,
+                      memoryOffset, view, sampler]() {
     if (view != VK_NULL_HANDLE) {
       vkDestroyImageView(device, view, allocator);
     }
@@ -883,7 +897,7 @@ SoVulkanRenderBackend::deferDestroyTextureEntry(VulkanCachedTexture & entry)
       vkDestroyImage(device, image, allocator);
     }
     if (memory != VK_NULL_HANDLE) {
-      vkFreeMemory(device, memory, allocator);
+      self->releaseMemory(memory, imageSize, memoryOffset);
     }
   });
   entry = VulkanCachedTexture();

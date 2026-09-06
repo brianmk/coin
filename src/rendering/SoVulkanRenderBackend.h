@@ -6,6 +6,7 @@
 #include "rendering/SoRenderBackend.h"
 
 #include "rendering/SoVulkanShared.h"
+#include "rendering/SoVulkanRenderBackend/SoVulkanMemPool.h"
 #include "rendering/SoVulkanRenderBackend/SoVulkanRecordContext.h"
 
 #include <Inventor/rendering/SoVulkanRenderTarget.h>
@@ -13,6 +14,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <functional>
+#include <memory>
 #include <mutex>
 #include <unordered_map>
 #include <vector>
@@ -180,6 +182,13 @@ struct VulkanCachedCommand {
 struct VulkanCachedTexture {
   VkImage image = VK_NULL_HANDLE;
   VkDeviceMemory memory = VK_NULL_HANDLE;
+  // Offset of `memory` into the sub-allocator block it came from (0 when the
+  // memory is a standalone vkAllocateMemory -- the legacy path).  Needed to
+  // return the range when FC_VULKAN_MEM_POOL is enabled.
+  VkDeviceSize memoryOffset = 0;
+  // Size of the `memory` range (the sub-allocated block size / allocation
+  // size).  Tracked so releaseMemory() returns exactly what was allocated.
+  VkDeviceSize memorySize = 0;
   VkImageView view = VK_NULL_HANDLE;
   VkSampler sampler = VK_NULL_HANDLE;
   VkDescriptorSet descriptorSet = VK_NULL_HANDLE;
@@ -407,6 +416,17 @@ private:
                                     VkDescriptorSet & set);
   bool ensureDescriptorPoolSpace();
   VkDescriptorSet resolveTextureSet(const SoRenderCommand & command);
+  // Release a texture image or staging buffer's device memory back to the
+  // sub-allocator when enabled (FC_VULKAN_MEM_POOL), else vkFreeMemory as the
+  // legacy path.  The caller must have recorded the offset (from a pool alloc)
+  // into the entry/staging record — when the pool is disabled the memory is a
+  // standalone allocation and offset is 0.  Destroying the VkBuffer/VkImage
+  // for the pool case is the caller's responsibility (the memory block outlives
+  // the buffer/image); this helper only returns the memory.
+  void releaseMemory(VkDeviceMemory memory, VkDeviceSize size,
+                     VkDeviceSize offset);
+  // True when sub-allocating transient texture memory (FC_VULKAN_MEM_POOL).
+  bool usingMemPool() const { return this->memPool != nullptr; }
 
   // --- Render recording ---------------------------------------------------
   // Every record* helper below takes the VulkanRecordContext it records
@@ -561,6 +581,13 @@ private:
   // physicalDevice in initialize().  Replaces the old per-backend
   // deviceMemoryProperties + deviceMemoryPropertiesValid cache.
   SoVulkanShared::MemoryProperties memProps;
+
+  // Sub-allocator for the high-churn transient resources (texture image memory
+  // and texture staging buffers), so each upload does not vkAllocateMemory /
+  // vkFreeMemory against the driver (slow, and counts against
+  // maxMemoryAllocationCount).  Enabled by FC_VULKAN_MEM_POOL (off by default);
+  // when disabled the legacy per-resource allocate path is used.
+  std::unique_ptr<SoVulkanMemPool> memPool;
 
   // --- Device capabilities (probed once in initialize()) -----------------
   // VkPhysicalDeviceFeatures::fillModeNonSolid gates the wireframe/points

@@ -33,6 +33,23 @@ using namespace CoinVulkanDetail;
 // --- Texture cache --------------------------------------------------------
 
 void
+SoVulkanRenderBackend::releaseMemory(VkDeviceMemory memory, VkDeviceSize size,
+                                    VkDeviceSize offset)
+{
+  if (memory == VK_NULL_HANDLE) return;
+  if (this->usingMemPool() && size > 0) {
+    // Return the range to the sub-allocator.  Safe here because the callers
+    // defer this free: destroyTextureEntry() flushes through the deferred ring
+    // (see deferDestroyTextureEntry), so the GPU can no longer reference the
+    // range when this runs.
+    this->memPool->free(memory, offset, size);
+  }
+  else {
+    vkFreeMemory(this->device, memory, this->allocator);
+  }
+}
+
+void
 SoVulkanRenderBackend::destroyTextureEntry(VulkanCachedTexture & entry)
 {
   if (entry.descriptorSet != VK_NULL_HANDLE) {
@@ -56,7 +73,7 @@ SoVulkanRenderBackend::destroyTextureEntry(VulkanCachedTexture & entry)
     entry.image = VK_NULL_HANDLE;
   }
   if (entry.memory != VK_NULL_HANDLE) {
-    vkFreeMemory(this->device, entry.memory, this->allocator);
+    this->releaseMemory(entry.memory, entry.memorySize, entry.memoryOffset);
     entry.memory = VK_NULL_HANDLE;
   }
   entry = VulkanCachedTexture();
@@ -183,6 +200,37 @@ SoVulkanRenderBackend::prepareTextureUpload(VulkanCachedTexture & entry,
 
   VkMemoryRequirements requirements;
   vkGetImageMemoryRequirements(this->device, entry.image, &requirements);
+  entry.memorySize = requirements.size;
+  if (this->usingMemPool()) {
+    // Sub-allocate the image memory from the pool; falls back to a standalone
+    // allocation if the pool cannot fit/grow the range.
+    uint32_t poolTypeIndex = 0;
+    if (this->selectMemoryType(requirements, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT,
+                               poolTypeIndex)) {
+      VkDeviceSize offset = 0;
+      if (this->memPool->alloc(poolTypeIndex, requirements.size,
+                               requirements.alignment, entry.memory, offset)) {
+      entry.memoryOffset = offset;
+      const VkResult bindRes = vkBindImageMemory(
+        this->device, entry.image, entry.memory, offset);
+      if (bindRes == VK_SUCCESS) {
+        // Staging buffer allocation (host-visible) below.
+        if (!this->createBuffer(byteSize, VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
+                                staging, stagingMemory, uploadPixels)) {
+          this->emitError("prepareTextureUpload: staging buffer creation failed");
+          this->destroyTextureEntry(entry);
+          return false;
+        }
+        return true;
+      }
+        // Binding failed: return the range to the pool and fall through to the
+        // legacy path so the upload can still proceed (at a cost of correctness
+        // pressure only in the failure case).
+        this->releaseMemory(entry.memory, entry.memorySize, entry.memoryOffset);
+        entry.memory = VK_NULL_HANDLE;
+      }
+    }
+  }
   uint32_t memoryTypeIndex = 0;
   if (!this->selectMemoryType(requirements, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT,
                               memoryTypeIndex)) {
@@ -200,6 +248,7 @@ SoVulkanRenderBackend::prepareTextureUpload(VulkanCachedTexture & entry,
     this->destroyTextureEntry(entry);
     return false;
   }
+  entry.memoryOffset = 0;
   vkBindImageMemory(this->device, entry.image, entry.memory, 0);
 
   if (!this->createBuffer(byteSize, VK_BUFFER_USAGE_TRANSFER_SRC_BIT,

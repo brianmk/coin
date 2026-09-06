@@ -385,6 +385,12 @@ SoVulkanRenderBackend::shutdown()
     vkDestroyCommandPool(this->device, this->commandPool, this->allocator);
     this->commandPool = VK_NULL_HANDLE;
   }
+  if (this->memPool) {
+    // Queue is idle and every deferred destroy has been flushed, so all
+    // sub-allocated ranges are free and every block can be released.
+    this->memPool->destroyAll();
+    this->memPool.reset();
+  }
 
   this->physicalDevice = VK_NULL_HANDLE;
   this->device = VK_NULL_HANDLE;
