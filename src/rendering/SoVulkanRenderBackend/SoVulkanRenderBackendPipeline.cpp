@@ -226,6 +226,8 @@ SoVulkanRenderBackend::recordBackground(const SoRenderParams & params,
 
 bool
 SoVulkanRenderBackend::createRenderPass(const SoVulkanRenderTarget & target,
+                                        VkAttachmentLoadOp colorLoadOp,
+                                        VkAttachmentLoadOp depthLoadOp,
                                         VkRenderPass & pass)
 {
   VkAttachmentDescription attachments[2];
@@ -234,7 +236,7 @@ SoVulkanRenderBackend::createRenderPass(const SoVulkanRenderTarget & target,
   attachments[0].flags = 0;
   attachments[0].format = target.colorFormat;
   attachments[0].samples = target.sampleCount;
-  attachments[0].loadOp = VK_ATTACHMENT_LOAD_OP_LOAD;
+  attachments[0].loadOp = colorLoadOp;
   attachments[0].storeOp = VK_ATTACHMENT_STORE_OP_STORE;
   attachments[0].stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
   attachments[0].stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
@@ -252,7 +254,7 @@ SoVulkanRenderBackend::createRenderPass(const SoVulkanRenderTarget & target,
     attachments[1].flags = 0;
     attachments[1].format = target.depthFormat;
     attachments[1].samples = target.sampleCount;
-    attachments[1].loadOp = VK_ATTACHMENT_LOAD_OP_LOAD;
+    attachments[1].loadOp = depthLoadOp;
     attachments[1].storeOp = VK_ATTACHMENT_STORE_OP_STORE;
     attachments[1].stencilLoadOp = VK_ATTACHMENT_LOAD_OP_LOAD;
     attachments[1].stencilStoreOp = VK_ATTACHMENT_STORE_OP_STORE;
@@ -300,14 +302,20 @@ SoVulkanRenderBackend::renderPassIdentity(const SoVulkanRenderTarget & target) c
 }
 
 VkRenderPass
-SoVulkanRenderBackend::getOrCreateRenderPass(const SoVulkanRenderTarget & target)
+SoVulkanRenderBackend::getOrCreateRenderPass(const SoVulkanRenderTarget & target,
+                                             VkAttachmentLoadOp colorLoadOp,
+                                             VkAttachmentLoadOp depthLoadOp)
 {
-  const RenderPassIdentity identity = this->renderPassIdentity(target);
+  RenderPassIdentity identity = this->renderPassIdentity(target);
+  identity.colorLoadOp = colorLoadOp;
+  identity.depthLoadOp = depthLoadOp;
   const auto found = this->renderPassCache.find(identity);
   if (found != this->renderPassCache.end()) return found->second;
 
   VkRenderPass pass = VK_NULL_HANDLE;
-  if (!this->createRenderPass(target, pass)) return VK_NULL_HANDLE;
+  if (!this->createRenderPass(target, colorLoadOp, depthLoadOp, pass)) {
+    return VK_NULL_HANDLE;
+  }
   this->renderPassCache.emplace(identity, pass);
   return pass;
 }

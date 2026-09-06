@@ -203,9 +203,38 @@ SoVulkanRenderBackend::applyScissor(const SoRenderCommand & command,
   this->applyScissorState(scissor, ctx);
 }
 
+bool
+SoVulkanRenderBackend::isFullTargetClear(const SoRenderParams & params,
+                                         const SoVulkanRenderTarget & target) const
+{
+  // Mirror the clear-region math in recordClear().  A full-target clear means
+  // the viewport region, after clamping to the target, covers the entire
+  // attachment, so no vkCmdClearAttachments region is needed and the render
+  // pass can clear via its loadOp instead.  Empty viewports clear nothing.
+  const SbVec2s & origin = params.viewport.getViewportOriginPixels();
+  const SbVec2s & size = params.viewport.getViewportSizePixels();
+  const int32_t x0 = std::max(0, static_cast<int32_t>(origin[0]));
+  const int32_t y0 = std::max(
+    0, static_cast<int32_t>(target.extent.height) -
+       static_cast<int32_t>(origin[1]) -
+       static_cast<int32_t>(size[1]));
+  const int32_t x1 = std::min(static_cast<int32_t>(target.extent.width),
+                              static_cast<int32_t>(origin[0]) +
+                                static_cast<int32_t>(size[0]));
+  const int32_t y1 = std::min(
+    static_cast<int32_t>(target.extent.height),
+    static_cast<int32_t>(target.extent.height) -
+      static_cast<int32_t>(origin[1]));
+  return x0 == 0 && y0 == 0 &&
+    x1 == static_cast<int32_t>(target.extent.width) &&
+    y1 == static_cast<int32_t>(target.extent.height);
+}
+
 void
 SoVulkanRenderBackend::recordClear(const SoRenderParams & params,
                                    const SoVulkanRenderTarget & target,
+                                   bool colorClearedByLoad,
+                                   bool depthClearedByLoad,
                                    VulkanRecordContext & ctx)
 {
   const bool hasDepth = target.depthImageView != VK_NULL_HANDLE &&
@@ -215,24 +244,31 @@ SoVulkanRenderBackend::recordClear(const SoRenderParams & params,
   uint32_t attachmentCount = 0;
 
   if (params.flags & SO_PARAM_CLEAR_WINDOW) {
-    const SbColor4f & color = params.clearColor;
-    VkClearAttachment clear {};
-    clear.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
-    clear.colorAttachment = 0;
-    clear.clearValue.color.float32[0] = color[0];
-    clear.clearValue.color.float32[1] = color[1];
-    clear.clearValue.color.float32[2] = color[2];
-    clear.clearValue.color.float32[3] = color[3];
-    attachments[attachmentCount++] = clear;
+    // When the render pass begins with a CLEAR color loadOp (full-target
+    // clear fast path), the attachment was already cleared to params.clearColor,
+    // so there is no matching vkCmdClearAttachments to omit.
+    if (!colorClearedByLoad) {
+      const SbColor4f & color = params.clearColor;
+      VkClearAttachment clear {};
+      clear.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+      clear.colorAttachment = 0;
+      clear.clearValue.color.float32[0] = color[0];
+      clear.clearValue.color.float32[1] = color[1];
+      clear.clearValue.color.float32[2] = color[2];
+      clear.clearValue.color.float32[3] = color[3];
+      attachments[attachmentCount++] = clear;
+    }
   }
 
   if (hasDepth && (params.flags & SO_PARAM_CLEAR_DEPTH)) {
-    VkClearAttachment clear {};
-    clear.aspectMask = VK_IMAGE_ASPECT_DEPTH_BIT;
-    clear.colorAttachment = 0;
-    clear.clearValue.depthStencil.depth = params.clearDepth;
-    clear.clearValue.depthStencil.stencil = 0;
-    attachments[attachmentCount++] = clear;
+    if (!depthClearedByLoad) {
+      VkClearAttachment clear {};
+      clear.aspectMask = VK_IMAGE_ASPECT_DEPTH_BIT;
+      clear.colorAttachment = 0;
+      clear.clearValue.depthStencil.depth = params.clearDepth;
+      clear.clearValue.depthStencil.stencil = 0;
+      attachments[attachmentCount++] = clear;
+    }
   }
 
   if (hasDepth && (params.flags & SO_PARAM_CLEAR_STENCIL)) {

@@ -477,11 +477,34 @@ SoVulkanRenderBackend::renderInternal(const SoDrawList & drawlist,
   this->updateLightingSetup(drawlist);
 
   // Render passes are cached by their attachment identity (formats, sample
-  // count, image layouts), not by the target's images: swapchain targets
-  // cycle their images every frame, and pipelines are keyed on the render
-  // pass handle, so reusing the pass across image changes keeps the pipeline
-  // cache warm.
-  this->renderPass = this->getOrCreateRenderPass(*target);
+  // count, image layouts, load ops), not by the target's images: swapchain
+  // targets cycle their images every frame, and pipelines are keyed on the
+  // render pass handle, so reusing the pass across image changes keeps the
+  // pipeline cache warm.  On the full-target-clear fast path (FC_VULKAN_RP_CLEAR)
+  // the color/depth attachments are cleared via their loadOp at pass begin,
+  // which is cheaper than a separate vkCmdClearAttachments region clear.
+  const bool wantRpClear = COIN_VULKAN_ENV_FLAG("FC_VULKAN_RP_CLEAR");
+  const bool fullTargetClear =
+    wantRpClear && this->isFullTargetClear(params, *target);
+  const bool clearWindow = (params.flags & SO_PARAM_CLEAR_WINDOW) != 0;
+  const bool clearDepth = (params.flags & SO_PARAM_CLEAR_DEPTH) != 0;
+  const bool hasDepth = target->depthImageView != VK_NULL_HANDLE &&
+                        target->depthFormat != VK_FORMAT_UNDEFINED;
+  const VkAttachmentLoadOp colorLoadOp =
+    (fullTargetClear && clearWindow)
+      ? VK_ATTACHMENT_LOAD_OP_CLEAR
+      : VK_ATTACHMENT_LOAD_OP_LOAD;
+  const VkAttachmentLoadOp depthLoadOp =
+    (fullTargetClear && hasDepth && clearDepth)
+      ? VK_ATTACHMENT_LOAD_OP_CLEAR
+      : VK_ATTACHMENT_LOAD_OP_LOAD;
+  this->renderPass = this->getOrCreateRenderPass(*target, colorLoadOp,
+                                                 depthLoadOp);
+  // Stash whether the pass cleared each attachment so recordClear() can skip
+  // the redundant vkCmdClearAttachments, and (below) so the begin info carries
+  // the matching clear values.
+  this->renderPassColorCleared = (colorLoadOp == VK_ATTACHMENT_LOAD_OP_CLEAR);
+  this->renderPassDepthCleared = (depthLoadOp == VK_ATTACHMENT_LOAD_OP_CLEAR);
   if (this->renderPass == VK_NULL_HANDLE) {
     this->emitError("failed to create Vulkan render pass");
     return FALSE;
@@ -579,8 +602,25 @@ SoVulkanRenderBackend::renderInternal(const SoDrawList & drawlist,
   rpbi.framebuffer = framebuffer;
   rpbi.renderArea.offset = {0, 0};
   rpbi.renderArea.extent = target->extent;
-  rpbi.clearValueCount = 0;
-  rpbi.pClearValues = nullptr;
+  // When the render pass clears an attachment via its loadOp (full-target
+  // clear fast path), the clear value must be supplied here.  clearValueCount
+  // maps one-to-one to the attachment indices (0 = color, 1 = depth).
+  VkClearValue clearValues[2];
+  uint32_t clearValueCount = 0;
+  if (this->renderPassColorCleared) {
+    clearValues[0].color.float32[0] = params.clearColor[0];
+    clearValues[0].color.float32[1] = params.clearColor[1];
+    clearValues[0].color.float32[2] = params.clearColor[2];
+    clearValues[0].color.float32[3] = params.clearColor[3];
+    clearValueCount = 1;
+  }
+  if (this->renderPassDepthCleared) {
+    clearValues[clearValueCount].depthStencil.depth = params.clearDepth;
+    clearValues[clearValueCount].depthStencil.stencil = 0;
+    ++clearValueCount;
+  }
+  rpbi.clearValueCount = clearValueCount;
+  rpbi.pClearValues = clearValueCount ? clearValues : nullptr;
 
   vkCmdBeginRenderPass(this->currentCommandBuffer(), &rpbi,
                        VK_SUBPASS_CONTENTS_INLINE);
@@ -651,6 +691,12 @@ SoVulkanRenderBackend::renderExternal(const SoDrawList & drawlist,
       "renderExternal called without a command buffer and render pass");
     return FALSE;
   }
+
+  // The external render pass is supplied by the caller (typically created with
+  // LOAD loadOps and layered over a pre-existing image), so no attachment is
+  // cleared by a loadOp here: recordClear() must emit vkCmdClearAttachments.
+  this->renderPassColorCleared = false;
+  this->renderPassDepthCleared = false;
 
   if (COIN_VULKAN_ENV_FLAG("FC_VULKAN_BLACK_DEBUG"))
     fprintf(stderr, "[BLACK] renderExternal ENTER frame=%d cmds=%d\n",
@@ -731,6 +777,10 @@ SoVulkanRenderBackend::renderExternalOverlay(const SoDrawList & drawlist,
       "pass");
     return FALSE;
   }
+
+  // External passes are caller-supplied LOAD render passes; see renderExternal().
+  this->renderPassColorCleared = false;
+  this->renderPassDepthCleared = false;
 
   if (COIN_VULKAN_ENV_FLAG("FC_VULKAN_BLACK_DEBUG"))
     fprintf(stderr, "[BLACK] renderExternalOverlay ENTER frame=%d cmds=%d\n",
@@ -826,7 +876,8 @@ SoVulkanRenderBackend::recordFrame(const SoDrawList & drawlist,
             nTriUnlit, nLine, nOverlay, nTrans);
   }
   this->applyViewport(params, target, ctx);
-  this->recordClear(params, target, ctx);
+  this->recordClear(params, target, this->renderPassColorCleared,
+                    this->renderPassDepthCleared, ctx);
   this->recordBackground(params, target, renderPass, ctx);
   // The background pass overrides the viewport/scissor for its own draw;
   // restore the viewport from params before recording geometry so draws

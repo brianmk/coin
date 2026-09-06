@@ -302,6 +302,8 @@ private:
   bool createLightingDescriptorSet();
   bool createPipelineLayout();
   bool createRenderPass(const SoVulkanRenderTarget & target,
+                        VkAttachmentLoadOp colorLoadOp,
+                        VkAttachmentLoadOp depthLoadOp,
                         VkRenderPass & renderPass);
   bool createShaders(VkShaderModule & vertexModule,
                      VkShaderModule & fragmentModule);
@@ -436,7 +438,14 @@ private:
   VkCommandBuffer currentCommandBuffer();
   void recordClear(const SoRenderParams & params,
                    const SoVulkanRenderTarget & target,
+                   bool colorClearedByLoad,
+                   bool depthClearedByLoad,
                    VulkanRecordContext & ctx);
+  // Returns true when the frame's clear region (derived from params.viewport)
+  // covers the whole target, so the render pass can use a CLEAR color/depth
+  // loadOp instead of a vkCmdClearAttachments region clear.
+  bool isFullTargetClear(const SoRenderParams & params,
+                         const SoVulkanRenderTarget & target) const;
   void recordDrawCommand(const SoDrawList & drawlist,
                          const SoRenderCommand & command,
                          const SoVulkanRenderTarget & target,
@@ -746,6 +755,12 @@ private:
     VkSampleCountFlagBits sampleCount = VK_SAMPLE_COUNT_1_BIT;
     VkImageLayout colorLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
     VkImageLayout depthLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
+    // Load ops distinguish a render pass that clears its attachments at begin
+    // (full-target clear fast path, FC_VULKAN_RP_CLEAR) from one that loads
+    // them and clears via vkCmdClearAttachments.  Two passes that differ only
+    // in loadOp must not share a cache entry.
+    VkAttachmentLoadOp colorLoadOp = VK_ATTACHMENT_LOAD_OP_LOAD;
+    VkAttachmentLoadOp depthLoadOp = VK_ATTACHMENT_LOAD_OP_LOAD;
 
     bool operator==(const RenderPassIdentity & other) const
     {
@@ -753,7 +768,9 @@ private:
         depthFormat == other.depthFormat &&
         sampleCount == other.sampleCount &&
         colorLayout == other.colorLayout &&
-        depthLayout == other.depthLayout;
+        depthLayout == other.depthLayout &&
+        colorLoadOp == other.colorLoadOp &&
+        depthLoadOp == other.depthLoadOp;
     }
   };
   struct RenderPassIdentityHash
@@ -770,16 +787,28 @@ private:
                          std::hash<uint32_t>()(static_cast<uint32_t>(key.colorLayout)));
       hash = hashCombine(hash,
                          std::hash<uint32_t>()(static_cast<uint32_t>(key.depthLayout)));
+      hash = hashCombine(hash,
+                         std::hash<uint32_t>()(static_cast<uint32_t>(key.colorLoadOp)));
+      hash = hashCombine(hash,
+                         std::hash<uint32_t>()(static_cast<uint32_t>(key.depthLoadOp)));
       return hash;
     }
   };
   RenderPassIdentity renderPassIdentity(const SoVulkanRenderTarget & target) const;
-  VkRenderPass getOrCreateRenderPass(const SoVulkanRenderTarget & target);
+  VkRenderPass getOrCreateRenderPass(const SoVulkanRenderTarget & target,
+                                     VkAttachmentLoadOp colorLoadOp,
+                                     VkAttachmentLoadOp depthLoadOp);
   std::unordered_map<RenderPassIdentity, VkRenderPass, RenderPassIdentityHash>
     renderPassCache;
 
   // Render pass used by the current frame (looked up from renderPassCache).
   VkRenderPass renderPass = VK_NULL_HANDLE;
+  // Whether the current frame's render pass clears the color/depth attachment
+  // via its loadOp (full-target-clear fast path).  When true, recordClear()
+  // skips the redundant vkCmdClearAttachments and the begin info supplies the
+  // corresponding clear value.
+  bool renderPassColorCleared = false;
+  bool renderPassDepthCleared = false;
 
   // Framebuffer cached for the current target identity (image views +
   // extent + render pass).  Swapchain targets cycle their images every
