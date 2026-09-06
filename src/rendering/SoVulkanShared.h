@@ -341,7 +341,7 @@ bufferTransition(VkCommandBuffer cmd, VkBuffer buffer, VkDeviceSize offset,
 // afterwards (the wait also retires any other in-flight work on the queue).
 inline bool
 withOneShotSubmit(VkDevice device, VkQueue queue, VkCommandPool pool,
-                  const VkAllocationCallbacks * allocator,
+                  const VkAllocationCallbacks * /*allocator*/,
                   const std::function<void(VkCommandBuffer)> & record)
 {
   VkCommandBufferAllocateInfo allocInfo {};

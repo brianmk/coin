@@ -85,7 +85,7 @@ bool vkRenderBreadcrumbEnabled()
 int vkLightFrameDbgBudget = 192;
 int vkLightFpDbgBudget = 192;
 
-void vkRenderBreadcrumb(const char* phase)
+[[maybe_unused]] void vkRenderBreadcrumb(const char* phase)
 {
   if (!vkRenderBreadcrumbEnabled()) {
     return;

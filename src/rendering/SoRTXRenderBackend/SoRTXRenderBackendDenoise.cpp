@@ -369,7 +369,7 @@ SoRTXRenderBackend::createDenoiseBackend()
 
 #if COIN_BUILD_RTX_DENOISER
   if (this->denoiseKind == DenoiseRtx) {
-    this->rtxModelKind = [this]() {
+    this->rtxModelKind = []() {
       const char * m = getenv("FC_VULKAN_PT_RTX_MODEL");
       if (m && std::strcmp(m, "TEMPORAL") == 0)
         return OPTIX_DENOISER_MODEL_KIND_TEMPORAL_AOV;
@@ -829,7 +829,7 @@ SoRTXRenderBackend::updateDenoise()
             colorR = dbg + (4 * gbStride) / 4;
             albR = dbg + (4 * gbStride + outStride) / 4;
           }
-          float * nrmR = dbg + 2 * gbStride / 4;
+          [[maybe_unused]] float * nrmR = dbg + 2 * gbStride / 4;
           const int mid = ((h / 2) * w + w / 2) * 4;
           // scan a horizontal strip at mid-height for lit (alpha>0) color runs
           int litPixels = 0;

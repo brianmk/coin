@@ -1052,7 +1052,7 @@ SoVulkanRenderBackend::recordTracedComposite(const SoDrawList & drawlist,
     if (topo == SO_TOPOLOGY_TRIANGLES) continue;
     if (topo == SO_TOPOLOGY_TRIANGLE_STRIP) continue;
 
-    const SoRasterState & raster = command.state.raster;
+    [[maybe_unused]] const SoRasterState & raster = command.state.raster;
     // Apply the command's own viewport/scissor if it carries one, else the
     // whole-surface viewport (the default for scene geometry).
     this->applyCommandViewport(command, target);
