@@ -18,16 +18,68 @@
 #define COIN_SOVULKANRENDERBACKENDP_H
 
 #include <algorithm>
+#include <atomic>
+#include <cstdarg>
 #include <cstddef>
 #include <cstdint>
+#include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <functional>
+#include <thread>
 
 #include <vulkan/vulkan.h>
 #include <Inventor/rendering/SoRenderIR.h>
 #include <rendering/SoFnv1a.h>
 
+#ifndef _WIN32
+#include <unistd.h>
+#endif
+
 namespace CoinVulkanDetail {
+
+  // ---- [TRC] per-step recording traces (FC_VULKAN_TRACE) ----
+  // One line per pipeline step, tagged with a monotonic sequence, frame
+  // index and thread id so an interleaved multi-thread log can be read in
+  // order.  Gated by FC_VULKAN_TRACE, off by default, and cached (the
+  // environment does not change mid-process).
+  inline bool vkBackendTraceEnabled()
+  {
+    static const bool enabled = std::getenv("FC_VULKAN_TRACE") != nullptr;
+    return enabled;
+  }
+
+  inline void vkBackendTrace(const uint32_t frame, const char * stage,
+                             const char * fmt, ...)
+  {
+    if (!vkBackendTraceEnabled()) return;
+    static std::atomic<long> seq(0);
+    const long n = seq.fetch_add(1, std::memory_order_relaxed);
+    char buf[224];
+    int len = std::snprintf(buf, sizeof(buf), "[TRC] %ld f=%u", n, frame);
+    const size_t th =
+      std::hash<std::thread::id>()(std::this_thread::get_id());
+    len += std::snprintf(buf + len, sizeof(buf) - static_cast<size_t>(len),
+                         " t=%zx %s ", th, stage);
+    va_list ap;
+    va_start(ap, fmt);
+    len += std::vsnprintf(buf + len,
+                          sizeof(buf) - static_cast<size_t>(len), fmt, ap);
+    va_end(ap);
+    if (len > 223) len = 223;
+    buf[len++] = '\n';
+    // write(2) to fd 2: unbuffered, lock-free syscalls so tracing perturbs
+    // thread interleaving as little as possible and the final line before a
+    // crash is never lost in a stdio buffer.  (fprintf + fflush fallback on
+    // Windows, where fd 2 is not a POSIX descriptor.)
+#ifdef _WIN32
+    std::fwrite(buf, 1, static_cast<size_t>(len), stderr);
+    std::fflush(stderr);
+#else
+    const ssize_t written = ::write(2, buf, static_cast<size_t>(len));
+    (void)written;
+#endif
+  }
 
 
   inline int s_debugFrame = 0;
@@ -215,17 +267,20 @@ hashTextureContent(const SoTextureData & texture)
 
 // Fixed interleaved vertex layout shared by every retained command.
 //
-//   offset 0 : vec3 position
-//   offset 12: vec3 normal
-//   offset 24: vec4 color
-//   offset 40: vec2 texcoord
+//   offset 0 : vec3 position  (R32G32B32_SFLOAT)
+//   offset 12: vec3 normal    (R32G32B32_SFLOAT)
+//   offset 24: vec4 color     (R8G8B8A8_UNORM)
+//   offset 28: vec2 texcoord  (R16G16_SFLOAT)
 //
-// This keeps a single static vertex-input description usable across all
-// pipelines, mirroring the GL backend's VAO-per-command bookkeeping without
-// any per-command vertex-state objects.
-constexpr uint32_t VULKAN_VERTEX_STRIDE = 48;
+// Positions and normals stay full f32 (CAD geometry needs the precision for
+// correct normals/lighting); the diffuse color is quantized to 8-bit UNORM and
+// the texture coordinate to half-float, cutting the per-vertex fetch from 48
+// to 32 bytes.  This keeps a single static vertex-input description usable
+// across all pipelines, mirroring the GL backend's VAO-per-command bookkeeping
+// without any per-command vertex-state objects.
+constexpr uint32_t VULKAN_VERTEX_STRIDE = 32;
 constexpr int MAX_VERTEX_COUNT = 10000000;
-constexpr int MAX_SHADER_LIGHTS = 8;
+constexpr int MAX_SHADER_LIGHTS = SO_MAX_SHADER_LIGHTS;
 
 struct alignas(16) VulkanPushConstants {
   float proj[16];       // projection matrix (view/model live in the UBO)
@@ -258,22 +313,14 @@ struct alignas(16) VulkanBackgroundPush {
 static_assert(sizeof(VulkanBackgroundPush) == 48,
               "VulkanBackgroundPush must match BackgroundPush layout");
 
-// std140 mirror of the LightingBlock uniform (set 0, binding 0) in the
-// visual Vertex/Fragment shaders.  The lighting constant block is written
-// ONCE per unique lightingHandle per frame into a small ring; every draw that
-// references the same handle binds that same slot through a dynamic offset,
-// so the 8-light setup is never recomputed or re-written per draw.  The
-// layout must match the shader byte-for-byte; vec3 members consume 16 bytes
-// like std140 vec4s.
-struct alignas(16) VulkanLightingUbo {
-  float ambientLight[4];                   // offset 0
-  float lightType[MAX_SHADER_LIGHTS * 4];        // offset 16
-  float lightColor[MAX_SHADER_LIGHTS * 4];       // offset 144
-  float lightDirection[MAX_SHADER_LIGHTS * 4];   // offset 272
-  float lightPosition[MAX_SHADER_LIGHTS * 4];    // offset 400
-  float lightAttenuation[MAX_SHADER_LIGHTS * 4]; // offset 528
-  float lightSpotParams[MAX_SHADER_LIGHTS * 4];  // offset 656
-};
+// The lighting constant block is the standardized SoLightingBlock (the
+// single authoritative std140 mirror of the visual shaders' LightingBlock
+// uniform, set 0 binding 0).  It is written ONCE per unique lightingHandle
+// per frame into a small ring -- world-space setups transformed to eye space
+// by SoRenderIR::fillLightingBlock() with the frame view -- and every draw
+// referencing the same handle binds that same slot through a dynamic offset,
+// so the 8-light setup is never recomputed or re-written per draw.
+using VulkanLightingUbo = SoLightingBlock;
 static_assert(sizeof(VulkanLightingUbo) == 784,
               "VulkanLightingUbo must match LightingBlock std140 layout");
 

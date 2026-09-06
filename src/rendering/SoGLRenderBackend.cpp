@@ -30,7 +30,7 @@
 namespace {
 
 static constexpr int MAX_VERTEX_COUNT = 10000000;
-static constexpr int MAX_SHADER_LIGHTS = 8;
+static constexpr int MAX_SHADER_LIGHTS = SO_MAX_SHADER_LIGHTS;
 
 GLenum
 textureWrapToGL(const SoTextureWrap wrap)

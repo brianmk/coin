@@ -516,14 +516,14 @@ SoGLDriverDatabaseP::findDriver(const cc_xml_elt * vendor, const cc_glglue * COI
       if (maxversionelement)
         maxversion = cc_xml_elt_get_cdata(maxversionelement);
 
-      unsigned int minversion_major = 0;
-      unsigned int minversion_minor = 0;
-      unsigned int minversion_micro = 0;
-      unsigned int minversion_nano = 0;
-      unsigned int maxversion_major = 0;
-      unsigned int maxversion_minor = 0;
-      unsigned int maxversion_micro = 0;
-      unsigned int maxversion_nano = 0;
+      [[maybe_unused]] unsigned int minversion_major = 0;
+      [[maybe_unused]] unsigned int minversion_minor = 0;
+      [[maybe_unused]] unsigned int minversion_micro = 0;
+      [[maybe_unused]] unsigned int minversion_nano = 0;
+      [[maybe_unused]] unsigned int maxversion_major = 0;
+      [[maybe_unused]] unsigned int maxversion_minor = 0;
+      [[maybe_unused]] unsigned int maxversion_micro = 0;
+      [[maybe_unused]] unsigned int maxversion_nano = 0;
 
       SbIntList indices;
 

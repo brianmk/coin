@@ -30,49 +30,51 @@
 using namespace CoinVulkanDetail;
 
 void
-SoVulkanRenderBackend::resetBoundState()
+SoVulkanRenderBackend::resetBoundState(VulkanRecordContext & ctx)
 {
-  this->lastBoundPipeline = VK_NULL_HANDLE;
-  this->hasBoundViewport = false;
-  this->hasBoundScissor = false;
+  ctx.reset();
 }
 
 void
-SoVulkanRenderBackend::applyPipeline(const VkPipeline pipeline)
+SoVulkanRenderBackend::applyPipeline(const VkPipeline pipeline,
+                                     VulkanRecordContext & ctx)
 {
-  if (pipeline == this->lastBoundPipeline) return;
-  vkCmdBindPipeline(this->activeCommandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS,
+  if (pipeline == ctx.lastBoundPipeline) return;
+  vkCmdBindPipeline(ctx.buffer, VK_PIPELINE_BIND_POINT_GRAPHICS,
                     pipeline);
-  this->lastBoundPipeline = pipeline;
+  ctx.lastBoundPipeline = pipeline;
 }
 
 void
-SoVulkanRenderBackend::applyViewportState(const VkViewport & viewport)
+SoVulkanRenderBackend::applyViewportState(const VkViewport & viewport,
+                                          VulkanRecordContext & ctx)
 {
-  if (this->hasBoundViewport &&
-      std::memcmp(&this->lastBoundViewport, &viewport, sizeof(viewport)) == 0) {
+  if (ctx.hasBoundViewport &&
+      std::memcmp(&ctx.lastBoundViewport, &viewport, sizeof(viewport)) == 0) {
     return;
   }
-  vkCmdSetViewport(this->activeCommandBuffer, 0, 1, &viewport);
-  this->lastBoundViewport = viewport;
-  this->hasBoundViewport = true;
+  vkCmdSetViewport(ctx.buffer, 0, 1, &viewport);
+  ctx.lastBoundViewport = viewport;
+  ctx.hasBoundViewport = true;
 }
 
 void
-SoVulkanRenderBackend::applyScissorState(const VkRect2D & scissor)
+SoVulkanRenderBackend::applyScissorState(const VkRect2D & scissor,
+                                         VulkanRecordContext & ctx)
 {
-  if (this->hasBoundScissor &&
-      std::memcmp(&this->lastBoundScissor, &scissor, sizeof(scissor)) == 0) {
+  if (ctx.hasBoundScissor &&
+      std::memcmp(&ctx.lastBoundScissor, &scissor, sizeof(scissor)) == 0) {
     return;
   }
-  vkCmdSetScissor(this->activeCommandBuffer, 0, 1, &scissor);
-  this->lastBoundScissor = scissor;
-  this->hasBoundScissor = true;
+  vkCmdSetScissor(ctx.buffer, 0, 1, &scissor);
+  ctx.lastBoundScissor = scissor;
+  ctx.hasBoundScissor = true;
 }
 
 void
 SoVulkanRenderBackend::applyViewport(const SoRenderParams & params,
-                                     const SoVulkanRenderTarget & target)
+                                     const SoVulkanRenderTarget & target,
+                                     VulkanRecordContext & ctx)
 {
   const SbVec2s & origin = params.viewport.getViewportOriginPixels();
   const SbVec2s & size = params.viewport.getViewportSizePixels();
@@ -98,7 +100,7 @@ SoVulkanRenderBackend::applyViewport(const SoRenderParams & params,
   viewport.height = static_cast<float>(size[1]);
   viewport.minDepth = 0.0f;
   viewport.maxDepth = 1.0f;
-  this->applyViewportState(viewport);
+  this->applyViewportState(viewport, ctx);
 
   // Clamp the clear region to the target so an off-screen viewport (origin
   // outside the target, or a size exceeding the extent) never generates a
@@ -119,7 +121,7 @@ SoVulkanRenderBackend::applyViewport(const SoRenderParams & params,
   scissor.offset = {x0, y0};
   scissor.extent = {static_cast<uint32_t>(std::max(0, x1 - x0)),
                     static_cast<uint32_t>(std::max(0, y1 - y0))};
-  this->applyScissorState(scissor);
+  this->applyScissorState(scissor, ctx);
 }
 
 // Apply a per-command viewport (recorded by the IR producer from
@@ -128,7 +130,8 @@ SoVulkanRenderBackend::applyViewport(const SoRenderParams & params,
 // by applyViewport().  Same Y-flip math as applyViewport().
 void
 SoVulkanRenderBackend::applyCommandViewport(const SoRenderCommand & command,
-                                            const SoVulkanRenderTarget & target)
+                                            const SoVulkanRenderTarget & target,
+                                            VulkanRecordContext & ctx)
 {
   const SoRasterState & raster = command.state.raster;
   if (!raster.viewportEnabled || raster.viewportWidth <= 0 ||
@@ -150,7 +153,7 @@ SoVulkanRenderBackend::applyCommandViewport(const SoRenderCommand & command,
     std::clamp(command.state.depth.range[0], 0.0f, 1.0f);
   viewport.maxDepth =
     std::clamp(command.state.depth.range[1], 0.0f, 1.0f);
-  this->applyViewportState(viewport);
+  this->applyViewportState(viewport, ctx);
 
   // The per-command viewport also bounds the draw region; mirror the
   // scissor clamp used by applyViewport().
@@ -171,12 +174,13 @@ SoVulkanRenderBackend::applyCommandViewport(const SoRenderCommand & command,
   scissor.offset = {x0, y0};
   scissor.extent = {static_cast<uint32_t>(std::max(0, x1 - x0)),
                     static_cast<uint32_t>(std::max(0, y1 - y0))};
-  this->applyScissorState(scissor);
+  this->applyScissorState(scissor, ctx);
 }
 
 void
 SoVulkanRenderBackend::applyScissor(const SoRenderCommand & command,
-                                    const SoVulkanRenderTarget & target)
+                                    const SoVulkanRenderTarget & target,
+                                    VulkanRecordContext & ctx)
 {
   VkRect2D scissor {};
   const SoRasterState & raster = command.state.raster;
@@ -196,12 +200,42 @@ SoVulkanRenderBackend::applyScissor(const SoRenderCommand & command,
     scissor.offset = {0, 0};
     scissor.extent = target.extent;
   }
-  this->applyScissorState(scissor);
+  this->applyScissorState(scissor, ctx);
+}
+
+bool
+SoVulkanRenderBackend::isFullTargetClear(const SoRenderParams & params,
+                                         const SoVulkanRenderTarget & target) const
+{
+  // Mirror the clear-region math in recordClear().  A full-target clear means
+  // the viewport region, after clamping to the target, covers the entire
+  // attachment, so no vkCmdClearAttachments region is needed and the render
+  // pass can clear via its loadOp instead.  Empty viewports clear nothing.
+  const SbVec2s & origin = params.viewport.getViewportOriginPixels();
+  const SbVec2s & size = params.viewport.getViewportSizePixels();
+  const int32_t x0 = std::max(0, static_cast<int32_t>(origin[0]));
+  const int32_t y0 = std::max(
+    0, static_cast<int32_t>(target.extent.height) -
+       static_cast<int32_t>(origin[1]) -
+       static_cast<int32_t>(size[1]));
+  const int32_t x1 = std::min(static_cast<int32_t>(target.extent.width),
+                              static_cast<int32_t>(origin[0]) +
+                                static_cast<int32_t>(size[0]));
+  const int32_t y1 = std::min(
+    static_cast<int32_t>(target.extent.height),
+    static_cast<int32_t>(target.extent.height) -
+      static_cast<int32_t>(origin[1]));
+  return x0 == 0 && y0 == 0 &&
+    x1 == static_cast<int32_t>(target.extent.width) &&
+    y1 == static_cast<int32_t>(target.extent.height);
 }
 
 void
 SoVulkanRenderBackend::recordClear(const SoRenderParams & params,
-                                   const SoVulkanRenderTarget & target)
+                                   const SoVulkanRenderTarget & target,
+                                   bool colorClearedByLoad,
+                                   bool depthClearedByLoad,
+                                   VulkanRecordContext & ctx)
 {
   const bool hasDepth = target.depthImageView != VK_NULL_HANDLE &&
                         target.depthFormat != VK_FORMAT_UNDEFINED;
@@ -210,24 +244,31 @@ SoVulkanRenderBackend::recordClear(const SoRenderParams & params,
   uint32_t attachmentCount = 0;
 
   if (params.flags & SO_PARAM_CLEAR_WINDOW) {
-    const SbColor4f & color = params.clearColor;
-    VkClearAttachment clear {};
-    clear.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
-    clear.colorAttachment = 0;
-    clear.clearValue.color.float32[0] = color[0];
-    clear.clearValue.color.float32[1] = color[1];
-    clear.clearValue.color.float32[2] = color[2];
-    clear.clearValue.color.float32[3] = color[3];
-    attachments[attachmentCount++] = clear;
+    // When the render pass begins with a CLEAR color loadOp (full-target
+    // clear fast path), the attachment was already cleared to params.clearColor,
+    // so there is no matching vkCmdClearAttachments to omit.
+    if (!colorClearedByLoad) {
+      const SbColor4f & color = params.clearColor;
+      VkClearAttachment clear {};
+      clear.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+      clear.colorAttachment = 0;
+      clear.clearValue.color.float32[0] = color[0];
+      clear.clearValue.color.float32[1] = color[1];
+      clear.clearValue.color.float32[2] = color[2];
+      clear.clearValue.color.float32[3] = color[3];
+      attachments[attachmentCount++] = clear;
+    }
   }
 
   if (hasDepth && (params.flags & SO_PARAM_CLEAR_DEPTH)) {
-    VkClearAttachment clear {};
-    clear.aspectMask = VK_IMAGE_ASPECT_DEPTH_BIT;
-    clear.colorAttachment = 0;
-    clear.clearValue.depthStencil.depth = params.clearDepth;
-    clear.clearValue.depthStencil.stencil = 0;
-    attachments[attachmentCount++] = clear;
+    if (!depthClearedByLoad) {
+      VkClearAttachment clear {};
+      clear.aspectMask = VK_IMAGE_ASPECT_DEPTH_BIT;
+      clear.colorAttachment = 0;
+      clear.clearValue.depthStencil.depth = params.clearDepth;
+      clear.clearValue.depthStencil.stencil = 0;
+      attachments[attachmentCount++] = clear;
+    }
   }
 
   if (hasDepth && (params.flags & SO_PARAM_CLEAR_STENCIL)) {
@@ -266,13 +307,14 @@ SoVulkanRenderBackend::recordClear(const SoRenderParams & params,
                       static_cast<uint32_t>(y1 - y0)};
   rect.baseArrayLayer = 0;
   rect.layerCount = 1;
-  vkCmdClearAttachments(this->activeCommandBuffer, attachmentCount, attachments, 1,
+  vkCmdClearAttachments(ctx.buffer, attachmentCount, attachments, 1,
                         &rect);
 }
 
 void
 SoVulkanRenderBackend::recordOverlayDepthClear(const SoRenderCommand & command,
-                                               const SoVulkanRenderTarget & target)
+                                               const SoVulkanRenderTarget & target,
+                                               VulkanRecordContext & ctx)
 {
   const bool hasDepth = target.depthImageView != VK_NULL_HANDLE &&
                         target.depthFormat != VK_FORMAT_UNDEFINED;
@@ -311,12 +353,14 @@ SoVulkanRenderBackend::recordOverlayDepthClear(const SoRenderCommand & command,
                       static_cast<uint32_t>(y1 - y0)};
   rect.baseArrayLayer = 0;
   rect.layerCount = 1;
-  vkCmdClearAttachments(this->activeCommandBuffer, 1, &attachment, 1, &rect);
+  vkCmdClearAttachments(ctx.buffer, 1, &attachment, 1, &rect);
 }
 
 bool
 SoVulkanRenderBackend::updateLightingSetup(const SoDrawList & drawlist)
 {
+  vkBackendTrace(this->uboFrameIndex, "updateLightingSetup.enter", "cmds=%d",
+                 drawlist.getNumCommands());
   // Build the (usually single) lighting constant block per distinct
   // lightingHandle once per frame, into the lighting ring, so the 8-light
   // setup is computed once and referenced by every draw through its dynamic
@@ -331,6 +375,12 @@ SoVulkanRenderBackend::updateLightingSetup(const SoDrawList & drawlist)
 
   static const SoLightingData emptyLighting;
   uint32_t occupiedSlots = 0;
+
+  // Setups are world-space; the visual shaders light in eye space, so pack
+  // them through the frame view (cacheFrameMatrices() runs before this).
+  SbMat frameViewMat;
+  std::memcpy(frameViewMat, this->frameViewFloats, sizeof(float) * 16);
+  const SbMatrix frameView(frameViewMat);
 
   // Seed slot 0 with empty lighting so the handle-0 fallback in
   // lightingOffsetFor() is always valid.
@@ -363,52 +413,7 @@ SoVulkanRenderBackend::updateLightingSetup(const SoDrawList & drawlist)
       static_cast<VkDeviceSize>(frameBase + slot) * this->lightingConstStride;
     VulkanLightingUbo * u = reinterpret_cast<VulkanLightingUbo *>(
       static_cast<char *>(this->lightingConstMapped) + offset);
-    std::memset(u, 0, sizeof(VulkanLightingUbo));
-
-    u->ambientLight[0] = lighting->ambient[0];
-    u->ambientLight[1] = lighting->ambient[1];
-    u->ambientLight[2] = lighting->ambient[2];
-    u->ambientLight[3] = 1.0f;
-
-    const int count = std::min<int>(
-      static_cast<int>(lighting->lights.size()), MAX_SHADER_LIGHTS);
-    for (int li = 0; li < count; ++li) {
-      const SoLightData & light = lighting->lights[static_cast<size_t>(li)];
-      float * type = u->lightType + li * 4;
-      type[0] = static_cast<float>(light.type);
-      type[1] = type[2] = 0.0f;
-      type[3] = 1.0f;
-
-      float * color = u->lightColor + li * 4;
-      color[0] = light.color[0];
-      color[1] = light.color[1];
-      color[2] = light.color[2];
-      color[3] = 1.0f;
-
-      float * direction = u->lightDirection + li * 4;
-      direction[0] = light.direction[0];
-      direction[1] = light.direction[1];
-      direction[2] = light.direction[2];
-      direction[3] = 1.0f;
-
-      float * position = u->lightPosition + li * 4;
-      position[0] = light.position[0];
-      position[1] = light.position[1];
-      position[2] = light.position[2];
-      position[3] = 1.0f;
-
-      float * attenuation = u->lightAttenuation + li * 4;
-      attenuation[0] = light.attenuation[0];
-      attenuation[1] = light.attenuation[1];
-      attenuation[2] = light.attenuation[2];
-      attenuation[3] = 1.0f;
-
-      float * spot = u->lightSpotParams + li * 4;
-      spot[0] = light.spotCutoffCos;
-      spot[1] = light.spotExponent;
-      spot[2] = 0.0f;
-      spot[3] = 1.0f;
-    }
+    SoRenderIR::fillLightingBlock(*u, *lighting, &frameView);
     this->lightingSlotOffsets[handle] = offset;
     ++occupiedSlots;
   }
@@ -515,8 +520,13 @@ SoVulkanRenderBackend::recordDrawCommand(const SoDrawList & drawlist,
                                          const bool transparent,
                                          const int fillModeOverride,
                                          const float * uniformColorOverride,
-                                         const bool overlayPass)
+                                         const bool overlayPass,
+                                         VulkanRecordContext & ctx)
 {
+  vkBackendTrace(this->uboFrameIndex, "recordDrawCommand.enter",
+                 "cmd=%p pass=%d slot=%u",
+                 reinterpret_cast<const void *>(&command),
+                 static_cast<int>(command.pass), ctx.uboCmdIndex);
   if (!command.geometry.positions || command.geometry.vertexCount == 0) {
     if (COIN_VULKAN_ENV_FLAG("FC_VULKAN_BACKEND_DEBUG")) {
       fprintf(stderr, "[VKBE] cmd %p pass=%d skip: no positions/verts\n",
@@ -611,14 +621,14 @@ SoVulkanRenderBackend::recordDrawCommand(const SoDrawList & drawlist,
               overlayPass ? 1 : 0, transparent ? 1 : 0);
     }
   }
-  this->applyPipeline(pipeline);
+  this->applyPipeline(pipeline, ctx);
   // Commands carrying their own viewport (SoViewportRegionElement) render
   // into that sub-region; otherwise the frame viewport from applyViewport()
   // stays active.
-  this->applyCommandViewport(command, target);
-  this->applyScissor(command, target);
+  this->applyCommandViewport(command, target, ctx);
+  this->applyScissor(command, target, ctx);
 
-  const uint32_t slotIndex = this->uboCmdIndex++;
+  const uint32_t slotIndex = ctx.uboCmdIndex++;
   // prepareLightingSlots() reserves a worst-case slot count before any
   // recording, so this can only trip if a future recording path forgets to
   // pre-count.  Guard at runtime regardless: the mapped UBO write below
@@ -639,36 +649,71 @@ SoVulkanRenderBackend::recordDrawCommand(const SoDrawList & drawlist,
   const uint32_t uboDynamicOffset = static_cast<uint32_t>(uboOffset);
 
   // Bind set 0 (lighting constant, dynamic offset per handle) and set 1
-  // (per-draw UBO + texture, dynamic offset) in one call.  Lighting is the
-  // same for every command sharing a handle, so its block was written once
-  // by updateLightingSetup() and is merely referenced here.
+  // (per-draw UBO + texture, dynamic offset).  Lighting is the same for every
+  // command sharing a handle, so its block was written once per handle by
+  // updateLightingSetup() and is merely referenced here.
   VkDescriptorSet textureSet = this->resolveTextureSet(command);
   if (textureSet == VK_NULL_HANDLE) {
     textureSet = this->whiteDescriptorSet;
   }
-  const VkDescriptorSet sets[2] = {this->lightingDescriptorSet, textureSet};
-  const uint32_t dynamicOffsets[2] = {
-    static_cast<uint32_t>(this->lightingOffsetFor(command)),
-    uboDynamicOffset,
-  };
-  vkCmdBindDescriptorSets(this->activeCommandBuffer,
-                          VK_PIPELINE_BIND_POINT_GRAPHICS,
-                          this->pipelineLayout, 0, 2, sets, 2,
-                          dynamicOffsets);
+  // Cache the lighting dynamic offset per handle: a frame's retained commands
+  // almost always share ONE handle, so only the first draw of a new handle
+  // pays the unordered_map lookup in lightingOffsetFor().  Set 0 re-binds only
+  // when the handle (its dynamic offset) actually changes; set 1 must re-bind
+  // every draw because its dynamic offset is the per-draw UBO slot below.
+  uint32_t lightingDynamicOffset = ctx.lastLightingOffset;
+  if (command.lightingHandle != ctx.lastLightingHandle) {
+    lightingDynamicOffset =
+      static_cast<uint32_t>(this->lightingOffsetFor(command));
+    ctx.lastLightingHandle = command.lightingHandle;
+    ctx.lastLightingOffset = lightingDynamicOffset;
+  }
+  uint32_t bindingOffsets[2] = { lightingDynamicOffset, uboDynamicOffset };
+  if (ctx.lastBoundLightingOffset != lightingDynamicOffset ||
+      ctx.lastBoundTextureSet != textureSet) {
+    // First draw of a new lighting handle / texture set: bind both sets with
+    // their dynamic offsets in one call (also covers the frame's first draw).
+    const VkDescriptorSet both[2] = {this->lightingDescriptorSet, textureSet};
+    vkBackendTrace(this->uboFrameIndex, "draw.bindDescSets2",
+                   "slot=%u", slotIndex);
+    vkCmdBindDescriptorSets(ctx.buffer,
+                            VK_PIPELINE_BIND_POINT_GRAPHICS,
+                            this->pipelineLayout, 0, 2, both, 2,
+                            bindingOffsets);
+    ctx.lastBoundLightingOffset = lightingDynamicOffset;
+    ctx.lastBoundTextureSet = textureSet;
+  }
+  else {
+    // Same lighting handle + texture set as the previous draw: only the
+    // per-draw UBO dynamic offset advances.  Re-bind set 1 alone (set 0 stays
+    // bound from the last 2-set bind) instead of re-emitting both sets.
+    vkBackendTrace(this->uboFrameIndex, "draw.bindDescSets1",
+                   "slot=%u", slotIndex);
+    vkCmdBindDescriptorSets(ctx.buffer,
+                            VK_PIPELINE_BIND_POINT_GRAPHICS,
+                            this->pipelineLayout, 1, 1, &textureSet, 1,
+                            &bindingOffsets[1]);
+  }
 
   const VkDeviceSize vertexOffset = entry.vertexOffset;
-  vkCmdBindVertexBuffers(this->activeCommandBuffer, 0, 1, &entry.vertexBuffer,
-                         &vertexOffset);
   const bool indexed =
     entry.indexBuffer != VK_NULL_HANDLE && command.geometry.indexCount &&
     command.geometry.indices;
+  vkBackendTrace(this->uboFrameIndex, "draw.bindVbuf0",
+                 "slot=%u vbuf=%p off=%llu", slotIndex,
+                 reinterpret_cast<const void *>(entry.vertexBuffer),
+                 static_cast<unsigned long long>(vertexOffset));
+  vkCmdBindVertexBuffers(ctx.buffer, 0, 1, &entry.vertexBuffer,
+                         &vertexOffset);
   if (indexed && !useWideLine) {
-    vkCmdBindIndexBuffer(this->activeCommandBuffer, entry.indexBuffer,
+    vkBackendTrace(this->uboFrameIndex, "draw.bindIbuf", "slot=%u", slotIndex);
+    vkCmdBindIndexBuffer(ctx.buffer, entry.indexBuffer,
                          entry.indexOffset, VK_INDEX_TYPE_UINT32);
   }
 
   this->updateLightingUniforms(drawlist, command, params, uboOffset,
                                uniformColorOverride != nullptr);
+  vkBackendTrace(this->uboFrameIndex, "draw.uboWrite", "slot=%u", slotIndex);
 
   VulkanPushConstants push {};
   SbMat projValue;
@@ -778,9 +823,8 @@ SoVulkanRenderBackend::recordDrawCommand(const SoDrawList & drawlist,
   // logical points (so a 2pt line is 2*dpr device px on a scaled display).
   // The Vulkan viewport is device pixels too, so apply the same ratio here
   // for parity; otherwise lines/points render 1/dpr too thin on a fractional
-  // (e.g. 1.25 / 1.5 / 2.0) scaling display.
-  const float dpr = params.devicePixelRatio > 0.0f
-    ? params.devicePixelRatio : 1.0f;
+  // (e.g. 1.25 / 1.5 / 2.0) scaling display.  frameDpr is hoisted per frame.
+  const float dpr = this->frameDpr;
   push.pointSize = std::max(1.0f, command.state.raster.pointSize) * dpr;
   push.lineParams[0] = push.lineParams[1] = push.lineParams[2] = 0.0f;
   push.lineParams[3] = 0.0f;
@@ -805,10 +849,12 @@ SoVulkanRenderBackend::recordDrawCommand(const SoDrawList & drawlist,
   push.lineParams[3] = command.geometry.topology == SO_TOPOLOGY_POINTS
     ? 1.0f : 0.0f;
 
-  vkCmdPushConstants(this->activeCommandBuffer, this->pipelineLayout,
-                     VK_SHADER_STAGE_VERTEX_BIT |
-                       VK_SHADER_STAGE_FRAGMENT_BIT,
-                     0, sizeof(push), &push);
+  vkBackendTrace(this->uboFrameIndex, "draw.pushConstants", "slot=%u",
+                 slotIndex);
+  vkCmdPushConstants(ctx.buffer, this->pipelineLayout,
+                      VK_SHADER_STAGE_VERTEX_BIT |
+                        VK_SHADER_STAGE_FRAGMENT_BIT,
+                      0, sizeof(push), &push);
 
   if (COIN_VULKAN_ENV_FLAG("FC_VULKAN_BACKEND_DEBUG") &&
       (command.geometry.topology == SO_TOPOLOGY_LINES ||
@@ -897,7 +943,7 @@ SoVulkanRenderBackend::recordDrawCommand(const SoDrawList & drawlist,
     VkDeviceSize wideOffset = 0;
     const VulkanCachedCommand::VulkanWideLineBuffer & wslot =
       entry.wideLineBuffers[this->uboFrameIndex % this->maxFramesInFlight];
-    vkCmdBindVertexBuffers(this->activeCommandBuffer, 0, 1, &wslot.buffer,
+    vkCmdBindVertexBuffers(ctx.buffer, 0, 1, &wslot.buffer,
                            &wideOffset);
   }
 
@@ -908,20 +954,261 @@ SoVulkanRenderBackend::recordDrawCommand(const SoDrawList & drawlist,
               (const void*)&command, entry.wideLineVertexCount,
               static_cast<int>(command.pass));
     }
-    vkCmdDraw(this->activeCommandBuffer, entry.wideLineVertexCount, 1, 0, 0);
-  }
-  else if (indexed) {
-    vkCmdDrawIndexed(this->activeCommandBuffer, command.geometry.indexCount, 1, 0,
-                     0, 0);
+    vkCmdDraw(ctx.buffer, entry.wideLineVertexCount, 1, 0, 0);
   }
   else {
-    vkCmdDraw(this->activeCommandBuffer, command.geometry.vertexCount, 1, 0, 0);
+    // Bind the per-instance model matrix (binding 1, rate INSTANCE) and draw
+    // with instanceCount=1.  Every visual pipeline now carries the instanced
+    // model attribute, so binding 1 must be bound for every visual draw (the
+    // shader reads the transform from it rather than the UBO).  The model is
+    // written into a per-command ring slot at the SAME element index the draw
+    // UBO uses, so the GPU reads this draw's transform even though recording
+    // completes before execution (a single shared offset would collapse every
+    // draw onto the last-committed model).  A batched group writes a run of
+    // [slotIndex .. slotIndex+N) elements and draws instanceCount=N.
+    const VkDeviceSize instElement =
+      static_cast<VkDeviceSize>((this->uboFrameIndex % this->maxFramesInFlight) *
+        this->uboSlotsPerFrame + slotIndex);
+    const VkDeviceSize instByteOffset = instElement * sizeof(float) * 16;
+    // The instance-model ring is pre-sized to maxFramesInFlight *
+    // uboSlotsPerFrame (see ensureInstanceModelRingCapacity), so the element
+    // index can never exceed it -- this is a defensive bounds check only, with
+    // no growth path (growing here would re-create the buffer mid-record,
+    // which races once workers record in parallel).
+    if (instByteOffset + sizeof(float) * 16 > this->instanceModelCapacity) {
+      return;
+    }
+    SbMat mm;
+    command.modelMatrix.getValue(mm);
+    std::memcpy(static_cast<char *>(this->instanceModelMapped) + instByteOffset,
+                &mm[0][0], sizeof(float) * 16);
+    vkBackendTrace(this->uboFrameIndex, "draw.bindVbuf1", "slot=%u",
+                   slotIndex);
+    vkCmdBindVertexBuffers(ctx.buffer, 1, 1,
+                           &this->instanceModelBuffer, &instByteOffset);
+    if (indexed) {
+      vkBackendTrace(this->uboFrameIndex, "draw.drawIndexed",
+                     "slot=%u buf=%p ic=%u cmd=%p", slotIndex,
+                     reinterpret_cast<const void *>(ctx.buffer),
+                     command.geometry.indexCount,
+                     reinterpret_cast<const void *>(&command));
+      vkCmdDrawIndexed(ctx.buffer, command.geometry.indexCount, 1, 0,
+                       0, 0);
+    }
+    else {
+      vkBackendTrace(this->uboFrameIndex, "draw.draw",
+                     "slot=%u buf=%p vc=%u ic=1 cmd=%p",
+                     slotIndex, reinterpret_cast<const void *>(ctx.buffer),
+                     command.geometry.vertexCount,
+                     reinterpret_cast<const void *>(&command));
+      vkCmdDraw(ctx.buffer, command.geometry.vertexCount, 1, 0, 0);
+    }
   }
+}
+
+bool
+SoVulkanRenderBackend::recordCommandBatch(const SoDrawList & drawlist,
+                                          const SoRenderCommand * const * commands,
+                                          int count,
+                                          const SoVulkanRenderTarget & target,
+                                          const SoRenderParams & params,
+                                          VkRenderPass pass,
+                                          const bool transparent,
+                                          const int fillModeOverride,
+                                          const float * uniformColorOverride,
+                                          VulkanRecordContext & ctx)
+{
+  // The batch shares geometry/material/state and differs only by model matrix,
+  // so every command picks the same pipeline, descriptor sets, vertex data and
+  // push constants as commands[0].  Rendered with one instanced draw.
+  vkBackendTrace(this->uboFrameIndex, "recordCommandBatch.enter",
+                 "count=%d slot=%u", count, ctx.uboCmdIndex);
+  const SoRenderCommand & command = *commands[0];
+  if (count < 2 || !command.geometry.positions ||
+      command.geometry.vertexCount == 0) {
+    return false;
+  }
+  const auto found = this->commandToCache.find(&command);
+  if (found == this->commandToCache.end()) return false;
+  // Fragile: only guaranteed-correct side paths (pipeline + descriptor + push +
+  // non-instanced vertex geometry) batch.  Wide-line expands per command on the
+  // CPU, so it is not batchable here.
+  const VulkanCachedCommand & entryRef = this->gpuCache[found->second];
+  if (entryRef.vertexBuffer == VK_NULL_HANDLE) return false;
+
+  bool useWideLine = false;
+  if (command.geometry.topology == SO_TOPOLOGY_LINES ||
+      command.geometry.topology == SO_TOPOLOGY_LINE_STRIP) {
+    const bool patternedLine =
+      command.state.raster.linePattern != 0xFFFF &&
+      command.state.raster.linePattern != 0;
+    useWideLine = fillModeOverride < 0 &&
+      (command.state.raster.lineWidth > 1.0f || patternedLine);
+  }
+  if (useWideLine) {
+    // Not batchable; caller falls back to per-command draws.
+    return false;
+  }
+
+  VkPipeline pipeline = VK_NULL_HANDLE;
+  if (!this->getOrCreatePipeline(command, target, pass, pipeline, transparent,
+                                 fillModeOverride, false) ||
+      pipeline == VK_NULL_HANDLE) {
+    return false;
+  }
+  this->applyPipeline(pipeline, ctx);
+  this->applyCommandViewport(command, target, ctx);
+  this->applyScissor(command, target, ctx);
+
+  // Reserve `count` lighting-UBO slots so a batch of N instances maps to N
+  // distinct instance-model ring elements (base..base+N-1).  The prepareLighting
+  // pre-pass reserved countDrawCommands() slots, so this cannot overflow.
+  const uint32_t slotIndex = ctx.uboCmdIndex;
+  ctx.uboCmdIndex += count;
+  const VkDeviceSize uboOffset =
+    ((this->uboFrameIndex % this->maxFramesInFlight) *
+       this->uboSlotsPerFrame + slotIndex) *
+    this->uboSlotStride;
+  const uint32_t uboDynamicOffset = static_cast<uint32_t>(uboOffset);
+
+  // Descriptor set 0 (lighting constant) + set 1 (per-draw UBO + texture).
+  // Lighting and texture are group-constant (batch key guarantees it), so bind
+  // once using commands[0].
+  VkDescriptorSet textureSet = this->resolveTextureSet(command);
+  if (textureSet == VK_NULL_HANDLE) {
+    textureSet = this->whiteDescriptorSet;
+  }
+  uint32_t lightingDynamicOffset = ctx.lastLightingOffset;
+  if (command.lightingHandle != ctx.lastLightingHandle) {
+    lightingDynamicOffset =
+      static_cast<uint32_t>(this->lightingOffsetFor(command));
+    ctx.lastLightingHandle = command.lightingHandle;
+    ctx.lastLightingOffset = lightingDynamicOffset;
+  }
+  uint32_t bindingOffsets[2] = { lightingDynamicOffset, uboDynamicOffset };
+  if (ctx.lastBoundLightingOffset != lightingDynamicOffset ||
+      ctx.lastBoundTextureSet != textureSet) {
+    const VkDescriptorSet both[2] = {this->lightingDescriptorSet, textureSet};
+    vkCmdBindDescriptorSets(ctx.buffer,
+                            VK_PIPELINE_BIND_POINT_GRAPHICS,
+                            this->pipelineLayout, 0, 2, both, 2,
+                            bindingOffsets);
+    ctx.lastBoundLightingOffset = lightingDynamicOffset;
+    ctx.lastBoundTextureSet = textureSet;
+  }
+  else {
+    vkCmdBindDescriptorSets(ctx.buffer,
+                            VK_PIPELINE_BIND_POINT_GRAPHICS,
+                            this->pipelineLayout, 1, 1, &textureSet, 1,
+                            &bindingOffsets[1]);
+  }
+
+  // Vertex buffer (binding 0).  The whole batch shares commands[0]'s geometry,
+  // so one bind serves every instance.
+  const VkDeviceSize vertexOffset = entryRef.vertexOffset;
+  vkCmdBindVertexBuffers(ctx.buffer, 0, 1, &entryRef.vertexBuffer,
+                         &vertexOffset);
+  const bool indexed =
+    entryRef.indexBuffer != VK_NULL_HANDLE && command.geometry.indexCount &&
+    command.geometry.indices;
+  if (indexed) {
+    vkCmdBindIndexBuffer(ctx.buffer, entryRef.indexBuffer,
+                         entryRef.indexOffset, VK_INDEX_TYPE_UINT32);
+  }
+
+  this->updateLightingUniforms(drawlist, command, params, uboOffset,
+                               uniformColorOverride != nullptr);
+
+  // Push constants (group-constant).
+  VulkanPushConstants push {};
+  SbMat projValue;
+  // Batches are recorded only from the main (non-overlay) passes, so every
+  // command projects with the frame camera (mirrors recordDrawCommand's
+  // frameCameraOverlay=false branch).
+  std::memcpy(projValue, this->frameProjFloats, sizeof(float) * 16);
+  std::memcpy(push.proj, &projValue[0][0], sizeof(float) * 16);
+  const SbVec4f & color = command.material.diffuse;
+  const bool useOverrideColor = uniformColorOverride != nullptr;
+  push.color[0] = useOverrideColor ? uniformColorOverride[0] : color[0];
+  push.color[1] = useOverrideColor ? uniformColorOverride[1] : color[1];
+  push.color[2] = useOverrideColor ? uniformColorOverride[2] : color[2];
+  push.color[3] = useOverrideColor ? uniformColorOverride[3] : color[3];
+  push.flags[0] = (entryRef.colorKey && !useOverrideColor) ? 1.0f : 0.0f;
+  push.flags[1] =
+    command.material.vertexColorAlphaIncludesOpacity ? 1.0f : 0.0f;
+  const bool textured = command.material.texture.pixels &&
+                        command.material.texture.width > 0 &&
+                        command.material.texture.height > 0;
+  push.flags[2] = (textured && !useOverrideColor) ? 1.0f : 0.0f;
+  push.flags[3] = command.material.textureAlphaIncludesOpacity ? 1.0f : 0.0f;
+  push.texParams[0] = static_cast<float>(command.material.texture.model);
+  push.texParams[1] = static_cast<float>(command.state.alphaTest.function);
+  push.texParams[2] = command.state.alphaTest.reference;
+  push.texParams[3] =
+    (command.material.flags & SO_MAT_IS_PIXEL_TEXT) ? 1.0f : 0.0f;
+  const SbVec4f & blendColor = command.material.texture.blendColor;
+  push.texBlend[0] = blendColor[0];
+  push.texBlend[1] = blendColor[1];
+  push.texBlend[2] = blendColor[2];
+  push.texBlend[3] = blendColor[3];
+  const float dpr = this->frameDpr;
+  push.pointSize = std::max(1.0f, command.state.raster.pointSize) * dpr;
+  push.lineParams[0] = push.lineParams[1] = push.lineParams[2] = 0.0f;
+  push.lineParams[3] = 0.0f;
+  push.lineParams[1] =
+    command.state.raster.pointShape == SO_POINT_SHAPE_ROUND ? 1.0f : 0.0f;
+  if (command.geometry.topology == SO_TOPOLOGY_POINTS) {
+    push.lineParams[1] = 1.0f;
+  }
+  push.lineParams[2] = 0.0f;
+  push.lineParams[3] =
+    command.geometry.topology == SO_TOPOLOGY_POINTS ? 1.0f : 0.0f;
+
+  vkCmdPushConstants(ctx.buffer, this->pipelineLayout,
+                      VK_SHADER_STAGE_VERTEX_BIT |
+                        VK_SHADER_STAGE_FRAGMENT_BIT,
+                      0, sizeof(push), &push);
+
+  // Per-instance model matrices: commands[0..count) at consecutive ring slots.
+  const VkDeviceSize instBase =
+    static_cast<VkDeviceSize>((this->uboFrameIndex % this->maxFramesInFlight) *
+      this->uboSlotsPerFrame + slotIndex);
+  const VkDeviceSize instCountBytes = instBase * sizeof(float) * 16 +
+    static_cast<VkDeviceSize>(count) * sizeof(float) * 16;
+  // Defensive bounds check only -- the ring is pre-sized to the slot layout
+  // (see ensureInstanceModelRingCapacity), so no growth path here (which
+  // would re-create the buffer mid-record and race under parallelism).
+  if (instCountBytes > this->instanceModelCapacity) {
+    return false;
+  }
+  char * mapped = static_cast<char *>(this->instanceModelMapped);
+  for (int k = 0; k < count; ++k) {
+    SbMat mm;
+    commands[k]->modelMatrix.getValue(mm);
+    std::memcpy(mapped + (instBase + k) * sizeof(float) * 16,
+                &mm[0][0], sizeof(float) * 16);
+  }
+  const VkDeviceSize instOffset = instBase * sizeof(float) * 16;
+  vkCmdBindVertexBuffers(ctx.buffer, 1, 1,
+                         &this->instanceModelBuffer, &instOffset);
+
+  if (indexed) {
+    vkCmdDrawIndexed(ctx.buffer, command.geometry.indexCount,
+                     static_cast<uint32_t>(count), 0, 0, 0);
+  }
+  else {
+    vkCmdDraw(ctx.buffer, command.geometry.vertexCount,
+              static_cast<uint32_t>(count), 0, 0);
+  }
+  return true;
 }
 
 bool
 SoVulkanRenderBackend::beginCommandBuffer()
 {
+  vkBackendTrace(this->uboFrameIndex, "beginCommandBuffer.enter",
+                 "primary=%p", reinterpret_cast<const void *>(
+                   this->currentCommandBuffer()));
   VkCommandBufferBeginInfo bi {};
   bi.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
   bi.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
@@ -931,8 +1218,13 @@ SoVulkanRenderBackend::beginCommandBuffer()
 bool
 SoVulkanRenderBackend::endAndSubmit()
 {
+  vkBackendTrace(this->uboFrameIndex, "endAndSubmit.enter", "frame=%u",
+                 this->uboFrameIndex);
   VkCommandBuffer cmd = this->currentCommandBuffer();
-  if (vkEndCommandBuffer(cmd) != VK_SUCCESS) return false;
+  const VkResult endRc = vkEndCommandBuffer(cmd);
+  vkBackendTrace(this->uboFrameIndex, "endAndSubmit.endRc", "rc=%d",
+                 static_cast<int>(endRc));
+  if (endRc != VK_SUCCESS) return false;
 
   VkSubmitInfo si {};
   si.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
@@ -940,7 +1232,10 @@ SoVulkanRenderBackend::endAndSubmit()
   si.pCommandBuffers = &cmd;
   const uint32_t slot = this->uboFrameIndex % this->maxFramesInFlight;
   const VkFence fence = this->frameFences[slot];
-  if (vkQueueSubmit(this->queue, 1, &si, fence) != VK_SUCCESS) {
+  const VkResult submitRc = vkQueueSubmit(this->queue, 1, &si, fence);
+  vkBackendTrace(this->uboFrameIndex, "endAndSubmit.submitRc", "rc=%d",
+                 static_cast<int>(submitRc));
+  if (submitRc != VK_SUCCESS) {
     // The fence stays unsignaled (no signal was requested), so beginFrame()
     // would wait forever on the next reuse of this slot.  Signal it by
     // submitting nothing and relying on the next frame's failure path, but

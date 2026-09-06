@@ -61,12 +61,15 @@ layout(location = 0) rayPayloadEXT Payload payload;
 
 const int COIN_MAX_LIGHTS = 8;
 
-// Same Gouraud evaluation as the raster visual program.
-vec3 coin_rtx_gouraud(vec3 eyePos, vec3 eyeNormal, vec3 baseColor,
+// Same Gouraud evaluation as the raster visual program.  The producer's
+// light data is world-space (the standard IR convention), so the evaluation
+// runs directly in world space; dot-product shading makes this identical to
+// the eye-space form.
+vec3 coin_rtx_gouraud(vec3 worldPos, vec3 worldNormal, vec3 baseColor,
                       RTMaterial mat)
 {
-    vec3 N = normalize(eyeNormal);
-    vec3 V = normalize(-eyePos);
+    vec3 N = normalize(worldNormal);
+    vec3 V = normalize(frame.u_cameraPos.xyz - worldPos);
     if (mat.params.y > 0.5 && dot(N, V) < 0.0) {
         N = -N;
     }
@@ -79,7 +82,7 @@ vec3 coin_rtx_gouraud(vec3 eyePos, vec3 eyeNormal, vec3 baseColor,
         float attenuation = 1.0;
         float spotFactor = 1.0;
         if (mat.lightType[i].x > 0.5) {
-            vec3 lightVector = mat.lightPosition[i].xyz - eyePos;
+            vec3 lightVector = mat.lightPosition[i].xyz - worldPos;
             float distanceToLight = length(lightVector);
             if (distanceToLight <= 0.0001) continue;
             L = lightVector / distanceToLight;
@@ -89,7 +92,7 @@ vec3 coin_rtx_gouraud(vec3 eyePos, vec3 eyeNormal, vec3 baseColor,
                                     0.0001);
             if (mat.lightType[i].x > 1.5) {
                 vec3 coneDir = normalize(mat.lightDirection[i].xyz);
-                vec3 fromLight = normalize(eyePos - mat.lightPosition[i].xyz);
+                vec3 fromLight = normalize(worldPos - mat.lightPosition[i].xyz);
                 float spotCos = dot(coneDir, fromLight);
                 if (spotCos < mat.lightSpot[i].x) continue;
                 spotFactor = pow(max(spotCos, 0.0), mat.lightSpot[i].y);
@@ -153,12 +156,11 @@ void main()
 
     if (payload.info.w == 0u) {
         // Preview mode: full Gouraud shading (matching the raster viewport
-        // and the old compute tracer).
-        vec3 eyePos = (frame.u_view * vec4(worldPos, 1.0)).xyz;
-        vec3 eyeN = normalize(mat3(frame.u_view) * worldN);
+        // and the old compute tracer); world-space light data is consumed
+        // directly.
         vec3 rgb = mat.diffuse.rgb;
         if (mat.params.w > 0.5) {
-            rgb = coin_rtx_gouraud(eyePos, eyeN, mat.diffuse.rgb, mat);
+            rgb = coin_rtx_gouraud(worldPos, worldN, mat.diffuse.rgb, mat);
         }
         payload.color = vec4(clamp(rgb, 0.0, 1.0), 1.0);
     }

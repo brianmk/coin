@@ -50,7 +50,7 @@ cc_xml_load_file(const char * path)
   fseek(fd, 0, SEEK_SET);
   char * buffer = new char [ bufsize + 1 ];
   size_t pos = 0, bytes;
-  while ( pos != bufsize ) {
+  while ( pos != static_cast<size_t>(bufsize) ) {
     bytes = fread(buffer + pos, 1, bufsize - pos, fd);
     if ( bytes == 0 ) {
       // fprintf(stderr, "fread() returned %d\n", bytes);

@@ -7,6 +7,16 @@
 //   location 2: vec4 a_color
 //   location 3: vec2 a_texcoord
 //
+// The model matrix is supplied per-instance via an instanced vertex attribute
+// (binding 1, VK_VERTEX_INPUT_RATE_INSTANCE) so an entire group of commands
+// that share geometry/material but differ only by their model matrix can be
+// drawn with a single instanced vkCmdDraw.  A one-element instance buffer is
+// bound for non-instanced draws (instanceCount == 1), so the shader reads the
+// transform from the same attribute in every case.  The attribute bytes carry
+// the model matrix in row-major SbMat order; assembling them as mat4 columns
+// reproduces the same effective (transposed) matrix the GLSL compiler builds
+// from the old column-major UBO mat4.
+//
 // A single push-constant block carries the projection matrix, the uniform
 // diffuse color, and scalar feature flags.  The view/model matrices plus the
 // per-draw material state live in a std140 uniform buffer (set 1, binding 0)
@@ -57,6 +67,14 @@ layout(location = 0) in vec3 a_position;
 layout(location = 1) in vec3 a_normal;
 layout(location = 2) in vec4 a_color;
 layout(location = 3) in vec2 a_texcoord;
+// Per-instance model matrix (binding 1, rate INSTANCE).  The four rows of the
+// row-major SbMat are carried as four vec4 attributes; assembling them as the
+// columns of a mat4 gives the same effective transform the UBO mat4 produced,
+// so lighting/transform output is identical to the pre-instancing path.
+layout(location = 4) in vec4 a_iModelRow0;
+layout(location = 5) in vec4 a_iModelRow1;
+layout(location = 6) in vec4 a_iModelRow2;
+layout(location = 7) in vec4 a_iModelRow3;
 
 // Lighting is evaluated per fragment (see Fragment.glsl): Gouraud shading
 // hardens the light gradient into linear bands between vertices, which on
@@ -70,9 +88,11 @@ layout(location = 3) out vec2 v_texcoord;
 
 void main()
 {
-    vec4 worldPos = draw.u_model * vec4(a_position, 1.0);
+    mat4 u_iModel = mat4(a_iModelRow0, a_iModelRow1,
+                         a_iModelRow2, a_iModelRow3);
+    vec4 worldPos = u_iModel * vec4(a_position, 1.0);
     vec4 eyePos = draw.u_view * worldPos;
-    mat3 normalMatrix = transpose(inverse(mat3(draw.u_view * draw.u_model)));
+    mat3 normalMatrix = transpose(inverse(mat3(draw.u_view * u_iModel)));
     vec3 eyeNormal = normalMatrix * a_normal;
 
     vec4 clip = pc.u_proj * eyePos;

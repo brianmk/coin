@@ -116,7 +116,6 @@ class SoStateP {
 public:
   SoAction * action;
   SoElement ** initial;
-  int depth;
   SbBool ispopping;
   class sostate_pushstore * pushstore;
 };
@@ -140,7 +139,7 @@ SoState::SoState(SoAction * theAction, const SoTypeList & enabledelements)
   PRIVATE(this) = new SoStateP;
 
   PRIVATE(this)->action = theAction;
-  PRIVATE(this)->depth = 0;
+  this->depth = 0;
   PRIVATE(this)->ispopping = FALSE;
   this->cacheopen = FALSE;
 
@@ -164,7 +163,7 @@ SoState::SoState(SoAction * theAction, const SoTypeList & enabledelements)
     assert(type.isBad() || type.canCreateInstance());
     if (!type.isBad()) {
       SoElement * const element = (SoElement *) type.createInstance();
-      element->setDepth(PRIVATE(this)->depth);
+      element->setDepth(this->depth);
       const int stackindex = element->getStackIndex();
       this->stack[stackindex] = element;
       PRIVATE(this)->initial[stackindex] = element;
@@ -225,41 +224,29 @@ SoState::getAction(void) const
 */
 
 SoElement *
-SoState::getElement(const int stackindex)
+SoState::getElementPush(const int stackindex, SoElement * element)
 {
   // catch attempts at setting an element from another element's pop()
   // method (yes, I did this stupid mistake myself and spent a long
   // time debugging it, pederb, 2007-08-01)
   assert(!PRIVATE(this)->ispopping);
 
-  if (!this->isElementEnabled(stackindex)) return NULL;
-  SoElement * element = this->stack[stackindex];
+  // the caller (inline SoState::getElement()) guarantees that
+  //   * this->stack[stackindex] is non-NULL (element enabled), and
+  //   * element->getDepth() < this->depth
+  // so the copy-on-write push below materialises a new element for this depth.
 
-#if 0 // debug
-  SoDebugError::postInfo("SoState::getElement",
-                         "stackindex: %d, element: %p ('%s'), "
-                         "stackdepth: %d, pushstack: %s",
-                         stackindex, element,
-                         element->getTypeId().getName().getString(),
-                         element->getDepth(),
-                         (element->getDepth() < PRIVATE(this)->depth) ?
-                         "yes" : "no");
-#endif // debug
-
-  if (element->getDepth() < PRIVATE(this)->depth) { // create elt of correct depth
-    SoElement * next = element->nextup;
-    if (! next) { // allocate new element
-      next = (SoElement *) element->getTypeId().createInstance();
-      next->nextdown = element;
-      element->nextup = next;
-    }
-    next->setDepth(PRIVATE(this)->depth);
-    next->push(this);
-    this->stack[stackindex] = next;
-    element = next;
-    PRIVATE(this)->pushstore->elements.append(stackindex);
+  SoElement * next = element->nextup;
+  if (! next) { // allocate new element
+    next = (SoElement *) element->getTypeId().createInstance();
+    next->nextdown = element;
+    element->nextup = next;
   }
-  return element;
+  next->setDepth(this->depth);
+  next->push(this);
+  this->stack[stackindex] = next;
+  PRIVATE(this)->pushstore->elements.append(stackindex);
+  return next;
 }
 
 /*!
@@ -281,7 +268,7 @@ SoState::push(void)
   }
   PRIVATE(this)->pushstore = PRIVATE(this)->pushstore->next;
   PRIVATE(this)->pushstore->elements.truncate(0);
-  PRIVATE(this)->depth++;
+  this->depth++;
 }
 
 /*!
@@ -294,7 +281,7 @@ void
 SoState::pop(void)
 {
   PRIVATE(this)->ispopping = TRUE;
-  PRIVATE(this)->depth--;
+  this->depth--;
   int n = PRIVATE(this)->pushstore->elements.getLength();
   if (n) {
     const int * array = PRIVATE(this)->pushstore->elements.getArrayPtr();
@@ -319,7 +306,7 @@ SoState::pop(void)
 void
 SoState::print(FILE * const file) const
 {
-  fprintf(file, "SoState[%p]: depth = %d\n", this, PRIVATE(this)->depth);
+  fprintf(file, "SoState[%p]: depth = %d\n", this, this->depth);
   fprintf(file, "  enabled elements {\n");
   for (int i = 0; i < this->numstacks; i++) {
     SoElement * element;
@@ -339,7 +326,7 @@ SoState::print(FILE * const file) const
 int
 SoState::getDepth(void) const
 {
-  return PRIVATE(this)->depth;
+  return this->depth;
 }
 
 /*!

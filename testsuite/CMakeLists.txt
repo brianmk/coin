@@ -424,6 +424,19 @@ if(HAVE_EGL)
 		add_test(NAME VulkanBackendMaterialTest COMMAND VulkanBackendMaterialTest)
 		set_tests_properties(VulkanBackendMaterialTest PROPERTIES SKIP_RETURN_CODE 77)
 
+		add_executable(VulkanBackendRetainedChangeTest vulkan/vulkan-backend-retained-change-test.cpp)
+		target_link_libraries(VulkanBackendRetainedChangeTest Coin ${COIN_TARGET_LINK_LIBRARIES})
+		target_compile_definitions(VulkanBackendRetainedChangeTest PRIVATE COIN_INTERNAL)
+		target_include_directories(VulkanBackendRetainedChangeTest PRIVATE
+			${PROJECT_SOURCE_DIR}/src
+			${PROJECT_SOURCE_DIR}/include
+			${PROJECT_BINARY_DIR}/include
+			${PROJECT_SOURCE_DIR}/testsuite
+			${COIN_TARGET_INCLUDE_DIRECTORIES}
+		)
+		add_test(NAME VulkanBackendRetainedChangeTest COMMAND VulkanBackendRetainedChangeTest)
+		set_tests_properties(VulkanBackendRetainedChangeTest PROPERTIES SKIP_RETURN_CODE 77)
+
 		add_executable(VulkanBackendDepthFunctionTest vulkan/vulkan-backend-depth-function-test.cpp)
 		target_link_libraries(VulkanBackendDepthFunctionTest Coin ${COIN_TARGET_LINK_LIBRARIES})
 		target_compile_definitions(VulkanBackendDepthFunctionTest PRIVATE COIN_INTERNAL)
@@ -462,6 +475,19 @@ if(HAVE_EGL)
 		)
 	add_test(NAME VulkanBackendTextureModelsTest COMMAND VulkanBackendTextureModelsTest)
 		set_tests_properties(VulkanBackendTextureModelsTest PROPERTIES SKIP_RETURN_CODE 77)
+
+		add_executable(VulkanBackendMultitexStagingTest vulkan/vulkan-backend-multitex-staging-test.cpp)
+		target_link_libraries(VulkanBackendMultitexStagingTest Coin ${COIN_TARGET_LINK_LIBRARIES})
+		target_compile_definitions(VulkanBackendMultitexStagingTest PRIVATE COIN_INTERNAL)
+		target_include_directories(VulkanBackendMultitexStagingTest PRIVATE
+			${PROJECT_SOURCE_DIR}/src
+			${PROJECT_SOURCE_DIR}/include
+			${PROJECT_BINARY_DIR}/include
+			${PROJECT_SOURCE_DIR}/testsuite
+			${COIN_TARGET_INCLUDE_DIRECTORIES}
+		)
+		add_test(NAME VulkanBackendMultitexStagingTest COMMAND VulkanBackendMultitexStagingTest)
+		set_tests_properties(VulkanBackendMultitexStagingTest PROPERTIES SKIP_RETURN_CODE 77)
 
 		add_executable(VulkanBackendScissorTest vulkan/vulkan-backend-scissor-test.cpp)
 		target_link_libraries(VulkanBackendScissorTest Coin ${COIN_TARGET_LINK_LIBRARIES})

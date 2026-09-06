@@ -154,7 +154,8 @@ SoVulkanRenderBackend::createBackgroundPipeline(
 void
 SoVulkanRenderBackend::recordBackground(const SoRenderParams & params,
                                         const SoVulkanRenderTarget & target,
-                                        VkRenderPass renderPass)
+                                        VkRenderPass renderPass,
+                                        VulkanRecordContext & ctx)
 {
   if (!params.backgroundGradient) {
     return;
@@ -193,14 +194,14 @@ SoVulkanRenderBackend::recordBackground(const SoRenderParams & params,
   viewport.height = static_cast<float>(h);
   viewport.minDepth = 0.0f;
   viewport.maxDepth = 1.0f;
-  this->applyViewportState(viewport);
+  this->applyViewportState(viewport, ctx);
 
   VkRect2D scissor {};
   scissor.offset = {x0, y0};
   scissor.extent = {static_cast<uint32_t>(w), static_cast<uint32_t>(h)};
-  this->applyScissorState(scissor);
+  this->applyScissorState(scissor, ctx);
 
-  this->applyPipeline(pipeline);
+  this->applyPipeline(pipeline, ctx);
 
   VulkanBackgroundPush push {};
   push.topColor[0] = params.backgroundTopColor[0];
@@ -215,16 +216,18 @@ SoVulkanRenderBackend::recordBackground(const SoRenderParams & params,
   push.viewport[1] = static_cast<float>(h);
   push.viewport[2] = static_cast<float>(x0);
   push.viewport[3] = static_cast<float>(y0);
-  vkCmdPushConstants(this->activeCommandBuffer, this->backgroundPipelineLayout,
-                     VK_SHADER_STAGE_VERTEX_BIT |
-                       VK_SHADER_STAGE_FRAGMENT_BIT,
-                     0, sizeof(push), &push);
+  vkCmdPushConstants(ctx.buffer, this->backgroundPipelineLayout,
+                      VK_SHADER_STAGE_VERTEX_BIT |
+                        VK_SHADER_STAGE_FRAGMENT_BIT,
+                      0, sizeof(push), &push);
 
-  vkCmdDraw(this->activeCommandBuffer, 3, 1, 0, 0);
+  vkCmdDraw(ctx.buffer, 3, 1, 0, 0);
 }
 
 bool
 SoVulkanRenderBackend::createRenderPass(const SoVulkanRenderTarget & target,
+                                        VkAttachmentLoadOp colorLoadOp,
+                                        VkAttachmentLoadOp depthLoadOp,
                                         VkRenderPass & pass)
 {
   VkAttachmentDescription attachments[2];
@@ -233,7 +236,7 @@ SoVulkanRenderBackend::createRenderPass(const SoVulkanRenderTarget & target,
   attachments[0].flags = 0;
   attachments[0].format = target.colorFormat;
   attachments[0].samples = target.sampleCount;
-  attachments[0].loadOp = VK_ATTACHMENT_LOAD_OP_LOAD;
+  attachments[0].loadOp = colorLoadOp;
   attachments[0].storeOp = VK_ATTACHMENT_STORE_OP_STORE;
   attachments[0].stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
   attachments[0].stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
@@ -251,7 +254,7 @@ SoVulkanRenderBackend::createRenderPass(const SoVulkanRenderTarget & target,
     attachments[1].flags = 0;
     attachments[1].format = target.depthFormat;
     attachments[1].samples = target.sampleCount;
-    attachments[1].loadOp = VK_ATTACHMENT_LOAD_OP_LOAD;
+    attachments[1].loadOp = depthLoadOp;
     attachments[1].storeOp = VK_ATTACHMENT_STORE_OP_STORE;
     attachments[1].stencilLoadOp = VK_ATTACHMENT_LOAD_OP_LOAD;
     attachments[1].stencilStoreOp = VK_ATTACHMENT_STORE_OP_STORE;
@@ -299,14 +302,20 @@ SoVulkanRenderBackend::renderPassIdentity(const SoVulkanRenderTarget & target) c
 }
 
 VkRenderPass
-SoVulkanRenderBackend::getOrCreateRenderPass(const SoVulkanRenderTarget & target)
+SoVulkanRenderBackend::getOrCreateRenderPass(const SoVulkanRenderTarget & target,
+                                             VkAttachmentLoadOp colorLoadOp,
+                                             VkAttachmentLoadOp depthLoadOp)
 {
-  const RenderPassIdentity identity = this->renderPassIdentity(target);
+  RenderPassIdentity identity = this->renderPassIdentity(target);
+  identity.colorLoadOp = colorLoadOp;
+  identity.depthLoadOp = depthLoadOp;
   const auto found = this->renderPassCache.find(identity);
   if (found != this->renderPassCache.end()) return found->second;
 
   VkRenderPass pass = VK_NULL_HANDLE;
-  if (!this->createRenderPass(target, pass)) return VK_NULL_HANDLE;
+  if (!this->createRenderPass(target, colorLoadOp, depthLoadOp, pass)) {
+    return VK_NULL_HANDLE;
+  }
   this->renderPassCache.emplace(identity, pass);
   return pass;
 }
@@ -320,6 +329,13 @@ SoVulkanRenderBackend::getOrCreatePipeline(const SoRenderCommand & command,
                                            const int fillModeOverride,
                                            const bool overlayPass)
 {
+  if (vkBackendTraceEnabled()) {
+    static std::atomic<int> n(0);
+    if (n.fetch_add(1) < 32) {
+      vkBackendTrace(this->uboFrameIndex, "getOrCreatePipeline.enter",
+                     "call=%d", n.load());
+    }
+  }
   // Pipelines are immutable in Vulkan.  Key the cache on every retained
   // state value that changes the created pipeline so commands of different
   // topology, fill mode, depth/blend state, or sample count never reuse an
@@ -478,12 +494,25 @@ SoVulkanRenderBackend::getOrCreatePipeline(const SoRenderCommand & command,
                                   : this->fragmentModule;
   stages[1].pName = "main";
 
-  VkVertexInputBindingDescription binding {};
-  binding.binding = 0;
-  binding.stride = key.wideLine ? 36u : VULKAN_VERTEX_STRIDE;
-  binding.inputRate = VK_VERTEX_INPUT_RATE_VERTEX;
+  // Binding 0: the interleaved position/normal/color/texcoord stream.  The
+  // wide-line path substitutes its own 36-byte clip-space layout at binding 0.
+  VkVertexInputBindingDescription binding[2] {};
+  binding[0].binding = 0;
+  binding[0].stride = key.wideLine ? 36u : VULKAN_VERTEX_STRIDE;
+  binding[0].inputRate = VK_VERTEX_INPUT_RATE_VERTEX;
+  // Binding 1 (visual pipelines only): the per-instance model matrix, four
+  // R32G32B32A32 rows advanced per instance (rate INSTANCE).  This lets a
+  // group of commands sharing geometry/material but differing only by model
+  // matrix be drawn as one instanced vkCmdDraw.  A one-element instance buffer
+  // is bound for ordinary non-instanced draws, so every visual draw carries
+  // the attribute.  Wide-line pipelines keep their own layout (no instancing).
+  if (!key.wideLine) {
+    binding[1].binding = 1;
+    binding[1].stride = sizeof(float) * 16; // mat4, 4 x vec4
+    binding[1].inputRate = VK_VERTEX_INPUT_RATE_INSTANCE;
+  }
 
-  VkVertexInputAttributeDescription attributes[4] {};
+  VkVertexInputAttributeDescription attributes[8] {};
   attributes[0].location = 0;
   attributes[0].binding = 0;
   attributes[0].format = VK_FORMAT_R32G32B32_SFLOAT;
@@ -494,12 +523,29 @@ SoVulkanRenderBackend::getOrCreatePipeline(const SoRenderCommand & command,
   attributes[1].offset = 12;
   attributes[2].location = 2;
   attributes[2].binding = 0;
-  attributes[2].format = VK_FORMAT_R32G32B32A32_SFLOAT;
+  attributes[2].format = VK_FORMAT_R8G8B8A8_UNORM;
   attributes[2].offset = 24;
   attributes[3].location = 3;
   attributes[3].binding = 0;
-  attributes[3].format = VK_FORMAT_R32G32_SFLOAT;
-  attributes[3].offset = 40;
+  attributes[3].format = VK_FORMAT_R16G16_SFLOAT;
+  attributes[3].offset = 28;
+  // Instance model matrix rows (binding 1, rate INSTANCE).
+  attributes[4].location = 4;
+  attributes[4].binding = 1;
+  attributes[4].format = VK_FORMAT_R32G32B32A32_SFLOAT;
+  attributes[4].offset = 0;
+  attributes[5].location = 5;
+  attributes[5].binding = 1;
+  attributes[5].format = VK_FORMAT_R32G32B32A32_SFLOAT;
+  attributes[5].offset = 16;
+  attributes[6].location = 6;
+  attributes[6].binding = 1;
+  attributes[6].format = VK_FORMAT_R32G32B32A32_SFLOAT;
+  attributes[6].offset = 32;
+  attributes[7].location = 7;
+  attributes[7].binding = 1;
+  attributes[7].format = VK_FORMAT_R32G32B32A32_SFLOAT;
+  attributes[7].offset = 48;
 
   // Wide-line layout: clip-space position (0), color (16), polyline
   // distance (32).
@@ -520,9 +566,9 @@ SoVulkanRenderBackend::getOrCreatePipeline(const SoRenderCommand & command,
   VkPipelineVertexInputStateCreateInfo vertexInput {};
   vertexInput.sType =
     VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO;
-  vertexInput.vertexBindingDescriptionCount = 1;
-  vertexInput.pVertexBindingDescriptions = &binding;
-  vertexInput.vertexAttributeDescriptionCount = key.wideLine ? 3u : 4u;
+  vertexInput.vertexBindingDescriptionCount = key.wideLine ? 1u : 2u;
+  vertexInput.pVertexBindingDescriptions = binding;
+  vertexInput.vertexAttributeDescriptionCount = key.wideLine ? 3u : 8u;
   vertexInput.pVertexAttributeDescriptions =
     key.wideLine ? wideLineAttributes : attributes;
 

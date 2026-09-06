@@ -6,13 +6,19 @@
 #include "rendering/SoRenderBackend.h"
 
 #include "rendering/SoVulkanShared.h"
+#include "rendering/SoVulkanRenderBackend/SoVulkanMemPool.h"
+#include "rendering/SoVulkanRenderBackend/SoVulkanRecordContext.h"
 
 #include <Inventor/rendering/SoVulkanRenderTarget.h>
 
 #include <cstddef>
 #include <cstdint>
+#include <atomic>
+#include <condition_variable>
 #include <functional>
+#include <memory>
 #include <mutex>
+#include <thread>
 #include <unordered_map>
 #include <vector>
 
@@ -124,6 +130,14 @@ struct VulkanCachedCommand {
   struct VulkanWideLineBuffer {
     VkBuffer buffer = VK_NULL_HANDLE;
     VkDeviceMemory memory = VK_NULL_HANDLE;
+    //! Persistent host mapping of `memory` (VK_MEMORY_PROPERTY_HOST_VISIBLE |
+    //! HOST_COHERENT), established once at (re)creation and kept alive so the
+    //! steady-state per-frame update is a plain memcpy instead of a per-command
+    //! vkMapMemory/vkUnmapMemory pair.  map/unmap dominates the wide-line cost
+    //! on line-heavy scenes (each call ~50us; a dozen visible edge commands per
+    //! frame is ~1ms+).  Cleared to null whenever `memory` is destroyed; freeing
+    //! memory implicitly unmaps, so no explicit unmap is needed at teardown.
+    void * mapped = nullptr;
     VkDeviceSize size = 0;
     //! Fingerprint of the geometry/view/proj/width/viewport that produced the
     //! quads in this slot.  A match means the buffer already holds the exact
@@ -171,6 +185,13 @@ struct VulkanCachedCommand {
 struct VulkanCachedTexture {
   VkImage image = VK_NULL_HANDLE;
   VkDeviceMemory memory = VK_NULL_HANDLE;
+  // Offset of `memory` into the sub-allocator block it came from (0 when the
+  // memory is a standalone vkAllocateMemory -- the legacy path).  Needed to
+  // return the range when FC_VULKAN_MEM_POOL is enabled.
+  VkDeviceSize memoryOffset = 0;
+  // Size of the `memory` range (the sub-allocated block size / allocation
+  // size).  Tracked so releaseMemory() returns exactly what was allocated.
+  VkDeviceSize memorySize = 0;
   VkImageView view = VK_NULL_HANDLE;
   VkSampler sampler = VK_NULL_HANDLE;
   VkDescriptorSet descriptorSet = VK_NULL_HANDLE;
@@ -223,7 +244,8 @@ public:
   SbBool renderExternal(const SoDrawList & drawlist,
                         const SoRenderParams & params,
                         VkCommandBuffer commandBuffer,
-                        VkRenderPass renderPass);
+                        VkRenderPass renderPass,
+                        VkFramebuffer framebuffer);
 
   /*!
     \brief Record only the overlay pass (e.g. the navigation cube) into a
@@ -284,6 +306,8 @@ private:
   bool createLightingDescriptorSet();
   bool createPipelineLayout();
   bool createRenderPass(const SoVulkanRenderTarget & target,
+                        VkAttachmentLoadOp colorLoadOp,
+                        VkAttachmentLoadOp depthLoadOp,
                         VkRenderPass & renderPass);
   bool createShaders(VkShaderModule & vertexModule,
                      VkShaderModule & fragmentModule);
@@ -293,9 +317,12 @@ private:
   bool createBackgroundPipeline(const SoVulkanRenderTarget & target,
                                 VkRenderPass renderPass,
                                 VkPipeline & pipeline);
+  bool ensureFramebuffer(const SoVulkanRenderTarget * target,
+                         VkRenderPass renderPass);
   void recordBackground(const SoRenderParams & params,
                         const SoVulkanRenderTarget & target,
-                        VkRenderPass renderPass);
+                        VkRenderPass renderPass,
+                        VulkanRecordContext & ctx);
   bool getOrCreatePipeline(const SoRenderCommand & command,
                            const SoVulkanRenderTarget & target,
                            VkRenderPass renderPass,
@@ -370,23 +397,84 @@ private:
     size_t index = 0;
     const SoRenderCommand * command = nullptr;
     const SoTextureData * texture = nullptr;
-    VkBuffer staging = VK_NULL_HANDLE;
-    VkDeviceMemory stagingMemory = VK_NULL_HANDLE;
+    // Byte offset into the shared staging pool buffer (stagingPoolBuffer)
+    // where this upload's pixels were staged.  All pending uploads in a frame
+    // share one host-visible allocation, so a failure leaves a single buffer
+    // to clean up instead of N per-upload stagings.
+    VkDeviceSize stagingOffset = 0;
+    VkDeviceSize stagingBytes = 0;
   };
+
+  // One resolvable draw unit of the frame's worklist, produced by
+  // buildWorkItems().  buildWorkItems() walks the sorted order, buckets
+  // opaque depth-tested commands, and pre-assigns each item a disjoint
+  // `slotBase` (the first of `count` consecutive lighting-UBO / instance-model
+  // ring slots it consumes).  Worker threads later record from these read-only
+  // items, so nothing here mutates shared backend state.  `commands` is either
+  // a single pointer (count == 1, recorded as one draw) or an array of `count`
+  // pointers sharing geometry/material (recorded as one instanced draw).
+  struct VulkanWorkItem {
+    const SoRenderCommand * single = nullptr;     // count == 1 draw
+    const SoRenderCommand * const * commands = nullptr; // count > 1 batch array
+    int count = 1;
+    uint32_t slotBase = 0;
+    bool transparent = false;
+    bool recordToSecondary = false; // opaque pass → secondary cmd buffer (M1c)
+    bool overlayPass = false;      // SO_RENDERPASS_OVERLAY screen-space draw
+    int fillModeOverride = -1;     // wireframe/point redraw fill mode, or -1
+    const float * uniformColorOverride = nullptr;
+    // Pre-resolved per-item state so the record path (and parallel workers)
+    // avoid re-walking the pipeline cache / texture-set map / lighting map.
+    // Filled by buildWorkItems(); unused markers left null.
+    VkPipeline pipeline = VK_NULL_HANDLE;
+    VkDescriptorSet textureSet = VK_NULL_HANDLE;
+    uint32_t lightingDynamicOffset = 0;
+  };
+
+  bool buildWorkItems(const SoDrawList & drawlist,
+                      const SoRenderParams & params,
+                      bool wireframeOverlay, bool pointsOverlay,
+                      const float * overlayColor,
+                      VkRenderPass renderPass,
+                      std::vector<VulkanWorkItem> & out);
+  // Record one pre-assigned work item into ctx.buffer (single draw or a batch).
+  void recordWorkItem(const SoDrawList & drawlist,
+                      const SoRenderParams & params,
+                      const SoVulkanRenderTarget & target,
+                      VkRenderPass renderPass,
+                      const VulkanWorkItem & item,
+                      VulkanRecordContext & ctx);
+  // M1d pool: build persistent worker threads, partition+dispatch, join.
+  bool buildRecordPool();
+  void shutdownRecordPool();
+  void recordJobWorker(size_t workerIndex);
+  bool recordSecondaryChunk(VulkanRecordContext & ctx,
+                            const SoDrawList & drawlist,
+                            const SoRenderParams & params,
+                            const SoVulkanRenderTarget & target,
+                            VkRenderPass renderPass,
+                            const std::vector<const VulkanWorkItem *> & items,
+                            VkCommandBuffer secondary,
+                            VkFramebuffer framebuffer);
+  VkCommandBuffer workerSecondary(uint32_t frameSlot, uint32_t worker);
+  VkCommandBuffer parallelCurrentSecondary(uint32_t worker);
   bool prepareTextureUpload(VulkanCachedTexture & entry,
                             const SoTextureData & texture,
-                            VkBuffer & staging,
-                            VkDeviceMemory & stagingMemory);
+                            VkDeviceSize & stagingOffset,
+                            VkDeviceSize & stagingBytes);
   void recordTextureUpload(VkCommandBuffer commandBuffer,
                            const VulkanCachedTexture & entry,
                            const SoTextureData & texture,
-                           VkBuffer staging);
+                           VkBuffer staging,
+                           VkDeviceSize stagingOffset);
   bool finalizeTexture(VulkanCachedTexture & entry,
                        const SoTextureData & texture);
   bool recordPendingTextureUploads();
   void finalizePendingTextureUploads();
   bool flushPendingTextureUploadsExternal();
-  bool createSampler(const SoTextureData & texture, VkSampler & sampler);
+  bool createSampler(SoTextureFilter minFilter, SoTextureFilter magFilter,
+                     SoTextureWrap wrapS, SoTextureWrap wrapT,
+                     VkSampler & sampler);
   // Format actually used for an N-component SoTextureData image.  VK_FORMAT_
   // R8_UNORM / R8G8_UNORM / R8G8B8_UNORM are not guaranteed to be sampleable
   // (they are optional formats), so when the device lacks SAMPLED_IMAGE
@@ -397,21 +485,59 @@ private:
                                     VkDescriptorSet & set);
   bool ensureDescriptorPoolSpace();
   VkDescriptorSet resolveTextureSet(const SoRenderCommand & command);
+  // Release a texture image or staging buffer's device memory back to the
+  // sub-allocator when enabled (FC_VULKAN_MEM_POOL), else vkFreeMemory as the
+  // legacy path.  The caller must have recorded the offset (from a pool alloc)
+  // into the entry/staging record — when the pool is disabled the memory is a
+  // standalone allocation and offset is 0.  Destroying the VkBuffer/VkImage
+  // for the pool case is the caller's responsibility (the memory block outlives
+  // the buffer/image); this helper only returns the memory.
+  void releaseMemory(VkDeviceMemory memory, VkDeviceSize size,
+                     VkDeviceSize offset);
+  // True when sub-allocating transient texture memory (FC_VULKAN_MEM_POOL).
+  bool usingMemPool() const { return this->memPool != nullptr; }
 
   // --- Render recording ---------------------------------------------------
+  // Every record* helper below takes the VulkanRecordContext it records
+  // into and touches no other recording state, so (future) worker threads
+  // can each record their own command buffer with their own dedup cache.
   bool beginCommandBuffer();
   VkCommandBuffer currentCommandBuffer();
+  VkCommandBuffer currentSecondaryCommandBuffer();
   void recordClear(const SoRenderParams & params,
-                   const SoVulkanRenderTarget & target);
+                   const SoVulkanRenderTarget & target,
+                   bool colorClearedByLoad,
+                   bool depthClearedByLoad,
+                   VulkanRecordContext & ctx);
+  // Returns true when the frame's clear region (derived from params.viewport)
+  // covers the whole target, so the render pass can use a CLEAR color/depth
+  // loadOp instead of a vkCmdClearAttachments region clear.
+  bool isFullTargetClear(const SoRenderParams & params,
+                         const SoVulkanRenderTarget & target) const;
   void recordDrawCommand(const SoDrawList & drawlist,
                          const SoRenderCommand & command,
                          const SoVulkanRenderTarget & target,
                          const SoRenderParams & params,
                          VkRenderPass renderPass,
                          bool transparent,
-                         int fillModeOverride = -1,
-                         const float * uniformColorOverride = nullptr,
-                         bool overlayPass = false);
+                         int fillModeOverride,
+                         const float * uniformColorOverride,
+                         bool overlayPass,
+                         VulkanRecordContext & ctx);
+  // Instanced batch: draw `count` commands that share geometry/material/state
+  // and differ only by model matrix as ONE vkCmdDraw(instanceCount=count).
+  // `commands` is an array of pointers into the draw list.  Returns false if
+  // the first command cannot be drawn (missing cache entry) or any command is
+  // not batchable.
+  bool recordCommandBatch(const SoDrawList & drawlist,
+                           const SoRenderCommand * const * commands, int count,
+                           const SoVulkanRenderTarget & target,
+                           const SoRenderParams & params,
+                           VkRenderPass renderPass,
+                           bool transparent,
+                           int fillModeOverride,
+                           const float * uniformColorOverride,
+                           VulkanRecordContext & ctx);
   bool expandWideLines(VulkanCachedCommand & entry,
                        const SoRenderCommand & command,
                        const SoRenderParams & params,
@@ -419,39 +545,48 @@ private:
                        float lineWidth);
   bool endAndSubmit();
   void applyViewport(const SoRenderParams & params,
-                     const SoVulkanRenderTarget & target);
+                     const SoVulkanRenderTarget & target,
+                     VulkanRecordContext & ctx);
   void applyCommandViewport(const SoRenderCommand & command,
-                            const SoVulkanRenderTarget & target);
+                            const SoVulkanRenderTarget & target,
+                            VulkanRecordContext & ctx);
   void applyScissor(const SoRenderCommand & command,
-                    const SoVulkanRenderTarget & target);
+                    const SoVulkanRenderTarget & target,
+                    VulkanRecordContext & ctx);
   // Deduplicated dynamic-state emitters.  Each records the value last set
-  // this frame and skips the vkCmd* call when the incoming value is already
+  // into `ctx` and skips the vkCmd* call when the incoming value is already
   // active, so an opaque run of draws sharing a pipeline/viewport pays one
   // state change instead of one per draw.  Only the value actually submitted
   // to the command buffer is remembered, so early-return paths (e.g. a
   // command with no per-command viewport) leave the remembered state as the
   // real current binding.
-  void applyPipeline(VkPipeline pipeline);
-  void applyViewportState(const VkViewport & viewport);
-  void applyScissorState(const VkRect2D & scissor);
-  void resetBoundState();
+  void applyPipeline(VkPipeline pipeline, VulkanRecordContext & ctx);
+  void applyViewportState(const VkViewport & viewport,
+                          VulkanRecordContext & ctx);
+  void applyScissorState(const VkRect2D & scissor, VulkanRecordContext & ctx);
+  void resetBoundState(VulkanRecordContext & ctx);
   void recordOverlayDepthClear(const SoRenderCommand & command,
-                               const SoVulkanRenderTarget & target);
+                               const SoVulkanRenderTarget & target,
+                               VulkanRecordContext & ctx);
   void recordOverlayBlock(const SoDrawList & drawlist,
                           const SoRenderParams & params,
                           const SoVulkanRenderTarget & target,
-                          VkRenderPass renderPass);
+                          VkRenderPass renderPass,
+                          VulkanRecordContext & ctx);
   void recordTracedComposite(const SoDrawList & drawlist,
                              const SoRenderParams & params,
                              const SoVulkanRenderTarget & target,
-                             VkRenderPass renderPass);
+                             VkRenderPass renderPass,
+                             VulkanRecordContext & ctx);
   SbBool renderInternal(const SoDrawList & drawlist,
                         const SoRenderParams & params,
                         bool overlaysOnly);
   bool recordFrame(const SoDrawList & drawlist,
                    const SoRenderParams & params,
                    const SoVulkanRenderTarget & target,
-                   VkRenderPass renderPass);
+                   VkRenderPass renderPass,
+                   VulkanRecordContext & ctx,
+                   VkFramebuffer inheritFramebuffer);
 
   // --- Vulkan resource helpers -------------------------------------------
   bool createBuffer(VkDeviceSize size,
@@ -488,6 +623,18 @@ private:
                                   VkMemoryPropertyFlags desiredProperties,
                                   VkBuffer & buffer, VkDeviceMemory & memory,
                                   const void * data = nullptr);
+  // Ensure the per-instance model-matrix buffer holds at least `bytes`
+  // (HOST_VISIBLE | HOST_COHERENT, persistently mapped).  Recreates + remaps
+  // on growth; the old buffer is released through the deferred ring.
+  bool ensureInstanceModelBuffer(VkDeviceSize bytes);
+  // Size the per-instance model-matrix buffer to the full ring
+  // (maxFramesInFlight * uboSlotsPerFrame * sizeof(float[16])), matching the
+  // lighting-UBO ring the instance element index parallels
+  // ((frameIndex % maxFramesInFlight) * uboSlotsPerFrame + slotIndex).  Called
+  // at the same sites that create/resize the UBO ring so the per-draw path
+  // never grows (or worse, re-creates) the buffer -- a per-draw vkMapMemory /
+  // vkDestroyBuffer would otherwise race once workers record in parallel.
+  bool ensureInstanceModelRingCapacity();
   bool growLightingUbo(uint32_t minSlots);
   bool swapLightingBuffer(VkBuffer newBuffer, VkDeviceMemory newMemory,
                           void * newMapped, uint32_t newSlotsPerFrame);
@@ -512,6 +659,13 @@ private:
   // physicalDevice in initialize().  Replaces the old per-backend
   // deviceMemoryProperties + deviceMemoryPropertiesValid cache.
   SoVulkanShared::MemoryProperties memProps;
+
+  // Sub-allocator for the high-churn transient resources (texture image memory
+  // and texture staging buffers), so each upload does not vkAllocateMemory /
+  // vkFreeMemory against the driver (slow, and counts against
+  // maxMemoryAllocationCount).  Enabled by FC_VULKAN_MEM_POOL (off by default);
+  // when disabled the legacy per-resource allocate path is used.
+  std::unique_ptr<SoVulkanMemPool> memPool;
 
   // --- Device capabilities (probed once in initialize()) -----------------
   // VkPhysicalDeviceFeatures::fillModeNonSolid gates the wireframe/points
@@ -539,11 +693,62 @@ private:
   std::vector<VkCommandBuffer> frameCommandBuffers;
   std::vector<VkFence> frameFences;
   std::vector<uint8_t> frameFencePending;
-
-  // Command buffer being recorded by the current render()/renderExternal()
-  // call.  This is the backend's own buffer in render(), or the caller's
-  // buffer in renderExternal().
-  VkCommandBuffer activeCommandBuffer = VK_NULL_HANDLE;
+  // Secondary command buffers for M1c/M1d: one per in-flight frame slot per
+  // worker, used to record the render-order-independent opaque pass inside an
+  // already-begun render pass (RENDER_PASS_CONTINUE), then
+  // vkCmdExecuteCommands()'d into the slot's primary buffer.  Kept per-slot
+  // so a secondary is never reset while a primary that executed it is still
+  // pending; the pool's RESET_COMMAND_BUFFER_BIT lets each be re-recorded
+  // after its slot's fence is waited.
+  //
+  // ONE POOL PER WORKER: VkCommandPool host access is externally
+  // synchronized per the Vulkan spec, so concurrent vkReset/vkBegin/vkEnd of
+  // buffers allocated from a SHARED pool (M1d workers + main) races the
+  // pool's internal allocator.  Pool w owns only worker w's secondaries.
+  std::vector<VkCommandPool> secondaryCommandPools;
+  // Secondaries are indexed [slot * maxRecordWorkers + worker], so a worker
+  // always records into its own buffer of the current in-flight slot and a
+  // secondary is never reset while a primary that executed it is pending.
+  std::vector<VkCommandBuffer> secondaryCommandBuffers;
+  // M1d parallel recording.  The opaque worklist is partitioned into disjoint
+  // chunks, each recorded by one worker thread into its own secondary buffer
+  // (slots are pre-assigned disjoint by M1b, so the mapped UBO/instance-model
+  // writes are race-free).  The pool is persistent; worker 0 is the recording
+  // thread and workers 1..N-1 are spawned threads, all joined in shutdown().
+  bool parallelRecordEnabled = false;
+  uint32_t maxRecordWorkers = 1;
+  std::vector<std::thread> recordWorkers;
+  std::vector<VulkanRecordContext> workerRecordContexts;
+  struct ParallelRecordJob {
+    const SoDrawList * drawlist = nullptr;
+    const SoRenderParams * params = nullptr;
+    const SoVulkanRenderTarget * target = nullptr;
+    VkRenderPass renderPass = VK_NULL_HANDLE;
+    VkFramebuffer framebuffer = VK_NULL_HANDLE;
+    // This worker's chunk: pointers into the frame's worklist (workItemsScratch
+    // is a backend member that stays alive for the whole recording).
+    std::vector<const VulkanWorkItem *> items;
+    VkCommandBuffer secondary = VK_NULL_HANDLE;
+    VulkanRecordContext * ctx = nullptr;
+    bool ok = false;
+  };
+  std::vector<ParallelRecordJob> recordJobs;
+  std::mutex recordMutex;
+  std::condition_variable recordCvSpawn, recordCvDone;
+  // Monotonic dispatch generation: main increments it under recordMutex when
+  // publishing a frame's jobs; each worker remembers the generation it already
+  // processed and re-waits until a NEW one arrives, so every worker consumes
+  // each dispatch exactly once (a plain ready flag would let a finished worker
+  // immediately re-process the same frame while main is still waiting).
+  uint32_t recordJobGeneration = 0;
+  std::atomic<uint32_t> recordDoneCount {0};
+  bool recordPoolStopped = false;
+  // Per-recording command-buffer target + dedup state for the current
+  // render()/renderExternal() call.  This names the backend's own buffer in
+  // render(), or the caller's buffer in renderExternal().  Kept as one
+  // member (single-threaded recording); worker threads get their own
+  // VulkanRecordContext instances.
+  VulkanRecordContext recordContext;
 
   VkDescriptorSetLayout descriptorSetLayout = VK_NULL_HANDLE;
   // Set-0 layout: the lighting constant ring (binding 0, UBO dynamic).  The
@@ -575,7 +780,18 @@ private:
   VkDeviceSize uboSlotStride = 0;
   uint32_t uboSlotsPerFrame = 0;
   uint32_t uboFrameIndex = 0;
-  uint32_t uboCmdIndex = 0;
+
+  // Host-visible, persistently-mapped buffer holding the per-instance model
+  // matrices for instanced drawing (binding 1, rate INSTANCE).  A group of
+  // commands sharing geometry/material and differing only by model matrix is
+  // drawn with a single vkCmdDraw(instanceCount=N); the N model matrices are
+  // memcpy'd here and the attribute reads them per instance.  A one-element
+  // buffer serves ordinary non-instanced draws.  Grows on demand; freed in
+  // shutdown().
+  VkBuffer instanceModelBuffer = VK_NULL_HANDLE;
+  VkDeviceMemory instanceModelMemory = VK_NULL_HANDLE;
+  void * instanceModelMapped = nullptr;
+  VkDeviceSize instanceModelCapacity = 0;
   // Per-frame pre-conversion of the frame camera matrices (double -> float).
   // The main pass draws every command with the frame view/projection (only
   // scissor overlays carry their own matrices), so converting once per render
@@ -583,6 +799,10 @@ private:
   // updateLightingUniforms() and recordDrawCommand() on every draw.
   float frameViewFloats[16] = {};
   float frameProjFloats[16] = {};
+  // Hoisted device-pixel ratio: cacheFrameMatrices() computes the frame's
+  // scalar once so per-command push-constant code reads a member instead of
+  // re-evaluating params.devicePixelRatio (a branch + member access) per draw.
+  float frameDpr = 1.0f;
   void cacheFrameMatrices(const SoRenderParams & params);
 
   // Lighting constant ring (set 0, binding 0, dynamic offset).  Holds a few
@@ -624,6 +844,22 @@ private:
   // cache eviction compacts the texture cache.
   std::vector<PendingTextureUpload> pendingUploads;
 
+  // Persistent host-visible staging buffer used to coalesce the external
+  // texture-upload flush (flushPendingTextureUploadsExternal) into a single
+  // buffer write + one submit, instead of allocating a fresh transient staging
+  // buffer per pending upload per frame.  Grows on demand and is reused across
+  // frames; released at shutdown().  Its mapped pointer is the single owner of
+  // the staged pixel data, so a failure at any point leaves one buffer to
+  // clean up rather than N per-upload allocations to chase.
+  VkBuffer stagingPoolBuffer = VK_NULL_HANDLE;
+  VkDeviceMemory stagingPoolMemory = VK_NULL_HANDLE;
+  void * stagingPoolMapped = nullptr;
+  VkDeviceSize stagingPoolCapacity = 0;
+  // Running byte cursor into stagingPoolBuffer for the current frame's
+  // pending uploads; reset to 0 at the start of each flush/record pass.
+  VkDeviceSize stagingPoolCursor = 0;
+  bool ensureStagingPoolSize(VkDeviceSize required);
+
   // Texture binding (set 0, binding 1).  A 1x1 white fallback texture is
   // bound whenever a command carries no embedded SoTextureData.
   VkImage whiteImage = VK_NULL_HANDLE;
@@ -656,6 +892,12 @@ private:
     VkSampleCountFlagBits sampleCount = VK_SAMPLE_COUNT_1_BIT;
     VkImageLayout colorLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
     VkImageLayout depthLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
+    // Load ops distinguish a render pass that clears its attachments at begin
+    // (full-target clear fast path, FC_VULKAN_RP_CLEAR) from one that loads
+    // them and clears via vkCmdClearAttachments.  Two passes that differ only
+    // in loadOp must not share a cache entry.
+    VkAttachmentLoadOp colorLoadOp = VK_ATTACHMENT_LOAD_OP_LOAD;
+    VkAttachmentLoadOp depthLoadOp = VK_ATTACHMENT_LOAD_OP_LOAD;
 
     bool operator==(const RenderPassIdentity & other) const
     {
@@ -663,7 +905,9 @@ private:
         depthFormat == other.depthFormat &&
         sampleCount == other.sampleCount &&
         colorLayout == other.colorLayout &&
-        depthLayout == other.depthLayout;
+        depthLayout == other.depthLayout &&
+        colorLoadOp == other.colorLoadOp &&
+        depthLoadOp == other.depthLoadOp;
     }
   };
   struct RenderPassIdentityHash
@@ -680,16 +924,28 @@ private:
                          std::hash<uint32_t>()(static_cast<uint32_t>(key.colorLayout)));
       hash = hashCombine(hash,
                          std::hash<uint32_t>()(static_cast<uint32_t>(key.depthLayout)));
+      hash = hashCombine(hash,
+                         std::hash<uint32_t>()(static_cast<uint32_t>(key.colorLoadOp)));
+      hash = hashCombine(hash,
+                         std::hash<uint32_t>()(static_cast<uint32_t>(key.depthLoadOp)));
       return hash;
     }
   };
   RenderPassIdentity renderPassIdentity(const SoVulkanRenderTarget & target) const;
-  VkRenderPass getOrCreateRenderPass(const SoVulkanRenderTarget & target);
+  VkRenderPass getOrCreateRenderPass(const SoVulkanRenderTarget & target,
+                                     VkAttachmentLoadOp colorLoadOp,
+                                     VkAttachmentLoadOp depthLoadOp);
   std::unordered_map<RenderPassIdentity, VkRenderPass, RenderPassIdentityHash>
     renderPassCache;
 
   // Render pass used by the current frame (looked up from renderPassCache).
   VkRenderPass renderPass = VK_NULL_HANDLE;
+  // Whether the current frame's render pass clears the color/depth attachment
+  // via its loadOp (full-target-clear fast path).  When true, recordClear()
+  // skips the redundant vkCmdClearAttachments and the begin info supplies the
+  // corresponding clear value.
+  bool renderPassColorCleared = false;
+  bool renderPassDepthCleared = false;
 
   // Framebuffer cached for the current target identity (image views +
   // extent + render pass).  Swapchain targets cycle their images every
@@ -778,21 +1034,41 @@ private:
   std::unordered_map<BackgroundPipelineKey, VkPipeline,
                      BackgroundPipelineKeyHash> backgroundPipelineCache;
 
-  // Last dynamic state actually bound this frame (see applyPipeline /
-  // applyViewportState / applyScissorState).  Reset by resetBoundState() at
-  // each frame boundary; maxFramesInFlight is per-slot but dynamic state is
-  // per-record (the command buffer being recorded), so it is reset once per
-  // frame, not per in-flight slot.
-  VkPipeline lastBoundPipeline = VK_NULL_HANDLE;
-  VkViewport lastBoundViewport {};
-  VkRect2D lastBoundScissor {};
-  bool hasBoundViewport = false;
-  bool hasBoundScissor = false;
+  // Reusable CPU scratch for the wide-line quad expansion.  expandWideLines()
+  // previously allocated clipCache/distances/quads as fresh std::vector per
+  // line per frame -- for line-heavy scenes that is thousands of heap
+  // alloc/free per frame.  These are reused via assign() (no realloc when
+  // capacity is sufficient), so only the fill cost remains.
+  std::vector<float> wlineClipScratch;
+  std::vector<float> wlineDistScratch;
+  std::vector<float> wlineQuadScratch;
 
   std::vector<VulkanCachedCommand> gpuCache;
   std::unordered_map<const SoRenderCommand *, size_t> commandToCache;
   std::vector<VulkanCachedTexture> textureCache;
   std::unordered_map<const SoRenderCommand *, size_t> commandToTexture;
+
+  // Reusable batch-key bucket map for recordFrame()'s opaque batching pass.
+  // Previously a fresh std::unordered_map per frame; reused via clear() so an
+  // ordinary frame does not heap-allocate the bucket table + key vectors.
+  std::unordered_map<uint64_t, std::vector<const SoRenderCommand *>> batchBucketScratch;
+  // Reusable worklist produced by buildWorkItems() and consumed by the record
+  // path (M1b) and, later, secondary-buffer / parallel workers (M1c/M1d).
+  // Cleared per frame and refilled so an ordinary frame does not heap-allocate
+  // the item vector.
+  std::vector<VulkanWorkItem> workItemsScratch;
+
+  // Packed sampler-state key: minFilter | magFilter << 2 | wrapS << 4 | wrapT << 6.
+  typedef uint8_t SamplerKey;
+  static SamplerKey samplerKey(SoTextureFilter minFilter,
+                               SoTextureFilter magFilter,
+                               SoTextureWrap wrapS, SoTextureWrap wrapT);
+  // Sampler cache so textures sharing filter/wrap state reuse one VkSampler
+  // instead of creating one per texture entry.  Owned here; destroyed at
+  // shutdown() after the texture cache.  Always created lazily on first use.
+  std::unordered_map<SamplerKey, VkSampler> samplerCache;
+  VkSampler cachedSampler(SoTextureFilter minFilter, SoTextureFilter magFilter,
+                          SoTextureWrap wrapS, SoTextureWrap wrapT);
 
   std::vector<VulkanGeometryBlock> geometryBlocks;
   // Released blocks are kept as reusable ids so a geometry-change burst does
@@ -803,8 +1079,9 @@ private:
 
   // Reusable scratch packing buffer for uploadGeometry().  Resized but never
   // reallocated across successive uploads, so the interleaved repack does not
-  // churn the heap on every geometry change.
-  std::vector<float> uploadScratch;
+  // churn the heap on every geometry change.  Stores the 32-byte packed layout
+  // (see VULKAN_VERTEX_STRIDE), so it is byte-addressed.
+  std::vector<uint8_t> uploadScratch;
   // Reusable per-draw "needs geometry upload" flag buffer for
   // updateGeometryCache().  Grows to the largest draw list seen, then keeps
   // its capacity so an ordinary frame does not heap-allocate a fresh vector

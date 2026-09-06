@@ -822,7 +822,7 @@ namespace {
     assert(fabs(v - vknotvec[numvknots-1]) < 1.e-12);
 
     // testing the findspan routine
-    int i = 0;
+    [[maybe_unused]] int i = 0;
     // rechter rand
     i = FindSpan(uknotvec[0], udegree, numuctrlpts, uknotvec);
     assert( i == udegree );

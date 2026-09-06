@@ -123,7 +123,18 @@ inline void checkDenoiseDownsampleLayout() {
 
 constexpr int SBT_GROUP_COUNT = 5; // raygen, miss, shadow miss, chit, shadow chit
 
-constexpr int MAX_SHADER_LIGHTS = 8;
+// SO_MAX_SHADER_LIGHTS is mirrored as a literal [8] in every shader's
+// lighting block (PathTrace.glsl, ClosestHit.glsl, Raygen.glsl, the visual
+// Fragment/Vertex, the GL Lighting.glsl) because GLSL cannot read a C++
+// constexpr.  If the shared constant is ever raised, these shaders must be
+// regenerated in lockstep; assert the invariant here so a silent desync (that
+// would over/under-run the light arrays) is caught at compile time instead of
+// at runtime on the GPU.
+static_assert(SO_MAX_SHADER_LIGHTS == 8,
+              "SO_MAX_SHADER_LIGHTS change requires regenerating the "
+              "hardcoded [8] light arrays in the GLSL/Visual shaders");
+
+constexpr int MAX_SHADER_LIGHTS = SO_MAX_SHADER_LIGHTS;
 constexpr int MAX_VERTEX_COUNT = 10000000;
 
 // FNV-1a content hash of a command's geometry, sampled so full-scene
@@ -241,6 +252,50 @@ hashGeometrySignal(const SoGeometryDesc & geometry, uint32_t vertexStride,
   return h;
 }
 
+// Returns true when the command's traced positions are not usable for
+// tracing -- either they have collapsed to a degenerate point/line (a
+// near-zero extent on every axis) or they contain non-finite / wildly
+// out-of-range coordinates.  FreeCAD's selection/preselection highlight
+// momentarily swaps a shape's base geometry for a placeholder or a
+// degenerate/overwritten vertex buffer via SoHighlightElementAction /
+// whichChild, so for a frame or two the base OPAQUE command's vertex buffer
+// is re-recorded with all positions piled at a point, or a garbage in-place
+// overwrite (extension far beyond any CAD part).  Treated as a real content
+// change this would set cacheChanged (forcing a path-tracing accumulation
+// restart, the "lights re-calc" glitch) and refit the BLAS with the junk
+// points (so a ray transmitting through glass misses the surface and reads
+// black).  Skipping such a command mirrors the existing singular-model-matrix
+// guard for the hidden anchor cube.
+inline bool
+geometryDegenerate(const SoGeometryDesc & geometry, uint32_t vertexStride)
+{
+  if (!geometry.positions || geometry.vertexCount == 0) return false;
+  const size_t posStrideFloats = vertexStride / sizeof(float);
+  const float * p0 = geometry.positions;
+  float mn[3] = {p0[0], p0[1], p0[2]};
+  float mx[3] = {p0[0], p0[1], p0[2]};
+  for (uint32_t i = 0; i < geometry.vertexCount; ++i) {
+    const float * p =
+      geometry.positions + static_cast<size_t>(i) * posStrideFloats;
+    for (int a = 0; a < 3; ++a) {
+      const float v = p[a];
+      // Non-finite coordinates are uninitialized garbage; a CAD part never
+      // needs |coord| beyond this.  A selection placeholder can leave one
+      // vertex far out of range while the rest collapse.
+      constexpr float kMax = 1.0e6f;
+      if (!std::isfinite(v) || v > kMax || v < -kMax) return true;
+      if (v < mn[a]) mn[a] = v;
+      if (v > mx[a]) mx[a] = v;
+    }
+  }
+  // Epsilon in object space: a valid CAD part spans at least a small extent;
+  // a selection placeholder collapses all three axes to ~0.
+  constexpr float kEps = 1.0e-4f;
+  return (mx[0] - mn[0]) < kEps &&
+         (mx[1] - mn[1]) < kEps &&
+         (mx[2] - mn[2]) < kEps;
+}
+
 // FNV-1a hash of a command's vertex positions only.  Separates position
 // edits (refit-able: topology unchanged) from index edits (topology change,
 // full rebuild required).
@@ -300,6 +355,40 @@ matricesNearlyEqual(const float * a, const float * b, size_t count)
     if (d > 1e-4f * scale + 1e-7f) return false;
   }
   return true;
+}
+
+// FNV-1a hash of a command's render-affecting material fields.  The geometry
+// cache hashes the traced positions and identity, so a pure material edit
+// (same geometry, same transform -- e.g. recoloring a part, or changing
+// Transparency to make it glass) produces an identical geometry content hash
+// and would never fire cacheChanged.  Because the material buffer is
+// re-uploaded every frame, the tracer's shader reads the new values -- but a
+// converged/idle path tracer generates no new samples, so the rendered image
+// stays stale until the camera moves.  Comparing this hash in the geometry
+// cache turns a material edit into a scene change (cacheChanged) that restarts
+// accumulation.  The hash covers every field updateMaterials() uploads that
+// affects shading; 0 is never returned (the FNV offset basis is non-zero).
+inline uint64_t
+hashMaterial(const SoMaterialData & material)
+{
+  uint64_t h = 1469598103934665603ull;
+  const auto mix = [&h](uint64_t v) {
+    CoinRenderDetail::fnvMix(h, v);
+  };
+  for (int i = 0; i < 4; ++i) {
+    mix(std::bit_cast<uint32_t>(material.diffuse[i]));
+    mix(std::bit_cast<uint32_t>(material.ambient[i]));
+    mix(std::bit_cast<uint32_t>(material.specular[i]));
+    mix(std::bit_cast<uint32_t>(material.emissive[i]));
+  }
+  mix(std::bit_cast<uint32_t>(material.shininess));
+  mix(std::bit_cast<uint32_t>(material.opacity));
+  mix(std::bit_cast<uint32_t>(material.metalness));
+  mix(std::bit_cast<uint32_t>(material.roughness));
+  mix(static_cast<uint64_t>(material.shadingModel));
+  mix(static_cast<uint64_t>(material.twoSidedLighting ? 1 : 0));
+  mix(static_cast<uint64_t>(material.flags));
+  return h;
 }
 
 } // namespace SoRTXBackend

@@ -18,6 +18,9 @@
 
 #include <Inventor/SbColor4f.h>
 #include <Inventor/SbVec2s.h>
+#include <Inventor/SbVec3f.h>
+#include <Inventor/rendering/SoRenderIR.h>
+#include <vector>
 
 // Pull in Vulkan handle types for renderExternal().  This header is only
 // fully compiled when COIN_BUILD_VULKAN_RENDERER is enabled.
@@ -208,7 +211,8 @@ public:
   SbBool renderExternal(SbBool clearwindow,
                         SbBool clearzbuffer,
                         VkCommandBuffer commandBuffer,
-                        VkRenderPass renderPass);
+                        VkRenderPass renderPass,
+                        VkFramebuffer framebuffer);
 
   /*!
     \brief Select the ray-tracing backend for the next render() calls.
@@ -293,6 +297,19 @@ public:
   int getEnvMap(void) const;
   //! Number of available environment/cubemap presets.
   static int getEnvMapCount(void);
+  /*!
+    \brief Provide the authoritative scene lighting (GL host -> RT backend).
+
+    \a lights is the effective eye-space light set (the viewer headlight plus
+    any document SoLight nodes) and \a ambient the intensity-scaled scene
+    ambient.  Fired through to the RT backend so the path tracer uses the
+    host's lights instead of the IR draw-list lighting capture, which can
+    drop to zero lights on the retained/replayed frame and render surfaces
+    at ambient-only (near-black).  Passing an empty \a lights restores the
+    per-command IR lighting.
+  */
+  void setSceneLights(const std::vector<SoLightData> & lights,
+                      const SbVec3f & ambient);
   //! Human-readable name of an environment preset index.
   static const char * getEnvMapName(int index);
   /*!

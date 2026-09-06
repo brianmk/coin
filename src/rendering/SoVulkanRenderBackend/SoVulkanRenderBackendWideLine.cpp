@@ -29,6 +29,61 @@
 using namespace CoinVulkanDetail;
 
 bool
+SoVulkanRenderBackend::ensureInstanceModelRingCapacity()
+{
+  const VkDeviceSize bytes =
+    static_cast<VkDeviceSize>(this->maxFramesInFlight) *
+    static_cast<VkDeviceSize>(this->uboSlotsPerFrame) * sizeof(float) * 16;
+  // Guard against an uninitialised ring (uboSlotsPerFrame==0 -> zero bytes):
+  // ensureInstanceModelBuffer() already clamps to a minimum of 64 bytes, so a
+  // zero request still allocates a valid single-element buffer.  The per-draw
+  // slot-index math is only ever exercised after prepareLightingSlots() sizes
+  // uboSlotsPerFrame, so this is a safety bound, not a steady-state path.
+  return this->ensureInstanceModelBuffer(bytes);
+}
+
+bool
+SoVulkanRenderBackend::ensureInstanceModelBuffer(VkDeviceSize bytes)
+{
+  if (this->instanceModelBuffer != VK_NULL_HANDLE &&
+      this->instanceModelCapacity >= bytes) {
+    return true;
+  }
+  if (this->instanceModelBuffer != VK_NULL_HANDLE) {
+    const VkDevice device = this->device;
+    const VkAllocationCallbacks * allocator = this->allocator;
+    const VkBuffer oldBuffer = this->instanceModelBuffer;
+    const VkDeviceMemory oldMemory = this->instanceModelMemory;
+    this->instanceModelBuffer = VK_NULL_HANDLE;
+    this->instanceModelMemory = VK_NULL_HANDLE;
+    this->instanceModelMapped = nullptr;
+    this->instanceModelCapacity = 0;
+    this->deferDestroy([device, allocator, oldBuffer, oldMemory]() {
+      if (oldBuffer != VK_NULL_HANDLE) {
+        vkDestroyBuffer(device, oldBuffer, allocator);
+      }
+      if (oldMemory != VK_NULL_HANDLE) {
+        vkFreeMemory(device, oldMemory, allocator);
+      }
+    });
+  }
+  const VkDeviceSize cap = std::max<VkDeviceSize>(bytes, 64u);
+  if (!this->createBuffer(cap, VK_BUFFER_USAGE_VERTEX_BUFFER_BIT,
+                          this->instanceModelBuffer, this->instanceModelMemory,
+                          nullptr)) {
+    this->emitError("ensureInstanceModelBuffer: failed to create buffer");
+    return false;
+  }
+  if (vkMapMemory(this->device, this->instanceModelMemory, 0, cap, 0,
+                  &this->instanceModelMapped) != VK_SUCCESS) {
+    this->emitError("ensureInstanceModelBuffer: vkMapMemory failed");
+    return false;
+  }
+  this->instanceModelCapacity = cap;
+  return true;
+}
+
+bool
 SoVulkanRenderBackend::expandWideLines(VulkanCachedCommand & entry,
                                        const SoRenderCommand & command,
                                        const SoRenderParams & params,
@@ -200,11 +255,13 @@ SoVulkanRenderBackend::expandWideLines(VulkanCachedCommand & entry,
   // (glLineStipple: each bit covers linePatternScaleFactor pixels), so the
   // fragment discard below must operate on pixel distances, not object
   // units -- an object-unit period changes size when zooming.
-  std::vector<float> clipCache(static_cast<size_t>(vertexCount) * 4, 0.0f);
-  std::vector<float> distances(vertexCount, 0.0f);
+  this->wlineClipScratch.assign(static_cast<size_t>(vertexCount) * 4, 0.0f);
+  this->wlineDistScratch.assign(vertexCount, 0.0f);
+  float * const clipCache = this->wlineClipScratch.data();
+  float * const distances = this->wlineDistScratch.data();
   for (uint32_t i = 0; i < count; ++i) {
     const uint32_t actual = geometry.indices ? geometry.indices[i] : i;
-    float * clip = clipCache.data() + static_cast<size_t>(actual) * 4;
+    float * clip = clipCache + static_cast<size_t>(actual) * 4;
     transformPoint(geometry.positions
                    + static_cast<size_t>(actual) * posStrideFloats, clip);
   }
@@ -213,8 +270,8 @@ SoVulkanRenderBackend::expandWideLines(VulkanCachedCommand & entry,
       const uint32_t previous = geometry.indices
         ? geometry.indices[i - 1] : i - 1;
       const uint32_t current = geometry.indices ? geometry.indices[i] : i;
-      const float * c0 = clipCache.data() + static_cast<size_t>(previous) * 4;
-      const float * c1 = clipCache.data() + static_cast<size_t>(current) * 4;
+      const float * c0 = clipCache + static_cast<size_t>(previous) * 4;
+      const float * c1 = clipCache + static_cast<size_t>(current) * 4;
       if (c0[3] <= 0.0f || c1[3] <= 0.0f) {
         distances[current] = distances[previous];
         continue;
@@ -230,8 +287,8 @@ SoVulkanRenderBackend::expandWideLines(VulkanCachedCommand & entry,
       const uint32_t first = geometry.indices ? geometry.indices[i] : i;
       const uint32_t second = geometry.indices
         ? geometry.indices[i + 1] : i + 1;
-      const float * c0 = clipCache.data() + static_cast<size_t>(first) * 4;
-      const float * c1 = clipCache.data() + static_cast<size_t>(second) * 4;
+      const float * c0 = clipCache + static_cast<size_t>(first) * 4;
+      const float * c1 = clipCache + static_cast<size_t>(second) * 4;
       if (c0[3] <= 0.0f || c1[3] <= 0.0f) {
         distances[first] = 0.0f;
         distances[second] = 0.0f;
@@ -246,7 +303,9 @@ SoVulkanRenderBackend::expandWideLines(VulkanCachedCommand & entry,
 
   // 6 vertices per segment (two triangles), 9 floats each:
   // clip position (4) + color (4) + distance in pixels (1).
-  std::vector<float> quads(static_cast<size_t>(segmentCount) * 6 * 9);
+  const size_t quadFloats = static_cast<size_t>(segmentCount) * 6 * 9;
+  this->wlineQuadScratch.assign(quadFloats, 0.0f);
+  float * const quads = this->wlineQuadScratch.data();
   size_t outIndex = 0;
   size_t diagSkippedW = 0;
   size_t diagSkippedDeg = 0;
@@ -267,8 +326,8 @@ SoVulkanRenderBackend::expandWideLines(VulkanCachedCommand & entry,
     const float * col1 = geometry.colors
       ? geometry.colors + static_cast<size_t>(i1) * 4 : nullptr;
 
-    const float * c0 = clipCache.data() + static_cast<size_t>(i0) * 4;
-    const float * c1 = clipCache.data() + static_cast<size_t>(i1) * 4;
+    const float * c0 = clipCache + static_cast<size_t>(i0) * 4;
+    const float * c1 = clipCache + static_cast<size_t>(i1) * 4;
 
     // Near-plane clip in the remapped clip space.  A point is visible when
     // it is in front of the eye (w > nearEps) AND in front of the near plane
@@ -375,7 +434,7 @@ SoVulkanRenderBackend::expandWideLines(VulkanCachedCommand & entry,
       const int corner = triOrder[t];
       const int endpoint = corner < 2 ? 0 : 1;
       const float * col = endpoint == 0 ? colA : colB;
-      float * out = quads.data() + outIndex;
+      float * out = quads + outIndex;
       outIndex += 9;
       out[0] = corners[corner][0];
       out[1] = corners[corner][1];
@@ -388,7 +447,6 @@ SoVulkanRenderBackend::expandWideLines(VulkanCachedCommand & entry,
       out[8] = endpoint == 0 ? dA : dB;
     }
   }
-  quads.resize(outIndex);
   if (outIndex < 9) {
     if (wdiag) {
       fprintf(stderr, "[WLINE2] FAIL cmd=%p verts=%u segs=%u outIndex=%zu "
@@ -428,8 +486,8 @@ SoVulkanRenderBackend::expandWideLines(VulkanCachedCommand & entry,
     static int distLog = 0;
     if (distLog++ < 3) {
       fprintf(stderr, "[WLINE] verts=%u segs=%u quads=%zu dists:",
-              vertexCount, segmentCount, quads.size() / 9);
-      for (size_t q = 0; q < quads.size() && q < 60; q += 9) {
+              vertexCount, segmentCount, outIndex / 9);
+      for (size_t q = 0; q < outIndex && q < 60; q += 9) {
         fprintf(stderr, " %.1f", static_cast<double>(quads[q + 8]));
       }
       fprintf(stderr, "\n");
@@ -451,6 +509,7 @@ SoVulkanRenderBackend::expandWideLines(VulkanCachedCommand & entry,
       const VkDeviceMemory oldMemory = slot.memory;
       slot.buffer = VK_NULL_HANDLE;
       slot.memory = VK_NULL_HANDLE;
+      slot.mapped = nullptr;
       slot.size = 0;
       this->deferDestroy([device, allocator, oldBuffer, oldMemory]() {
         if (oldBuffer != VK_NULL_HANDLE) {
@@ -462,22 +521,25 @@ SoVulkanRenderBackend::expandWideLines(VulkanCachedCommand & entry,
       });
     }
     if (!this->createBuffer(needed, VK_BUFFER_USAGE_VERTEX_BUFFER_BIT,
-                            slot.buffer, slot.memory, quads.data())) {
+                            slot.buffer, slot.memory, nullptr)) {
       this->emitError("expandWideLines: failed to create quad buffer");
       slot.size = 0;
       return false;
     }
     slot.size = needed;
-  }
-  else {
-    void * mapped = nullptr;
-    if (vkMapMemory(this->device, slot.memory, 0, needed, 0,
-                    &mapped) != VK_SUCCESS) {
+    // Establish the persistent host mapping.  The buffer is HOST_VISIBLE |
+    // HOST_COHERENT, so the GPU observes a memcpy without any explicit flush,
+    // and keeping the mapping alive avoids a vkMapMemory/vkUnmapMemory pair on
+    // every subsequent frame for this slot.
+    if (vkMapMemory(this->device, slot.memory, 0, needed, 0, &slot.mapped)
+        != VK_SUCCESS) {
       this->emitError("expandWideLines: vkMapMemory failed");
       return false;
     }
-    std::memcpy(mapped, quads.data(), static_cast<size_t>(needed));
-    vkUnmapMemory(this->device, slot.memory);
+    std::memcpy(slot.mapped, quads, static_cast<size_t>(needed));
+  }
+  else {
+    std::memcpy(slot.mapped, quads, static_cast<size_t>(needed));
   }
 
   slot.expandFingerprint = wfp;
