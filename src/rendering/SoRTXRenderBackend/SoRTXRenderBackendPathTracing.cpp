@@ -24,7 +24,7 @@
 using namespace SoRTXBackend;
 
 void
-SoRTXRenderBackend::updatePathTracingState(const SoDrawList & drawlist,
+SoRTXRenderBackend::updatePathTracingState(const SoDrawList & /*drawlist*/,
                                            const SoRenderParams & params,
                                            const SoVulkanRenderTarget & target,
                                            VkCommandBuffer cmd)

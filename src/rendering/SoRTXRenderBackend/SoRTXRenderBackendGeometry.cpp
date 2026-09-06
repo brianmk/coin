@@ -1881,8 +1881,7 @@ SoRTXRenderBackend::updateMaterials(const SoDrawList & drawlist)
       const VkAllocationCallbacks * allocator = this->allocator;
       const VkBuffer buffer = this->materialBuffer;
       const VkDeviceMemory memory = this->materialMemory;
-      void * mapped = this->materialMapped;
-      this->deferDestroy([device, allocator, buffer, memory, mapped]() {
+      this->deferDestroy([device, allocator, buffer, memory]() {
         vkUnmapMemory(device, memory);
         vkDestroyBuffer(device, buffer, allocator);
         vkFreeMemory(device, memory, allocator);
