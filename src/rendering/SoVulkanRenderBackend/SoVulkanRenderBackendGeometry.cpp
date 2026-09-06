@@ -779,13 +779,22 @@ SoVulkanRenderBackend::updateGeometryCache(const SoDrawList & drawlist,
       entry.normalCount == geometry.normalCount &&
       entry.vertexStride == vertexStride &&
       entry.texcoordStride == geometry.texcoordStride;
-    // The sampled content re-hash only guards against in-place edits of a
-    // retained buffer, and those can only be produced by a traversal.  On a
-    // replayed frame (geometryContentUnchanged) no traversal ran, so
-    // pointer-identical retained geometry is guaranteed unchanged and the
-    // per-command FNV walk (up to ~3k sampled values) is skipped.
+    // Change detection:
+    //  - Retained geometry (SoGeometryDesc::retained): the producer guarantees
+    //    the stream pointers change exactly when the content changes (shape
+    //    tessellation reallocates the buffers on rebuild), so pointer/count
+    //    identity alone is a correct change detector.  A per-frame content hash
+    //    is redundant and doing it defeats the retained contract those
+    //    producers rely on.  Skip the FNV walk entirely here.
+    //  - Replayed frames (geometryContentUnchanged): no traversal ran, so
+    //    pointer-identical geometry is bit-identical; also skip.
+    //  - Otherwise (per-frame arena streams that rewrite the same pointer in
+    //    place, e.g. per-vertex colors): fall back to the sampled content hash
+    //    to catch in-place edits.
+    const bool pointerIdentitySufficient =
+      geometry.retained || geometryContentUnchanged;
     const bool geometryMatches = identityMatches &&
-      (geometryContentUnchanged ||
+      (pointerIdentitySufficient ||
        entry.contentHash == hashGeometryContent(geometry));
     if (!geometryMatches) {
       needsGeometry[static_cast<size_t>(i)] = 1;
