@@ -717,23 +717,10 @@ SoVulkanRenderBackend::updateGeometryCache(const SoDrawList & drawlist,
 
   // Release uploads left over from a frame that aborted between the cache
   // update and the flush/finalize step (e.g. a failed framebuffer create).
-  // Their copies were never recorded, but deferring the staging destruction
-  // is uniformly safe and keeps a single cleanup path.
-  for (const PendingTextureUpload & upload : this->pendingUploads) {
-    if (upload.staging == VK_NULL_HANDLE) continue;
-    const VkDevice device = this->device;
-    const VkAllocationCallbacks * allocator = this->allocator;
-    const VkBuffer staging = upload.staging;
-    const VkDeviceMemory stagingMemory = upload.stagingMemory;
-    this->deferDestroy([device, allocator, staging, stagingMemory]() {
-      if (staging != VK_NULL_HANDLE) {
-        vkDestroyBuffer(device, staging, allocator);
-      }
-      if (stagingMemory != VK_NULL_HANDLE) {
-        vkFreeMemory(device, stagingMemory, allocator);
-      }
-    });
-  }
+  // Their copies were never recorded.  The staged pixels live in the shared
+  // staging pool (which persists across frames), so there is no per-upload
+  // staging buffer to defer-destroy; just drop the pending list so the next
+  // frame re-stages from scratch.
   this->pendingUploads.clear();
 
   const long cacheBcStart = vkGeometryBreadcrumbEnabled() ? vkGeometryBreadcrumbNowUs() : 0;
@@ -747,6 +734,9 @@ SoVulkanRenderBackend::updateGeometryCache(const SoDrawList & drawlist,
 
   this->needsGeometryScratch.assign(
     static_cast<size_t>(std::max(0, drawlist.getNumCommands())), 0);
+  // Start this frame's texture staging at the front of the shared staging
+  // pool so pending uploads coalesce into one buffer (see prepareTextureUpload).
+  this->stagingPoolCursor = 0;
   std::vector<uint8_t> & needsGeometry = this->needsGeometryScratch;
   int retainedUploads = 0;
   VkDeviceSize retainedUploadBytes = 0;
@@ -920,8 +910,8 @@ SoVulkanRenderBackend::updateGeometryCache(const SoDrawList & drawlist,
           upload.index = this->commandToTexture[&command];
           upload.texture = &texture;
           ++bcTexturePrepares;
-          if (this->prepareTextureUpload(texEntry, texture, upload.staging,
-                                         upload.stagingMemory)) {
+          if (this->prepareTextureUpload(texEntry, texture, upload.stagingOffset,
+                                         upload.stagingBytes)) {
             this->pendingUploads.push_back(upload);
           }
           // On failure the entry was reset by prepareTextureUpload();

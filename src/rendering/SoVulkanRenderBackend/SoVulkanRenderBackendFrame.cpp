@@ -227,12 +227,9 @@ SoVulkanRenderBackend::shutdown()
 
   // Release uploads abandoned by a frame that aborted between the cache
   // update and the flush/finalize step.  Their copies were never recorded,
-  // so synchronous destruction is safe here.
+  // so synchronous destruction is safe here.  The staged pixels live in the
+  // shared staging pool, so there is no per-upload staging to free.
   for (const PendingTextureUpload & upload : this->pendingUploads) {
-    if (upload.staging != VK_NULL_HANDLE) {
-      vkDestroyBuffer(this->device, upload.staging, this->allocator);
-      vkFreeMemory(this->device, upload.stagingMemory, this->allocator);
-    }
     if (upload.index < this->textureCache.size()) {
       this->destroyTextureEntry(this->textureCache[upload.index]);
     }
@@ -345,6 +342,20 @@ SoVulkanRenderBackend::shutdown()
     this->lightingConstMemory = VK_NULL_HANDLE;
   }
   this->lightingDescriptorSet = VK_NULL_HANDLE;
+  if (this->stagingPoolMapped != nullptr) {
+    vkUnmapMemory(this->device, this->stagingPoolMemory);
+    this->stagingPoolMapped = nullptr;
+  }
+  if (this->stagingPoolBuffer != VK_NULL_HANDLE) {
+    vkDestroyBuffer(this->device, this->stagingPoolBuffer, this->allocator);
+    this->stagingPoolBuffer = VK_NULL_HANDLE;
+  }
+  if (this->stagingPoolMemory != VK_NULL_HANDLE) {
+    vkFreeMemory(this->device, this->stagingPoolMemory, this->allocator);
+    this->stagingPoolMemory = VK_NULL_HANDLE;
+  }
+  this->stagingPoolCapacity = 0;
+  this->stagingPoolCursor = 0;
   for (auto & kv : this->samplerCache) {
     if (kv.second != VK_NULL_HANDLE) {
       vkDestroySampler(this->device, kv.second, this->allocator);

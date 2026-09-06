@@ -172,10 +172,64 @@ SoVulkanRenderBackend::effectiveTextureFormat(const int numComponents) const
 }
 
 bool
+SoVulkanRenderBackend::ensureStagingPoolSize(VkDeviceSize required)
+{
+  if (this->stagingPoolBuffer != VK_NULL_HANDLE &&
+      this->stagingPoolCapacity >= required) {
+    return true;
+  }
+  // Grow: at least double the current capacity so a burst of uploads in a
+  // frame amortizes a single reallocation instead of one per upload.
+  VkDeviceSize newCapacity =
+    std::max<VkDeviceSize>(required, this->stagingPoolCapacity * 2);
+  newCapacity = std::max<VkDeviceSize>(newCapacity, 256u * 1024u);
+
+  VkBuffer newBuffer = VK_NULL_HANDLE;
+  VkDeviceMemory newMemory = VK_NULL_HANDLE;
+  if (!SoVulkanShared::createBufferAllocated(
+        this->device, this->allocator, newCapacity,
+        VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
+        VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+        /*deviceAddress*/ false,
+        [this](const VkMemoryRequirements & req, VkMemoryPropertyFlags desired,
+               uint32_t & memoryTypeIndex) {
+          return this->selectMemoryType(req, desired, memoryTypeIndex);
+        }, newBuffer, newMemory)) {
+    return false;
+  }
+  void * newMapped = nullptr;
+  if (vkMapMemory(this->device, newMemory, 0, newCapacity, 0, &newMapped) !=
+      VK_SUCCESS) {
+    vkDestroyBuffer(this->device, newBuffer, this->allocator);
+    vkFreeMemory(this->device, newMemory, this->allocator);
+    return false;
+  }
+  // Preserve any bytes already staged in the old buffer (uploads prepared
+  // earlier in this frame) before swapping it out.
+  if (this->stagingPoolBuffer != VK_NULL_HANDLE && this->stagingPoolMapped &&
+      this->stagingPoolCursor > 0) {
+    std::memcpy(newMapped, this->stagingPoolMapped,
+                static_cast<size_t>(this->stagingPoolCursor));
+  }
+  if (this->stagingPoolBuffer != VK_NULL_HANDLE) {
+    if (this->stagingPoolMapped != nullptr) {
+      vkUnmapMemory(this->device, this->stagingPoolMemory);
+    }
+    vkDestroyBuffer(this->device, this->stagingPoolBuffer, this->allocator);
+    vkFreeMemory(this->device, this->stagingPoolMemory, this->allocator);
+  }
+  this->stagingPoolBuffer = newBuffer;
+  this->stagingPoolMemory = newMemory;
+  this->stagingPoolMapped = newMapped;
+  this->stagingPoolCapacity = newCapacity;
+  return true;
+}
+
+bool
 SoVulkanRenderBackend::prepareTextureUpload(VulkanCachedTexture & entry,
                                             const SoTextureData & texture,
-                                            VkBuffer & staging,
-                                            VkDeviceMemory & stagingMemory)
+                                            VkDeviceSize & stagingOffset,
+                                            VkDeviceSize & stagingBytes)
 {
   if (texture.numComponents < 1 || texture.numComponents > 4) {
     this->emitError("prepareTextureUpload: unsupported component count");
@@ -230,6 +284,23 @@ SoVulkanRenderBackend::prepareTextureUpload(VulkanCachedTexture & entry,
   VkMemoryRequirements requirements;
   vkGetImageMemoryRequirements(this->device, entry.image, &requirements);
   entry.memorySize = requirements.size;
+  // Stage the pixels into the shared staging pool.  The pool is host-visible
+  // and reused across frames (grown on demand), so all pending uploads of a
+  // frame coalesce into one buffer -- one allocation, one cleanup surface --
+  // rather than a fresh per-upload staging buffer.  st_offset is the byte
+  // offset (grown monotonically within the frame) where these pixels land.
+  if (!this->ensureStagingPoolSize(byteSize)) {
+    this->emitError("prepareTextureUpload: staging pool growth failed");
+    this->destroyTextureEntry(entry);
+    return false;
+  }
+  stagingOffset = this->stagingPoolCursor;
+  stagingBytes = byteSize;
+  unsigned char * dst = static_cast<unsigned char *>(this->stagingPoolMapped) +
+                        static_cast<size_t>(stagingOffset);
+  std::memcpy(dst, uploadPixels, static_cast<size_t>(byteSize));
+  this->stagingPoolCursor += ((byteSize + 3u) & ~(VkDeviceSize)3u);
+
   if (this->usingMemPool()) {
     // Sub-allocate the image memory from the pool; falls back to a standalone
     // allocation if the pool cannot fit/grow the range.
@@ -243,13 +314,6 @@ SoVulkanRenderBackend::prepareTextureUpload(VulkanCachedTexture & entry,
       const VkResult bindRes = vkBindImageMemory(
         this->device, entry.image, entry.memory, offset);
       if (bindRes == VK_SUCCESS) {
-        // Staging buffer allocation (host-visible) below.
-        if (!this->createBuffer(byteSize, VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
-                                staging, stagingMemory, uploadPixels)) {
-          this->emitError("prepareTextureUpload: staging buffer creation failed");
-          this->destroyTextureEntry(entry);
-          return false;
-        }
         return true;
       }
         // Binding failed: return the range to the pool and fall through to the
@@ -280,12 +344,6 @@ SoVulkanRenderBackend::prepareTextureUpload(VulkanCachedTexture & entry,
   entry.memoryOffset = 0;
   vkBindImageMemory(this->device, entry.image, entry.memory, 0);
 
-  if (!this->createBuffer(byteSize, VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
-                          staging, stagingMemory, uploadPixels)) {
-    this->emitError("prepareTextureUpload: staging buffer creation failed");
-    this->destroyTextureEntry(entry);
-    return false;
-  }
   return true;
 }
 
@@ -294,7 +352,8 @@ SoVulkanRenderBackend::recordTextureUpload(
   VkCommandBuffer commandBuffer,
   const VulkanCachedTexture & entry,
   const SoTextureData & texture,
-  VkBuffer staging)
+  VkBuffer staging,
+  VkDeviceSize stagingOffset)
 {
   SoVulkanShared::imageTransition(
     commandBuffer, entry.image,
@@ -303,6 +362,7 @@ SoVulkanRenderBackend::recordTextureUpload(
     VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT);
 
   VkBufferImageCopy region {};
+  region.bufferOffset = stagingOffset;
   region.imageSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
   region.imageSubresource.layerCount = 1;
   region.imageExtent = {static_cast<uint32_t>(texture.width),
@@ -356,7 +416,8 @@ SoVulkanRenderBackend::recordPendingTextureUploads()
     if (upload.index >= this->textureCache.size()) continue;
     this->recordTextureUpload(this->currentCommandBuffer(),
                               this->textureCache[upload.index],
-                              *upload.texture, upload.staging);
+                              *upload.texture, this->stagingPoolBuffer,
+                              upload.stagingOffset);
   }
   return true;
 }
@@ -394,18 +455,6 @@ SoVulkanRenderBackend::finalizePendingTextureUploads()
       // retries the upload.
       this->deferDestroyTextureEntry(texEntry);
     }
-    if (upload.staging != VK_NULL_HANDLE) {
-      const VkBuffer staging = upload.staging;
-      const VkDeviceMemory stagingMemory = upload.stagingMemory;
-      this->deferDestroy([device, allocator, staging, stagingMemory]() {
-        if (staging != VK_NULL_HANDLE) {
-          vkDestroyBuffer(device, staging, allocator);
-        }
-        if (stagingMemory != VK_NULL_HANDLE) {
-          vkFreeMemory(device, stagingMemory, allocator);
-        }
-      });
-    }
   }
   this->pendingUploads.clear();
 }
@@ -416,10 +465,11 @@ SoVulkanRenderBackend::flushPendingTextureUploadsExternal()
   if (this->pendingUploads.empty()) return true;
 
   // External path: the caller owns the frame command buffer and is already
-  // inside a render pass, so the copies cannot be merged into it.  Record
-  // them into one transient command buffer, submit, and wait.  The wait also
-  // retires any in-flight frames submitted by the external caller, which
-  // keeps ring-buffer reuse in renderExternal() safe even when the caller
+  // inside a render pass, so the copies cannot be merged into it.  All
+  // pending uploads were staged into the single shared staging pool buffer
+  // at their recording offsets, so one submit copies every pending texture.
+  // The wait also retires any in-flight frames submitted by the external
+  // caller, which keeps the staging pool free for reuse even when the caller
   // pipelines more frames than maxFramesInFlight.
   if (!SoVulkanShared::withOneShotSubmit(
         this->device, this->queue, this->commandPool, this->allocator,
@@ -428,7 +478,9 @@ SoVulkanRenderBackend::flushPendingTextureUploadsExternal()
             if (upload.index >= this->textureCache.size()) continue;
             this->recordTextureUpload(uploadBuffer,
                                       this->textureCache[upload.index],
-                                      *upload.texture, upload.staging);
+                                      *upload.texture,
+                                      this->stagingPoolBuffer,
+                                      upload.stagingOffset);
           }
         })) {
     this->emitError(
@@ -436,18 +488,10 @@ SoVulkanRenderBackend::flushPendingTextureUploadsExternal()
     goto fail;
   }
 
-  // Staging buffers are no longer referenced by the completed submission.
-  for (const PendingTextureUpload & upload : this->pendingUploads) {
-    if (upload.staging != VK_NULL_HANDLE) {
-      vkDestroyBuffer(this->device, upload.staging, this->allocator);
-      vkFreeMemory(this->device, upload.stagingMemory, this->allocator);
-    }
-  }
-
   // Host-side completion (views/samplers/descriptor sets) and content
-  // identity stamping.  The queue is idle here, so synchronous destruction
-  // on failure is safe.  A failure leaves the content keys unstamped, so the
-  // next frame retries the upload.
+  // identity stamping.  The queue is idle here, so the shared staging pool
+  // is free to be reused by the next frame.  A failure leaves the content
+  // keys unstamped, so the next frame retries the upload.
   for (const PendingTextureUpload & upload : this->pendingUploads) {
     if (upload.index >= this->textureCache.size()) continue;
     VulkanCachedTexture & texEntry = this->textureCache[upload.index];
@@ -473,10 +517,6 @@ SoVulkanRenderBackend::flushPendingTextureUploadsExternal()
 
 fail:
   for (const PendingTextureUpload & upload : this->pendingUploads) {
-    if (upload.staging != VK_NULL_HANDLE) {
-      vkDestroyBuffer(this->device, upload.staging, this->allocator);
-      vkFreeMemory(this->device, upload.stagingMemory, this->allocator);
-    }
     if (upload.index < this->textureCache.size()) {
       // Reset the half-initialized entry so the next frame retries cleanly.
       this->destroyTextureEntry(this->textureCache[upload.index]);

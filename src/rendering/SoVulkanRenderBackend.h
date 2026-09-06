@@ -391,17 +391,22 @@ private:
     size_t index = 0;
     const SoRenderCommand * command = nullptr;
     const SoTextureData * texture = nullptr;
-    VkBuffer staging = VK_NULL_HANDLE;
-    VkDeviceMemory stagingMemory = VK_NULL_HANDLE;
+    // Byte offset into the shared staging pool buffer (stagingPoolBuffer)
+    // where this upload's pixels were staged.  All pending uploads in a frame
+    // share one host-visible allocation, so a failure leaves a single buffer
+    // to clean up instead of N per-upload stagings.
+    VkDeviceSize stagingOffset = 0;
+    VkDeviceSize stagingBytes = 0;
   };
   bool prepareTextureUpload(VulkanCachedTexture & entry,
                             const SoTextureData & texture,
-                            VkBuffer & staging,
-                            VkDeviceMemory & stagingMemory);
+                            VkDeviceSize & stagingOffset,
+                            VkDeviceSize & stagingBytes);
   void recordTextureUpload(VkCommandBuffer commandBuffer,
                            const VulkanCachedTexture & entry,
                            const SoTextureData & texture,
-                           VkBuffer staging);
+                           VkBuffer staging,
+                           VkDeviceSize stagingOffset);
   bool finalizeTexture(VulkanCachedTexture & entry,
                        const SoTextureData & texture);
   bool recordPendingTextureUploads();
@@ -728,6 +733,22 @@ private:
   // submission.  Indices are re-resolved from the command pointers after
   // cache eviction compacts the texture cache.
   std::vector<PendingTextureUpload> pendingUploads;
+
+  // Persistent host-visible staging buffer used to coalesce the external
+  // texture-upload flush (flushPendingTextureUploadsExternal) into a single
+  // buffer write + one submit, instead of allocating a fresh transient staging
+  // buffer per pending upload per frame.  Grows on demand and is reused across
+  // frames; released at shutdown().  Its mapped pointer is the single owner of
+  // the staged pixel data, so a failure at any point leaves one buffer to
+  // clean up rather than N per-upload allocations to chase.
+  VkBuffer stagingPoolBuffer = VK_NULL_HANDLE;
+  VkDeviceMemory stagingPoolMemory = VK_NULL_HANDLE;
+  void * stagingPoolMapped = nullptr;
+  VkDeviceSize stagingPoolCapacity = 0;
+  // Running byte cursor into stagingPoolBuffer for the current frame's
+  // pending uploads; reset to 0 at the start of each flush/record pass.
+  VkDeviceSize stagingPoolCursor = 0;
+  bool ensureStagingPoolSize(VkDeviceSize required);
 
   // Texture binding (set 0, binding 1).  A 1x1 white fallback texture is
   // bound whenever a command carries no embedded SoTextureData.
