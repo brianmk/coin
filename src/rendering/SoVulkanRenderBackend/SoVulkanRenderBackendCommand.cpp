@@ -359,6 +359,8 @@ SoVulkanRenderBackend::recordOverlayDepthClear(const SoRenderCommand & command,
 bool
 SoVulkanRenderBackend::updateLightingSetup(const SoDrawList & drawlist)
 {
+  vkBackendTrace(this->uboFrameIndex, "updateLightingSetup.enter", "cmds=%d",
+                 drawlist.getNumCommands());
   // Build the (usually single) lighting constant block per distinct
   // lightingHandle once per frame, into the lighting ring, so the 8-light
   // setup is computed once and referenced by every draw through its dynamic
@@ -373,6 +375,12 @@ SoVulkanRenderBackend::updateLightingSetup(const SoDrawList & drawlist)
 
   static const SoLightingData emptyLighting;
   uint32_t occupiedSlots = 0;
+
+  // Setups are world-space; the visual shaders light in eye space, so pack
+  // them through the frame view (cacheFrameMatrices() runs before this).
+  SbMat frameViewMat;
+  std::memcpy(frameViewMat, this->frameViewFloats, sizeof(float) * 16);
+  const SbMatrix frameView(frameViewMat);
 
   // Seed slot 0 with empty lighting so the handle-0 fallback in
   // lightingOffsetFor() is always valid.
@@ -405,52 +413,7 @@ SoVulkanRenderBackend::updateLightingSetup(const SoDrawList & drawlist)
       static_cast<VkDeviceSize>(frameBase + slot) * this->lightingConstStride;
     VulkanLightingUbo * u = reinterpret_cast<VulkanLightingUbo *>(
       static_cast<char *>(this->lightingConstMapped) + offset);
-    std::memset(u, 0, sizeof(VulkanLightingUbo));
-
-    u->ambientLight[0] = lighting->ambient[0];
-    u->ambientLight[1] = lighting->ambient[1];
-    u->ambientLight[2] = lighting->ambient[2];
-    u->ambientLight[3] = 1.0f;
-
-    const int count = std::min<int>(
-      static_cast<int>(lighting->lights.size()), MAX_SHADER_LIGHTS);
-    for (int li = 0; li < count; ++li) {
-      const SoLightData & light = lighting->lights[static_cast<size_t>(li)];
-      float * type = u->lightType + li * 4;
-      type[0] = static_cast<float>(light.type);
-      type[1] = type[2] = 0.0f;
-      type[3] = 1.0f;
-
-      float * color = u->lightColor + li * 4;
-      color[0] = light.color[0];
-      color[1] = light.color[1];
-      color[2] = light.color[2];
-      color[3] = 1.0f;
-
-      float * direction = u->lightDirection + li * 4;
-      direction[0] = light.direction[0];
-      direction[1] = light.direction[1];
-      direction[2] = light.direction[2];
-      direction[3] = 1.0f;
-
-      float * position = u->lightPosition + li * 4;
-      position[0] = light.position[0];
-      position[1] = light.position[1];
-      position[2] = light.position[2];
-      position[3] = 1.0f;
-
-      float * attenuation = u->lightAttenuation + li * 4;
-      attenuation[0] = light.attenuation[0];
-      attenuation[1] = light.attenuation[1];
-      attenuation[2] = light.attenuation[2];
-      attenuation[3] = 1.0f;
-
-      float * spot = u->lightSpotParams + li * 4;
-      spot[0] = light.spotCutoffCos;
-      spot[1] = light.spotExponent;
-      spot[2] = 0.0f;
-      spot[3] = 1.0f;
-    }
+    SoRenderIR::fillLightingBlock(*u, *lighting, &frameView);
     this->lightingSlotOffsets[handle] = offset;
     ++occupiedSlots;
   }
@@ -560,6 +523,10 @@ SoVulkanRenderBackend::recordDrawCommand(const SoDrawList & drawlist,
                                          const bool overlayPass,
                                          VulkanRecordContext & ctx)
 {
+  vkBackendTrace(this->uboFrameIndex, "recordDrawCommand.enter",
+                 "cmd=%p pass=%d slot=%u",
+                 reinterpret_cast<const void *>(&command),
+                 static_cast<int>(command.pass), ctx.uboCmdIndex);
   if (!command.geometry.positions || command.geometry.vertexCount == 0) {
     if (COIN_VULKAN_ENV_FLAG("FC_VULKAN_BACKEND_DEBUG")) {
       fprintf(stderr, "[VKBE] cmd %p pass=%d skip: no positions/verts\n",
@@ -707,6 +674,8 @@ SoVulkanRenderBackend::recordDrawCommand(const SoDrawList & drawlist,
     // First draw of a new lighting handle / texture set: bind both sets with
     // their dynamic offsets in one call (also covers the frame's first draw).
     const VkDescriptorSet both[2] = {this->lightingDescriptorSet, textureSet};
+    vkBackendTrace(this->uboFrameIndex, "draw.bindDescSets2",
+                   "slot=%u", slotIndex);
     vkCmdBindDescriptorSets(ctx.buffer,
                             VK_PIPELINE_BIND_POINT_GRAPHICS,
                             this->pipelineLayout, 0, 2, both, 2,
@@ -718,6 +687,8 @@ SoVulkanRenderBackend::recordDrawCommand(const SoDrawList & drawlist,
     // Same lighting handle + texture set as the previous draw: only the
     // per-draw UBO dynamic offset advances.  Re-bind set 1 alone (set 0 stays
     // bound from the last 2-set bind) instead of re-emitting both sets.
+    vkBackendTrace(this->uboFrameIndex, "draw.bindDescSets1",
+                   "slot=%u", slotIndex);
     vkCmdBindDescriptorSets(ctx.buffer,
                             VK_PIPELINE_BIND_POINT_GRAPHICS,
                             this->pipelineLayout, 1, 1, &textureSet, 1,
@@ -728,15 +699,21 @@ SoVulkanRenderBackend::recordDrawCommand(const SoDrawList & drawlist,
   const bool indexed =
     entry.indexBuffer != VK_NULL_HANDLE && command.geometry.indexCount &&
     command.geometry.indices;
+  vkBackendTrace(this->uboFrameIndex, "draw.bindVbuf0",
+                 "slot=%u vbuf=%p off=%llu", slotIndex,
+                 reinterpret_cast<const void *>(entry.vertexBuffer),
+                 static_cast<unsigned long long>(vertexOffset));
   vkCmdBindVertexBuffers(ctx.buffer, 0, 1, &entry.vertexBuffer,
                          &vertexOffset);
   if (indexed && !useWideLine) {
+    vkBackendTrace(this->uboFrameIndex, "draw.bindIbuf", "slot=%u", slotIndex);
     vkCmdBindIndexBuffer(ctx.buffer, entry.indexBuffer,
                          entry.indexOffset, VK_INDEX_TYPE_UINT32);
   }
 
   this->updateLightingUniforms(drawlist, command, params, uboOffset,
                                uniformColorOverride != nullptr);
+  vkBackendTrace(this->uboFrameIndex, "draw.uboWrite", "slot=%u", slotIndex);
 
   VulkanPushConstants push {};
   SbMat projValue;
@@ -872,6 +849,8 @@ SoVulkanRenderBackend::recordDrawCommand(const SoDrawList & drawlist,
   push.lineParams[3] = command.geometry.topology == SO_TOPOLOGY_POINTS
     ? 1.0f : 0.0f;
 
+  vkBackendTrace(this->uboFrameIndex, "draw.pushConstants", "slot=%u",
+                 slotIndex);
   vkCmdPushConstants(ctx.buffer, this->pipelineLayout,
                       VK_SHADER_STAGE_VERTEX_BIT |
                         VK_SHADER_STAGE_FRAGMENT_BIT,
@@ -1003,13 +982,25 @@ SoVulkanRenderBackend::recordDrawCommand(const SoDrawList & drawlist,
     command.modelMatrix.getValue(mm);
     std::memcpy(static_cast<char *>(this->instanceModelMapped) + instByteOffset,
                 &mm[0][0], sizeof(float) * 16);
+    vkBackendTrace(this->uboFrameIndex, "draw.bindVbuf1", "slot=%u",
+                   slotIndex);
     vkCmdBindVertexBuffers(ctx.buffer, 1, 1,
                            &this->instanceModelBuffer, &instByteOffset);
     if (indexed) {
+      vkBackendTrace(this->uboFrameIndex, "draw.drawIndexed",
+                     "slot=%u buf=%p ic=%u cmd=%p", slotIndex,
+                     reinterpret_cast<const void *>(ctx.buffer),
+                     command.geometry.indexCount,
+                     reinterpret_cast<const void *>(&command));
       vkCmdDrawIndexed(ctx.buffer, command.geometry.indexCount, 1, 0,
                        0, 0);
     }
     else {
+      vkBackendTrace(this->uboFrameIndex, "draw.draw",
+                     "slot=%u buf=%p vc=%u ic=1 cmd=%p",
+                     slotIndex, reinterpret_cast<const void *>(ctx.buffer),
+                     command.geometry.vertexCount,
+                     reinterpret_cast<const void *>(&command));
       vkCmdDraw(ctx.buffer, command.geometry.vertexCount, 1, 0, 0);
     }
   }
@@ -1030,6 +1021,8 @@ SoVulkanRenderBackend::recordCommandBatch(const SoDrawList & drawlist,
   // The batch shares geometry/material/state and differs only by model matrix,
   // so every command picks the same pipeline, descriptor sets, vertex data and
   // push constants as commands[0].  Rendered with one instanced draw.
+  vkBackendTrace(this->uboFrameIndex, "recordCommandBatch.enter",
+                 "count=%d slot=%u", count, ctx.uboCmdIndex);
   const SoRenderCommand & command = *commands[0];
   if (count < 2 || !command.geometry.positions ||
       command.geometry.vertexCount == 0) {
@@ -1213,6 +1206,9 @@ SoVulkanRenderBackend::recordCommandBatch(const SoDrawList & drawlist,
 bool
 SoVulkanRenderBackend::beginCommandBuffer()
 {
+  vkBackendTrace(this->uboFrameIndex, "beginCommandBuffer.enter",
+                 "primary=%p", reinterpret_cast<const void *>(
+                   this->currentCommandBuffer()));
   VkCommandBufferBeginInfo bi {};
   bi.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
   bi.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
@@ -1222,8 +1218,13 @@ SoVulkanRenderBackend::beginCommandBuffer()
 bool
 SoVulkanRenderBackend::endAndSubmit()
 {
+  vkBackendTrace(this->uboFrameIndex, "endAndSubmit.enter", "frame=%u",
+                 this->uboFrameIndex);
   VkCommandBuffer cmd = this->currentCommandBuffer();
-  if (vkEndCommandBuffer(cmd) != VK_SUCCESS) return false;
+  const VkResult endRc = vkEndCommandBuffer(cmd);
+  vkBackendTrace(this->uboFrameIndex, "endAndSubmit.endRc", "rc=%d",
+                 static_cast<int>(endRc));
+  if (endRc != VK_SUCCESS) return false;
 
   VkSubmitInfo si {};
   si.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
@@ -1231,7 +1232,10 @@ SoVulkanRenderBackend::endAndSubmit()
   si.pCommandBuffers = &cmd;
   const uint32_t slot = this->uboFrameIndex % this->maxFramesInFlight;
   const VkFence fence = this->frameFences[slot];
-  if (vkQueueSubmit(this->queue, 1, &si, fence) != VK_SUCCESS) {
+  const VkResult submitRc = vkQueueSubmit(this->queue, 1, &si, fence);
+  vkBackendTrace(this->uboFrameIndex, "endAndSubmit.submitRc", "rc=%d",
+                 static_cast<int>(submitRc));
+  if (submitRc != VK_SUCCESS) {
     // The fence stays unsignaled (no signal was requested), so beginFrame()
     // would wait forever on the next reuse of this slot.  Signal it by
     // submitting nothing and relying on the next frame's failure path, but

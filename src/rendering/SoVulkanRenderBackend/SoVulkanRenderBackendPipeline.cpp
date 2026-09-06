@@ -329,6 +329,13 @@ SoVulkanRenderBackend::getOrCreatePipeline(const SoRenderCommand & command,
                                            const int fillModeOverride,
                                            const bool overlayPass)
 {
+  if (vkBackendTraceEnabled()) {
+    static std::atomic<int> n(0);
+    if (n.fetch_add(1) < 32) {
+      vkBackendTrace(this->uboFrameIndex, "getOrCreatePipeline.enter",
+                     "call=%d", n.load());
+    }
+  }
   // Pipelines are immutable in Vulkan.  Key the cache on every retained
   // state value that changes the created pipeline so commands of different
   // topology, fill mode, depth/blend state, or sample count never reuse an

@@ -363,7 +363,7 @@ public:
   //! selection model behind FreeCAD's highlight roots); mixed in verbatim.
   uint64_t externalRevision = 0;
   //! Viewing matrix (SoViewingMatrixElement bits) stamped into the commands
-  //! of the last full traversal; the replay restrike key.
+  //! of the last full traversal; the replay restamp key.
   SbMatrix lastFrameView;
   SbBool lastFrameViewValid = FALSE;
   //! Viewing matrix the retained list's painter's-algorithm order was last
@@ -429,6 +429,17 @@ public:
   SoNode * sceneFpScene = nullptr;
   uint32_t sceneFpMainCount = 0;
   SbBool sceneFpValid = FALSE;
+
+  // Cheap draw-list fingerprint gate for the expensive graph-fingerprint walk.
+  // computeSceneFingerprint() hashes only the retained main commands (world
+  // matrices + geometry buffer pointers + counts), so it changes on a real
+  // geometry/transform edit but is invariant under camera motion.  When it
+  // matches the previous frame's value, computeGraphFingerprint() (a full scene
+  // tree walk) is skipped and the cached graph fingerprint is reused.
+  uint64_t drawFpCached = 0;
+  SoNode * drawFpScene = nullptr;
+  uint32_t drawFpMainCount = 0;
+  SbBool drawFpValid = FALSE;
 
   SoIRRenderAction irAction;
   //! Second IR action used to re-record the overlay/decoration scenes every
@@ -1142,7 +1153,8 @@ SbBool
 SoVulkanRenderManager::renderExternal(SbBool clearwindow,
                                       SbBool clearzbuffer,
                                       VkCommandBuffer commandBuffer,
-                                      VkRenderPass renderPass)
+                                      VkRenderPass renderPass,
+                                      VkFramebuffer framebuffer)
 {
   const long renderBcStart = vkRenderBreadcrumbEnabled() ? vkRenderBreadcrumbNowUs() : 0;
   SoRenderParams params;
@@ -1180,7 +1192,7 @@ SoVulkanRenderManager::renderExternal(SbBool clearwindow,
     return TRUE;
   }
   if (!this->pimpl->backend.renderExternal(*drawlist, params, commandBuffer,
-                                           renderPass)) {
+                                           renderPass, framebuffer)) {
     SoDebugError::postWarning("SoVulkanRenderManager::renderExternal",
                               "backend render failed (%d draw commands)",
                               drawlist->getNumCommands());
@@ -1680,31 +1692,70 @@ SoVulkanRenderManagerP::prepareRenderParams(SbBool clearwindow,
    const SbBool graphChanged = this->sceneGraphDirty;
    uint64_t graphFp;
    const SbVec2s fpVpSize = this->viewportRegion.getViewportSizePixels();
-   if (this->graphFingerprintValid && this->lastFpValid &&
-       !this->sceneGraphDirty && this->scene == this->lastFpScene &&
-       fpVpSize == this->lastFpViewport && this->devicePixelRatio == this->lastFpDpr) {
-     graphFp = this->graphFingerprint;
-   }
-   else {
-     graphFp = this->computeGraphFingerprint();
-     this->sceneGraphDirty = FALSE;
-   }
+    if (this->graphFingerprintValid && this->lastFpValid &&
+        !this->sceneGraphDirty && this->scene == this->lastFpScene &&
+        fpVpSize == this->lastFpViewport && this->devicePixelRatio == this->lastFpDpr) {
+      graphFp = this->graphFingerprint;
+    }
+    else {
+      // Recomputing computeGraphFingerprint() walks the ENTIRE scene-graph tree
+      // (graphFingerprintWalk, O(nodes) + geometry identity) and is measurable
+      // on a many-object scene (1000 boxes -> ~28 ms).  It only needs to run
+      // when the retained main draw list actually changed.  graphSceneDirty is
+      // set by a scene-root sensor that fires on ANY descendant notification,
+      // including the camera pose (FreeCAD keeps the camera inside the scene
+      // graph), so camera-orbit frames set it too -- and recomputing the full
+      // graph fingerprint there is pure waste: camera motion never changes the
+      // retained main-list content.  Gate the expensive walk on the cheap
+      // draw-list fingerprint (computeSceneFingerprint hashes only the retained
+      // commands: world matrix + geometry pointers + counts).  Camera-only
+      // frames produce the same draw-list fingerprint, so we keep the previous
+      // graph fingerprint (which is likewise camera-invariant) and the retained
+      // list replays instead of re-traversing.
+      const uint64_t drawFp = computeSceneFingerprint(
+        this->irAction, static_cast<int>(this->mainCommandCount));
+      if (this->drawFpValid && this->drawFpCached == drawFp &&
+          this->scene == this->drawFpScene &&
+          this->mainCommandCount == this->drawFpMainCount) {
+        graphFp = this->graphFingerprint;  // draw list unchanged -> reuse
+      }
+      else {
+        graphFp = this->computeGraphFingerprint();
+        this->drawFpCached = drawFp;
+        this->drawFpScene = this->scene;
+        this->drawFpMainCount = this->mainCommandCount;
+        this->drawFpValid = TRUE;
+      }
+      this->sceneGraphDirty = FALSE;
+    }
    this->lastFpScene = this->scene;
    this->lastFpViewport = fpVpSize;
    this->lastFpDpr = this->devicePixelRatio;
    this->lastFpValid = TRUE;
-   if (this->scene || this->camera || this->overlayScene
-       || this->decorationScene) {
+    if (this->scene || this->camera || this->overlayScene
+        || this->decorationScene) {
      if (irReplayEnabled() && this->graphFingerprintValid &&
-         !graphChanged &&
          graphFp == this->graphFingerprint) {
-       // Camera-only frame: the main graph, the viewport, and the
-       // caller-published revision are unchanged, so the retained main IR draw
-       // list is exactly what a full traversal would produce -- keep it (and
-       // the geometry/texture caches keyed on it) and restamp the frame view
-       // after the matrices are built below.
-       irReplayed = TRUE;
-     }
+      // Camera-only frame: the main graph, the viewport, and the
+      // caller-published revision are unchanged, so the retained main IR draw
+      // list is exactly what a full traversal would produce -- keep it (and
+      // the geometry/texture caches keyed on it) and restamp the frame view
+      // after the matrices are built below.
+      // The graph-fingerprint walk folds node-id of every non-camera-coupled
+      // reachable node, so a real edit -- a transform/matrix move, a geometry
+      // rebuild, an add/remove, a material/selection field write (SoShape::
+      // notify() bumps its own id and drops the retained tessellation) --
+      // re-bumps at least one folded id and therefore produces a DIFFERENT
+      // fingerprint, correctly forcing a re-traverse.  Camera pose/headlight
+      // motion is excluded from the walk, so it leaves the fingerprint
+      // unchanged and replays.  Relying on fingerprint equality (not the
+      // sensor dirty flag) is what makes this robust: FreeCAD keeps the
+      // camera inside the scene graph, so the "camera never dirties the
+      // scene sensor" assumption the dirty flag encodes is false here, and
+      // without this the retained main list would be re-traversed (O(scene))
+      // every navigation frame even though the geometry is unchanged.
+      irReplayed = TRUE;
+    }
     else {
       // Reuse the persistent traversal root: clear its children only when
       // the child set actually changes so the refcount stays balanced and
@@ -1729,11 +1780,11 @@ SoVulkanRenderManagerP::prepareRenderParams(SbBool clearwindow,
         }
         this->rootChildrenValid = TRUE;
       }
-       const long applyT0 = wantCpuTiming ? vkRenderBreadcrumbNowUs() : 0;
-       action.apply(root);
-       if (wantCpuTiming) {
-         cpuApplyMs = (vkRenderBreadcrumbNowUs() - applyT0) * 0.001;
-       }
+        const long applyT0 = wantCpuTiming ? vkRenderBreadcrumbNowUs() : 0;
+        action.apply(root);
+        if (wantCpuTiming) {
+          cpuApplyMs = (vkRenderBreadcrumbNowUs() - applyT0) * 0.001;
+        }
        this->mainCommandCount =
          action.getDrawList().getNumCommands();
        this->graphFingerprint = graphFp;
@@ -2025,17 +2076,16 @@ SoVulkanRenderManagerP::prepareRenderParams(SbBool clearwindow,
   if (irReplayed) {
     // Camera-only frame: restamp the frame viewing matrix into every
     // non-overlay command that carried the previous traversal's viewing
-    // element (commands stamped by a sub-camera keep their own matrix), and
-    // re-derive the eye-space lighting entries that were filled with it.
+    // element (commands stamped by a sub-camera keep their own matrix).
+    // Lighting setups are world-space and need no re-derivation here.
     if (this->lastFrameViewValid) {
       const long replayT0 = wantCpuTiming ? vkRenderBreadcrumbNowUs() : 0;
       // SbMatrix stores exactly float[4][4] (16 contiguous floats), so a
       // full-storage bit-compare says whether the viewing matrix changed at
       // all.  On a static camera (idle scene, no navigation) the replay
       // frame's view is bit-identical to the previous one: nothing to
-      // restamp and nothing to relight, so the O(N) per-command getValue +
-      // memcmp + matrix-copy loop (and the eye-space lighting restrike) is
-      // skipped entirely.
+      // restamp, so the O(N) per-command getValue + memcmp + matrix-copy
+      // loop is skipped entirely.
       if (std::memcmp(&this->lastFrameView[0][0], &params.viewMatrix[0][0],
                       sizeof(float) * 16) != 0) {
         SbMat lastView;
@@ -2055,7 +2105,6 @@ SoVulkanRenderManagerP::prepareRenderParams(SbBool clearwindow,
           }
         }
         dbgRestamped = restamped;
-        list.restrikeLighting(this->lastFrameView, params.viewMatrix);
         this->lastFrameView = params.viewMatrix;
       }
       if (wantCpuTiming) {

@@ -456,14 +456,33 @@ enum SoLightType : uint8_t {
 };
 
 /*!
+  \brief Maximum number of lights a retained render-backend shader evaluates.
+
+  All backends (GL visual program, Vulkan LightingBlock, RTX RTMaterial)
+  evaluate at most this many lights; setups carrying more are truncated with
+  a one-time warning by the consumer.
+*/
+constexpr int SO_MAX_SHADER_LIGHTS = 8;
+
+/*!
   \struct SoLightData
-  \brief View-space light description used by the render backend.
+  \brief Scene-space (world) light description used by the render backends.
+
+  The geometry fields are expressed in the scene's WORLD space: `direction`
+  is the normalized direction the light travels TOWARD (for a directional
+  light this is the negated SoDirectionalLight::direction field, rotated by
+  the light node's model matrix), and `position` is the light's world-space
+  location for point/spot lights.  The data is view-independent -- it does
+  not change when the camera moves -- so a draw list kept across a camera-
+  only frame needs no light re-derivation.  Consumers that shade in eye
+  space derive it with SoRenderIR::lightToEye(); the path tracer consumes
+  the world-space fields directly.
 */
 struct SoLightData {
   SoLightType type = SO_LIGHT_DIRECTIONAL;
   SbVec3f     color = SbVec3f(1.0f, 1.0f, 1.0f);
-  SbVec3f     direction = SbVec3f(0.0f, 0.0f, 1.0f);
-  SbVec3f     position = SbVec3f(0.0f, 0.0f, 1.0f);
+  SbVec3f     direction = SbVec3f(0.0f, 0.0f, 1.0f); // world, toward the light target
+  SbVec3f     position = SbVec3f(0.0f, 0.0f, 1.0f);  // world
   SbVec3f     attenuation = SbVec3f(0.0f, 0.0f, 1.0f);
   float       spotCutoffCos = -1.0f;
   float       spotExponent = 0.0f;
@@ -471,22 +490,75 @@ struct SoLightData {
 
 /*!
   \struct SoLightingData
-  \brief Shared lighting setup referenced by render commands.
+  \brief Shared (world-space) lighting setup referenced by render commands.
 */
 struct SoLightingData {
   SbVec3f ambient = SbVec3f(0.2f, 0.2f, 0.2f);
   std::vector<SoLightData> lights;
 };
 
+namespace SoRenderIR {
+
+/*!
+  \brief Transform one world-space light into eye space for \a view.
+
+  Directions are rotated by the view matrix; positions are transformed
+  fully.  Spot cone parameters are carried unchanged.
+*/
+COIN_DLL_API SoLightData lightToEye(const SoLightData & world,
+                                    const SbMatrix & view);
+
+} // namespace SoRenderIR
+
+/*!
+  \struct SoLightingBlock
+  \brief Standardized fixed-capacity GPU mirror of one world-space lighting
+  setup, shared by every retained backend's lighting uniform/staging buffer.
+
+  The layout is the std140 `LightingBlock` uniform layout of the Vulkan
+  visual shaders byte-for-byte (and the array form the GL visual program
+  uploads).  Producers fill it with SoRenderIR::fillLightingBlock();
+  backends memcpy the finished block straight into their buffer, so the
+  per-light field packing lives in exactly one place.  The evaluated light
+  count travels separately (the raster path carries it in the per-draw
+  material block), keeping the block itself a pure layout mirror.
+*/
+struct COIN_DLL_API SoLightingBlock {
+  float ambientLight[4];                            // offset 0
+  float lightType[SO_MAX_SHADER_LIGHTS * 4];        // offset 16
+  float lightColor[SO_MAX_SHADER_LIGHTS * 4];       // offset 144
+  float lightDirection[SO_MAX_SHADER_LIGHTS * 4];   // offset 272
+  float lightPosition[SO_MAX_SHADER_LIGHTS * 4];    // offset 400
+  float lightAttenuation[SO_MAX_SHADER_LIGHTS * 4]; // offset 528
+  float lightSpotParams[SO_MAX_SHADER_LIGHTS * 4];  // offset 656
+};
+static_assert(sizeof(SoLightingBlock) == 784,
+              "SoLightingBlock must match the std140 LightingBlock layout");
+
+namespace SoRenderIR {
+
+/*!
+  \brief Fill a SoLightingBlock from a world-space SoLightingData.
+
+  When \a toEye is non-NULL every light is transformed into eye space with
+  it (raster/preview consumers); when NULL the world-space fields are copied
+  verbatim (path-tracing consumers).  Ambient passes through unchanged.
+  Returns the number of lights actually written (<= SO_MAX_SHADER_LIGHTS).
+*/
+COIN_DLL_API int fillLightingBlock(SoLightingBlock & block,
+                                   const SoLightingData & world,
+                                   const SbMatrix * toEye);
+
+} // namespace SoRenderIR
+
 /*!
   \struct SoLightingRaw
-  \brief Scene-space inputs behind one SoLightingData entry.
+  \brief Scene-space inputs behind one SoLightingData entry (provenance).
 
-  The view-space fields of SoLightingData are derived during traversal and
-  go stale when the camera moves.  Retaining the scene-space vectors plus
-  each light's model matrix (and the viewing matrix used at fill time) lets
-  a draw list kept across a camera-only frame re-derive the eye-space data
-  with SoDrawList::restrikeLighting() instead of re-traversing the scene.
+  The setups themselves are world-space and view-independent, so nothing has
+  to be re-derived on camera moves.  The raw entry is recorded for
+  provenance and participates in deduplication, keeping setups that differ
+  only by their originating light nodes distinct.
 */
 struct SoLightingRaw {
   struct RawLight {
@@ -502,7 +574,6 @@ struct SoLightingRaw {
   bool hasRaw = false;
   SbVec3f ambient = SbVec3f(0.2f, 0.2f, 0.2f);
   std::vector<RawLight> lights;
-  SbMatrix viewUsed; //!< SoViewingMatrixElement value at fill time
 };
 
 /*!
@@ -560,9 +631,9 @@ public:
   SoLightingHandle addLightingSetup(const SoLightingData & lighting);
 
   //! Variant carrying the scene-space inputs (SoLightingRaw) alongside the
-  //! view-space setup so the entry can be restriked after a camera move.
-  //! The raw entry participates in deduplication (two setups equal in eye
-  //! space but derived from different cameras must stay separate).
+  //! setup.  The raw entry participates in deduplication (two setups equal
+  //! in their world-space fields but derived from different light nodes or
+  //! cameras must stay separate).
   SoLightingHandle addLightingSetup(const SoLightingData & lighting,
                                     const SoLightingRaw & raw);
 
@@ -570,12 +641,11 @@ public:
   //! Returns NULL for handle 0 or an invalid handle.
   const SoLightingData * getLighting(SoLightingHandle handle) const;
 
-  //! Re-derive the eye-space fields of every retained lighting setup whose
-  //! fill-time viewing matrix equals \a prevView, using the scene-space
-  //! raw inputs transformed by \a newView.  Entries filled without raw data
-  //! (or from a different camera) are left untouched.  Called by the Vulkan
-  //! render manager on camera-only frames that replay a retained draw list
-  //! instead of re-traversing the scene graph.
+  //! Compatibility no-op: lighting setups are world-space and view-
+  //! independent, so a camera-only frame replaying a retained draw list
+  //! needs no light re-derivation.  Kept exported (rather than removed) so
+  //! already-linked consumers (e.g. the pivy Python bindings) continue to
+  //! resolve the symbol; implementations do nothing.
   void restrikeLighting(const SbMatrix & prevView, const SbMatrix & newView);
 
   SoRenderCommand * begin();

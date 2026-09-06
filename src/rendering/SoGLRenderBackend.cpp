@@ -30,7 +30,7 @@
 namespace {
 
 static constexpr int MAX_VERTEX_COUNT = 10000000;
-static constexpr int MAX_SHADER_LIGHTS = 8;
+static constexpr int MAX_SHADER_LIGHTS = SO_MAX_SHADER_LIGHTS;
 
 GLenum
 textureWrapToGL(const SoTextureWrap wrap)
@@ -762,7 +762,9 @@ SoGLRenderBackend::uploadLighting(const SoDrawList & drawlist,
     });
   }
   for (int i = 0; i < count; ++i) {
-    const SoLightData & light = lighting->lights[static_cast<size_t>(i)];
+    // Setups are world-space; the Visual program shades in eye space.
+    const SoLightData light = SoRenderIR::lightToEye(
+      lighting->lights[static_cast<size_t>(i)], command.viewMatrix);
     types[i] = static_cast<GLint>(light.type);
     colors[i * 3 + 0] = light.color[0];
     colors[i * 3 + 1] = light.color[1];

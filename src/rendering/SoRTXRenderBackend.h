@@ -165,12 +165,12 @@ struct RTMaterial {
   float emissive[4];
   float params[4]; // x = shininess, y = twoSided, z = lightCount,
                    // w = shadingModel (0 = unlit, 1 = gouraud)
-  float lightType[8 * 4];
-  float lightColor[8 * 4];
-  float lightDirection[8 * 4];
-  float lightPosition[8 * 4];
-  float lightAttenuation[8 * 4];
-  float lightSpot[8 * 4];
+  float lightType[SO_MAX_SHADER_LIGHTS * 4];
+  float lightColor[SO_MAX_SHADER_LIGHTS * 4];
+  float lightDirection[SO_MAX_SHADER_LIGHTS * 4];
+  float lightPosition[SO_MAX_SHADER_LIGHTS * 4];
+  float lightAttenuation[SO_MAX_SHADER_LIGHTS * 4];
+  float lightSpot[SO_MAX_SHADER_LIGHTS * 4];
   float triangleData[4]; // x = triangle-normal pool offset, y = normal count,
                          // z = NEE pool offset, w = NEE entry count
   float pbr[4]; // x = metalness, y = roughness, z = usePbr, w = unused

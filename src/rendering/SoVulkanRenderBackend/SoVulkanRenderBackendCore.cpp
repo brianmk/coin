@@ -34,7 +34,10 @@
 #include <cstdlib>
 #include <cstring>
 #include <limits>
+#include <atomic>
+#include <condition_variable>
 #include <mutex>
+#include <thread>
 #include <vector>
 
 using namespace CoinVulkanDetail;
@@ -160,6 +163,27 @@ SoVulkanRenderBackend::initialize(const SoRenderBackendInitParams & params)
     this->memPool = std::make_unique<SoVulkanMemPool>(
       this->device, this->allocator);
   }
+
+  // Opt-in parallel recording (M1d).  Default off so output is identical to
+  // the serial path unless enabled.  Worker count = hardware threads (capped
+  // to a sane bound); worker 0 is the recording thread, the rest are spawned.
+  if (SoVulkanShared::envFlagEnabled("FC_VULKAN_PARALLEL_RECORD")) {
+    unsigned int hw = std::thread::hardware_concurrency();
+    this->maxRecordWorkers = hw == 0 ? 1 : hw;
+    if (this->maxRecordWorkers > 8) this->maxRecordWorkers = 8;
+    const char * cap = std::getenv("FC_VULKAN_RECORD_WORKERS");
+    if (cap && cap[0]) {
+      const unsigned int v = static_cast<unsigned int>(std::atoi(cap));
+      if (v >= 1 && v < this->maxRecordWorkers) this->maxRecordWorkers = v;
+    }
+    this->parallelRecordEnabled = this->maxRecordWorkers > 1;
+  }
+  else {
+    this->maxRecordWorkers = 1;
+    this->parallelRecordEnabled = false;
+  }
+  vkBackendTrace(0, "init.parallelConfig", "parallel=%d W=%u",
+                 this->parallelRecordEnabled ? 1 : 0, this->maxRecordWorkers);
 
   // Cache the device capabilities the backend relies on.  Vulkan has no API
   // to read back which features an already-created device enabled, so query
@@ -287,18 +311,102 @@ SoVulkanRenderBackend::createCommandPool()
                           &this->commandPool) != VK_SUCCESS) {
     return false;
   }
-  // Secondary pool for the M1c opaque-pass re-record: same transient/reset
-  // flags as the primary pool, secondary-level buffers.
-  VkCommandPoolCreateInfo sci {};
-  sci.sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO;
-  sci.flags = VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT |
-              VK_COMMAND_POOL_CREATE_TRANSIENT_BIT;
-  sci.queueFamilyIndex = this->queueFamilyIndex;
-  if (vkCreateCommandPool(this->device, &sci, this->allocator,
-                          &this->secondaryCommandPool) != VK_SUCCESS) {
-    return false;
+  // Secondary pools for the M1c/M1d opaque-pass re-record: same
+  // transient/reset flags as the primary pool, secondary-level buffers.  One
+  // pool per worker (worker 0 = the recording thread): VkCommandPool host
+  // access is externally synchronized, so concurrent reset/begin/end of
+  // buffers from a SHARED pool would race its internal allocator.
+  this->secondaryCommandPools.assign(this->maxRecordWorkers, VK_NULL_HANDLE);
+  for (VkCommandPool & pool : this->secondaryCommandPools) {
+    VkCommandPoolCreateInfo sci {};
+    sci.sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO;
+    sci.flags = VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT |
+                VK_COMMAND_POOL_CREATE_TRANSIENT_BIT;
+    sci.queueFamilyIndex = this->queueFamilyIndex;
+    if (vkCreateCommandPool(this->device, &sci, this->allocator, &pool) !=
+        VK_SUCCESS) {
+      return false;
+    }
   }
   return this->allocateFrameResources();
+}
+
+bool
+SoVulkanRenderBackend::buildRecordPool()
+{
+  if (this->maxRecordWorkers <= 1) return true;
+  if (this->recordWorkers.size() == this->maxRecordWorkers - 1) return true;
+  this->recordPoolStopped = false;
+  vkBackendTrace(0, "buildRecordPool.enter", "W=%u",
+                 this->maxRecordWorkers);
+  for (uint32_t w = 1; w < this->maxRecordWorkers; ++w) {
+    try {
+      this->recordWorkers.emplace_back(
+        &SoVulkanRenderBackend::recordJobWorker, this, static_cast<size_t>(w));
+    }
+    catch (const std::exception &) {
+      // Could not spawn: fall back to serial recording (worker 0 only) and
+      // retire any threads already spawned.
+      this->shutdownRecordPool();
+      this->parallelRecordEnabled = false;
+      this->maxRecordWorkers = 1;
+      return false;
+    }
+  }
+  return true;
+}
+
+void
+SoVulkanRenderBackend::shutdownRecordPool()
+{
+  if (this->recordWorkers.empty()) return;
+  {
+    std::lock_guard<std::mutex> lk(this->recordMutex);
+    this->recordPoolStopped = true;
+  }
+  this->recordCvSpawn.notify_all();
+  for (std::thread & t : this->recordWorkers) {
+    if (t.joinable()) t.join();
+  }
+  this->recordWorkers.clear();
+}
+
+void
+SoVulkanRenderBackend::recordJobWorker(const size_t workerIndex)
+{
+  uint32_t processed = 0;
+  while (true) {
+    {
+      std::unique_lock<std::mutex> lk(this->recordMutex);
+      this->recordCvSpawn.wait(lk, [this, &processed] {
+        return this->recordPoolStopped ||
+               this->recordJobGeneration != processed;
+      });
+      if (this->recordPoolStopped) return;
+      processed = this->recordJobGeneration;
+    }
+    vkBackendTrace(this->uboFrameIndex, "recordJobWorker.wake",
+                   "w=%zu gen=%u", workerIndex, processed);
+    if (workerIndex >= this->recordJobs.size()) continue;
+    ParallelRecordJob & job = this->recordJobs[workerIndex];
+    vkBackendTrace(this->uboFrameIndex, "recordJobWorker.record",
+                   "w=%zu secondary=%p items=%zu", workerIndex,
+                   reinterpret_cast<const void *>(job.secondary),
+                   job.items.size());
+    if (!job.ctx || !job.drawlist || !job.params || !job.target) {
+      job.ok = false;
+    }
+    else {
+      job.ok = this->recordSecondaryChunk(*job.ctx, *job.drawlist, *job.params,
+                                          *job.target, job.renderPass,
+                                          job.items, job.secondary,
+                                          job.framebuffer);
+    }
+    vkBackendTrace(this->uboFrameIndex, "recordJobWorker.done",
+                   "w=%zu ok=%d", workerIndex, job.ok ? 1 : 0);
+    this->recordDoneCount.fetch_add(1);
+    this->recordCvDone.notify_all();
+  }
 }
 
 bool
@@ -322,19 +430,42 @@ SoVulkanRenderBackend::allocateFrameResources()
     return false;
   }
 
-  // One secondary command buffer per in-flight slot (M1c), all from the
-  // secondary pool.  Recorded once per slot and executed into that slot's
-  // primary, then re-recorded only after the slot's fence is waited.
-  this->secondaryCommandBuffers.assign(this->maxFramesInFlight, VK_NULL_HANDLE);
-  VkCommandBufferAllocateInfo sai {};
-  sai.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
-  sai.commandPool = this->secondaryCommandPool;
-  sai.level = VK_COMMAND_BUFFER_LEVEL_SECONDARY;
-  sai.commandBufferCount = this->maxFramesInFlight;
-  if (vkAllocateCommandBuffers(this->device, &sai,
-                               this->secondaryCommandBuffers.data()) !=
-      VK_SUCCESS) {
-    return false;
+  // One secondary command buffer per in-flight slot per worker (M1c/M1d),
+  // each allocated from that worker's own pool.  Recorded once per slot and
+  // executed into that slot's primary, then re-recorded only after the slot's
+  // fence is waited.  Indexed [slot * maxRecordWorkers + worker] (the layout
+  // workerSecondary() reads), so allocate worker w's buffer into every
+  // [slot][w] position.
+  const uint32_t secondaryCount =
+    this->maxFramesInFlight * this->maxRecordWorkers;
+  this->secondaryCommandBuffers.assign(secondaryCount, VK_NULL_HANDLE);
+  for (uint32_t w = 0; w < this->maxRecordWorkers; ++w) {
+    if (w >= this->secondaryCommandPools.size() ||
+        this->secondaryCommandPools[w] == VK_NULL_HANDLE) {
+      return false;
+    }
+    std::vector<VkCommandBuffer> perWorker(this->maxFramesInFlight,
+                                           VK_NULL_HANDLE);
+    VkCommandBufferAllocateInfo sai {};
+    sai.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
+    sai.commandPool = this->secondaryCommandPools[w];
+    sai.level = VK_COMMAND_BUFFER_LEVEL_SECONDARY;
+    sai.commandBufferCount = this->maxFramesInFlight;
+    if (vkAllocateCommandBuffers(this->device, &sai, perWorker.data()) !=
+        VK_SUCCESS) {
+      return false;
+    }
+    for (uint32_t s = 0; s < this->maxFramesInFlight; ++s) {
+      this->secondaryCommandBuffers[
+        static_cast<size_t>(s) * this->maxRecordWorkers + w] = perWorker[s];
+    }
+  }
+
+  // Per-worker record contexts + job slots, sized by maxRecordWorkers.
+  this->workerRecordContexts.assign(this->maxRecordWorkers, VulkanRecordContext{});
+  this->recordJobs.assign(this->maxRecordWorkers, ParallelRecordJob{});
+  if (this->parallelRecordEnabled) {
+    if (!this->buildRecordPool()) return false;
   }
 
   VkFenceCreateInfo fi {};
@@ -359,13 +490,19 @@ SoVulkanRenderBackend::releaseFrameResources()
     }
   }
   this->frameCommandBuffers.clear();
-  for (auto & buffer : this->secondaryCommandBuffers) {
-    if (buffer != VK_NULL_HANDLE) {
-      vkFreeCommandBuffers(this->device, this->secondaryCommandPool, 1,
+  for (size_t i = 0; i < this->secondaryCommandBuffers.size(); ++i) {
+    VkCommandBuffer & buffer = this->secondaryCommandBuffers[i];
+    if (buffer == VK_NULL_HANDLE) continue;
+    const uint32_t w =
+      static_cast<uint32_t>(i % this->maxRecordWorkers);
+    if (w < this->secondaryCommandPools.size()) {
+      vkFreeCommandBuffers(this->device, this->secondaryCommandPools[w], 1,
                            &buffer);
     }
   }
   this->secondaryCommandBuffers.clear();
+  this->workerRecordContexts.clear();
+  this->recordJobs.clear();
   for (VkFence fence : this->frameFences) {
     if (fence != VK_NULL_HANDLE) {
       vkDestroyFence(this->device, fence, this->allocator);
@@ -386,9 +523,29 @@ SoVulkanRenderBackend::currentCommandBuffer()
 VkCommandBuffer
 SoVulkanRenderBackend::currentSecondaryCommandBuffer()
 {
-  if (this->secondaryCommandBuffers.empty()) return VK_NULL_HANDLE;
-  return this->secondaryCommandBuffers[this->uboFrameIndex %
-                                       this->secondaryCommandBuffers.size()];
+  return this->workerSecondary(
+    this->uboFrameIndex % std::max<uint32_t>(this->maxFramesInFlight, 1u), 0);
+}
+
+VkCommandBuffer
+SoVulkanRenderBackend::workerSecondary(const uint32_t frameSlot,
+                                       const uint32_t worker)
+{
+  if (this->secondaryCommandBuffers.empty() || this->maxRecordWorkers == 0) {
+    return VK_NULL_HANDLE;
+  }
+  const size_t idx = static_cast<size_t>(frameSlot) * this->maxRecordWorkers +
+                     worker;
+  if (idx >= this->secondaryCommandBuffers.size()) return VK_NULL_HANDLE;
+  return this->secondaryCommandBuffers[idx];
+}
+
+VkCommandBuffer
+SoVulkanRenderBackend::parallelCurrentSecondary(const uint32_t worker)
+{
+  return this->workerSecondary(
+    this->uboFrameIndex % std::max<uint32_t>(this->maxFramesInFlight, 1u),
+    worker);
 }
 
 void
@@ -770,6 +927,8 @@ SoVulkanRenderBackend::prepareLightingSlots(const uint32_t neededDraws)
 void
 SoVulkanRenderBackend::beginFrame()
 {
+  vkBackendTrace(this->uboFrameIndex, "beginFrame.enter",
+                 "nextFrame=%u", this->uboFrameIndex + 1);
   // One frame boundary: advance the ring cursor, then, on the own-queue
   // path, wait the slot's fence.  The slot we are about to record into was
   // last used maxFramesInFlight frames ago; its fence covers that

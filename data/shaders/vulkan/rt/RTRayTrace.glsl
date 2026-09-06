@@ -144,11 +144,15 @@ float coin_rtx_ao(vec3 worldPos, vec3 worldN, vec2 seed)
 }
 
 // Same Gouraud evaluation as the raster visual program and the v1 chit.
-vec3 coin_rtx_gouraud(vec3 eyePos, vec3 eyeNormal, vec3 baseColor,
+// The producer's light data is world-space (the standard IR convention), so
+// everything is evaluated directly in world space; the result is identical to
+// the eye-space evaluation because every quantity is a rotation of the same
+// scene and shading only consumes dot products.
+vec3 coin_rtx_gouraud(vec3 worldPos, vec3 worldNormal, vec3 baseColor,
                       RTMaterial mat)
 {
-    vec3 N = normalize(eyeNormal);
-    vec3 V = normalize(-eyePos);
+    vec3 N = normalize(worldNormal);
+    vec3 V = normalize(frame.u_cameraPos.xyz - worldPos);
     if (mat.params.y > 0.5 && dot(N, V) < 0.0) {
         N = -N;
     }
@@ -161,7 +165,7 @@ vec3 coin_rtx_gouraud(vec3 eyePos, vec3 eyeNormal, vec3 baseColor,
         float attenuation = 1.0;
         float spotFactor = 1.0;
         if (mat.lightType[i].x > 0.5) {
-            vec3 lightVector = mat.lightPosition[i].xyz - eyePos;
+            vec3 lightVector = mat.lightPosition[i].xyz - worldPos;
             float distanceToLight = length(lightVector);
             if (distanceToLight <= 0.0001) continue;
             L = lightVector / distanceToLight;
@@ -171,7 +175,7 @@ vec3 coin_rtx_gouraud(vec3 eyePos, vec3 eyeNormal, vec3 baseColor,
                                     0.0001);
             if (mat.lightType[i].x > 1.5) {
                 vec3 coneDir = normalize(mat.lightDirection[i].xyz);
-                vec3 fromLight = normalize(eyePos - mat.lightPosition[i].xyz);
+                vec3 fromLight = normalize(worldPos - mat.lightPosition[i].xyz);
                 float spotCos = dot(coneDir, fromLight);
                 if (spotCos < mat.lightSpot[i].x) continue;
                 spotFactor = pow(max(spotCos, 0.0), mat.lightSpot[i].y);
@@ -192,18 +196,15 @@ vec3 coin_rtx_gouraud(vec3 eyePos, vec3 eyeNormal, vec3 baseColor,
     return clamp(litColor + mat.emissive.rgb, 0.0, 1.0);
 }
 
-// Next-event-estimation direct lighting with shadow rays.  Matches the
-// raster Gouraud convention: the producer's light data is used verbatim
-// against eye-space normals (no view-space conversion), so the direct term
-// looks like the raster viewport.  The producer stores lights in eye space
-// (the light's node matrix is ModelMatrix * ViewingMatrix), so shadow ray
-// directions are converted back to world space before the ray query.
+// Next-event-estimation direct lighting with shadow rays.  The producer's
+// light data is world-space (the standard IR convention), so the shading
+// terms and the shadow query are evaluated directly in world space against
+// the world-space TLAS -- no view-space round-trip.
 vec3 coin_rtx_directLighting(vec3 worldPos, vec3 worldN, vec3 rayDir,
                              RTMaterial mat)
 {
-    vec3 eyePos = (frame.u_view * vec4(worldPos, 1.0)).xyz;
-    vec3 N = normalize(mat3(frame.u_view) * worldN);
-    vec3 V = normalize(-eyePos);
+    vec3 N = normalize(worldN);
+    vec3 V = normalize(frame.u_cameraPos.xyz - worldPos);
     vec3 lit = mat.ambient.rgb; // ambient light folded in by producer
     int lightCount = int(mat.params.z);
     for (int i = 0; i < COIN_MAX_LIGHTS; ++i) {
@@ -214,7 +215,7 @@ vec3 coin_rtx_directLighting(vec3 worldPos, vec3 worldN, vec3 rayDir,
         float spotFactor = 1.0;
         float distToLight = 1e30;
         if (mat.lightType[i].x > 0.5) {
-            vec3 lightVector = mat.lightPosition[i].xyz - eyePos;
+            vec3 lightVector = mat.lightPosition[i].xyz - worldPos;
             distToLight = length(lightVector);
             if (distToLight <= 0.0001) continue;
             L = lightVector / distToLight;
@@ -224,7 +225,7 @@ vec3 coin_rtx_directLighting(vec3 worldPos, vec3 worldN, vec3 rayDir,
                                     0.0001);
             if (mat.lightType[i].x > 1.5) {
                 vec3 coneDir = normalize(mat.lightDirection[i].xyz);
-                vec3 fromLight = normalize(eyePos - mat.lightPosition[i].xyz);
+                vec3 fromLight = normalize(worldPos - mat.lightPosition[i].xyz);
                 float spotCos = dot(coneDir, fromLight);
                 if (spotCos < mat.lightSpot[i].x) continue;
                 spotFactor = pow(max(spotCos, 0.0), mat.lightSpot[i].y);
@@ -234,15 +235,13 @@ vec3 coin_rtx_directLighting(vec3 worldPos, vec3 worldN, vec3 rayDir,
             L = mat.lightDirection[i].xyz;
         }
 
-        float NdotL = dot(N, normalize(L));
+        L = normalize(L);
+        float NdotL = dot(N, L);
         if (NdotL <= 0.0) continue;
 
-        // Shadow ray: the light data is in eye space (see above), so
-        // convert the direction back to world space for the shadow query
-        // against the world-space TLAS.
-        vec3 worldL = normalize((frame.u_viewInverse *
-                                 vec4(normalize(L), 0.0)).xyz);
-        float transm = shadowTransmittance(worldPos + worldN * 0.001, worldL,
+        // Shadow ray: the light data is already world space, so it can be
+        // used directly for the query against the world-space TLAS.
+        float transm = shadowTransmittance(worldPos + worldN * 0.001, L,
                                            distToLight - 0.001);
         if (transm <= 1e-4) {
             continue;
@@ -300,20 +299,19 @@ vec3 coin_rtx_neeEmissive(vec3 worldPos, vec3 worldN, RTMaterial mat,
     if (transm <= 1e-4) {
         return vec3(0.0);
     }
-    // Evaluate the shading model in eye space, matching
+    // Evaluate the shading model in world space, matching
     // coin_rtx_directLighting so an emissive surface reads like an
-    // analytic light of the same brightness.
-    vec3 eyePos = (frame.u_view * vec4(worldPos, 1.0)).xyz;
-    vec3 eyeN = normalize(mat3(frame.u_view) * worldN);
-    vec3 eyeV = normalize(-eyePos);
-    vec3 eyeL = normalize((frame.u_view * vec4(L, 0.0)).xyz);
+    // analytic light of the same brightness (world == eye for dot-product
+    // shading under a rigid view transform).
+    vec3 shadeN = normalize(worldN);
+    vec3 shadeV = normalize(frame.u_cameraPos.xyz - worldPos);
     vec3 contribution;
     if (mat.pbr.z > 0.5) {
-        contribution = pbrEval(eyeN, eyeV, eyeL, mat) * cosS;
+        contribution = pbrEval(shadeN, shadeV, L, mat) * cosS;
     }
     else {
-        vec3 H = normalize(eyeL + eyeV);
-        float NdotH = max(dot(eyeN, H), 0.0);
+        vec3 H = normalize(L + shadeV);
+        float NdotH = max(dot(shadeN, H), 0.0);
         float shininess = max(mat.params.x * 128.0, 0.0);
         float specularFactor = shininess > 0.0 ? pow(NdotH, shininess) : 0.0;
         contribution = mat.diffuse.rgb * cosS +

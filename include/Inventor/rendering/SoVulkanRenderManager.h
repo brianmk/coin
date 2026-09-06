@@ -211,7 +211,8 @@ public:
   SbBool renderExternal(SbBool clearwindow,
                         SbBool clearzbuffer,
                         VkCommandBuffer commandBuffer,
-                        VkRenderPass renderPass);
+                        VkRenderPass renderPass,
+                        VkFramebuffer framebuffer);
 
   /*!
     \brief Select the ray-tracing backend for the next render() calls.

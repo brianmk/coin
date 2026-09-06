@@ -2004,13 +2004,13 @@ SoRTXRenderBackend::updateMaterials(const SoDrawList & drawlist)
     out.ambient[2] = sceneAmbient[2] * material.ambient[2];
     out.ambient[3] = 1.0f;
 
-    // Light list: the GL-pushed authoritative set (the viewer headlight +
+    // Light list: the host-pushed authoritative set (the viewer headlight +
     // document lights) when present, else the per-command IR capture.  The
     // IR capture can drop to zero lights on the retained/replayed path
     // tracer (SoLightElement::getLights goes empty after the first frames),
-    // which renders surfaces at ambient-only (near-black).  The pushed set
-    // is the reliable source and keeps the headlight view-fixed in eye
-    // space (the RT shader converts back through frame.u_viewInverse).
+    // which renders surfaces at ambient-only (near-black).  Both sources
+    // carry world-space light geometry (the standard IR convention), which
+    // the RT shaders consume directly.
     const std::vector<SoLightData> * lightSource = &lighting->lights;
     if (!this->sceneLights.empty()) {
       lightSource = &this->sceneLights;

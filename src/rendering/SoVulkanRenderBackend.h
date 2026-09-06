@@ -13,9 +13,12 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <atomic>
+#include <condition_variable>
 #include <functional>
 #include <memory>
 #include <mutex>
+#include <thread>
 #include <unordered_map>
 #include <vector>
 
@@ -241,7 +244,8 @@ public:
   SbBool renderExternal(const SoDrawList & drawlist,
                         const SoRenderParams & params,
                         VkCommandBuffer commandBuffer,
-                        VkRenderPass renderPass);
+                        VkRenderPass renderPass,
+                        VkFramebuffer framebuffer);
 
   /*!
     \brief Record only the overlay pass (e.g. the navigation cube) into a
@@ -313,6 +317,8 @@ private:
   bool createBackgroundPipeline(const SoVulkanRenderTarget & target,
                                 VkRenderPass renderPass,
                                 VkPipeline & pipeline);
+  bool ensureFramebuffer(const SoVulkanRenderTarget * target,
+                         VkRenderPass renderPass);
   void recordBackground(const SoRenderParams & params,
                         const SoVulkanRenderTarget & target,
                         VkRenderPass renderPass,
@@ -429,7 +435,29 @@ private:
                       const SoRenderParams & params,
                       bool wireframeOverlay, bool pointsOverlay,
                       const float * overlayColor,
+                      VkRenderPass renderPass,
                       std::vector<VulkanWorkItem> & out);
+  // Record one pre-assigned work item into ctx.buffer (single draw or a batch).
+  void recordWorkItem(const SoDrawList & drawlist,
+                      const SoRenderParams & params,
+                      const SoVulkanRenderTarget & target,
+                      VkRenderPass renderPass,
+                      const VulkanWorkItem & item,
+                      VulkanRecordContext & ctx);
+  // M1d pool: build persistent worker threads, partition+dispatch, join.
+  bool buildRecordPool();
+  void shutdownRecordPool();
+  void recordJobWorker(size_t workerIndex);
+  bool recordSecondaryChunk(VulkanRecordContext & ctx,
+                            const SoDrawList & drawlist,
+                            const SoRenderParams & params,
+                            const SoVulkanRenderTarget & target,
+                            VkRenderPass renderPass,
+                            const std::vector<const VulkanWorkItem *> & items,
+                            VkCommandBuffer secondary,
+                            VkFramebuffer framebuffer);
+  VkCommandBuffer workerSecondary(uint32_t frameSlot, uint32_t worker);
+  VkCommandBuffer parallelCurrentSecondary(uint32_t worker);
   bool prepareTextureUpload(VulkanCachedTexture & entry,
                             const SoTextureData & texture,
                             VkDeviceSize & stagingOffset,
@@ -557,7 +585,8 @@ private:
                    const SoRenderParams & params,
                    const SoVulkanRenderTarget & target,
                    VkRenderPass renderPass,
-                   VulkanRecordContext & ctx);
+                   VulkanRecordContext & ctx,
+                   VkFramebuffer inheritFramebuffer);
 
   // --- Vulkan resource helpers -------------------------------------------
   bool createBuffer(VkDeviceSize size,
@@ -664,14 +693,56 @@ private:
   std::vector<VkCommandBuffer> frameCommandBuffers;
   std::vector<VkFence> frameFences;
   std::vector<uint8_t> frameFencePending;
-  // Secondary command buffers for M1c: one per in-flight frame slot, used to
-  // record the render-order-independent opaque pass inside an already-begun
-  // render pass (RENDER_PASS_CONTINUE), then vkCmdExecuteCommands()'d into the
-  // slot's primary buffer.  Kept per-slot so a secondary is never reset while
-  // a primary that executed it is still pending; the pool's RESET_COMMAND_BUFFER_BIT
-  // lets each be re-recorded after its slot's fence is waited.
-  VkCommandPool secondaryCommandPool = VK_NULL_HANDLE;
+  // Secondary command buffers for M1c/M1d: one per in-flight frame slot per
+  // worker, used to record the render-order-independent opaque pass inside an
+  // already-begun render pass (RENDER_PASS_CONTINUE), then
+  // vkCmdExecuteCommands()'d into the slot's primary buffer.  Kept per-slot
+  // so a secondary is never reset while a primary that executed it is still
+  // pending; the pool's RESET_COMMAND_BUFFER_BIT lets each be re-recorded
+  // after its slot's fence is waited.
+  //
+  // ONE POOL PER WORKER: VkCommandPool host access is externally
+  // synchronized per the Vulkan spec, so concurrent vkReset/vkBegin/vkEnd of
+  // buffers allocated from a SHARED pool (M1d workers + main) races the
+  // pool's internal allocator.  Pool w owns only worker w's secondaries.
+  std::vector<VkCommandPool> secondaryCommandPools;
+  // Secondaries are indexed [slot * maxRecordWorkers + worker], so a worker
+  // always records into its own buffer of the current in-flight slot and a
+  // secondary is never reset while a primary that executed it is pending.
   std::vector<VkCommandBuffer> secondaryCommandBuffers;
+  // M1d parallel recording.  The opaque worklist is partitioned into disjoint
+  // chunks, each recorded by one worker thread into its own secondary buffer
+  // (slots are pre-assigned disjoint by M1b, so the mapped UBO/instance-model
+  // writes are race-free).  The pool is persistent; worker 0 is the recording
+  // thread and workers 1..N-1 are spawned threads, all joined in shutdown().
+  bool parallelRecordEnabled = false;
+  uint32_t maxRecordWorkers = 1;
+  std::vector<std::thread> recordWorkers;
+  std::vector<VulkanRecordContext> workerRecordContexts;
+  struct ParallelRecordJob {
+    const SoDrawList * drawlist = nullptr;
+    const SoRenderParams * params = nullptr;
+    const SoVulkanRenderTarget * target = nullptr;
+    VkRenderPass renderPass = VK_NULL_HANDLE;
+    VkFramebuffer framebuffer = VK_NULL_HANDLE;
+    // This worker's chunk: pointers into the frame's worklist (workItemsScratch
+    // is a backend member that stays alive for the whole recording).
+    std::vector<const VulkanWorkItem *> items;
+    VkCommandBuffer secondary = VK_NULL_HANDLE;
+    VulkanRecordContext * ctx = nullptr;
+    bool ok = false;
+  };
+  std::vector<ParallelRecordJob> recordJobs;
+  std::mutex recordMutex;
+  std::condition_variable recordCvSpawn, recordCvDone;
+  // Monotonic dispatch generation: main increments it under recordMutex when
+  // publishing a frame's jobs; each worker remembers the generation it already
+  // processed and re-waits until a NEW one arrives, so every worker consumes
+  // each dispatch exactly once (a plain ready flag would let a finished worker
+  // immediately re-process the same frame while main is still waiting).
+  uint32_t recordJobGeneration = 0;
+  std::atomic<uint32_t> recordDoneCount {0};
+  bool recordPoolStopped = false;
   // Per-recording command-buffer target + dedup state for the current
   // render()/renderExternal() call.  This names the backend's own buffer in
   // render(), or the caller's buffer in renderExternal().  Kept as one

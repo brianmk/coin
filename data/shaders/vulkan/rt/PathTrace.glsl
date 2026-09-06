@@ -234,9 +234,7 @@ void main()
                       mat.emissive.rgb;
             }
             else if (mat.params.w > 0.5) {
-                vec3 eyePos = (frame.u_view * vec4(h.pos, 1.0)).xyz;
-                vec3 eyeN = normalize(mat3(frame.u_view) * h.normal);
-                rgb = coin_rtx_gouraud(eyePos, eyeN, mat.diffuse.rgb, mat);
+                rgb = coin_rtx_gouraud(h.pos, h.normal, mat.diffuse.rgb, mat);
             }
             else {
                 rgb = mat.diffuse.rgb;
@@ -294,9 +292,7 @@ void main()
                 rgb += coin_rtx_directLighting(h.pos, h.normal, dir, mat);
             }
             else if (mat.params.w > 0.5) {
-                vec3 eyePos = (frame.u_view * vec4(h.pos, 1.0)).xyz;
-                vec3 eyeN = normalize(mat3(frame.u_view) * h.normal);
-                rgb += coin_rtx_gouraud(eyePos, eyeN, mat.diffuse.rgb, mat);
+                rgb += coin_rtx_gouraud(h.pos, h.normal, mat.diffuse.rgb, mat);
             }
             rgb += mat.emissive.rgb;
             normals[index] = vec4(h.normal, 1.0);
@@ -332,10 +328,8 @@ void main()
                       mat.emissive.rgb;
             }
             else if (mat.params.w > 0.5) {
-                vec3 eyePos = (frame.u_view * vec4(h.pos, 1.0)).xyz;
-                vec3 eyeN = normalize(mat3(frame.u_view) * h.normal);
                 rgb = (mat.diffuse.rgb * ao) +
-                      coin_rtx_gouraud(eyePos, eyeN, mat.diffuse.rgb, mat) +
+                      coin_rtx_gouraud(h.pos, h.normal, mat.diffuse.rgb, mat) +
                       mat.emissive.rgb;
             }
             else {

@@ -321,7 +321,12 @@ bool rawEqual(const SoLightingRaw & a, const SoLightingRaw & b)
   if (a.hasRaw != b.hasRaw) return false;
   if (!a.hasRaw) return true;
   if (a.lights.size() != b.lights.size()) return false;
-  if (!matrixBitsEqual(a.viewUsed, b.viewUsed)) return false;
+  // NOTE: SoLightingRaw::viewUsed is deliberately NOT compared.  Setups are
+  // world-space and view-independent, so two setups whose raw world geometry
+  // is identical are the same light regardless of the fill-time viewing
+  // matrix.  Comparing viewUsed (the old view-fixed/restrike convention) would
+  // fragment the dedup hash across camera frames, keeping identical
+  // world-space setups separate and inflating the lighting ring.
   for (size_t i = 0; i < a.lights.size(); ++i) {
     if (!rawLightEqual(a.lights[i], b.lights[i])) return false;
   }
@@ -359,6 +364,18 @@ SoDrawList::addLightingSetup(const SoLightingData & lighting,
   return static_cast<SoLightingHandle>(this->lightingSetups.size());
 }
 
+// Compatibility no-op, kept exported so already-linked consumers (such as the
+// pivy Python bindings) still resolve the symbol.  SoLightData carries
+// world-space geometry, so retained lighting setups are view-independent and a
+// camera-only frame replaying this draw list shades correctly without any
+// re-derivation.
+void
+SoDrawList::restrikeLighting(const SbMatrix & prevView, const SbMatrix & newView)
+{
+  (void)prevView;
+  (void)newView;
+}
+
 namespace {
 bool lightFreshDbgEnabled()
 {
@@ -376,89 +393,90 @@ void lightFreshDbgMat(const char * name, const SbMatrix & m)
           a[1][3], a[2][0], a[2][1], a[2][2], a[2][3], a[3][0], a[3][1],
           a[3][2], a[3][3]);
 }
-int lightFreshDbgBudget = 32;
-int lightReplayDbgBudget = 32;
-int lightReplayCallBudget = 2000;
+
 } // namespace
 
-void
-SoDrawList::restrikeLighting(const SbMatrix & prevView, const SbMatrix & newView)
+namespace {
+
+void packLightIntoBlock(SoLightingBlock & block, int slot,
+                        const SoLightData & light)
 {
-  if (std::getenv("FC_VULKAN_LIGHTREPLAY_DBG") && lightReplayCallBudget-- > 0) {
-    fprintf(stderr,
-            "[LITREPLAY] called prev==new:%d raws=%zu\n",
-            (int)matrixBitsEqual(prevView, newView),
-            this->lightingRaws.size());
+  float * type = block.lightType + slot * 4;
+  type[0] = static_cast<float>(light.type);
+  type[1] = type[2] = 0.0f;
+  type[3] = 1.0f;
+
+  float * color = block.lightColor + slot * 4;
+  color[0] = light.color[0];
+  color[1] = light.color[1];
+  color[2] = light.color[2];
+  color[3] = 1.0f;
+
+  float * direction = block.lightDirection + slot * 4;
+  direction[0] = light.direction[0];
+  direction[1] = light.direction[1];
+  direction[2] = light.direction[2];
+  direction[3] = 1.0f;
+
+  float * position = block.lightPosition + slot * 4;
+  position[0] = light.position[0];
+  position[1] = light.position[1];
+  position[2] = light.position[2];
+  position[3] = 1.0f;
+
+  float * attenuation = block.lightAttenuation + slot * 4;
+  attenuation[0] = light.attenuation[0];
+  attenuation[1] = light.attenuation[1];
+  attenuation[2] = light.attenuation[2];
+  attenuation[3] = 1.0f;
+
+  float * spot = block.lightSpotParams + slot * 4;
+  spot[0] = light.spotCutoffCos;
+  spot[1] = light.spotExponent;
+  spot[2] = 0.0f;
+  spot[3] = 1.0f;
+}
+
+} // namespace
+
+SoLightData
+SoRenderIR::lightToEye(const SoLightData & world, const SbMatrix & view)
+{
+  SoLightData eye = world;
+  view.multDirMatrix(world.direction, eye.direction);
+  if (eye.direction.normalize() == 0.0f) {
+    eye.direction = world.direction;
   }
-  if (matrixBitsEqual(prevView, newView)) {
-    return;
+  if (world.type != SO_LIGHT_DIRECTIONAL) {
+    view.multVecMatrix(world.position, eye.position);
   }
-  if (std::getenv("FC_VULKAN_LIGHTREPLAY_DBG") && lightReplayDbgBudget-- > 0) {
-    fprintf(stderr, "[LITREPLAY] entry\n");
-    lightFreshDbgMat("prevView", prevView);
-    lightFreshDbgMat("newView", newView);
-    for (size_t e = 0; e < this->lightingRaws.size(); ++e) {
-      const SoLightingRaw & r = this->lightingRaws[e];
-      if (!r.hasRaw || !matrixBitsEqual(r.viewUsed, prevView)) {
-        fprintf(stderr, "[LITREPLAY]   entry%zu SKIP (hasRaw=%d viewMatch=%d)\n",
-                e, (int)r.hasRaw,
-                (int)matrixBitsEqual(r.viewUsed, prevView));
-        continue;
-      }
-      fprintf(stderr,
-              "[LITREPLAY]   entry%zu restrike lights=%zu\n", e,
-              r.lights.size());
+  return eye;
+}
+
+int
+SoRenderIR::fillLightingBlock(SoLightingBlock & block,
+                              const SoLightingData & world,
+                              const SbMatrix * toEye)
+{
+  std::memset(&block, 0, sizeof(block));
+  block.ambientLight[0] = world.ambient[0];
+  block.ambientLight[1] = world.ambient[1];
+  block.ambientLight[2] = world.ambient[2];
+  block.ambientLight[3] = 1.0f;
+
+  const int count = std::min<int>(
+    static_cast<int>(world.lights.size()), SO_MAX_SHADER_LIGHTS);
+  for (int i = 0; i < count; ++i) {
+    const SoLightData & light = world.lights[static_cast<size_t>(i)];
+    if (toEye != nullptr) {
+      packLightIntoBlock(block, i, lightToEye(light, *toEye));
+    }
+    else {
+      packLightIntoBlock(block, i, light);
     }
   }
-  for (size_t e = 0; e < this->lightingRaws.size(); ++e) {
-    const SoLightingRaw & raw = this->lightingRaws[e];
-    if (!raw.hasRaw || !matrixBitsEqual(raw.viewUsed, prevView)) {
-      continue;
-    }
-    SoLightingData & setup = this->lightingSetups[e];
-    setup.ambient = raw.ambient;
-    setup.lights.clear();
-    setup.lights.reserve(raw.lights.size());
-    for (const SoLightingRaw::RawLight & rl : raw.lights) {
-      SoLightData light;
-      light.type = rl.type;
-      light.color = rl.color;
-      light.attenuation = rl.attenuation;
-      light.spotCutoffCos = rl.spotCutoffCos;
-      light.spotExponent = rl.spotExponent;
-      // The stored light geometry IS the eye-space value (it matches the
-      // legacy GL convention of passing raw field values to glLightfv, which
-      // GL reads in eye space).  It is view-independent, so a camera-only
-      // frame re-uses it verbatim instead of transforming it.
-      if (rl.type == SO_LIGHT_DIRECTIONAL) {
-        light.direction = rl.sceneDirection;
-        if (light.direction.normalize() == 0.0f) {
-          light.direction.setValue(0.0f, 0.0f, 1.0f);
-        }
-      }
-      else if (rl.type == SO_LIGHT_POINT) {
-        light.position = rl.scenePosition;
-      }
-      else {
-        light.position = rl.scenePosition;
-        light.direction = rl.sceneDirection;
-        if (light.direction.normalize() == 0.0f) {
-          light.direction.setValue(0.0f, 0.0f, -1.0f);
-        }
-      }
-      setup.lights.push_back(light);
-    }
-    if (std::getenv("FC_VULKAN_LIGHTREPLAY_DBG")) {
-      for (size_t li = 0; li < setup.lights.size(); ++li) {
-        const SoLightData & l = setup.lights[li];
-        fprintf(stderr,
-                "[LITREPLAY]   entry%zu light%zu type=%d dir(eye)=(%.4f,%.4f,"
-                "%.4f) pos(eye)=(%.4f,%.4f,%.4f)\n",
-                e, li, (int)l.type, l.direction[0], l.direction[1],
-                l.direction[2], l.position[0], l.position[1], l.position[2]);
-      }
-    }
-  }
+
+  return count;
 }
 
 const SoLightingData *
@@ -859,17 +877,14 @@ fillLightingFromState(SoState * state, SoDrawList & drawlist)
 {
   SoLightingData lighting;
 
-  // Scene-space inputs kept alongside the view-space setup so a camera-only
-  // frame can re-derive this entry (SoDrawList::restrikeLighting) instead of
-  // re-traversing the scene.
+  // Scene-space inputs recorded alongside the (world-space) setup for
+  // provenance and deduplication; the setup itself needs no re-derivation
+  // when the camera moves.
   SoLightingRaw raw;
   raw.hasRaw = true;
-  raw.viewUsed = SoViewingMatrixElement::get(state);
-  const SbMatrix viewInverse = raw.viewUsed.inverse();
-
-  if (lightFreshDbgEnabled() && lightFreshDbgBudget-- > 0) {
-    lightFreshDbgMat("viewUsed", raw.viewUsed);
-  }
+  // Strips the view out of SoLightElement::getMatrix (== model * view) so the
+  // stored sceneMatrix is the light's pure world/model transform.
+  const SbMatrix viewInverse = SoViewingMatrixElement::get(state).inverse();
 
   const SbColor & ambientColor = SoEnvironmentElement::getAmbientColor(state);
   const float ambientIntensity = SoEnvironmentElement::getAmbientIntensity(state);
@@ -902,23 +917,25 @@ fillLightingFromState(SoState * state, SoDrawList & drawlist)
     // lightMatrix == model * view, so the scene-space model matrix follows.
     rawLight.sceneMatrix = lightMatrix * viewInverse;
 
-    // Coin's legacy GL path (So{Directional,Point,Spot}Light::GLRender)
-    // passes the raw field values UNTRANSFORMED to glLightfv(GL_POSITION /
-    // GL_SPOT_DIRECTION), and OpenGL interprets those in EYE space.  The net
-    // effect: lights are view-fixed -- their eye-space direction/position is
-    // the raw field value regardless of the camera.  A world-fixed
-    // reinterpretation (transforming by model*view) makes faces cross the
-    // NdotL=0 boundary as the camera orbits and go pure black, diverging
-    // from the GL backend.  Store the raw values as the eye-space data so the
-    // IR/Vulkan shading stays consistent with GL for any camera pose.
+    // World-space light data: the raw field values are light-LOCAL, so the
+    // light node's scene matrix maps them to the scene's world space.  A
+    // light at the scene root (identity matrix) keeps its raw geometry; a
+    // headlight parented to the camera inherits the camera rotation and thus
+    // stays head-fixed while document lights stay world-fixed -- which is
+    // exactly the scene-graph semantics the legacy GL path gave the
+    // modelview transform it fed glLightfv with.  The stored data is view-
+    // independent: eye-space consumers derive it per frame with
+    // SoRenderIR::lightToEye(); the path tracer shades in world space.
     if (light->isOfType(SoDirectionalLight::getClassTypeId())) {
       SoDirectionalLight * directional = static_cast<SoDirectionalLight *>(light);
       lightData.type = SO_LIGHT_DIRECTIONAL;
       rawLight.type = SO_LIGHT_DIRECTIONAL;
       rawLight.sceneDirection = -(directional->direction.getValue());
-      lightData.direction = rawLight.sceneDirection;
+      rawLight.sceneMatrix.multDirMatrix(rawLight.sceneDirection,
+                                         lightData.direction);
       if (lightData.direction.normalize() == 0.0f) {
-        lightData.direction.setValue(0.0f, 0.0f, 1.0f);
+        lightData.direction = rawLight.sceneDirection;
+        lightData.direction.normalize();
       }
     }
     else if (light->isOfType(SoPointLight::getClassTypeId())) {
@@ -927,7 +944,8 @@ fillLightingFromState(SoState * state, SoDrawList & drawlist)
       rawLight.type = SO_LIGHT_POINT;
       rawLight.scenePosition = point->location.getValue();
       lightData.attenuation = attenuation;
-      lightData.position = rawLight.scenePosition;
+      rawLight.sceneMatrix.multVecMatrix(rawLight.scenePosition,
+                                         lightData.position);
     }
     else if (light->isOfType(SoSpotLight::getClassTypeId())) {
       SoSpotLight * spot = static_cast<SoSpotLight *>(light);
@@ -936,10 +954,13 @@ fillLightingFromState(SoState * state, SoDrawList & drawlist)
       rawLight.scenePosition = spot->location.getValue();
       rawLight.sceneDirection = spot->direction.getValue();
       lightData.attenuation = attenuation;
-      lightData.position = rawLight.scenePosition;
-      lightData.direction = rawLight.sceneDirection;
+      rawLight.sceneMatrix.multVecMatrix(rawLight.scenePosition,
+                                         lightData.position);
+      rawLight.sceneMatrix.multDirMatrix(rawLight.sceneDirection,
+                                         lightData.direction);
       if (lightData.direction.normalize() == 0.0f) {
-        lightData.direction.setValue(0.0f, 0.0f, -1.0f);
+        lightData.direction = rawLight.sceneDirection;
+        lightData.direction.normalize();
       }
       float cutoff = spot->cutOffAngle.getValue();
       if (cutoff < 0.0f) cutoff = 0.0f;
@@ -965,8 +986,8 @@ fillLightingFromState(SoState * state, SoDrawList & drawlist)
               light->getName().getString(), (int)lightData.type);
       lightFreshDbgMat("lightMatrix", lightMatrix);
       fprintf(stderr,
-              "[LITFRESH]   dir(eye)=(%.4f,%.4f,%.4f) pos(eye)=(%.4f,%.4f,"
-              "%.4f) sceneDir=(%.4f,%.4f,%.4f)\n",
+              "[LITFRESH]   dir(world)=(%.4f,%.4f,%.4f) pos(world)=(%.4f,%.4f,"
+              "%.4f) rawDir=(%.4f,%.4f,%.4f)\n",
               lightData.direction[0], lightData.direction[1],
               lightData.direction[2], lightData.position[0],
               lightData.position[1], lightData.position[2],

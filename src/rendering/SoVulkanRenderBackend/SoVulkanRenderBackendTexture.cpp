@@ -174,14 +174,19 @@ SoVulkanRenderBackend::effectiveTextureFormat(const int numComponents) const
 bool
 SoVulkanRenderBackend::ensureStagingPoolSize(VkDeviceSize required)
 {
+  // The caller needs `required` MORE bytes at the current cursor: the pool
+  // must fit cursor + required, not merely `required` (two mid-size uploads
+  // in one frame would otherwise each pass the check individually yet
+  // overrun the buffer end -- heap corruption downstream).
   if (this->stagingPoolBuffer != VK_NULL_HANDLE &&
-      this->stagingPoolCapacity >= required) {
+      this->stagingPoolCapacity >= this->stagingPoolCursor + required) {
     return true;
   }
   // Grow: at least double the current capacity so a burst of uploads in a
   // frame amortizes a single reallocation instead of one per upload.
   VkDeviceSize newCapacity =
-    std::max<VkDeviceSize>(required, this->stagingPoolCapacity * 2);
+    std::max<VkDeviceSize>(this->stagingPoolCursor + required,
+                           this->stagingPoolCapacity * 2);
   newCapacity = std::max<VkDeviceSize>(newCapacity, 256u * 1024u);
 
   VkBuffer newBuffer = VK_NULL_HANDLE;

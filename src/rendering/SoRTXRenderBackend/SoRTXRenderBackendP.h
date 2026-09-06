@@ -123,7 +123,18 @@ inline void checkDenoiseDownsampleLayout() {
 
 constexpr int SBT_GROUP_COUNT = 5; // raygen, miss, shadow miss, chit, shadow chit
 
-constexpr int MAX_SHADER_LIGHTS = 8;
+// SO_MAX_SHADER_LIGHTS is mirrored as a literal [8] in every shader's
+// lighting block (PathTrace.glsl, ClosestHit.glsl, Raygen.glsl, the visual
+// Fragment/Vertex, the GL Lighting.glsl) because GLSL cannot read a C++
+// constexpr.  If the shared constant is ever raised, these shaders must be
+// regenerated in lockstep; assert the invariant here so a silent desync (that
+// would over/under-run the light arrays) is caught at compile time instead of
+// at runtime on the GPU.
+static_assert(SO_MAX_SHADER_LIGHTS == 8,
+              "SO_MAX_SHADER_LIGHTS change requires regenerating the "
+              "hardcoded [8] light arrays in the GLSL/Visual shaders");
+
+constexpr int MAX_SHADER_LIGHTS = SO_MAX_SHADER_LIGHTS;
 constexpr int MAX_VERTEX_COUNT = 10000000;
 
 // FNV-1a content hash of a command's geometry, sampled so full-scene

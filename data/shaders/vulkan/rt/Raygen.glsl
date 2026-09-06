@@ -114,17 +114,14 @@ vec3 sampleCosine(vec2 u)
     return vec3(a * cos(phi), a * sin(phi), sqrt(max(1.0 - u.x, 0.0)));
 }
 
-// Next-event-estimation direct lighting with shadow rays.  Matches the
-// raster Gouraud convention: the producer's light data is used verbatim
-// against eye-space normals, so the direct term looks like the raster
-// viewport.  The producer stores lights in eye space (the light's node
-// matrix is ModelMatrix * ViewingMatrix), so the shadow ray direction is
-// converted back to world space before the TLAS trace.
+// Next-event-estimation direct lighting with shadow rays.  The producer's
+// light data is world-space (the standard IR convention), so the shading
+// terms and the shadow trace are evaluated directly in world space against
+// the world-space TLAS -- no view-space round-trip.
 vec3 coin_rtx_directLighting(vec3 worldPos, vec3 worldN, RTMaterial mat)
 {
-    vec3 eyePos = (frame.u_view * vec4(worldPos, 1.0)).xyz;
-    vec3 N = normalize(mat3(frame.u_view) * worldN);
-    vec3 V = normalize(-eyePos);
+    vec3 N = normalize(worldN);
+    vec3 V = normalize(frame.u_cameraPos.xyz - worldPos);
     vec3 lit = mat.ambient.rgb; // ambient light folded in by producer
     int lightCount = int(mat.params.z);
     for (int i = 0; i < COIN_MAX_LIGHTS; ++i) {
@@ -135,7 +132,7 @@ vec3 coin_rtx_directLighting(vec3 worldPos, vec3 worldN, RTMaterial mat)
         float spotFactor = 1.0;
         float distToLight = 1e30;
         if (mat.lightType[i].x > 0.5) {
-            vec3 lightVector = mat.lightPosition[i].xyz - eyePos;
+            vec3 lightVector = mat.lightPosition[i].xyz - worldPos;
             distToLight = length(lightVector);
             if (distToLight <= 0.0001) continue;
             L = lightVector / distToLight;
@@ -144,7 +141,7 @@ vec3 coin_rtx_directLighting(vec3 worldPos, vec3 worldN, RTMaterial mat)
                                     att.x * distToLight * distToLight, 0.0001);
             if (mat.lightType[i].x > 1.5) {
                 vec3 coneDir = normalize(mat.lightDirection[i].xyz);
-                vec3 fromLight = normalize(eyePos - mat.lightPosition[i].xyz);
+                vec3 fromLight = normalize(worldPos - mat.lightPosition[i].xyz);
                 float spotCos = dot(coneDir, fromLight);
                 if (spotCos < mat.lightSpot[i].x) continue;
                 spotFactor = pow(max(spotCos, 0.0), mat.lightSpot[i].y);
@@ -154,18 +151,17 @@ vec3 coin_rtx_directLighting(vec3 worldPos, vec3 worldN, RTMaterial mat)
             L = mat.lightDirection[i].xyz;
         }
 
-        float NdotL = dot(N, normalize(L));
+        L = normalize(L);
+        float NdotL = dot(N, L);
         if (NdotL <= 0.0) continue;
 
         // Shadow ray: the shadow pair writes only payload.occluded.  The
-        // TLAS is world space, so convert the eye-space direction L back to
-        // world space before tracing.
+        // light data is already world space, so trace L directly against
+        // the world-space TLAS.
         payload.occluded = 0u;
-        vec3 worldL = normalize((frame.u_viewInverse *
-                                 vec4(normalize(L), 0.0)).xyz);
         traceRayEXT(tlas, gl_RayFlagsOpaqueEXT, 0xFF, SBT_HIT_SHADOW, 0,
                     SBT_MISS_SHADOW, worldPos + worldN * 0.001, 0.001,
-                    worldL, distToLight - 0.001, 0);
+                    L, distToLight - 0.001, 0);
         if (payload.occluded != 0u) continue;
 
         vec3 H = normalize(normalize(L) + V);

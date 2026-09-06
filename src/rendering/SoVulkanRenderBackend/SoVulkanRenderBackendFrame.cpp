@@ -27,6 +27,9 @@
 #include <cstring>
 #include <limits>
 #include <mutex>
+#include <atomic>
+#include <condition_variable>
+#include <thread>
 #include <unordered_map>
 #include <vector>
 
@@ -397,16 +400,20 @@ SoVulkanRenderBackend::shutdown()
                                  this->allocator);
     this->lightingSetLayout = VK_NULL_HANDLE;
   }
+  // Join the M1d record workers before freeing the secondary buffers they
+  // record into.
+  this->shutdownRecordPool();
   this->releaseFrameResources();
   if (this->commandPool != VK_NULL_HANDLE) {
     vkDestroyCommandPool(this->device, this->commandPool, this->allocator);
     this->commandPool = VK_NULL_HANDLE;
   }
-  if (this->secondaryCommandPool != VK_NULL_HANDLE) {
-    vkDestroyCommandPool(this->device, this->secondaryCommandPool,
-                        this->allocator);
-    this->secondaryCommandPool = VK_NULL_HANDLE;
+  for (VkCommandPool pool : this->secondaryCommandPools) {
+    if (pool != VK_NULL_HANDLE) {
+      vkDestroyCommandPool(this->device, pool, this->allocator);
+    }
   }
+  this->secondaryCommandPools.clear();
   if (this->memPool) {
     // Queue is idle and every deferred destroy has been flushed, so all
     // sub-allocated ranges are free and every block can be released.
@@ -439,6 +446,9 @@ SoVulkanRenderBackend::renderInternal(const SoDrawList & drawlist,
     return FALSE;
   }
   this->debugValidateDrawList(drawlist);
+  vkBackendTrace(this->uboFrameIndex, "renderInternal.enter",
+                 "overlaysOnly=%d cmds=%d",
+                 static_cast<int>(overlaysOnly), drawlist.getNumCommands());
 
   if (COIN_VULKAN_ENV_FLAG("FC_VULKAN_BLACK_DEBUG")) {
     static int blackFrame = 0;
@@ -554,56 +564,14 @@ SoVulkanRenderBackend::renderInternal(const SoDrawList & drawlist,
   // old framebuffer is released through the deferred ring: an older in-flight
   // submission may still reference it (the per-frame vkQueueWaitIdle is gone,
   // so only the current slot's fence has been waited by beginFrame()).
-  if (this->renderPassFramebuffer == VK_NULL_HANDLE ||
-      this->renderPassFramebufferPass != this->renderPass ||
-      this->renderPassFramebufferColorImage != target->colorImage ||
-      this->renderPassFramebufferColorView != target->colorImageView ||
-      this->renderPassFramebufferDepthImage != target->depthImage ||
-      this->renderPassFramebufferDepthView != target->depthImageView ||
-      this->renderPassFramebufferExtent.width != target->extent.width ||
-      this->renderPassFramebufferExtent.height != target->extent.height) {
-    if (this->renderPassFramebuffer != VK_NULL_HANDLE) {
-      const VkDevice device = this->device;
-      const VkAllocationCallbacks * allocator = this->allocator;
-      const VkFramebuffer oldFramebuffer = this->renderPassFramebuffer;
-      this->deferDestroy([device, allocator, oldFramebuffer]() {
-        if (oldFramebuffer != VK_NULL_HANDLE) {
-          vkDestroyFramebuffer(device, oldFramebuffer, allocator);
-        }
-      });
-      this->renderPassFramebuffer = VK_NULL_HANDLE;
-    }
-    VkFramebufferCreateInfo fci {};
-    fci.sType = VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO;
-    fci.renderPass = this->renderPass;
-    fci.attachmentCount =
-      (target->depthImageView != VK_NULL_HANDLE &&
-       target->depthFormat != VK_FORMAT_UNDEFINED)
-        ? 2u : 1u;
-    const VkImageView attachments[] = {
-      target->colorImageView,
-      target->depthImageView,
-    };
-    fci.pAttachments = attachments;
-    fci.width = target->extent.width;
-    fci.height = target->extent.height;
-    fci.layers = 1;
-    if (vkCreateFramebuffer(this->device, &fci, this->allocator,
-                            &this->renderPassFramebuffer) != VK_SUCCESS) {
-      this->emitError("failed to create Vulkan framebuffer");
-      // The one-shot command buffer was begun above and never submitted; an
-      // implicit reset only happens on submission, so reset it explicitly or
-      // every later beginCommandBuffer() will fail.
-      vkEndCommandBuffer(this->currentCommandBuffer());
-      vkResetCommandBuffer(this->currentCommandBuffer(), 0);
-      return FALSE;
-    }
-    this->renderPassFramebufferPass = this->renderPass;
-    this->renderPassFramebufferColorImage = target->colorImage;
-    this->renderPassFramebufferColorView = target->colorImageView;
-    this->renderPassFramebufferDepthImage = target->depthImage;
-    this->renderPassFramebufferDepthView = target->depthImageView;
-    this->renderPassFramebufferExtent = target->extent;
+  if (!this->ensureFramebuffer(target, this->renderPass)) {
+    this->emitError("failed to create Vulkan framebuffer");
+    // The one-shot command buffer was begun above and never submitted; an
+    // implicit reset only happens on submission, so reset it explicitly or
+    // every later beginCommandBuffer() will fail.
+    vkEndCommandBuffer(this->currentCommandBuffer());
+    vkResetCommandBuffer(this->currentCommandBuffer(), 0);
+    return FALSE;
   }
   const VkFramebuffer framebuffer = this->renderPassFramebuffer;
 
@@ -657,7 +625,8 @@ SoVulkanRenderBackend::renderInternal(const SoDrawList & drawlist,
   }
   else {
     recorded = this->recordFrame(drawlist, params, *target, this->renderPass,
-                                 this->recordContext);
+                                 this->recordContext,
+                                 this->renderPassFramebuffer);
   }
   this->recordContext.buffer = VK_NULL_HANDLE;
 
@@ -692,11 +661,65 @@ SoVulkanRenderBackend::renderOverlaysOnly(const SoDrawList & drawlist,
   return this->renderInternal(drawlist, params, true);
 }
 
+bool
+SoVulkanRenderBackend::ensureFramebuffer(const SoVulkanRenderTarget * target,
+                                         VkRenderPass renderPass)
+{
+  if (this->renderPassFramebuffer != VK_NULL_HANDLE &&
+      this->renderPassFramebufferPass == renderPass &&
+      this->renderPassFramebufferColorImage == target->colorImage &&
+      this->renderPassFramebufferColorView == target->colorImageView &&
+      this->renderPassFramebufferDepthImage == target->depthImage &&
+      this->renderPassFramebufferDepthView == target->depthImageView &&
+      this->renderPassFramebufferExtent.width == target->extent.width &&
+      this->renderPassFramebufferExtent.height == target->extent.height) {
+    return true;
+  }
+  if (this->renderPassFramebuffer != VK_NULL_HANDLE) {
+    const VkDevice device = this->device;
+    const VkAllocationCallbacks * allocator = this->allocator;
+    const VkFramebuffer oldFramebuffer = this->renderPassFramebuffer;
+    this->deferDestroy([device, allocator, oldFramebuffer]() {
+      if (oldFramebuffer != VK_NULL_HANDLE) {
+        vkDestroyFramebuffer(device, oldFramebuffer, allocator);
+      }
+    });
+    this->renderPassFramebuffer = VK_NULL_HANDLE;
+  }
+  VkFramebufferCreateInfo fci {};
+  fci.sType = VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO;
+  fci.renderPass = renderPass;
+  fci.attachmentCount =
+    (target->depthImageView != VK_NULL_HANDLE &&
+     target->depthFormat != VK_FORMAT_UNDEFINED)
+      ? 2u : 1u;
+  const VkImageView attachments[] = {
+    target->colorImageView,
+    target->depthImageView,
+  };
+  fci.pAttachments = attachments;
+  fci.width = target->extent.width;
+  fci.height = target->extent.height;
+  fci.layers = 1;
+  if (vkCreateFramebuffer(this->device, &fci, this->allocator,
+                          &this->renderPassFramebuffer) != VK_SUCCESS) {
+    return false;
+  }
+  this->renderPassFramebufferPass = renderPass;
+  this->renderPassFramebufferColorImage = target->colorImage;
+  this->renderPassFramebufferColorView = target->colorImageView;
+  this->renderPassFramebufferDepthImage = target->depthImage;
+  this->renderPassFramebufferDepthView = target->depthImageView;
+  this->renderPassFramebufferExtent = target->extent;
+  return true;
+}
+
 SbBool
 SoVulkanRenderBackend::renderExternal(const SoDrawList & drawlist,
                                       const SoRenderParams & params,
                                       VkCommandBuffer commandBuffer,
-                                      VkRenderPass renderPass)
+                                      VkRenderPass renderPass,
+                                      VkFramebuffer framebuffer)
 {
   if (!this->isInitialized()) {
     this->emitError("renderExternal called before backend initialization");
@@ -754,11 +777,22 @@ SoVulkanRenderBackend::renderExternal(const SoDrawList & drawlist,
   }
   vkBackendRenderBreadcrumbSince(textureBcStart, 5000, "renderExternal flushPendingTextureUploadsExternal end");
 
+  // The M1c/M1d secondary path records with RENDER_PASS_CONTINUE inheritance,
+  // which needs the framebuffer matching the caller's pass + swapchain image.
+  // The caller owns the pass/framebuffer pair (e.g. QVulkanWindow's
+  // defaultRenderPass()/currentFramebuffer(), whose MSAA pass carries a
+  // resolve attachment the backend cannot guess), so the framebuffer is
+  // threaded in rather than fabricated here.
+  if (framebuffer == VK_NULL_HANDLE) {
+    this->emitError("renderExternal called without a framebuffer");
+    return FALSE;
+  }
+
   const double cpuT3 = wantCpuTiming ? vkBackendRenderNowMs() : 0.0;
   const long recordBcStart = vkBackendRenderBreadcrumbEnabled() ? vkBackendRenderNowUs() : 0;
   this->recordContext.buffer = commandBuffer;
   const bool recorded = this->recordFrame(drawlist, params, *target, renderPass,
-                                          this->recordContext);
+                                          this->recordContext, framebuffer);
   vkBackendRenderBreadcrumbSince(recordBcStart, 5000, "renderExternal recordFrame end");
   this->recordContext.buffer = VK_NULL_HANDLE;
   if (wantCpuTiming) {
@@ -766,10 +800,11 @@ SoVulkanRenderBackend::renderExternal(const SoDrawList & drawlist,
     geomMs = cpuT2 - cpuT1;
     texMs = cpuT3 - cpuT2;
     recordMs = vkBackendRenderNowMs() - cpuT3;
+    const double totalMs = recordMs + texMs + geomMs + setupMs;
     std::fprintf(stderr,
                  "[RTDBG] cpuTimingRaster mode=full setup=%.2f geom=%.2f "
-                 "tex=%.2f record=%.2f\n",
-                 setupMs, geomMs, texMs, recordMs);
+                 "tex=%.2f record=%.2f total=%.2f\n",
+                 setupMs, geomMs, texMs, recordMs, totalMs);
     std::fflush(stderr);
   }
   vkBackendRenderBreadcrumbSince(externalBcStart, 5000, "renderExternal end");
@@ -851,10 +886,11 @@ SoVulkanRenderBackend::renderExternalOverlay(const SoDrawList & drawlist,
     geomMs = cpuT2 - cpuT1;
     texMs = cpuT3 - cpuT2;
     recordMs = vkBackendRenderNowMs() - cpuT3;
+    const double totalMs = recordMs + texMs + geomMs + setupMs;
     std::fprintf(stderr,
                  "[RTDBG] cpuTimingRaster mode=overlay setup=%.2f geom=%.2f "
-                 "tex=%.2f record=%.2f\n",
-                 setupMs, geomMs, texMs, recordMs);
+                 "tex=%.2f record=%.2f total=%.2f\n",
+                 setupMs, geomMs, texMs, recordMs, totalMs);
     std::fflush(stderr);
   }
   return TRUE;
@@ -865,6 +901,7 @@ SoVulkanRenderBackend::buildWorkItems(const SoDrawList & drawlist,
                                       const SoRenderParams & params,
                                       bool wireframeOverlay, bool pointsOverlay,
                                       const float * overlayColor,
+                                      VkRenderPass renderPass,
                                       std::vector<VulkanWorkItem> & out)
 {
   const int overlayFillMode = wireframeOverlay
@@ -1006,6 +1043,122 @@ SoVulkanRenderBackend::buildWorkItems(const SoDrawList & drawlist,
     out.push_back(item);
   }
 
+  // M1d: when the opaque pass is recorded in parallel, pre-resolve every
+  // recordToSecondary item's pipeline here (single-threaded).  getOrCreatePipeline()
+  // mutates the shared pipelineCache/gpuCache on its cold path, so warming each
+  // key ahead of the dispatch means the parallel recorders only hit the read-only
+  // warm fast path and never race on the cache.  Opaque items use the default
+  // (non-transparent, no fill-mode override, not an overlay) recording state.
+  if (this->parallelRecordEnabled) {
+    const auto * tgt = static_cast<const SoVulkanRenderTarget *>(params.renderTarget);
+    if (tgt) {
+      for (const VulkanWorkItem & item : out) {
+        if (!item.recordToSecondary) continue;
+        VkPipeline warmed = VK_NULL_HANDLE;
+        if (item.count > 1) {
+          this->getOrCreatePipeline(*item.commands[0], *tgt, renderPass, warmed,
+                                    false, -1, false);
+        }
+        else {
+          this->getOrCreatePipeline(*item.single, *tgt, renderPass, warmed,
+                                    false, -1, false);
+        }
+      }
+    }
+  }
+
+  return true;
+}
+
+void
+SoVulkanRenderBackend::recordWorkItem(const SoDrawList & drawlist,
+                                      const SoRenderParams & params,
+                                      const SoVulkanRenderTarget & target,
+                                      VkRenderPass renderPass,
+                                      const VulkanWorkItem & item,
+                                      VulkanRecordContext & ctx)
+{
+  // Plant the pre-assigned disjoint slot block, then record one draw or one
+  // instanced batch.  The record helper advances ctx.uboCmdIndex from here.
+  ctx.uboCmdIndex = item.slotBase;
+  vkBackendTrace(this->uboFrameIndex, "recordWorkItem.enter",
+                 "count=%d slotBase=%u kind=%s",
+                 static_cast<int>(item.count), item.slotBase,
+                 item.count > 1 ? "batch" : "single");
+  if (item.count > 1) {
+    if (this->recordCommandBatch(drawlist, item.commands, item.count, target,
+                                 params, renderPass, item.transparent,
+                                 item.fillModeOverride, item.uniformColorOverride,
+                                 ctx)) {
+      return;
+    }
+    // Batch rejected (e.g. a non-batchable command slipped in): fall back to
+    // per-command draws over the item's slot range, each at its own slot.
+    for (int k = 0; k < item.count; ++k) {
+      ctx.uboCmdIndex = item.slotBase + static_cast<uint32_t>(k);
+      this->recordDrawCommand(drawlist, *item.commands[k], target, params,
+                              renderPass, item.transparent,
+                              item.fillModeOverride, item.uniformColorOverride,
+                              false, ctx);
+    }
+    return;
+  }
+  this->recordDrawCommand(drawlist, *item.single, target, params, renderPass,
+                          item.transparent, item.fillModeOverride,
+                          item.uniformColorOverride, false, ctx);
+}
+
+bool
+SoVulkanRenderBackend::recordSecondaryChunk(VulkanRecordContext & ctx,
+                                            const SoDrawList & drawlist,
+                                            const SoRenderParams & params,
+                                            const SoVulkanRenderTarget & target,
+                                            VkRenderPass renderPass,
+                                            const std::vector<const VulkanWorkItem *> & items,
+                                            VkCommandBuffer secondary,
+                                            VkFramebuffer framebuffer)
+{
+  if (secondary == VK_NULL_HANDLE || items.empty()) return true;
+  vkBackendTrace(this->uboFrameIndex, "recordSecondaryChunk.enter",
+                 "secondary=%p items=%zu",
+                 reinterpret_cast<const void *>(secondary), items.size());
+  if (COIN_VULKAN_ENV_FLAG("FC_VULKAN_BACKEND_DEBUG")) {
+    fprintf(stderr, "[SEC] begin chunk items=%zu secondary=%p frame=%u\n",
+            items.size(), (const void*)secondary, this->uboFrameIndex);
+  }
+  vkResetCommandBuffer(secondary, 0);
+  vkBackendTrace(this->uboFrameIndex, "recordSecondaryChunk.resetDone",
+                 "secondary=%p",
+                 reinterpret_cast<const void *>(secondary));
+  // Start from a clean dedup cache: secondary buffers inherit nothing (not
+  // dynamic state, pipeline, or descriptors) from the primary.
+  ctx.reset();
+  VkCommandBufferBeginInfo sbi {};
+  sbi.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
+  sbi.flags = VK_COMMAND_BUFFER_USAGE_RENDER_PASS_CONTINUE_BIT |
+              VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+  VkCommandBufferInheritanceInfo inh {};
+  inh.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_INHERITANCE_INFO;
+  inh.renderPass = renderPass;
+  inh.subpass = 0;
+  inh.framebuffer = framebuffer;
+  sbi.pInheritanceInfo = &inh;
+  if (vkBeginCommandBuffer(secondary, &sbi) != VK_SUCCESS) {
+    vkBackendTrace(this->uboFrameIndex, "recordSecondaryChunk.beginFail",
+                   "secondary=%p",
+                   reinterpret_cast<const void *>(secondary));
+    return false;
+  }
+  vkBackendTrace(this->uboFrameIndex, "recordSecondaryChunk.beginOk",
+                 "secondary=%p", reinterpret_cast<const void *>(secondary));
+  ctx.buffer = secondary;
+  for (const VulkanWorkItem * item : items) {
+    this->recordWorkItem(drawlist, params, target, renderPass, *item, ctx);
+  }
+  ctx.buffer = VK_NULL_HANDLE;
+  vkEndCommandBuffer(secondary);
+  vkBackendTrace(this->uboFrameIndex, "recordSecondaryChunk.endOk",
+                 "secondary=%p", reinterpret_cast<const void *>(secondary));
   return true;
 }
 
@@ -1014,8 +1167,11 @@ SoVulkanRenderBackend::recordFrame(const SoDrawList & drawlist,
                                    const SoRenderParams & params,
                                    const SoVulkanRenderTarget & target,
                                    VkRenderPass renderPass,
-                                   VulkanRecordContext & ctx)
+                                   VulkanRecordContext & ctx,
+                                   VkFramebuffer inheritFramebuffer)
 {
+  vkBackendTrace(this->uboFrameIndex, "recordFrame.enter",
+                 "cmds=%d", drawlist.getNumCommands());
   if (COIN_VULKAN_ENV_FLAG("FC_VULKAN_MATRIX_DUMP")) {
     s_debugFrame++;
     s_dumpCmdCount = 0;
@@ -1121,108 +1277,182 @@ SoVulkanRenderBackend::recordFrame(const SoDrawList & drawlist,
   // per-draw uboCmdIndex++ sequence produced, so recording is identical.
   std::vector<VulkanWorkItem> & workItems = this->workItemsScratch;
   this->buildWorkItems(drawlist, params, wireframeOverlay, pointsOverlay,
-                       overlayColor, workItems);
+                       overlayColor, renderPass, workItems);
+  vkBackendTrace(this->uboFrameIndex, "recordFrame.workItemsBuilt",
+                 "items=%zu", workItems.size());
 
-  // Record one item into the current ctx.buffer using its pre-assigned slot
-  // base.  The pre-assigned disjoint block means we set uboCmdIndex per item
-  // rather than letting each record helper increment from the previous value,
-  // so workers can later record disjoint ranges without sharing cursor state.
-  auto recordItem = [&](const VulkanWorkItem & item) {
-    ctx.uboCmdIndex = item.slotBase;
-    if (item.count > 1) {
-      if (this->recordCommandBatch(drawlist, item.commands, item.count, target,
-                                   params, renderPass, item.transparent,
-                                   item.fillModeOverride,
-                                   item.uniformColorOverride, ctx)) {
-        // Batched into one instanced draw; nothing further to do.
+  // Secondaries are recorded with RENDER_PASS_CONTINUE inheritance into the
+  // pass the frame is in.  On the INTERNAL path that pass is backend-owned
+  // (renderPass == this->renderPass) and the combination is exercised by the
+  // testsuite.  The EXTERNAL path (FreeCAD's QuarterVulkanWidget) hands us a
+  // caller-owned pass/framebuffer/command-buffer triplet (QVulkanWindow's,
+  // possibly MSAA); recording secondaries against it has proven to corrupt
+  // NVIDIA driver state (crash inside the driver at the first render-pass
+  // command after the replay) so it stays OFF unless explicitly opted in
+  // while that interaction is investigated.
+  const bool externalPass = renderPass != this->renderPass;
+  const bool canUseSecondary =
+    !this->secondaryCommandBuffers.empty() &&
+    inheritFramebuffer != VK_NULL_HANDLE &&
+    (!externalPass || COIN_VULKAN_ENV_FLAG("FC_VULKAN_EXTERNAL_SECONDARY"));
+  const bool debugFlags =
+    COIN_VULKAN_ENV_FLAG("FC_VULKAN_MATRIX_DUMP") ||
+    COIN_VULKAN_ENV_FLAG("FC_VULKAN_BLACK_DEBUG");
+
+  // Count the render-order-independent opaque items that live in a secondary.
+  uint64_t secondaryItemCount = 0;
+  for (const VulkanWorkItem & item : workItems) {
+    if (item.recordToSecondary) ++secondaryItemCount;
+  }
+  const bool wantParallel =
+    canUseSecondary && this->parallelRecordEnabled && !debugFlags &&
+    secondaryItemCount >= 64 && this->maxRecordWorkers > 1;
+  vkBackendTrace(this->uboFrameIndex, "recordFrame.mode",
+                 "secondary=%u canSec=%d parEnabled=%d W=%u wantPar=%d",
+                 static_cast<unsigned>(secondaryItemCount),
+                 canUseSecondary ? 1 : 0, this->parallelRecordEnabled ? 1 : 0,
+                 this->maxRecordWorkers, wantParallel ? 1 : 0);
+
+  if (canUseSecondary && secondaryItemCount > 0 && !wantParallel) {
+    // M1c serial: one secondary holds the whole opaque pass, replayed in place.
+    VkCommandBuffer secondary = this->currentSecondaryCommandBuffer();
+    VkCommandBuffer primary = this->currentCommandBuffer();
+    std::vector<const VulkanWorkItem *> opaqueItems;
+    opaqueItems.reserve(static_cast<size_t>(secondaryItemCount));
+    for (const VulkanWorkItem & item : workItems) {
+      if (item.recordToSecondary) opaqueItems.push_back(&item);
+    }
+    if (!this->recordSecondaryChunk(ctx, drawlist, params, target, renderPass,
+                                    opaqueItems, secondary,
+                                    inheritFramebuffer)) {
+      this->emitError("failed to begin secondary command buffer");
+      this->recordContext.buffer = primary;
+      this->recordContext.reset();
+      for (const VulkanWorkItem & item : workItems) {
+        this->recordWorkItem(drawlist, params, target, renderPass, item,
+                             this->recordContext);
+      }
+      return TRUE;
+    }
+    // The primary's bound state was NOT preserved across the secondary, so
+    // reset its dedup cache before continuing inline.
+    ctx.buffer = primary;
+    ctx.reset();
+    vkCmdExecuteCommands(primary, 1, &secondary);
+    for (const VulkanWorkItem & item : workItems) {
+      if (!item.recordToSecondary) {
+        this->recordWorkItem(drawlist, params, target, renderPass, item, ctx);
+      }
+    }
+  }
+  else if (wantParallel) {
+    // M1d parallel: partition opaque items into disjoint chunks (greedy
+    // longest-first for load balance), record each into its own worker
+    // secondary in parallel, then replay all in order followed by the inline
+    // painter-order / overlay / annotation items.
+    if (COIN_VULKAN_ENV_FLAG("FC_VULKAN_BACKEND_DEBUG")) {
+      static int parLog = 0;
+      if (parLog++ < 3) {
+        fprintf(stderr,
+                "[PAR] parallel record: %u opaque items across %u workers\n",
+                static_cast<unsigned>(secondaryItemCount),
+                static_cast<unsigned>(this->maxRecordWorkers));
+      }
+    }
+    const uint32_t W = this->maxRecordWorkers;
+    for (uint32_t w = 0; w < W; ++w) {
+      this->recordJobs[w].items.clear();
+      this->recordJobs[w].drawlist = &drawlist;
+      this->recordJobs[w].params = &params;
+      this->recordJobs[w].target = &target;
+      this->recordJobs[w].renderPass = renderPass;
+      this->recordJobs[w].framebuffer = inheritFramebuffer;
+      this->recordJobs[w].secondary = this->parallelCurrentSecondary(w);
+      this->recordJobs[w].ctx = &this->workerRecordContexts[w];
+      this->recordJobs[w].ok = false;
+    }
+    // Greedy longest-first: costs = first command's vertex count * item.count.
+    std::vector<std::pair<uint64_t, const VulkanWorkItem *>> heaviest;
+    heaviest.reserve(static_cast<size_t>(secondaryItemCount));
+    for (const VulkanWorkItem & item : workItems) {
+      if (!item.recordToSecondary) continue;
+      const SoRenderCommand * first =
+        item.count > 1 ? item.commands[0] : item.single;
+      uint64_t cost = static_cast<uint64_t>(first ? first->geometry.vertexCount : 0);
+      if (first && first->geometry.indexCount) cost *= first->geometry.indexCount;
+      cost *= static_cast<uint64_t>(item.count);
+      heaviest.emplace_back(cost, &item);
+    }
+    std::sort(heaviest.begin(), heaviest.end(),
+              [](const std::pair<uint64_t, const VulkanWorkItem *> & a,
+                 const std::pair<uint64_t, const VulkanWorkItem *> & b) {
+                return a.first > b.first;
+              });
+    std::vector<uint64_t> load(W, 0);
+    for (const auto & h : heaviest) {
+      uint32_t dst = 0;
+      for (uint32_t w = 1; w < W; ++w) { if (load[w] < load[dst]) dst = w; }
+      this->recordJobs[dst].items.push_back(h.second);
+      load[dst] += h.first;
+    }
+    // Dispatch: main records worker 0, spawned threads record workers 1..W-1.
+    this->recordDoneCount = 0;
+    {
+      std::lock_guard<std::mutex> lk(this->recordMutex);
+      ++this->recordJobGeneration;
+    }
+    vkBackendTrace(this->uboFrameIndex, "recordFrame.dispatch",
+                   "gen=%u W=%u items=%u", this->recordJobGeneration, W,
+                   static_cast<unsigned>(secondaryItemCount));
+    this->recordCvSpawn.notify_all();
+    this->recordJobs[0].ok = this->recordSecondaryChunk(
+      this->workerRecordContexts[0], drawlist, params, target, renderPass,
+      this->recordJobs[0].items, this->recordJobs[0].secondary,
+      this->recordJobs[0].framebuffer);
+    {
+      std::unique_lock<std::mutex> lk(this->recordMutex);
+      this->recordCvDone.wait(lk, [this] {
+        return this->recordDoneCount.load() >= this->maxRecordWorkers - 1;
+      });
+    }
+    vkBackendTrace(this->uboFrameIndex, "recordFrame.joined",
+                   "doneCount=%d ok0=%d",
+                   this->recordDoneCount.load(), this->recordJobs[0].ok ? 1 : 0);
+    // Replay the secondaries in order, then inline the non-opaque items.
+    // A failed worker's chunk is re-recorded inline (serial fallback) into the
+    // primary instead of executing its possibly-invalid secondary.
+    VkCommandBuffer primary = this->currentCommandBuffer();
+    ctx.buffer = primary;
+    ctx.reset();
+    std::vector<VkCommandBuffer> execute;
+    execute.reserve(W);
+    for (uint32_t w = 0; w < W; ++w) {
+      if (this->recordJobs[w].items.empty()) continue;
+      if (this->recordJobs[w].ok) {
+        execute.push_back(this->recordJobs[w].secondary);
       }
       else {
-        // Batch rejected (e.g. a non-batchable command slipped in): fall back
-        // to per-command draws over the item's slot range.  Re-assign the base
-        // so each falls at its own slot, matching the pre-assigned layout.
-        for (int k = 0; k < item.count; ++k) {
-          ctx.uboCmdIndex = item.slotBase + static_cast<uint32_t>(k);
-          this->recordDrawCommand(drawlist, *item.commands[k], target, params,
-                                  renderPass, item.transparent,
-                                  item.fillModeOverride, item.uniformColorOverride,
-                                  false, ctx);
+        this->emitError("parallel record worker failed; recorded inline");
+        for (const VulkanWorkItem * item : this->recordJobs[w].items) {
+          this->recordWorkItem(drawlist, params, target, renderPass, *item,
+                               ctx);
         }
       }
     }
-    else {
-      this->recordDrawCommand(drawlist, *item.single, target, params,
-                              renderPass, item.transparent,
-                              item.fillModeOverride, item.uniformColorOverride,
-                              false, ctx);
+    if (!execute.empty()) {
+      vkCmdExecuteCommands(primary, static_cast<uint32_t>(execute.size()),
+                           execute.data());
     }
-  };
-
-  // M1c: the render-order-independent opaque pass is recorded into a
-  // secondary command buffer that we re-play into the already-begun render
-  // pass, so the opaque draws can later (M1d) be recorded in parallel by
-  // worker threads.  Only paths with a real framebuffer (own-queue render)
-  // use a secondary; otherwise fall back to fully-inline record to keep the
-  // exact same output.
-  if (this->secondaryCommandBuffers.empty() ||
-      this->renderPassFramebuffer == VK_NULL_HANDLE) {
     for (const VulkanWorkItem & item : workItems) {
-      recordItem(item);
+      if (!item.recordToSecondary) {
+        this->recordWorkItem(drawlist, params, target, renderPass, item, ctx);
+      }
     }
   }
   else {
-    VkCommandBuffer secondary = this->currentSecondaryCommandBuffer();
-    VkCommandBuffer primary = this->currentCommandBuffer();
-    bool hasSecondaryItems = false;
+    // Fully-inline record (no secondary available or nothing to re-play).
     for (const VulkanWorkItem & item : workItems) {
-      if (item.recordToSecondary) { hasSecondaryItems = true; break; }
-    }
-    if (!hasSecondaryItems) {
-      for (const VulkanWorkItem & item : workItems) {
-        recordItem(item);
-      }
-    }
-    else {
-      // Record the opaque items into the secondary (render-pass-continue).
-      // Begin from a clean dedup cache: secondary buffers inherit NOTHING
-      // (not dynamic state, pipeline, or descriptors) from the primary, so a
-      // stale lastBound* entry would suppress a needed re-bind.
-      vkResetCommandBuffer(secondary, 0);
-      ctx.reset();
-      VkCommandBufferBeginInfo sbi {};
-      sbi.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
-      sbi.flags = VK_COMMAND_BUFFER_USAGE_RENDER_PASS_CONTINUE_BIT |
-                  VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
-      VkCommandBufferInheritanceInfo inh {};
-      inh.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_INHERITANCE_INFO;
-      inh.renderPass = renderPass;
-      inh.subpass = 0;
-      inh.framebuffer = this->renderPassFramebuffer;
-      sbi.pInheritanceInfo = &inh;
-      if (vkBeginCommandBuffer(secondary, &sbi) != VK_SUCCESS) {
-        this->emitError("failed to begin secondary command buffer");
-        // Fall back to fully-inline recording for this frame.
-        ctx.buffer = primary;
-        ctx.reset();
-        for (const VulkanWorkItem & item : workItems) {
-          recordItem(item);
-        }
-        return TRUE;
-      }
-      ctx.buffer = secondary;
-      for (const VulkanWorkItem & item : workItems) {
-        if (item.recordToSecondary) recordItem(item);
-      }
-      ctx.buffer = primary;
-      // The primary's bound state was NOT preserved across the secondary, so
-      // reset its dedup cache before continuing inline (else the first inline
-      // draw would skip binds the primary no longer has).
-      ctx.reset();
-      vkEndCommandBuffer(secondary);
-      vkCmdExecuteCommands(primary, 1, &secondary);
-      // Inline the remaining (painter-order, overlay-redraw, annotation) items.
-      for (const VulkanWorkItem & item : workItems) {
-        if (!item.recordToSecondary) recordItem(item);
-      }
+      this->recordWorkItem(drawlist, params, target, renderPass, item, ctx);
     }
   }
 
