@@ -762,9 +762,7 @@ SoGLRenderBackend::uploadLighting(const SoDrawList & drawlist,
     });
   }
   for (int i = 0; i < count; ++i) {
-    // Setups are world-space; the Visual program shades in eye space.
-    const SoLightData light = SoRenderIR::lightToEye(
-      lighting->lights[static_cast<size_t>(i)], command.viewMatrix);
+    const SoLightData & light = lighting->lights[static_cast<size_t>(i)];
     types[i] = static_cast<GLint>(light.type);
     colors[i * 3 + 0] = light.color[0];
     colors[i * 3 + 1] = light.color[1];
