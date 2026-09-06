@@ -765,6 +765,8 @@ SoVulkanRenderBackend::cacheFrameMatrices(const SoRenderParams & params)
               sizeof(float) * 16);
   std::memcpy(this->frameProjFloats, &params.projMatrix[0][0],
               sizeof(float) * 16);
+  this->frameDpr = params.devicePixelRatio > 0.0f
+    ? params.devicePixelRatio : 1.0f;
 }
 
 void
@@ -880,18 +882,16 @@ SoVulkanRenderBackend::deferDestroyTextureEntry(VulkanCachedTexture & entry)
   const VkDeviceSize imageSize = entry.memorySize;
   const VkDeviceSize memoryOffset = entry.memoryOffset;
   const VkImageView view = entry.view;
-  const VkSampler sampler = entry.sampler;
+  // The sampler is shared (samplerCache), so it is NOT destroyed here; it is
+  // released once at shutdown() after the texture cache has been emptied.
   // Capture `this` so the memory is returned to the sub-allocator (when
   // enabled) inside the deferred lambda, by which point the frame's
   // submission is complete and the range is safe to reuse.
   SoVulkanRenderBackend * self = this;
   this->deferDestroy([self, device, allocator, image, memory, imageSize,
-                      memoryOffset, view, sampler]() {
+                      memoryOffset, view]() {
     if (view != VK_NULL_HANDLE) {
       vkDestroyImageView(device, view, allocator);
-    }
-    if (sampler != VK_NULL_HANDLE) {
-      vkDestroySampler(device, sampler, allocator);
     }
     if (image != VK_NULL_HANDLE) {
       vkDestroyImage(device, image, allocator);
@@ -995,7 +995,8 @@ SoVulkanRenderBackend::createWhiteTexture()
   fallback.magFilter = SO_TEXTURE_FILTER_NEAREST;
   fallback.wrapS = SO_TEXTURE_WRAP_CLAMP_TO_EDGE;
   fallback.wrapT = SO_TEXTURE_WRAP_CLAMP_TO_EDGE;
-  if (!this->createSampler(fallback, this->whiteSampler)) {
+  if (!this->createSampler(fallback.minFilter, fallback.magFilter,
+                           fallback.wrapS, fallback.wrapT, this->whiteSampler)) {
     return false;
   }
   const bool allocated = this->allocateTextureDescriptorSet(

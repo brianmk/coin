@@ -407,7 +407,9 @@ private:
   bool recordPendingTextureUploads();
   void finalizePendingTextureUploads();
   bool flushPendingTextureUploadsExternal();
-  bool createSampler(const SoTextureData & texture, VkSampler & sampler);
+  bool createSampler(SoTextureFilter minFilter, SoTextureFilter magFilter,
+                     SoTextureWrap wrapS, SoTextureWrap wrapT,
+                     VkSampler & sampler);
   // Format actually used for an N-component SoTextureData image.  VK_FORMAT_
   // R8_UNORM / R8G8_UNORM / R8G8B8_UNORM are not guaranteed to be sampleable
   // (they are optional formats), so when the device lacks SAMPLED_IMAGE
@@ -682,6 +684,10 @@ private:
   // updateLightingUniforms() and recordDrawCommand() on every draw.
   float frameViewFloats[16] = {};
   float frameProjFloats[16] = {};
+  // Hoisted device-pixel ratio: cacheFrameMatrices() computes the frame's
+  // scalar once so per-command push-constant code reads a member instead of
+  // re-evaluating params.devicePixelRatio (a branch + member access) per draw.
+  float frameDpr = 1.0f;
   void cacheFrameMatrices(const SoRenderParams & params);
 
   // Lighting constant ring (set 0, binding 0, dynamic offset).  Holds a few
@@ -910,6 +916,23 @@ private:
   std::unordered_map<const SoRenderCommand *, size_t> commandToCache;
   std::vector<VulkanCachedTexture> textureCache;
   std::unordered_map<const SoRenderCommand *, size_t> commandToTexture;
+
+  // Reusable batch-key bucket map for recordFrame()'s opaque batching pass.
+  // Previously a fresh std::unordered_map per frame; reused via clear() so an
+  // ordinary frame does not heap-allocate the bucket table + key vectors.
+  std::unordered_map<uint64_t, std::vector<const SoRenderCommand *>> batchBucketScratch;
+
+  // Packed sampler-state key: minFilter | magFilter << 2 | wrapS << 4 | wrapT << 6.
+  typedef uint8_t SamplerKey;
+  static SamplerKey samplerKey(SoTextureFilter minFilter,
+                               SoTextureFilter magFilter,
+                               SoTextureWrap wrapS, SoTextureWrap wrapT);
+  // Sampler cache so textures sharing filter/wrap state reuse one VkSampler
+  // instead of creating one per texture entry.  Owned here; destroyed at
+  // shutdown() after the texture cache.  Always created lazily on first use.
+  std::unordered_map<SamplerKey, VkSampler> samplerCache;
+  VkSampler cachedSampler(SoTextureFilter minFilter, SoTextureFilter magFilter,
+                          SoTextureWrap wrapS, SoTextureWrap wrapT);
 
   std::vector<VulkanGeometryBlock> geometryBlocks;
   // Released blocks are kept as reusable ids so a geometry-change burst does

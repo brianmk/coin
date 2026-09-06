@@ -846,9 +846,8 @@ SoVulkanRenderBackend::recordDrawCommand(const SoDrawList & drawlist,
   // logical points (so a 2pt line is 2*dpr device px on a scaled display).
   // The Vulkan viewport is device pixels too, so apply the same ratio here
   // for parity; otherwise lines/points render 1/dpr too thin on a fractional
-  // (e.g. 1.25 / 1.5 / 2.0) scaling display.
-  const float dpr = params.devicePixelRatio > 0.0f
-    ? params.devicePixelRatio : 1.0f;
+  // (e.g. 1.25 / 1.5 / 2.0) scaling display.  frameDpr is hoisted per frame.
+  const float dpr = this->frameDpr;
   push.pointSize = std::max(1.0f, command.state.raster.pointSize) * dpr;
   push.lineParams[0] = push.lineParams[1] = push.lineParams[2] = 0.0f;
   push.lineParams[3] = 0.0f;
@@ -1159,8 +1158,7 @@ SoVulkanRenderBackend::recordCommandBatch(const SoDrawList & drawlist,
   push.texBlend[1] = blendColor[1];
   push.texBlend[2] = blendColor[2];
   push.texBlend[3] = blendColor[3];
-  const float dpr = params.devicePixelRatio > 0.0f
-    ? params.devicePixelRatio : 1.0f;
+  const float dpr = this->frameDpr;
   push.pointSize = std::max(1.0f, command.state.raster.pointSize) * dpr;
   push.lineParams[0] = push.lineParams[1] = push.lineParams[2] = 0.0f;
   push.lineParams[3] = 0.0f;

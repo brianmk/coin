@@ -345,6 +345,12 @@ SoVulkanRenderBackend::shutdown()
     this->lightingConstMemory = VK_NULL_HANDLE;
   }
   this->lightingDescriptorSet = VK_NULL_HANDLE;
+  for (auto & kv : this->samplerCache) {
+    if (kv.second != VK_NULL_HANDLE) {
+      vkDestroySampler(this->device, kv.second, this->allocator);
+    }
+  }
+  this->samplerCache.clear();
   if (this->whiteSampler != VK_NULL_HANDLE) {
     vkDestroySampler(this->device, this->whiteSampler, this->allocator);
     this->whiteSampler = VK_NULL_HANDLE;
@@ -981,8 +987,12 @@ SoVulkanRenderBackend::recordFrame(const SoDrawList & drawlist,
       // the CPU-expanded wide-line path must keep per-command expansion, so
       // neither is batched here.  Consecutive runs do not exist (the sort order
       // interleaves objects), so bucket by a batch key and re-verify pairwise
-      // compatibility (splitting any accidental key collision).
-      std::unordered_map<uint64_t, std::vector<const SoRenderCommand*>> buckets;
+      // compatibility (splitting any accidental key collision).  The bucket map
+      // is a reused member (cleared below) rather than a fresh per-frame map,
+      // so a normal frame does not heap-allocate the bucket table + key vectors.
+      std::unordered_map<uint64_t, std::vector<const SoRenderCommand*>> & buckets =
+        this->batchBucketScratch;
+      buckets.clear();
       for (int i = 0; i < drawlist.getNumCommands(); ++i) {
         const int index =
           i < static_cast<int>(order.size()) ? order[i] : i;

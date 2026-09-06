@@ -61,7 +61,7 @@ SoVulkanRenderBackend::destroyTextureEntry(VulkanCachedTexture & entry)
     entry.descriptorSet = VK_NULL_HANDLE;
   }
   if (entry.sampler != VK_NULL_HANDLE) {
-    vkDestroySampler(this->device, entry.sampler, this->allocator);
+    // Shared sampler owned by samplerCache; released at shutdown(), not here.
     entry.sampler = VK_NULL_HANDLE;
   }
   if (entry.view != VK_NULL_HANDLE) {
@@ -103,17 +103,46 @@ SoVulkanRenderBackend::getOrCreateTexture(const SoRenderCommand * command)
   return this->textureCache.back();
 }
 
+SoVulkanRenderBackend::SamplerKey
+SoVulkanRenderBackend::samplerKey(SoTextureFilter minFilter,
+                                  SoTextureFilter magFilter,
+                                  SoTextureWrap wrapS, SoTextureWrap wrapT)
+{
+  return static_cast<SamplerKey>(
+    (static_cast<uint8_t>(minFilter) & 0x3u) |
+    ((static_cast<uint8_t>(magFilter) & 0x3u) << 2u) |
+    ((static_cast<uint8_t>(wrapS) & 0x3u) << 4u) |
+    ((static_cast<uint8_t>(wrapT) & 0x3u) << 6u));
+}
+
+VkSampler
+SoVulkanRenderBackend::cachedSampler(SoTextureFilter minFilter,
+                                     SoTextureFilter magFilter,
+                                     SoTextureWrap wrapS, SoTextureWrap wrapT)
+{
+  const SamplerKey key = samplerKey(minFilter, magFilter, wrapS, wrapT);
+  const auto found = this->samplerCache.find(key);
+  if (found != this->samplerCache.end()) return found->second;
+  VkSampler sampler = VK_NULL_HANDLE;
+  if (this->createSampler(minFilter, magFilter, wrapS, wrapT, sampler)) {
+    this->samplerCache.emplace(key, sampler);
+  }
+  return sampler;
+}
+
 bool
-SoVulkanRenderBackend::createSampler(const SoTextureData & texture,
+SoVulkanRenderBackend::createSampler(SoTextureFilter minFilter,
+                                     SoTextureFilter magFilter,
+                                     SoTextureWrap wrapS, SoTextureWrap wrapT,
                                      VkSampler & sampler)
 {
   VkSamplerCreateInfo ci {};
   ci.sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO;
-  ci.magFilter = textureFilterToVk(texture.magFilter);
-  ci.minFilter = textureFilterToVk(texture.minFilter);
+  ci.magFilter = textureFilterToVk(magFilter);
+  ci.minFilter = textureFilterToVk(minFilter);
   ci.mipmapMode = VK_SAMPLER_MIPMAP_MODE_NEAREST;
-  ci.addressModeU = textureWrapToVk(texture.wrapS);
-  ci.addressModeV = textureWrapToVk(texture.wrapT);
+  ci.addressModeU = textureWrapToVk(wrapS);
+  ci.addressModeV = textureWrapToVk(wrapT);
   ci.addressModeW = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
   ci.mipLodBias = 0.0f;
   ci.anisotropyEnable = VK_FALSE;
@@ -299,7 +328,11 @@ SoVulkanRenderBackend::finalizeTexture(VulkanCachedTexture & entry,
   entry.view = createImageView(this->device, entry.image, format,
                                VK_IMAGE_ASPECT_COLOR_BIT, this->allocator);
   if (entry.view == VK_NULL_HANDLE ||
-      !this->createSampler(texture, entry.sampler) ||
+      // Shared sampler: entries with identical filter/wrap state reuse one
+      // VkSampler from samplerCache instead of creating one per texture entry.
+      (entry.sampler = this->cachedSampler(texture.minFilter, texture.magFilter,
+                                           texture.wrapS, texture.wrapT)) ==
+        VK_NULL_HANDLE ||
       !this->allocateTextureDescriptorSet(entry.view, entry.sampler,
                                           entry.descriptorSet)) {
     this->emitError("finalizeTexture: view/sampler/descriptor creation failed");
