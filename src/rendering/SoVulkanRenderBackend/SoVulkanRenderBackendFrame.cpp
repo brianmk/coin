@@ -410,7 +410,6 @@ SoVulkanRenderBackend::renderInternal(const SoDrawList & drawlist,
       "SoRenderParams::renderTarget");
     return FALSE;
   }
-
   this->debugValidateDrawList(drawlist);
 
   if (COIN_VULKAN_ENV_FLAG("FC_VULKAN_BLACK_DEBUG")) {
@@ -580,16 +579,19 @@ SoVulkanRenderBackend::renderInternal(const SoDrawList & drawlist,
   vkCmdBeginRenderPass(this->currentCommandBuffer(), &rpbi,
                        VK_SUBPASS_CONTENTS_INLINE);
 
-  this->activeCommandBuffer = this->currentCommandBuffer();
+  this->recordContext.buffer = this->currentCommandBuffer();
   bool recorded = true;
   if (overlaysOnly) {
-    this->recordTracedComposite(drawlist, params, *target, this->renderPass);
-    this->recordOverlayBlock(drawlist, params, *target, this->renderPass);
+    this->recordTracedComposite(drawlist, params, *target, this->renderPass,
+                                this->recordContext);
+    this->recordOverlayBlock(drawlist, params, *target, this->renderPass,
+                             this->recordContext);
   }
   else {
-    recorded = this->recordFrame(drawlist, params, *target, this->renderPass);
+    recorded = this->recordFrame(drawlist, params, *target, this->renderPass,
+                                 this->recordContext);
   }
-  this->activeCommandBuffer = VK_NULL_HANDLE;
+  this->recordContext.buffer = VK_NULL_HANDLE;
 
   vkCmdEndRenderPass(this->currentCommandBuffer());
 
@@ -680,10 +682,11 @@ SoVulkanRenderBackend::renderExternal(const SoDrawList & drawlist,
 
   const double cpuT3 = wantCpuTiming ? vkBackendRenderNowMs() : 0.0;
   const long recordBcStart = vkBackendRenderBreadcrumbEnabled() ? vkBackendRenderNowUs() : 0;
-  this->activeCommandBuffer = commandBuffer;
-  const bool recorded = this->recordFrame(drawlist, params, *target, renderPass);
+  this->recordContext.buffer = commandBuffer;
+  const bool recorded = this->recordFrame(drawlist, params, *target, renderPass,
+                                          this->recordContext);
   vkBackendRenderBreadcrumbSince(recordBcStart, 5000, "renderExternal recordFrame end");
-  this->activeCommandBuffer = VK_NULL_HANDLE;
+  this->recordContext.buffer = VK_NULL_HANDLE;
   if (wantCpuTiming) {
     setupMs = cpuT1 - cpuT0;
     geomMs = cpuT2 - cpuT1;
@@ -759,10 +762,12 @@ SoVulkanRenderBackend::renderExternalOverlay(const SoDrawList & drawlist,
   }
 
   const double cpuT3 = wantCpuTiming ? vkBackendRenderNowMs() : 0.0;
-  this->activeCommandBuffer = commandBuffer;
-  this->recordTracedComposite(drawlist, params, *target, renderPass);
-  this->recordOverlayBlock(drawlist, params, *target, renderPass);
-  this->activeCommandBuffer = VK_NULL_HANDLE;
+  this->recordContext.buffer = commandBuffer;
+  this->recordTracedComposite(drawlist, params, *target, renderPass,
+                              this->recordContext);
+  this->recordOverlayBlock(drawlist, params, *target, renderPass,
+                           this->recordContext);
+  this->recordContext.buffer = VK_NULL_HANDLE;
   if (wantCpuTiming) {
     setupMs = cpuT1 - cpuT0;
     geomMs = cpuT2 - cpuT1;
@@ -781,7 +786,8 @@ bool
 SoVulkanRenderBackend::recordFrame(const SoDrawList & drawlist,
                                    const SoRenderParams & params,
                                    const SoVulkanRenderTarget & target,
-                                   VkRenderPass renderPass)
+                                   VkRenderPass renderPass,
+                                   VulkanRecordContext & ctx)
 {
   if (COIN_VULKAN_ENV_FLAG("FC_VULKAN_MATRIX_DUMP")) {
     s_debugFrame++;
@@ -813,13 +819,13 @@ SoVulkanRenderBackend::recordFrame(const SoDrawList & drawlist,
             params.clearColor[3], drawlist.getNumCommands(), nTri, nTriLit,
             nTriUnlit, nLine, nOverlay, nTrans);
   }
-  this->applyViewport(params, target);
-  this->recordClear(params, target);
-  this->recordBackground(params, target, renderPass);
+  this->applyViewport(params, target, ctx);
+  this->recordClear(params, target, ctx);
+  this->recordBackground(params, target, renderPass, ctx);
   // The background pass overrides the viewport/scissor for its own draw;
   // restore the viewport from params before recording geometry so draws
   // land in the requested region.
-  this->applyViewport(params, target);
+  this->applyViewport(params, target, ctx);
 
   // Vulkan-only display options, configured through setWireframeOverlay()/
   // setPointsOverlay()/setEdgeColor().  Environment variables act as a
@@ -907,7 +913,7 @@ SoVulkanRenderBackend::recordFrame(const SoDrawList & drawlist,
         if (command.pass == SO_RENDERPASS_OVERLAY) continue;
         if (command.pass != SO_RENDERPASS_TRANSPARENT) continue;
         this->recordDrawCommand(drawlist, command, target, params, renderPass,
-                                true);
+                                true, -1, nullptr, false, ctx);
       }
     }
     else {
@@ -946,12 +952,13 @@ SoVulkanRenderBackend::recordFrame(const SoDrawList & drawlist,
           const int cnt = end - start;
           if (cnt > 1 &&
               this->recordCommandBatch(drawlist, &v[start], cnt, target, params,
-                                       renderPass, false)) {
+                                       renderPass, false, -1, nullptr, ctx)) {
             // Batched into one instanced draw; nothing further to do.
           }
           else {
             this->recordDrawCommand(drawlist, *v[start], target, params,
-                                    renderPass, false);
+                                    renderPass, false, -1, nullptr, false,
+                                    ctx);
           }
           start = end;
         }
@@ -968,7 +975,8 @@ SoVulkanRenderBackend::recordFrame(const SoDrawList & drawlist,
         if (command.pass == SO_RENDERPASS_OVERLAY) continue;
         if (command.pass == SO_RENDERPASS_TRANSPARENT) continue;
         this->recordDrawCommand(drawlist, command, target, params, renderPass,
-                                false, overlayFillMode, overlayColor);
+                                false, overlayFillMode, overlayColor, false,
+                                ctx);
       }
     }
   }
@@ -985,13 +993,13 @@ SoVulkanRenderBackend::recordFrame(const SoDrawList & drawlist,
     if (command.pass == SO_RENDERPASS_OVERLAY) continue;
     if (command.state.depth.enabled) continue;
     this->recordDrawCommand(drawlist, command, target, params, renderPass,
-                            false);
+                            false, -1, nullptr, false, ctx);
   }
 
   // Screen-space overlay geometry (navigation cube): drawn after both passes
   // into its own viewport, with the overlay rect's depth cleared first so the
   // overlay self-occludes independently of the main scene.
-  this->recordOverlayBlock(drawlist, params, target, renderPass);
+  this->recordOverlayBlock(drawlist, params, target, renderPass, ctx);
 
   return true;
 }
@@ -1000,7 +1008,8 @@ void
 SoVulkanRenderBackend::recordOverlayBlock(const SoDrawList & drawlist,
                                           const SoRenderParams & params,
                                           const SoVulkanRenderTarget & target,
-                                          VkRenderPass renderPass)
+                                          VkRenderPass renderPass,
+                                          VulkanRecordContext & ctx)
 {
   // Overlays are drawn in recorded (insertion) order, matching GL: the
   // draw-list sorted order is a painter's algorithm built from the main
@@ -1019,14 +1028,14 @@ SoVulkanRenderBackend::recordOverlayBlock(const SoDrawList & drawlist,
     if (raster.scissorX != lastClearX || raster.scissorY != lastClearY ||
         raster.scissorWidth != lastClearW ||
         raster.scissorHeight != lastClearH) {
-      this->recordOverlayDepthClear(command, target);
+      this->recordOverlayDepthClear(command, target, ctx);
       lastClearX = raster.scissorX;
       lastClearY = raster.scissorY;
       lastClearW = raster.scissorWidth;
       lastClearH = raster.scissorHeight;
     }
     this->recordDrawCommand(drawlist, command, target, params, renderPass,
-                            false, -1, nullptr, true);
+                            false, -1, nullptr, true, ctx);
   }
 }
 
@@ -1034,7 +1043,8 @@ void
 SoVulkanRenderBackend::recordTracedComposite(const SoDrawList & drawlist,
                                              const SoRenderParams & params,
                                              const SoVulkanRenderTarget & target,
-                                             VkRenderPass renderPass)
+                                             VkRenderPass renderPass,
+                                             VulkanRecordContext & ctx)
 {
   // Ray-tracing compositing residue: the RT backend traces only triangles, so
   // the OPAQUE/TRANSPARENT LINES / POINTS / LINE_STRIP commands (BRep edge
@@ -1055,8 +1065,8 @@ SoVulkanRenderBackend::recordTracedComposite(const SoDrawList & drawlist,
     [[maybe_unused]] const SoRasterState & raster = command.state.raster;
     // Apply the command's own viewport/scissor if it carries one, else the
     // whole-surface viewport (the default for scene geometry).
-    this->applyCommandViewport(command, target);
-    this->applyScissor(command, target);
+    this->applyCommandViewport(command, target, ctx);
+    this->applyScissor(command, target, ctx);
     // overlayPass=false: these are scene-geometry edge/point commands, so
     // they must draw with the FRAME camera (params.projMatrix), not the
     // command's own projection matrix.  Passing overlayPass=true made them
@@ -1064,6 +1074,6 @@ SoVulkanRenderBackend::recordTracedComposite(const SoDrawList & drawlist,
     // (the offset "phantom box").  They inherit the raster depth compare so
     // the present-pass depth occludes hidden edges.
     this->recordDrawCommand(drawlist, command, target, params, renderPass,
-                            false, -1, nullptr, false);
+                            false, -1, nullptr, false, ctx);
   }
 }

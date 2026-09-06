@@ -154,7 +154,8 @@ SoVulkanRenderBackend::createBackgroundPipeline(
 void
 SoVulkanRenderBackend::recordBackground(const SoRenderParams & params,
                                         const SoVulkanRenderTarget & target,
-                                        VkRenderPass renderPass)
+                                        VkRenderPass renderPass,
+                                        VulkanRecordContext & ctx)
 {
   if (!params.backgroundGradient) {
     return;
@@ -193,14 +194,14 @@ SoVulkanRenderBackend::recordBackground(const SoRenderParams & params,
   viewport.height = static_cast<float>(h);
   viewport.minDepth = 0.0f;
   viewport.maxDepth = 1.0f;
-  this->applyViewportState(viewport);
+  this->applyViewportState(viewport, ctx);
 
   VkRect2D scissor {};
   scissor.offset = {x0, y0};
   scissor.extent = {static_cast<uint32_t>(w), static_cast<uint32_t>(h)};
-  this->applyScissorState(scissor);
+  this->applyScissorState(scissor, ctx);
 
-  this->applyPipeline(pipeline);
+  this->applyPipeline(pipeline, ctx);
 
   VulkanBackgroundPush push {};
   push.topColor[0] = params.backgroundTopColor[0];
@@ -215,12 +216,12 @@ SoVulkanRenderBackend::recordBackground(const SoRenderParams & params,
   push.viewport[1] = static_cast<float>(h);
   push.viewport[2] = static_cast<float>(x0);
   push.viewport[3] = static_cast<float>(y0);
-  vkCmdPushConstants(this->activeCommandBuffer, this->backgroundPipelineLayout,
-                     VK_SHADER_STAGE_VERTEX_BIT |
-                       VK_SHADER_STAGE_FRAGMENT_BIT,
-                     0, sizeof(push), &push);
+  vkCmdPushConstants(ctx.buffer, this->backgroundPipelineLayout,
+                      VK_SHADER_STAGE_VERTEX_BIT |
+                        VK_SHADER_STAGE_FRAGMENT_BIT,
+                      0, sizeof(push), &push);
 
-  vkCmdDraw(this->activeCommandBuffer, 3, 1, 0, 0);
+  vkCmdDraw(ctx.buffer, 3, 1, 0, 0);
 }
 
 bool

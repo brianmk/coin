@@ -6,6 +6,7 @@
 #include "rendering/SoRenderBackend.h"
 
 #include "rendering/SoVulkanShared.h"
+#include "rendering/SoVulkanRenderBackend/SoVulkanRecordContext.h"
 
 #include <Inventor/rendering/SoVulkanRenderTarget.h>
 
@@ -303,7 +304,8 @@ private:
                                 VkPipeline & pipeline);
   void recordBackground(const SoRenderParams & params,
                         const SoVulkanRenderTarget & target,
-                        VkRenderPass renderPass);
+                        VkRenderPass renderPass,
+                        VulkanRecordContext & ctx);
   bool getOrCreatePipeline(const SoRenderCommand & command,
                            const SoVulkanRenderTarget & target,
                            VkRenderPass renderPass,
@@ -407,32 +409,38 @@ private:
   VkDescriptorSet resolveTextureSet(const SoRenderCommand & command);
 
   // --- Render recording ---------------------------------------------------
+  // Every record* helper below takes the VulkanRecordContext it records
+  // into and touches no other recording state, so (future) worker threads
+  // can each record their own command buffer with their own dedup cache.
   bool beginCommandBuffer();
   VkCommandBuffer currentCommandBuffer();
   void recordClear(const SoRenderParams & params,
-                   const SoVulkanRenderTarget & target);
+                   const SoVulkanRenderTarget & target,
+                   VulkanRecordContext & ctx);
   void recordDrawCommand(const SoDrawList & drawlist,
                          const SoRenderCommand & command,
                          const SoVulkanRenderTarget & target,
                          const SoRenderParams & params,
                          VkRenderPass renderPass,
                          bool transparent,
-                         int fillModeOverride = -1,
-                         const float * uniformColorOverride = nullptr,
-                         bool overlayPass = false);
+                         int fillModeOverride,
+                         const float * uniformColorOverride,
+                         bool overlayPass,
+                         VulkanRecordContext & ctx);
   // Instanced batch: draw `count` commands that share geometry/material/state
   // and differ only by model matrix as ONE vkCmdDraw(instanceCount=count).
   // `commands` is an array of pointers into the draw list.  Returns false if
   // the first command cannot be drawn (missing cache entry) or any command is
   // not batchable.
   bool recordCommandBatch(const SoDrawList & drawlist,
-                          const SoRenderCommand * const * commands, int count,
-                          const SoVulkanRenderTarget & target,
-                          const SoRenderParams & params,
-                          VkRenderPass renderPass,
-                          bool transparent,
-                          int fillModeOverride = -1,
-                          const float * uniformColorOverride = nullptr);
+                           const SoRenderCommand * const * commands, int count,
+                           const SoVulkanRenderTarget & target,
+                           const SoRenderParams & params,
+                           VkRenderPass renderPass,
+                           bool transparent,
+                           int fillModeOverride,
+                           const float * uniformColorOverride,
+                           VulkanRecordContext & ctx);
   bool expandWideLines(VulkanCachedCommand & entry,
                        const SoRenderCommand & command,
                        const SoRenderParams & params,
@@ -440,39 +448,47 @@ private:
                        float lineWidth);
   bool endAndSubmit();
   void applyViewport(const SoRenderParams & params,
-                     const SoVulkanRenderTarget & target);
+                     const SoVulkanRenderTarget & target,
+                     VulkanRecordContext & ctx);
   void applyCommandViewport(const SoRenderCommand & command,
-                            const SoVulkanRenderTarget & target);
+                            const SoVulkanRenderTarget & target,
+                            VulkanRecordContext & ctx);
   void applyScissor(const SoRenderCommand & command,
-                    const SoVulkanRenderTarget & target);
+                    const SoVulkanRenderTarget & target,
+                    VulkanRecordContext & ctx);
   // Deduplicated dynamic-state emitters.  Each records the value last set
-  // this frame and skips the vkCmd* call when the incoming value is already
+  // into `ctx` and skips the vkCmd* call when the incoming value is already
   // active, so an opaque run of draws sharing a pipeline/viewport pays one
   // state change instead of one per draw.  Only the value actually submitted
   // to the command buffer is remembered, so early-return paths (e.g. a
   // command with no per-command viewport) leave the remembered state as the
   // real current binding.
-  void applyPipeline(VkPipeline pipeline);
-  void applyViewportState(const VkViewport & viewport);
-  void applyScissorState(const VkRect2D & scissor);
-  void resetBoundState();
+  void applyPipeline(VkPipeline pipeline, VulkanRecordContext & ctx);
+  void applyViewportState(const VkViewport & viewport,
+                          VulkanRecordContext & ctx);
+  void applyScissorState(const VkRect2D & scissor, VulkanRecordContext & ctx);
+  void resetBoundState(VulkanRecordContext & ctx);
   void recordOverlayDepthClear(const SoRenderCommand & command,
-                               const SoVulkanRenderTarget & target);
+                               const SoVulkanRenderTarget & target,
+                               VulkanRecordContext & ctx);
   void recordOverlayBlock(const SoDrawList & drawlist,
                           const SoRenderParams & params,
                           const SoVulkanRenderTarget & target,
-                          VkRenderPass renderPass);
+                          VkRenderPass renderPass,
+                          VulkanRecordContext & ctx);
   void recordTracedComposite(const SoDrawList & drawlist,
                              const SoRenderParams & params,
                              const SoVulkanRenderTarget & target,
-                             VkRenderPass renderPass);
+                             VkRenderPass renderPass,
+                             VulkanRecordContext & ctx);
   SbBool renderInternal(const SoDrawList & drawlist,
                         const SoRenderParams & params,
                         bool overlaysOnly);
   bool recordFrame(const SoDrawList & drawlist,
                    const SoRenderParams & params,
                    const SoVulkanRenderTarget & target,
-                   VkRenderPass renderPass);
+                   VkRenderPass renderPass,
+                   VulkanRecordContext & ctx);
 
   // --- Vulkan resource helpers -------------------------------------------
   bool createBuffer(VkDeviceSize size,
@@ -565,10 +581,12 @@ private:
   std::vector<VkFence> frameFences;
   std::vector<uint8_t> frameFencePending;
 
-  // Command buffer being recorded by the current render()/renderExternal()
-  // call.  This is the backend's own buffer in render(), or the caller's
-  // buffer in renderExternal().
-  VkCommandBuffer activeCommandBuffer = VK_NULL_HANDLE;
+  // Per-recording command-buffer target + dedup state for the current
+  // render()/renderExternal() call.  This names the backend's own buffer in
+  // render(), or the caller's buffer in renderExternal().  Kept as one
+  // member (single-threaded recording); worker threads get their own
+  // VulkanRecordContext instances.
+  VulkanRecordContext recordContext;
 
   VkDescriptorSetLayout descriptorSetLayout = VK_NULL_HANDLE;
   // Set-0 layout: the lighting constant ring (binding 0, UBO dynamic).  The
@@ -815,26 +833,6 @@ private:
   std::unordered_map<BackgroundPipelineKey, VkPipeline,
                      BackgroundPipelineKeyHash> backgroundPipelineCache;
 
-  // Last dynamic state actually bound this frame (see applyPipeline /
-  // applyViewportState / applyScissorState).  Reset by resetBoundState() at
-  // each frame boundary; maxFramesInFlight is per-slot but dynamic state is
-  // per-record (the command buffer being recorded), so it is reset once per
-  // frame, not per in-flight slot.
-  VkPipeline lastBoundPipeline = VK_NULL_HANDLE;
-  VkViewport lastBoundViewport {};
-  VkRect2D lastBoundScissor {};
-  bool hasBoundViewport = false;
-  bool hasBoundScissor = false;
-  // Per-frame descriptor-bind caches (reset in resetBoundState()).  A frame
-  // typically shares one lighting handle and one (usually the white) texture,
-  // so caching the resolved set/offset avoids an unordered_map lookup per draw
-  // and lets set 0 re-bind only when the lighting handle actually changes.
-  // Set 1 must still re-bind every draw because its dynamic offset (the
-  // per-draw view/model/material slot) advances each draw.
-  uint32_t lastLightingHandle = UINT32_MAX;
-  uint32_t lastLightingOffset = 0;
-  uint32_t lastBoundLightingOffset = UINT32_MAX;
-  VkDescriptorSet lastBoundTextureSet = VK_NULL_HANDLE;
   // Reusable CPU scratch for the wide-line quad expansion.  expandWideLines()
   // previously allocated clipCache/distances/quads as fresh std::vector per
   // line per frame -- for line-heavy scenes that is thousands of heap

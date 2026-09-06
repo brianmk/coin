@@ -730,7 +730,7 @@ SoVulkanRenderBackend::beginFrame()
   // other slot) may have left a different pipeline/viewport/scissor bound.
   // Forget it so this frame's first apply* emits, and so accidental reuse
   // from the slot's prior content cannot wrongly skip a needed change.
-  this->resetBoundState();
+  this->resetBoundState(this->recordContext);
   this->flushPendingDestroys();
 }
 
