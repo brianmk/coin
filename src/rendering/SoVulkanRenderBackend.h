@@ -413,6 +413,7 @@ private:
     int count = 1;
     uint32_t slotBase = 0;
     bool transparent = false;
+    bool recordToSecondary = false; // opaque pass → secondary cmd buffer (M1c)
     bool overlayPass = false;      // SO_RENDERPASS_OVERLAY screen-space draw
     int fillModeOverride = -1;     // wireframe/point redraw fill mode, or -1
     const float * uniformColorOverride = nullptr;
@@ -474,6 +475,7 @@ private:
   // can each record their own command buffer with their own dedup cache.
   bool beginCommandBuffer();
   VkCommandBuffer currentCommandBuffer();
+  VkCommandBuffer currentSecondaryCommandBuffer();
   void recordClear(const SoRenderParams & params,
                    const SoVulkanRenderTarget & target,
                    bool colorClearedByLoad,
@@ -662,7 +664,14 @@ private:
   std::vector<VkCommandBuffer> frameCommandBuffers;
   std::vector<VkFence> frameFences;
   std::vector<uint8_t> frameFencePending;
-
+  // Secondary command buffers for M1c: one per in-flight frame slot, used to
+  // record the render-order-independent opaque pass inside an already-begun
+  // render pass (RENDER_PASS_CONTINUE), then vkCmdExecuteCommands()'d into the
+  // slot's primary buffer.  Kept per-slot so a secondary is never reset while
+  // a primary that executed it is still pending; the pool's RESET_COMMAND_BUFFER_BIT
+  // lets each be re-recorded after its slot's fence is waited.
+  VkCommandPool secondaryCommandPool = VK_NULL_HANDLE;
+  std::vector<VkCommandBuffer> secondaryCommandBuffers;
   // Per-recording command-buffer target + dedup state for the current
   // render()/renderExternal() call.  This names the backend's own buffer in
   // render(), or the caller's buffer in renderExternal().  Kept as one

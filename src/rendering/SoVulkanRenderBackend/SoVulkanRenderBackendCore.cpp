@@ -287,6 +287,17 @@ SoVulkanRenderBackend::createCommandPool()
                           &this->commandPool) != VK_SUCCESS) {
     return false;
   }
+  // Secondary pool for the M1c opaque-pass re-record: same transient/reset
+  // flags as the primary pool, secondary-level buffers.
+  VkCommandPoolCreateInfo sci {};
+  sci.sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO;
+  sci.flags = VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT |
+              VK_COMMAND_POOL_CREATE_TRANSIENT_BIT;
+  sci.queueFamilyIndex = this->queueFamilyIndex;
+  if (vkCreateCommandPool(this->device, &sci, this->allocator,
+                          &this->secondaryCommandPool) != VK_SUCCESS) {
+    return false;
+  }
   return this->allocateFrameResources();
 }
 
@@ -307,6 +318,21 @@ SoVulkanRenderBackend::allocateFrameResources()
   ai.commandBufferCount = this->maxFramesInFlight;
   if (vkAllocateCommandBuffers(this->device, &ai,
                                this->frameCommandBuffers.data()) !=
+      VK_SUCCESS) {
+    return false;
+  }
+
+  // One secondary command buffer per in-flight slot (M1c), all from the
+  // secondary pool.  Recorded once per slot and executed into that slot's
+  // primary, then re-recorded only after the slot's fence is waited.
+  this->secondaryCommandBuffers.assign(this->maxFramesInFlight, VK_NULL_HANDLE);
+  VkCommandBufferAllocateInfo sai {};
+  sai.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
+  sai.commandPool = this->secondaryCommandPool;
+  sai.level = VK_COMMAND_BUFFER_LEVEL_SECONDARY;
+  sai.commandBufferCount = this->maxFramesInFlight;
+  if (vkAllocateCommandBuffers(this->device, &sai,
+                               this->secondaryCommandBuffers.data()) !=
       VK_SUCCESS) {
     return false;
   }
@@ -333,6 +359,13 @@ SoVulkanRenderBackend::releaseFrameResources()
     }
   }
   this->frameCommandBuffers.clear();
+  for (auto & buffer : this->secondaryCommandBuffers) {
+    if (buffer != VK_NULL_HANDLE) {
+      vkFreeCommandBuffers(this->device, this->secondaryCommandPool, 1,
+                           &buffer);
+    }
+  }
+  this->secondaryCommandBuffers.clear();
   for (VkFence fence : this->frameFences) {
     if (fence != VK_NULL_HANDLE) {
       vkDestroyFence(this->device, fence, this->allocator);
@@ -348,6 +381,14 @@ SoVulkanRenderBackend::currentCommandBuffer()
   if (this->frameCommandBuffers.empty()) return VK_NULL_HANDLE;
   return this->frameCommandBuffers[this->uboFrameIndex %
                                    this->frameCommandBuffers.size()];
+}
+
+VkCommandBuffer
+SoVulkanRenderBackend::currentSecondaryCommandBuffer()
+{
+  if (this->secondaryCommandBuffers.empty()) return VK_NULL_HANDLE;
+  return this->secondaryCommandBuffers[this->uboFrameIndex %
+                                       this->secondaryCommandBuffers.size()];
 }
 
 void

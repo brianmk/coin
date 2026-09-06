@@ -402,6 +402,11 @@ SoVulkanRenderBackend::shutdown()
     vkDestroyCommandPool(this->device, this->commandPool, this->allocator);
     this->commandPool = VK_NULL_HANDLE;
   }
+  if (this->secondaryCommandPool != VK_NULL_HANDLE) {
+    vkDestroyCommandPool(this->device, this->secondaryCommandPool,
+                        this->allocator);
+    this->secondaryCommandPool = VK_NULL_HANDLE;
+  }
   if (this->memPool) {
     // Queue is idle and every deferred destroy has been flushed, so all
     // sub-allocated ranges are free and every block can be released.
@@ -948,6 +953,7 @@ SoVulkanRenderBackend::buildWorkItems(const SoDrawList & drawlist,
             item.commands = &v[start];
           }
           item.count = cnt;
+          item.recordToSecondary = true;
           item.slotBase = nextSlot;
           nextSlot += static_cast<uint32_t>(cnt);
           out.push_back(item);
@@ -1116,11 +1122,12 @@ SoVulkanRenderBackend::recordFrame(const SoDrawList & drawlist,
   std::vector<VulkanWorkItem> & workItems = this->workItemsScratch;
   this->buildWorkItems(drawlist, params, wireframeOverlay, pointsOverlay,
                        overlayColor, workItems);
-  for (const VulkanWorkItem & item : workItems) {
-    // Pre-assigned disjoint block of slots: the item's first of `count`
-    // consecutive slots.  Setting uboCmdIndex here (rather than letting each
-    // record helper increment from the previous value) lets workers later
-    // record disjoint ranges without touching shared cursor state.
+
+  // Record one item into the current ctx.buffer using its pre-assigned slot
+  // base.  The pre-assigned disjoint block means we set uboCmdIndex per item
+  // rather than letting each record helper increment from the previous value,
+  // so workers can later record disjoint ranges without sharing cursor state.
+  auto recordItem = [&](const VulkanWorkItem & item) {
     this->uboCmdIndex = item.slotBase;
     if (item.count > 1) {
       if (this->recordCommandBatch(drawlist, item.commands, item.count, target,
@@ -1147,6 +1154,75 @@ SoVulkanRenderBackend::recordFrame(const SoDrawList & drawlist,
                               renderPass, item.transparent,
                               item.fillModeOverride, item.uniformColorOverride,
                               false, ctx);
+    }
+  };
+
+  // M1c: the render-order-independent opaque pass is recorded into a
+  // secondary command buffer that we re-play into the already-begun render
+  // pass, so the opaque draws can later (M1d) be recorded in parallel by
+  // worker threads.  Only paths with a real framebuffer (own-queue render)
+  // use a secondary; otherwise fall back to fully-inline record to keep the
+  // exact same output.
+  if (this->secondaryCommandBuffers.empty() ||
+      this->renderPassFramebuffer == VK_NULL_HANDLE) {
+    for (const VulkanWorkItem & item : workItems) {
+      recordItem(item);
+    }
+  }
+  else {
+    VkCommandBuffer secondary = this->currentSecondaryCommandBuffer();
+    VkCommandBuffer primary = this->currentCommandBuffer();
+    bool hasSecondaryItems = false;
+    for (const VulkanWorkItem & item : workItems) {
+      if (item.recordToSecondary) { hasSecondaryItems = true; break; }
+    }
+    if (!hasSecondaryItems) {
+      for (const VulkanWorkItem & item : workItems) {
+        recordItem(item);
+      }
+    }
+    else {
+      // Record the opaque items into the secondary (render-pass-continue).
+      // Begin from a clean dedup cache: secondary buffers inherit NOTHING
+      // (not dynamic state, pipeline, or descriptors) from the primary, so a
+      // stale lastBound* entry would suppress a needed re-bind.
+      vkResetCommandBuffer(secondary, 0);
+      ctx.reset();
+      VkCommandBufferBeginInfo sbi {};
+      sbi.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
+      sbi.flags = VK_COMMAND_BUFFER_USAGE_RENDER_PASS_CONTINUE_BIT |
+                  VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+      VkCommandBufferInheritanceInfo inh {};
+      inh.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_INHERITANCE_INFO;
+      inh.renderPass = renderPass;
+      inh.subpass = 0;
+      inh.framebuffer = this->renderPassFramebuffer;
+      sbi.pInheritanceInfo = &inh;
+      if (vkBeginCommandBuffer(secondary, &sbi) != VK_SUCCESS) {
+        this->emitError("failed to begin secondary command buffer");
+        // Fall back to fully-inline recording for this frame.
+        ctx.buffer = primary;
+        ctx.reset();
+        for (const VulkanWorkItem & item : workItems) {
+          recordItem(item);
+        }
+        return TRUE;
+      }
+      ctx.buffer = secondary;
+      for (const VulkanWorkItem & item : workItems) {
+        if (item.recordToSecondary) recordItem(item);
+      }
+      ctx.buffer = primary;
+      // The primary's bound state was NOT preserved across the secondary, so
+      // reset its dedup cache before continuing inline (else the first inline
+      // draw would skip binds the primary no longer has).
+      ctx.reset();
+      vkEndCommandBuffer(secondary);
+      vkCmdExecuteCommands(primary, 1, &secondary);
+      // Inline the remaining (painter-order, overlay-redraw, annotation) items.
+      for (const VulkanWorkItem & item : workItems) {
+        if (!item.recordToSecondary) recordItem(item);
+      }
     }
   }
 
