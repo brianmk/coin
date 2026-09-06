@@ -508,12 +508,12 @@ SoVulkanRenderBackend::getOrCreatePipeline(const SoRenderCommand & command,
   attributes[1].offset = 12;
   attributes[2].location = 2;
   attributes[2].binding = 0;
-  attributes[2].format = VK_FORMAT_R32G32B32A32_SFLOAT;
+  attributes[2].format = VK_FORMAT_R8G8B8A8_UNORM;
   attributes[2].offset = 24;
   attributes[3].location = 3;
   attributes[3].binding = 0;
-  attributes[3].format = VK_FORMAT_R32G32_SFLOAT;
-  attributes[3].offset = 40;
+  attributes[3].format = VK_FORMAT_R16G16_SFLOAT;
+  attributes[3].offset = 28;
   // Instance model matrix rows (binding 1, rate INSTANCE).
   attributes[4].location = 4;
   attributes[4].binding = 1;

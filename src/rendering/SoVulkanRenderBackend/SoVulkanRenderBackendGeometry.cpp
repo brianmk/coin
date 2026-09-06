@@ -51,7 +51,42 @@ VkDeviceSize alignGeometryUpload(VkDeviceSize bytes)
   return ((bytes + alignment - 1) / alignment) * alignment;
 }
 
-void packInterleavedVertices(const SoGeometryDesc & geometry, float * vertices)
+// Encode a float to a half (binary16).  Ranges outside the finite half range
+// clamp to +/-inf; CAD texcoords are in [0,1] so this is exact in practice.
+static inline uint16_t floatToHalf(float value)
+{
+  // IEEE 754 single -> binary16 by narrowing the exponent/mantissa.
+  uint32_t bits = 0;
+  std::memcpy(&bits, &value, sizeof(bits));
+  const uint32_t sign = (bits >> 16) & 0x8000u;
+  uint32_t exp = (bits >> 23) & 0xFFu;
+  uint32_t mant = bits & 0x7FFFFFu;
+
+  if (exp == 0xFFu) {
+    // Inf/NaN: saturate to inf with the sign, preserving NaN payload roughly.
+    return static_cast<uint16_t>(sign | 0x7C00u | (mant ? 0x0200u : 0));
+  }
+  // The single exponent is biased by 127; the half by 15.  Shift the excess.
+  int32_t halfExp = static_cast<int32_t>(exp) - 127 + 15;
+  if (halfExp >= 0x1F) {
+    // Overflow -> inf.
+    return static_cast<uint16_t>(sign | 0x7C00u);
+  }
+  if (halfExp <= 0) {
+    // Subnormal / zero underflow.
+    if (halfExp < -10) {
+      return static_cast<uint16_t>(sign);
+    }
+    // Subnormal: shift the mantissa into the denormal range.
+    mant = (mant | 0x800000u) >> (1 - halfExp);
+    return static_cast<uint16_t>(sign | ((mant + 0x1000u) >> 13));
+  }
+  // Normalized value.  Round to nearest even on the 13 dropped mantissa bits.
+  return static_cast<uint16_t>(sign | (halfExp << 10) |
+                               ((mant + 0x1000u) >> 13));
+}
+
+void packInterleavedVertices(const SoGeometryDesc & geometry, uint8_t * vertices)
 {
   const uint32_t vertexCount = geometry.vertexCount;
   const uint32_t posStride = geometry.vertexStride
@@ -64,51 +99,43 @@ void packInterleavedVertices(const SoGeometryDesc & geometry, float * vertices)
   const uint32_t texcoordStrideFloats = texcoordStride / sizeof(float);
 
   for (uint32_t i = 0; i < vertexCount; ++i) {
-    float * out = vertices + static_cast<size_t>(i) * 12;
+    // 32-byte interleaved vertex: vec3 position f32 @0, vec3 normal f32 @12,
+    // vec4 color R8G8B8A8_UNORM @24, vec2 texcoord R16G16_SFLOAT @28.
+    uint8_t * out = vertices + static_cast<size_t>(i) * VULKAN_VERTEX_STRIDE;
 
     const float * pos = geometry.positions +
       static_cast<size_t>(i) * posStrideFloats;
-    out[0] = pos[0];
-    out[1] = pos[1];
-    out[2] = pos[2];
+    std::memcpy(out + 0, pos, 3 * sizeof(float));
 
+    float n[3] = {0.0f, 0.0f, 1.0f};
     if (geometry.normals && i < geometry.normalCount) {
       const float * normal = geometry.normals +
         static_cast<size_t>(i) * normalStrideFloats;
-      out[3] = normal[0];
-      out[4] = normal[1];
-      out[5] = normal[2];
+      n[0] = normal[0]; n[1] = normal[1]; n[2] = normal[2];
     }
-    else {
-      out[3] = 0.0f;
-      out[4] = 0.0f;
-      out[5] = 1.0f;
-    }
+    std::memcpy(out + 12, n, 3 * sizeof(float));
 
+    float c[4] = {1.0f, 1.0f, 1.0f, 1.0f};
     if (geometry.colors) {
       const float * color = geometry.colors + static_cast<size_t>(i) * 4;
-      out[6] = color[0];
-      out[7] = color[1];
-      out[8] = color[2];
-      out[9] = color[3];
+      c[0] = color[0]; c[1] = color[1]; c[2] = color[2]; c[3] = color[3];
     }
-    else {
-      out[6] = 1.0f;
-      out[7] = 1.0f;
-      out[8] = 1.0f;
-      out[9] = 1.0f;
+    // Clamp to [0,1] then quantize to 8-bit UNORM, matching the VkFormat.
+    for (int k = 0; k < 4; ++k) {
+      float v = c[k] < 0.0f ? 0.0f : (c[k] > 1.0f ? 1.0f : c[k]);
+      out[24 + k] = static_cast<uint8_t>(v * 255.0f + 0.5f);
     }
 
+    float uv[2] = {0.0f, 0.0f};
     if (geometry.texcoords) {
-      const float * uv = geometry.texcoords +
+      const float * tex = geometry.texcoords +
         static_cast<size_t>(i) * texcoordStrideFloats;
-      out[10] = uv[0];
-      out[11] = uv[1];
+      uv[0] = tex[0]; uv[1] = tex[1];
     }
-    else {
-      out[10] = 0.0f;
-      out[11] = 0.0f;
-    }
+    const uint16_t halfU = floatToHalf(uv[0]);
+    const uint16_t halfV = floatToHalf(uv[1]);
+    std::memcpy(out + 28, &halfU, sizeof(halfU));
+    std::memcpy(out + 30, &halfV, sizeof(halfV));
   }
 }
 
@@ -339,8 +366,9 @@ SoVulkanRenderBackend::uploadGeometry(VulkanCachedCommand & entry,
     ? geometry.vertexStride : sizeof(float) * 3;
 
   std::lock_guard<std::mutex> scratchLock(this->uploadScratchMutex);
-  this->uploadScratch.resize(static_cast<size_t>(vertexCount) * 12);
-  float * const vertices = this->uploadScratch.data();
+  // Byte-sized scratch: 32 bytes per packed vertex.
+  this->uploadScratch.resize(static_cast<size_t>(vertexCount) * VULKAN_VERTEX_STRIDE);
+  uint8_t * const vertices = this->uploadScratch.data();
   packInterleavedVertices(geometry, vertices);
 
   const VkDeviceSize vertexBytes =
@@ -452,7 +480,7 @@ SoVulkanRenderBackend::uploadGeometryShared(VulkanCachedCommand & entry,
 
   char * base = reinterpret_cast<char*>(block.mapped);
   packInterleavedVertices(geometry,
-    reinterpret_cast<float*>(base + vertexOffset));
+    reinterpret_cast<uint8_t*>(base + vertexOffset));
   if (indexBytes != 0) {
     std::memcpy(base + indexOffset, geometry.indices,
       static_cast<size_t>(indexBytes));

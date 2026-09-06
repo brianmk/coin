@@ -215,17 +215,20 @@ hashTextureContent(const SoTextureData & texture)
 
 // Fixed interleaved vertex layout shared by every retained command.
 //
-//   offset 0 : vec3 position
-//   offset 12: vec3 normal
-//   offset 24: vec4 color
-//   offset 40: vec2 texcoord
+//   offset 0 : vec3 position  (R32G32B32_SFLOAT)
+//   offset 12: vec3 normal    (R32G32B32_SFLOAT)
+//   offset 24: vec4 color     (R8G8B8A8_UNORM)
+//   offset 28: vec2 texcoord  (R16G16_SFLOAT)
 //
-// This keeps a single static vertex-input description usable across all
-// pipelines, mirroring the GL backend's VAO-per-command bookkeeping without
-// any per-command vertex-state objects.
-constexpr uint32_t VULKAN_VERTEX_STRIDE = 48;
+// Positions and normals stay full f32 (CAD geometry needs the precision for
+// correct normals/lighting); the diffuse color is quantized to 8-bit UNORM and
+// the texture coordinate to half-float, cutting the per-vertex fetch from 48
+// to 32 bytes.  This keeps a single static vertex-input description usable
+// across all pipelines, mirroring the GL backend's VAO-per-command bookkeeping
+// without any per-command vertex-state objects.
+constexpr uint32_t VULKAN_VERTEX_STRIDE = 32;
 constexpr int MAX_VERTEX_COUNT = 10000000;
-constexpr int MAX_SHADER_LIGHTS = 8;
+constexpr int MAX_SHADER_LIGHTS = SO_MAX_SHADER_LIGHTS;
 
 struct alignas(16) VulkanPushConstants {
   float proj[16];       // projection matrix (view/model live in the UBO)
@@ -258,22 +261,14 @@ struct alignas(16) VulkanBackgroundPush {
 static_assert(sizeof(VulkanBackgroundPush) == 48,
               "VulkanBackgroundPush must match BackgroundPush layout");
 
-// std140 mirror of the LightingBlock uniform (set 0, binding 0) in the
-// visual Vertex/Fragment shaders.  The lighting constant block is written
-// ONCE per unique lightingHandle per frame into a small ring; every draw that
-// references the same handle binds that same slot through a dynamic offset,
-// so the 8-light setup is never recomputed or re-written per draw.  The
-// layout must match the shader byte-for-byte; vec3 members consume 16 bytes
-// like std140 vec4s.
-struct alignas(16) VulkanLightingUbo {
-  float ambientLight[4];                   // offset 0
-  float lightType[MAX_SHADER_LIGHTS * 4];        // offset 16
-  float lightColor[MAX_SHADER_LIGHTS * 4];       // offset 144
-  float lightDirection[MAX_SHADER_LIGHTS * 4];   // offset 272
-  float lightPosition[MAX_SHADER_LIGHTS * 4];    // offset 400
-  float lightAttenuation[MAX_SHADER_LIGHTS * 4]; // offset 528
-  float lightSpotParams[MAX_SHADER_LIGHTS * 4];  // offset 656
-};
+// The lighting constant block is the standardized SoLightingBlock (the
+// single authoritative std140 mirror of the visual shaders' LightingBlock
+// uniform, set 0 binding 0).  It is written ONCE per unique lightingHandle
+// per frame into a small ring -- world-space setups transformed to eye space
+// by SoRenderIR::fillLightingBlock() with the frame view -- and every draw
+// referencing the same handle binds that same slot through a dynamic offset,
+// so the 8-light setup is never recomputed or re-written per draw.
+using VulkanLightingUbo = SoLightingBlock;
 static_assert(sizeof(VulkanLightingUbo) == 784,
               "VulkanLightingUbo must match LightingBlock std140 layout");
 

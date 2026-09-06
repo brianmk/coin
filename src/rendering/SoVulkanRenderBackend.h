@@ -891,8 +891,9 @@ private:
 
   // Reusable scratch packing buffer for uploadGeometry().  Resized but never
   // reallocated across successive uploads, so the interleaved repack does not
-  // churn the heap on every geometry change.
-  std::vector<float> uploadScratch;
+  // churn the heap on every geometry change.  Stores the 32-byte packed layout
+  // (see VULKAN_VERTEX_STRIDE), so it is byte-addressed.
+  std::vector<uint8_t> uploadScratch;
   // Reusable per-draw "needs geometry upload" flag buffer for
   // updateGeometryCache().  Grows to the largest draw list seen, then keeps
   // its capacity so an ordinary frame does not heap-allocate a fresh vector
