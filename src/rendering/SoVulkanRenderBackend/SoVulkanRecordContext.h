@@ -25,6 +25,14 @@ struct VulkanRecordContext {
   // renderExternal()); cleared back to null when recording ends.
   VkCommandBuffer buffer = VK_NULL_HANDLE;
 
+  // Per-recording lighting/instance-model slot cursor.  Moved out of a
+  // backend member so each (future parallel) worker thread owns its own: the
+  // record path plants this at an item's pre-assigned slotBase (M1b) before
+  // each item, and recordDrawCommand/recordCommandBatch advance it, so
+  // concurrent workers each advance their own cursor while writing disjoint
+  // (race-free) ring regions.
+  uint32_t uboCmdIndex = 0;
+
   // Last dynamic state actually bound into `buffer` (see applyPipeline /
   // applyViewportState / applyScissorState).  Reset once per frame, not per
   // in-flight slot: dynamic state is per-recording, so a reused slot's prior
@@ -49,6 +57,7 @@ struct VulkanRecordContext {
   // alone: the entry point assigns the buffer after the reset.
   void reset()
   {
+    uboCmdIndex = 0;
     lastBoundPipeline = VK_NULL_HANDLE;
     hasBoundViewport = false;
     hasBoundScissor = false;

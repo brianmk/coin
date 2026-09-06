@@ -1128,7 +1128,7 @@ SoVulkanRenderBackend::recordFrame(const SoDrawList & drawlist,
   // rather than letting each record helper increment from the previous value,
   // so workers can later record disjoint ranges without sharing cursor state.
   auto recordItem = [&](const VulkanWorkItem & item) {
-    this->uboCmdIndex = item.slotBase;
+    ctx.uboCmdIndex = item.slotBase;
     if (item.count > 1) {
       if (this->recordCommandBatch(drawlist, item.commands, item.count, target,
                                    params, renderPass, item.transparent,
@@ -1141,7 +1141,7 @@ SoVulkanRenderBackend::recordFrame(const SoDrawList & drawlist,
         // to per-command draws over the item's slot range.  Re-assign the base
         // so each falls at its own slot, matching the pre-assigned layout.
         for (int k = 0; k < item.count; ++k) {
-          this->uboCmdIndex = item.slotBase + static_cast<uint32_t>(k);
+          ctx.uboCmdIndex = item.slotBase + static_cast<uint32_t>(k);
           this->recordDrawCommand(drawlist, *item.commands[k], target, params,
                                   renderPass, item.transparent,
                                   item.fillModeOverride, item.uniformColorOverride,

@@ -762,8 +762,8 @@ SoVulkanRenderBackend::prepareLightingSlots(const uint32_t neededDraws)
     if (!this->growLightingUbo(neededDraws)) return false;
   }
   // The frame index was advanced by beginFrame(); every render starts from
-  // slot zero of its own ring half.
-  this->uboCmdIndex = 0;
+  // slot zero of its own ring half.  The slot cursor now lives in the
+  // per-recording VulkanRecordContext (reset by its frame-start reset()).
   return true;
 }
 

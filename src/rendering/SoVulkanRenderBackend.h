@@ -709,7 +709,6 @@ private:
   VkDeviceSize uboSlotStride = 0;
   uint32_t uboSlotsPerFrame = 0;
   uint32_t uboFrameIndex = 0;
-  uint32_t uboCmdIndex = 0;
 
   // Host-visible, persistently-mapped buffer holding the per-instance model
   // matrices for instanced drawing (binding 1, rate INSTANCE).  A group of

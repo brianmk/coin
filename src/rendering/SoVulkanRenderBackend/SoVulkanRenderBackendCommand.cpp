@@ -661,7 +661,7 @@ SoVulkanRenderBackend::recordDrawCommand(const SoDrawList & drawlist,
   this->applyCommandViewport(command, target, ctx);
   this->applyScissor(command, target, ctx);
 
-  const uint32_t slotIndex = this->uboCmdIndex++;
+  const uint32_t slotIndex = ctx.uboCmdIndex++;
   // prepareLightingSlots() reserves a worst-case slot count before any
   // recording, so this can only trip if a future recording path forgets to
   // pre-count.  Guard at runtime regardless: the mapped UBO write below
@@ -1070,8 +1070,8 @@ SoVulkanRenderBackend::recordCommandBatch(const SoDrawList & drawlist,
   // Reserve `count` lighting-UBO slots so a batch of N instances maps to N
   // distinct instance-model ring elements (base..base+N-1).  The prepareLighting
   // pre-pass reserved countDrawCommands() slots, so this cannot overflow.
-  const uint32_t slotIndex = this->uboCmdIndex;
-  this->uboCmdIndex += count;
+  const uint32_t slotIndex = ctx.uboCmdIndex;
+  ctx.uboCmdIndex += count;
   const VkDeviceSize uboOffset =
     ((this->uboFrameIndex % this->maxFramesInFlight) *
        this->uboSlotsPerFrame + slotIndex) *
