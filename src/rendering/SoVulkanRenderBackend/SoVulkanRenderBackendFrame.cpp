@@ -856,6 +856,154 @@ SoVulkanRenderBackend::renderExternalOverlay(const SoDrawList & drawlist,
 }
 
 bool
+SoVulkanRenderBackend::buildWorkItems(const SoDrawList & drawlist,
+                                      const SoRenderParams & params,
+                                      bool wireframeOverlay, bool pointsOverlay,
+                                      const float * overlayColor,
+                                      std::vector<VulkanWorkItem> & out)
+{
+  const int overlayFillMode = wireframeOverlay
+    ? SoDrawStyleElement::LINES
+    : (pointsOverlay ? SoDrawStyleElement::POINTS : -1);
+  const std::vector<int> & order = drawlist.getSortedOrder();
+  out.clear();
+
+  // Geometry content identity for batching: reuse the cached content hash the
+  // geometry cache computed when the buffer was uploaded (a map lookup) instead
+  // of re-walking every vertex stream.
+  auto contentHashOf = [this](const SoRenderCommand & c) -> uint64_t {
+    const auto it = this->commandToCache.find(&c);
+    if (it == this->commandToCache.end()) return 0;
+    return this->gpuCache[it->second].contentHash;
+  };
+
+  uint32_t nextSlot = 0;
+  // Opaque then transparent, honoring the draw-list sort order.  Overlay
+  // commands are handled by the dedicated overlay block outside the work list.
+  for (int passIndex = 0; passIndex < 2; ++passIndex) {
+    const bool transparent = passIndex == 1;
+    if (transparent) {
+      // Transparent geometry must preserve painter's order, so never batch.
+      for (int i = 0; i < drawlist.getNumCommands(); ++i) {
+        const int index =
+          i < static_cast<int>(order.size()) ? order[i] : i;
+        const SoRenderCommand & command = drawlist.getCommand(index);
+        if (command.pass == SO_RENDERPASS_OVERLAY) continue;
+        if (command.pass != SO_RENDERPASS_TRANSPARENT) continue;
+        if (!command.geometry.positions || command.geometry.vertexCount == 0)
+          continue;
+        const auto found = this->commandToCache.find(&command);
+        if (found == this->commandToCache.end()) continue;
+        if (this->gpuCache[found->second].vertexBuffer == VK_NULL_HANDLE)
+          continue;
+        VulkanWorkItem item;
+        item.single = &command;
+        item.count = 1;
+        item.transparent = true;
+        item.slotBase = nextSlot++;
+        out.push_back(item);
+      }
+    }
+    else {
+      // Only depth-tested opaque geometry is render-order independent, so it can
+      // be reordered and batched.  Depth-off commands go to the on-top
+      // annotation pass; the CPU wide-line path must stay per-command.  Bucket
+      // by a batch key and re-verify pairwise (splitting any collision).
+      std::unordered_map<uint64_t, std::vector<const SoRenderCommand*>> & buckets =
+        this->batchBucketScratch;
+      buckets.clear();
+      for (int i = 0; i < drawlist.getNumCommands(); ++i) {
+        const int index =
+          i < static_cast<int>(order.size()) ? order[i] : i;
+        const SoRenderCommand & command = drawlist.getCommand(index);
+        if (command.pass == SO_RENDERPASS_OVERLAY) continue;
+        if (command.pass == SO_RENDERPASS_TRANSPARENT) continue;
+        if (!command.state.depth.enabled) continue; // on-top annotation (later)
+        if (!command.geometry.positions || command.geometry.vertexCount == 0)
+          continue;
+        if (vkIsWideLine(command)) continue;        // CPU-expanded per command
+        const auto found = this->commandToCache.find(&command);
+        if (found == this->commandToCache.end()) continue;
+        if (this->gpuCache[found->second].vertexBuffer == VK_NULL_HANDLE)
+          continue;
+        buckets[vkBatchKey(command, contentHashOf(command))].push_back(&command);
+      }
+      for (auto & kv : buckets) {
+        std::vector<const SoRenderCommand*> & v = kv.second;
+        int start = 0;
+        while (start < static_cast<int>(v.size())) {
+          int end = start + 1;
+          const uint64_t hStart = contentHashOf(*v[start]);
+          while (end < static_cast<int>(v.size()) &&
+                 vkCommandBatchable(*v[start], *v[end], hStart,
+                                    contentHashOf(*v[end]))) {
+            ++end;
+          }
+          const int cnt = end - start;
+          VulkanWorkItem item;
+          if (cnt == 1) {
+            item.single = v[start];
+          }
+          else {
+            item.commands = &v[start];
+          }
+          item.count = cnt;
+          item.slotBase = nextSlot;
+          nextSlot += static_cast<uint32_t>(cnt);
+          out.push_back(item);
+          start = end;
+        }
+      }
+    }
+
+    // Wireframe/point overlay: re-draw opaque geometry in the requested fill
+    // mode using a uniform edge color.
+    if (!transparent && overlayFillMode >= 0) {
+      for (int i = 0; i < drawlist.getNumCommands(); ++i) {
+        const int index =
+          i < static_cast<int>(order.size()) ? order[i] : i;
+        const SoRenderCommand & command = drawlist.getCommand(index);
+        if (command.pass == SO_RENDERPASS_OVERLAY) continue;
+        if (command.pass == SO_RENDERPASS_TRANSPARENT) continue;
+        if (!command.geometry.positions || command.geometry.vertexCount == 0)
+          continue;
+        const auto found = this->commandToCache.find(&command);
+        if (found == this->commandToCache.end()) continue;
+        if (this->gpuCache[found->second].vertexBuffer == VK_NULL_HANDLE)
+          continue;
+        VulkanWorkItem item;
+        item.single = &command;
+        item.count = 1;
+        item.fillModeOverride = overlayFillMode;
+        item.uniformColorOverride = overlayColor;
+        item.slotBase = nextSlot++;
+        out.push_back(item);
+      }
+    }
+  }
+
+  // On-top annotations: depth-disabled commands drawn after both passes in
+  // insertion order.
+  for (int i = 0; i < drawlist.getNumCommands(); ++i) {
+    const SoRenderCommand & command = drawlist.getCommand(i);
+    if (command.pass == SO_RENDERPASS_OVERLAY) continue;
+    if (command.state.depth.enabled) continue;
+    if (!command.geometry.positions || command.geometry.vertexCount == 0)
+      continue;
+    const auto found = this->commandToCache.find(&command);
+    if (found == this->commandToCache.end()) continue;
+    if (this->gpuCache[found->second].vertexBuffer == VK_NULL_HANDLE) continue;
+    VulkanWorkItem item;
+    item.single = &command;
+    item.count = 1;
+    item.slotBase = nextSlot++;
+    out.push_back(item);
+  }
+
+  return true;
+}
+
+bool
 SoVulkanRenderBackend::recordFrame(const SoDrawList & drawlist,
                                    const SoRenderParams & params,
                                    const SoVulkanRenderTarget & target,
@@ -960,118 +1108,46 @@ SoVulkanRenderBackend::recordFrame(const SoDrawList & drawlist,
     return FALSE;
   }
 
-  // Opaque then transparent, honoring the draw-list sort order.  Overlay
-  // commands (SO_RENDERPASS_OVERLAY) are handled exclusively by the
-  // dedicated overlay block below: they carry their own view/projection
-  // matrices and viewport, so recording them here with the main camera
-  // matrices would draw garbage into the scene depth buffer.
-  const std::vector<int> & order = drawlist.getSortedOrder();
-  // Geometry content identity for batching: reuse the content hash the geometry
-  // cache already computed when the command's buffer was uploaded (a map
-  // lookup), instead of re-walking every vertex stream each frame (which
-  // dominates record time on command-heavy scenes).
-  auto contentHashOf = [this](const SoRenderCommand & c) -> uint64_t {
-    const auto it = this->commandToCache.find(&c);
-    if (it == this->commandToCache.end()) return 0;
-    return this->gpuCache[it->second].contentHash;
-  };
-
-  for (int passIndex = 0; passIndex < 2; ++passIndex) {
-    const bool transparent = passIndex == 1;
-    if (transparent) {
-      // Transparent geometry must preserve painter's order, so never batch it.
-      for (int i = 0; i < drawlist.getNumCommands(); ++i) {
-        const int index =
-          i < static_cast<int>(order.size()) ? order[i] : i;
-        const SoRenderCommand & command = drawlist.getCommand(index);
-        if (command.pass == SO_RENDERPASS_OVERLAY) continue;
-        if (command.pass != SO_RENDERPASS_TRANSPARENT) continue;
-        this->recordDrawCommand(drawlist, command, target, params, renderPass,
-                                true, -1, nullptr, false, ctx);
+  // Build the read-only worklist (bucketed opaque + batched + transparent +
+  // overlay-redraw + annotation items), each with a pre-assigned disjoint
+  // slotBase, then record it.  buildWorkItems() mirrors the exact order the
+  // previous inline loops used, and the slotBase values match what the
+  // per-draw uboCmdIndex++ sequence produced, so recording is identical.
+  std::vector<VulkanWorkItem> & workItems = this->workItemsScratch;
+  this->buildWorkItems(drawlist, params, wireframeOverlay, pointsOverlay,
+                       overlayColor, workItems);
+  for (const VulkanWorkItem & item : workItems) {
+    // Pre-assigned disjoint block of slots: the item's first of `count`
+    // consecutive slots.  Setting uboCmdIndex here (rather than letting each
+    // record helper increment from the previous value) lets workers later
+    // record disjoint ranges without touching shared cursor state.
+    this->uboCmdIndex = item.slotBase;
+    if (item.count > 1) {
+      if (this->recordCommandBatch(drawlist, item.commands, item.count, target,
+                                   params, renderPass, item.transparent,
+                                   item.fillModeOverride,
+                                   item.uniformColorOverride, ctx)) {
+        // Batched into one instanced draw; nothing further to do.
       }
-    }
-    else {
-      // Only depth-tested opaque geometry (depth test ON) is render-order
-      // independent, so those commands can be reordered and batched (identical
-      // pipeline/descriptor/push/material, differing only by model matrix).
-      // Depth-test-off commands are handled by the on-top annotation pass and
-      // the CPU-expanded wide-line path must keep per-command expansion, so
-      // neither is batched here.  Consecutive runs do not exist (the sort order
-      // interleaves objects), so bucket by a batch key and re-verify pairwise
-      // compatibility (splitting any accidental key collision).  The bucket map
-      // is a reused member (cleared below) rather than a fresh per-frame map,
-      // so a normal frame does not heap-allocate the bucket table + key vectors.
-      std::unordered_map<uint64_t, std::vector<const SoRenderCommand*>> & buckets =
-        this->batchBucketScratch;
-      buckets.clear();
-      for (int i = 0; i < drawlist.getNumCommands(); ++i) {
-        const int index =
-          i < static_cast<int>(order.size()) ? order[i] : i;
-        const SoRenderCommand & command = drawlist.getCommand(index);
-        if (command.pass == SO_RENDERPASS_OVERLAY) continue;
-        if (command.pass == SO_RENDERPASS_TRANSPARENT) continue;
-        if (!command.state.depth.enabled) continue; // on-top annotation (later)
-        if (!command.geometry.positions || command.geometry.vertexCount == 0)
-          continue;
-        if (vkIsWideLine(command)) continue;        // CPU-expanded per command
-        buckets[vkBatchKey(command, contentHashOf(command))].push_back(&command);
-      }
-      for (auto & kv : buckets) {
-        std::vector<const SoRenderCommand*> & v = kv.second;
-        int start = 0;
-        while (start < static_cast<int>(v.size())) {
-          int end = start + 1;
-          const uint64_t hStart = contentHashOf(*v[start]);
-          while (end < static_cast<int>(v.size()) &&
-                 vkCommandBatchable(*v[start], *v[end], hStart,
-                                    contentHashOf(*v[end]))) {
-            ++end;
-          }
-          const int cnt = end - start;
-          if (cnt > 1 &&
-              this->recordCommandBatch(drawlist, &v[start], cnt, target, params,
-                                       renderPass, false, -1, nullptr, ctx)) {
-            // Batched into one instanced draw; nothing further to do.
-          }
-          else {
-            this->recordDrawCommand(drawlist, *v[start], target, params,
-                                    renderPass, false, -1, nullptr, false,
-                                    ctx);
-          }
-          start = end;
+      else {
+        // Batch rejected (e.g. a non-batchable command slipped in): fall back
+        // to per-command draws over the item's slot range.  Re-assign the base
+        // so each falls at its own slot, matching the pre-assigned layout.
+        for (int k = 0; k < item.count; ++k) {
+          this->uboCmdIndex = item.slotBase + static_cast<uint32_t>(k);
+          this->recordDrawCommand(drawlist, *item.commands[k], target, params,
+                                  renderPass, item.transparent,
+                                  item.fillModeOverride, item.uniformColorOverride,
+                                  false, ctx);
         }
       }
     }
-
-    // Wireframe/point overlay: re-draw opaque geometry in the requested fill
-    // mode using a uniform edge color (no vertex colors, no texture, unlit).
-    if (!transparent && overlayFillMode >= 0) {
-      for (int i = 0; i < drawlist.getNumCommands(); ++i) {
-        const int index =
-          i < static_cast<int>(order.size()) ? order[i] : i;
-        const SoRenderCommand & command = drawlist.getCommand(index);
-        if (command.pass == SO_RENDERPASS_OVERLAY) continue;
-        if (command.pass == SO_RENDERPASS_TRANSPARENT) continue;
-        this->recordDrawCommand(drawlist, command, target, params, renderPass,
-                                false, overlayFillMode, overlayColor, false,
-                                ctx);
-      }
+    else {
+      this->recordDrawCommand(drawlist, *item.single, target, params,
+                              renderPass, item.transparent,
+                              item.fillModeOverride, item.uniformColorOverride,
+                              false, ctx);
     }
-  }
-
-  // On-top annotations: commands recorded with the depth test disabled are
-  // drawn after both passes in insertion order.  This mirrors GL's delayed
-  // annotations pass (glClear(GL_DEPTH_BUFFER_BIT) + re-render on top),
-  // which clarify selection uses to show a highlighted shape through
-  // occluding geometry: the base shape and its highlight are recorded with
-  // the depth test off during traversal and deferred here so later-drawn
-  // occluders cannot paint over them.
-  for (int i = 0; i < drawlist.getNumCommands(); ++i) {
-    const SoRenderCommand & command = drawlist.getCommand(i);
-    if (command.pass == SO_RENDERPASS_OVERLAY) continue;
-    if (command.state.depth.enabled) continue;
-    this->recordDrawCommand(drawlist, command, target, params, renderPass,
-                            false, -1, nullptr, false, ctx);
   }
 
   // Screen-space overlay geometry (navigation cube): drawn after both passes

@@ -398,6 +398,37 @@ private:
     VkDeviceSize stagingOffset = 0;
     VkDeviceSize stagingBytes = 0;
   };
+
+  // One resolvable draw unit of the frame's worklist, produced by
+  // buildWorkItems().  buildWorkItems() walks the sorted order, buckets
+  // opaque depth-tested commands, and pre-assigns each item a disjoint
+  // `slotBase` (the first of `count` consecutive lighting-UBO / instance-model
+  // ring slots it consumes).  Worker threads later record from these read-only
+  // items, so nothing here mutates shared backend state.  `commands` is either
+  // a single pointer (count == 1, recorded as one draw) or an array of `count`
+  // pointers sharing geometry/material (recorded as one instanced draw).
+  struct VulkanWorkItem {
+    const SoRenderCommand * single = nullptr;     // count == 1 draw
+    const SoRenderCommand * const * commands = nullptr; // count > 1 batch array
+    int count = 1;
+    uint32_t slotBase = 0;
+    bool transparent = false;
+    bool overlayPass = false;      // SO_RENDERPASS_OVERLAY screen-space draw
+    int fillModeOverride = -1;     // wireframe/point redraw fill mode, or -1
+    const float * uniformColorOverride = nullptr;
+    // Pre-resolved per-item state so the record path (and parallel workers)
+    // avoid re-walking the pipeline cache / texture-set map / lighting map.
+    // Filled by buildWorkItems(); unused markers left null.
+    VkPipeline pipeline = VK_NULL_HANDLE;
+    VkDescriptorSet textureSet = VK_NULL_HANDLE;
+    uint32_t lightingDynamicOffset = 0;
+  };
+
+  bool buildWorkItems(const SoDrawList & drawlist,
+                      const SoRenderParams & params,
+                      bool wireframeOverlay, bool pointsOverlay,
+                      const float * overlayColor,
+                      std::vector<VulkanWorkItem> & out);
   bool prepareTextureUpload(VulkanCachedTexture & entry,
                             const SoTextureData & texture,
                             VkDeviceSize & stagingOffset,
@@ -942,6 +973,11 @@ private:
   // Previously a fresh std::unordered_map per frame; reused via clear() so an
   // ordinary frame does not heap-allocate the bucket table + key vectors.
   std::unordered_map<uint64_t, std::vector<const SoRenderCommand *>> batchBucketScratch;
+  // Reusable worklist produced by buildWorkItems() and consumed by the record
+  // path (M1b) and, later, secondary-buffer / parallel workers (M1c/M1d).
+  // Cleared per frame and refilled so an ordinary frame does not heap-allocate
+  // the item vector.
+  std::vector<VulkanWorkItem> workItemsScratch;
 
   // Packed sampler-state key: minFilter | magFilter << 2 | wrapS << 4 | wrapT << 6.
   typedef uint8_t SamplerKey;
