@@ -637,7 +637,7 @@ cc_xml_doc_get_root(const cc_xml_doc * doc)
 // *************************************************************************
 
 void
-cc_xml_doc_strip_whitespace_x(cc_xml_doc * doc)
+cc_xml_doc_strip_whitespace_x([[maybe_unused]] cc_xml_doc * doc)
 {
   assert(doc);
   return;
@@ -759,7 +759,7 @@ cc_xml_doc_write_to_file(const cc_xml_doc * doc, const char * path)
     buffer.reset(bufptr);
   }
 
-  const size_t bytes = strlen(buffer.get());
+  [[maybe_unused]] const size_t bytes = strlen(buffer.get());
   assert(bufsize == bytes);
   FILE * fp = NULL;
   if (strcmp(path, "-") == 0)

@@ -78,8 +78,8 @@ path_node_clone(path_node * node)
   return path_node_new(node->element, node->idx);
 }
 
-static
-path_node *
+[[maybe_unused]]
+static path_node *
 path_node_delete(path_node * node)
 {
   path_node * next;

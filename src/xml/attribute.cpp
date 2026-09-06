@@ -173,13 +173,13 @@ cc_xml_attr_calculate_size(const cc_xml_attr * attr)
 }
 
 size_t
-cc_xml_attr_write_to_buffer(const cc_xml_attr * attr, char * buffer, size_t bufsize)
+cc_xml_attr_write_to_buffer(const cc_xml_attr * attr, char * buffer, [[maybe_unused]] size_t bufsize)
 {
   // We assert on mismatches between calculated memory usage and actual memory
   // usage, since this must be calculated correctly for not getting memory corruption
   // on invalid buffer size allocation before writing.
   const char * const origbufferptr = buffer;
-  const size_t assumed = cc_xml_attr_calculate_size(attr);
+  [[maybe_unused]] const size_t assumed = cc_xml_attr_calculate_size(attr);
   assert(assumed < bufsize);
   size_t namelen = strlen(attr->name);
   strcpy(buffer, attr->name);
