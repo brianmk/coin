@@ -29,6 +29,20 @@
 using namespace CoinVulkanDetail;
 
 bool
+SoVulkanRenderBackend::ensureInstanceModelRingCapacity()
+{
+  const VkDeviceSize bytes =
+    static_cast<VkDeviceSize>(this->maxFramesInFlight) *
+    static_cast<VkDeviceSize>(this->uboSlotsPerFrame) * sizeof(float) * 16;
+  // Guard against an uninitialised ring (uboSlotsPerFrame==0 -> zero bytes):
+  // ensureInstanceModelBuffer() already clamps to a minimum of 64 bytes, so a
+  // zero request still allocates a valid single-element buffer.  The per-draw
+  // slot-index math is only ever exercised after prepareLightingSlots() sizes
+  // uboSlotsPerFrame, so this is a safety bound, not a steady-state path.
+  return this->ensureInstanceModelBuffer(bytes);
+}
+
+bool
 SoVulkanRenderBackend::ensureInstanceModelBuffer(VkDeviceSize bytes)
 {
   if (this->instanceModelBuffer != VK_NULL_HANDLE &&

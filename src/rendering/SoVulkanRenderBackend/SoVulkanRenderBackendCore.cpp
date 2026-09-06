@@ -516,6 +516,13 @@ SoVulkanRenderBackend::createLightingUniformBuffer()
     this->lightingMemory = VK_NULL_HANDLE;
     return false;
   }
+  // The per-instance model-matrix ring parallels the lighting UBO ring
+  // (same slot layout), so pre-size it here; the per-draw path must never
+  // grow (re-create) this buffer, which would race under parallel recording.
+  if (!this->ensureInstanceModelRingCapacity()) {
+    this->emitError("createLightingUniformBuffer: failed to size instance buffer");
+    return false;
+  }
   return true;
 }
 
@@ -631,6 +638,13 @@ SoVulkanRenderBackend::swapLightingBuffer(VkBuffer newBuffer,
   this->lightingMemory = newMemory;
   this->lightingMapped = newMapped;
   this->uboSlotsPerFrame = newSlotsPerFrame;
+
+  // The ring was (re)sized to a new slot count or a new in-flight frame count;
+  // grow the per-instance model-matrix ring to the same geometry so the
+  // per-draw path never grows it (see ensureInstanceModelRingCapacity()).
+  if (!this->ensureInstanceModelRingCapacity()) {
+    this->emitError("swapLightingBuffer: failed to size instance buffer");
+  }
 
   // The old buffer may still be referenced by a pending frame; destroy it
   // only after the batch ring wraps back around (flushPendingDestroys()).

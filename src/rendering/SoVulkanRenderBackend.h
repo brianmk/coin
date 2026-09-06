@@ -529,6 +529,14 @@ private:
   // (HOST_VISIBLE | HOST_COHERENT, persistently mapped).  Recreates + remaps
   // on growth; the old buffer is released through the deferred ring.
   bool ensureInstanceModelBuffer(VkDeviceSize bytes);
+  // Size the per-instance model-matrix buffer to the full ring
+  // (maxFramesInFlight * uboSlotsPerFrame * sizeof(float[16])), matching the
+  // lighting-UBO ring the instance element index parallels
+  // ((frameIndex % maxFramesInFlight) * uboSlotsPerFrame + slotIndex).  Called
+  // at the same sites that create/resize the UBO ring so the per-draw path
+  // never grows (or worse, re-creates) the buffer -- a per-draw vkMapMemory /
+  // vkDestroyBuffer would otherwise race once workers record in parallel.
+  bool ensureInstanceModelRingCapacity();
   bool growLightingUbo(uint32_t minSlots);
   bool swapLightingBuffer(VkBuffer newBuffer, VkDeviceMemory newMemory,
                           void * newMapped, uint32_t newSlotsPerFrame);

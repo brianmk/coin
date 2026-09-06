@@ -956,7 +956,12 @@ SoVulkanRenderBackend::recordDrawCommand(const SoDrawList & drawlist,
       static_cast<VkDeviceSize>((this->uboFrameIndex % this->maxFramesInFlight) *
         this->uboSlotsPerFrame + slotIndex);
     const VkDeviceSize instByteOffset = instElement * sizeof(float) * 16;
-    if (!this->ensureInstanceModelBuffer(instByteOffset + sizeof(float) * 16)) {
+    // The instance-model ring is pre-sized to maxFramesInFlight *
+    // uboSlotsPerFrame (see ensureInstanceModelRingCapacity), so the element
+    // index can never exceed it -- this is a defensive bounds check only, with
+    // no growth path (growing here would re-create the buffer mid-record,
+    // which races once workers record in parallel).
+    if (instByteOffset + sizeof(float) * 16 > this->instanceModelCapacity) {
       return;
     }
     SbMat mm;
@@ -1143,7 +1148,10 @@ SoVulkanRenderBackend::recordCommandBatch(const SoDrawList & drawlist,
       this->uboSlotsPerFrame + slotIndex);
   const VkDeviceSize instCountBytes = instBase * sizeof(float) * 16 +
     static_cast<VkDeviceSize>(count) * sizeof(float) * 16;
-  if (!this->ensureInstanceModelBuffer(instCountBytes)) {
+  // Defensive bounds check only -- the ring is pre-sized to the slot layout
+  // (see ensureInstanceModelRingCapacity), so no growth path here (which
+  // would re-create the buffer mid-record and race under parallelism).
+  if (instCountBytes > this->instanceModelCapacity) {
     return false;
   }
   char * mapped = static_cast<char *>(this->instanceModelMapped);
