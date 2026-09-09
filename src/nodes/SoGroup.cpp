@@ -193,7 +193,6 @@
 #endif // HAVE_CONFIG_H
 
 #include <cassert>
-#include <execinfo.h>
 
 #include <Inventor/SoInput.h>
 #include <Inventor/SoOutput.h>
@@ -828,16 +827,6 @@ SoGroup::removeChild(SoNode * child)
 		       child,
 		       child ? child->getTypeId().getName().getString() : "");
 #endif // COIN_DEBUG
-    // TEMP-BT: locate the double-remove caller during initial open (delete me)
-    if (std::getenv("FC_VK_REMOVE_DBG")) {
-      std::fprintf(stderr, "[RM-DBG] removeChild fail: group=%s child=%p (%s) nchildren=%d\n",
-                   this->getTypeId().getName().getString(),
-                   child,
-                   child ? child->getTypeId().getName().getString() : "", (int)this->getNumChildren());
-      void* bt[24]; int n = backtrace(bt, 24);
-      backtrace_symbols_fd(bt, n, 2);
-      std::fflush(stderr);
-    }
     return;
   }
 
