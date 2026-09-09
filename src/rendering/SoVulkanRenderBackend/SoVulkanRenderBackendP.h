@@ -87,14 +87,80 @@ namespace CoinVulkanDetail {
   inline int s_dumpCmdCount = 0;
   inline int s_lightLog = 0;
 
+// Coin/OpenGL viewport origins are bottom-left; Vulkan's are top-left.  The
+// vertex shader flips Y in clip space, so the viewport rectangle must be
+// re-anchored to the top edge for the two to cancel out.  This computes the
+// viewport region in Vulkan coordinates and clamps it to the target so an
+// off-screen viewport (origin outside the target, or a size exceeding the
+// extent) never produces a clear/clip outside the render area.  Single
+// source for the math shared by applyViewport(), isFullTargetClear(),
+// recordClear() and recordBackground().
+struct VulkanViewportRect {
+  int32_t x0 = 0, y0 = 0, x1 = 0, y1 = 0;
+};
+
+inline VulkanViewportRect
+vulkanFlippedViewportRect(const SbVec2s & origin, const SbVec2s & size,
+                          const VkExtent2D & extent)
+{
+  VulkanViewportRect r;
+  r.x0 = std::max(0, static_cast<int32_t>(origin[0]));
+  r.y0 = std::max(0, static_cast<int32_t>(extent.height) -
+                       static_cast<int32_t>(origin[1]) -
+                       static_cast<int32_t>(size[1]));
+  r.x1 = std::min(static_cast<int32_t>(extent.width),
+                  static_cast<int32_t>(origin[0]) +
+                    static_cast<int32_t>(size[0]));
+  r.y1 = std::min(static_cast<int32_t>(extent.height),
+                  static_cast<int32_t>(extent.height) -
+                    static_cast<int32_t>(origin[1]));
+  return r;
+}
+
+// [BLACK] per-frame drawlist statistics (FC_VULKAN_BLACK_DEBUG).  One line
+// per recorded frame with the command breakdown, so a black/blank render
+// can be told apart from a frame that drew nothing vs. a frame that drew
+// only transparent/overlay commands.
+inline void
+vkBlackDebugStats(const SoDrawList & drawlist, const SoRenderParams & params,
+                  int overlaysOnly, const char * tag)
+{
+  static int blackFrame = 0;
+  int nTri = 0, nLine = 0, nOverlay = 0, nTrans = 0, nTriLit = 0;
+  int nTriUnlit = 0;
+  for (int i = 0; i < drawlist.getNumCommands(); ++i) {
+    const SoRenderCommand & c = drawlist.getCommand(i);
+    if (c.pass == SO_RENDERPASS_OVERLAY) nOverlay++;
+    else if (c.pass == SO_RENDERPASS_TRANSPARENT) nTrans++;
+    if (c.geometry.topology == SO_TOPOLOGY_TRIANGLES) {
+      nTri++;
+      if (c.material.shadingModel == SO_SHADING_LEGACY_GOURAUD) nTriLit++;
+      else nTriUnlit++;
+    }
+    if (c.geometry.topology == SO_TOPOLOGY_LINES ||
+        c.geometry.topology == SO_TOPOLOGY_LINE_STRIP) {
+      nLine++;
+    }
+  }
+  fprintf(stderr,
+          "[BLACK] %s frame=%d overlaysOnly=%d flags=0x%x "
+          "clear=(%.2f,%.2f,%.2f,%.2f) cmds=%d tri=%d(lit=%d unlit=%d) "
+          "line=%d overlay=%d trans=%d\n",
+          tag, blackFrame++, overlaysOnly, static_cast<unsigned>(params.flags),
+          params.clearColor[0], params.clearColor[1], params.clearColor[2],
+          params.clearColor[3], drawlist.getNumCommands(), nTri, nTriLit,
+          nTriUnlit, nLine, nOverlay, nTrans);
+}
+
 // Number of per-draw lighting UBO slots a frame will consume.  A command is
-// recorded once in its own pass, again when the wireframe/point overlay
-// redraw is active (opaque commands only), and overlay commands are recorded
-// a second time in the overlay block.  recordDrawCommand() bails out before
-// claiming a slot for skipped commands, so this worst case is a safe upper
-// bound.
+// recorded once in its own pass, again when the wireframe/point/tessellation
+// overlay redraw is active (opaque commands only), and overlay commands are
+// recorded a second time in the overlay block.  recordDrawCommand() bails
+// out before claiming a slot for skipped commands, so this worst case is a
+// safe upper bound.
   inline uint32_t
-countDrawCommands(const SoDrawList & drawlist, const int overlayFillMode)
+countDrawCommands(const SoDrawList & drawlist, const int overlayFillMode,
+                  const bool tessellationOverlay)
 {
   uint32_t draws = 0;
   const int num = drawlist.getNumCommands();
@@ -102,7 +168,7 @@ countDrawCommands(const SoDrawList & drawlist, const int overlayFillMode)
     const SoRenderCommand & command = drawlist.getCommand(i);
     if (command.pass == SO_RENDERPASS_OVERLAY) continue;
     ++draws;
-    if (overlayFillMode >= 0 &&
+    if ((overlayFillMode >= 0 || tessellationOverlay) &&
         command.pass != SO_RENDERPASS_TRANSPARENT) {
       ++draws;
     }

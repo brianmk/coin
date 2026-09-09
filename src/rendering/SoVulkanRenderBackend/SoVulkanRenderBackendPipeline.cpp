@@ -171,25 +171,15 @@ SoVulkanRenderBackend::recordBackground(const SoRenderParams & params,
   // applyViewport()); geometry drawn afterwards restores its own viewport.
   const SbVec2s & origin = params.viewport.getViewportOriginPixels();
   const SbVec2s & size = params.viewport.getViewportSizePixels();
-  const int32_t x0 = std::max(0, static_cast<int32_t>(origin[0]));
-  const int32_t y0 = std::max(
-    0, static_cast<int32_t>(target.extent.height) -
-         static_cast<int32_t>(origin[1]) -
-         static_cast<int32_t>(size[1]));
-  const int32_t x1 = std::min(static_cast<int32_t>(target.extent.width),
-                              static_cast<int32_t>(origin[0]) +
-                                static_cast<int32_t>(size[0]));
-  const int32_t y1 = std::min(
-    static_cast<int32_t>(target.extent.height),
-    static_cast<int32_t>(target.extent.height) -
-      static_cast<int32_t>(origin[1]));
-  const int32_t w = std::max(0, x1 - x0);
-  const int32_t h = std::max(0, y1 - y0);
+  const VulkanViewportRect rect =
+    vulkanFlippedViewportRect(origin, size, target.extent);
+  const int32_t w = std::max(0, rect.x1 - rect.x0);
+  const int32_t h = std::max(0, rect.y1 - rect.y0);
   if (w == 0 || h == 0) return;
 
   VkViewport viewport {};
-  viewport.x = static_cast<float>(x0);
-  viewport.y = static_cast<float>(y0);
+  viewport.x = static_cast<float>(rect.x0);
+  viewport.y = static_cast<float>(rect.y0);
   viewport.width = static_cast<float>(w);
   viewport.height = static_cast<float>(h);
   viewport.minDepth = 0.0f;
@@ -197,7 +187,7 @@ SoVulkanRenderBackend::recordBackground(const SoRenderParams & params,
   this->applyViewportState(viewport, ctx);
 
   VkRect2D scissor {};
-  scissor.offset = {x0, y0};
+  scissor.offset = {rect.x0, rect.y0};
   scissor.extent = {static_cast<uint32_t>(w), static_cast<uint32_t>(h)};
   this->applyScissorState(scissor, ctx);
 
@@ -214,8 +204,8 @@ SoVulkanRenderBackend::recordBackground(const SoRenderParams & params,
   push.bottomColor[3] = params.backgroundBottomColor[3];
   push.viewport[0] = static_cast<float>(w);
   push.viewport[1] = static_cast<float>(h);
-  push.viewport[2] = static_cast<float>(x0);
-  push.viewport[3] = static_cast<float>(y0);
+  push.viewport[2] = static_cast<float>(rect.x0);
+  push.viewport[3] = static_cast<float>(rect.y0);
   vkCmdPushConstants(ctx.buffer, this->backgroundPipelineLayout,
                       VK_SHADER_STAGE_VERTEX_BIT |
                         VK_SHADER_STAGE_FRAGMENT_BIT,
@@ -224,101 +214,6 @@ SoVulkanRenderBackend::recordBackground(const SoRenderParams & params,
   vkCmdDraw(ctx.buffer, 3, 1, 0, 0);
 }
 
-bool
-SoVulkanRenderBackend::createRenderPass(const SoVulkanRenderTarget & target,
-                                        VkAttachmentLoadOp colorLoadOp,
-                                        VkAttachmentLoadOp depthLoadOp,
-                                        VkRenderPass & pass)
-{
-  VkAttachmentDescription attachments[2];
-  uint32_t attachmentCount = 1;
-
-  attachments[0].flags = 0;
-  attachments[0].format = target.colorFormat;
-  attachments[0].samples = target.sampleCount;
-  attachments[0].loadOp = colorLoadOp;
-  attachments[0].storeOp = VK_ATTACHMENT_STORE_OP_STORE;
-  attachments[0].stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
-  attachments[0].stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
-  attachments[0].initialLayout = target.colorLayout;
-  attachments[0].finalLayout = target.colorLayout;
-
-  VkAttachmentReference colorRef {};
-  colorRef.attachment = 0;
-  colorRef.layout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
-
-  VkAttachmentReference depthRef {};
-  const bool hasDepth = target.depthImageView != VK_NULL_HANDLE &&
-                        target.depthFormat != VK_FORMAT_UNDEFINED;
-  if (hasDepth) {
-    attachments[1].flags = 0;
-    attachments[1].format = target.depthFormat;
-    attachments[1].samples = target.sampleCount;
-    attachments[1].loadOp = depthLoadOp;
-    attachments[1].storeOp = VK_ATTACHMENT_STORE_OP_STORE;
-    attachments[1].stencilLoadOp = VK_ATTACHMENT_LOAD_OP_LOAD;
-    attachments[1].stencilStoreOp = VK_ATTACHMENT_STORE_OP_STORE;
-    attachments[1].initialLayout = target.depthLayout;
-    attachments[1].finalLayout = target.depthLayout;
-    depthRef.attachment = 1;
-    depthRef.layout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
-    attachmentCount = 2;
-  }
-
-  VkSubpassDescription subpass {};
-  subpass.pipelineBindPoint = VK_PIPELINE_BIND_POINT_GRAPHICS;
-  subpass.colorAttachmentCount = 1;
-  subpass.pColorAttachments = &colorRef;
-  subpass.pDepthStencilAttachment = hasDepth ? &depthRef : nullptr;
-
-  VkRenderPassCreateInfo ci {};
-  ci.sType = VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO;
-  ci.attachmentCount = attachmentCount;
-  ci.pAttachments = attachments;
-  ci.subpassCount = 1;
-  ci.pSubpasses = &subpass;
-  ci.dependencyCount = 0;
-  ci.pDependencies = nullptr;
-
-  return vkCreateRenderPass(this->device, &ci, this->allocator, &pass) ==
-         VK_SUCCESS;
-}
-
-SoVulkanRenderBackend::RenderPassIdentity
-SoVulkanRenderBackend::renderPassIdentity(const SoVulkanRenderTarget & target) const
-{
-  RenderPassIdentity identity;
-  identity.colorFormat = target.colorFormat;
-  identity.sampleCount = target.sampleCount;
-  identity.colorLayout = target.colorLayout;
-  // createRenderPass() only adds a depth attachment when a depth view is
-  // present, so a configured-but-viewless depth format must not be part of
-  // the identity.
-  identity.depthFormat =
-    (target.depthImageView != VK_NULL_HANDLE) ? target.depthFormat
-                                              : VK_FORMAT_UNDEFINED;
-  identity.depthLayout = target.depthLayout;
-  return identity;
-}
-
-VkRenderPass
-SoVulkanRenderBackend::getOrCreateRenderPass(const SoVulkanRenderTarget & target,
-                                             VkAttachmentLoadOp colorLoadOp,
-                                             VkAttachmentLoadOp depthLoadOp)
-{
-  RenderPassIdentity identity = this->renderPassIdentity(target);
-  identity.colorLoadOp = colorLoadOp;
-  identity.depthLoadOp = depthLoadOp;
-  const auto found = this->renderPassCache.find(identity);
-  if (found != this->renderPassCache.end()) return found->second;
-
-  VkRenderPass pass = VK_NULL_HANDLE;
-  if (!this->createRenderPass(target, colorLoadOp, depthLoadOp, pass)) {
-    return VK_NULL_HANDLE;
-  }
-  this->renderPassCache.emplace(identity, pass);
-  return pass;
-}
 
 bool
 SoVulkanRenderBackend::getOrCreatePipeline(const SoRenderCommand & command,
@@ -641,7 +536,9 @@ SoVulkanRenderBackend::getOrCreatePipeline(const SoRenderCommand & command,
   depthStencil.depthTestEnable =
     (command.state.depth.enabled || overlay) ? VK_TRUE : VK_FALSE;
   depthStencil.depthWriteEnable =
-    (!transparent && !overlay && command.state.depth.writeEnabled)
+    (overlayPass ? command.state.depth.writeEnabled
+                 : (!transparent && !overlay &&
+                    command.state.depth.writeEnabled))
       ? VK_TRUE : VK_FALSE;
   depthStencil.depthCompareOp = overlay
     ? VK_COMPARE_OP_LESS_OR_EQUAL

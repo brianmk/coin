@@ -72,6 +72,41 @@ SoVulkanRenderBackend::applyScissorState(const VkRect2D & scissor,
 }
 
 void
+SoVulkanRenderBackend::bindDrawDescriptorSets(VulkanRecordContext & ctx,
+                                              VkDescriptorSet textureSet,
+                                              uint32_t lightingDynamicOffset,
+                                              uint32_t uboDynamicOffset,
+                                              uint32_t slotIndex)
+{
+  const uint32_t bindingOffsets[2] = {lightingDynamicOffset, uboDynamicOffset};
+  if (ctx.lastBoundLightingOffset != lightingDynamicOffset ||
+      ctx.lastBoundTextureSet != textureSet) {
+    // First draw of a new lighting handle / texture set: bind both sets with
+    // their dynamic offsets in one call (also covers the frame's first draw).
+    const VkDescriptorSet both[2] = {this->lightingDescriptorSet, textureSet};
+    vkBackendTrace(this->uboFrameIndex, "draw.bindDescSets2",
+                   "slot=%u", slotIndex);
+    vkCmdBindDescriptorSets(ctx.buffer,
+                            VK_PIPELINE_BIND_POINT_GRAPHICS,
+                            this->pipelineLayout, 0, 2, both, 2,
+                            bindingOffsets);
+    ctx.lastBoundLightingOffset = lightingDynamicOffset;
+    ctx.lastBoundTextureSet = textureSet;
+  }
+  else {
+    // Same lighting handle + texture set as the previous draw: only the
+    // per-draw UBO dynamic offset advances.  Re-bind set 1 alone (set 0 stays
+    // bound from the last 2-set bind) instead of re-emitting both sets.
+    vkBackendTrace(this->uboFrameIndex, "draw.bindDescSets1",
+                   "slot=%u", slotIndex);
+    vkCmdBindDescriptorSets(ctx.buffer,
+                            VK_PIPELINE_BIND_POINT_GRAPHICS,
+                            this->pipelineLayout, 1, 1, &textureSet, 1,
+                            &bindingOffsets[1]);
+  }
+}
+
+void
 SoVulkanRenderBackend::applyViewport(const SoRenderParams & params,
                                      const SoVulkanRenderTarget & target,
                                      VulkanRecordContext & ctx)
@@ -105,22 +140,12 @@ SoVulkanRenderBackend::applyViewport(const SoRenderParams & params,
   // Clamp the clear region to the target so an off-screen viewport (origin
   // outside the target, or a size exceeding the extent) never generates a
   // clear outside the render area.
-  const int32_t x0 = std::max(0, static_cast<int32_t>(origin[0]));
-  const int32_t y0 = std::max(
-    0, static_cast<int32_t>(target.extent.height) -
-         static_cast<int32_t>(origin[1]) -
-         static_cast<int32_t>(size[1]));
-  const int32_t x1 = std::min(static_cast<int32_t>(target.extent.width),
-                              static_cast<int32_t>(origin[0]) +
-                                static_cast<int32_t>(size[0]));
-  const int32_t y1 = std::min(
-    static_cast<int32_t>(target.extent.height),
-    static_cast<int32_t>(target.extent.height) -
-      static_cast<int32_t>(origin[1]));
+  const VulkanViewportRect rect =
+    vulkanFlippedViewportRect(origin, size, target.extent);
   VkRect2D scissor {};
-  scissor.offset = {x0, y0};
-  scissor.extent = {static_cast<uint32_t>(std::max(0, x1 - x0)),
-                    static_cast<uint32_t>(std::max(0, y1 - y0))};
+  scissor.offset = {rect.x0, rect.y0};
+  scissor.extent = {static_cast<uint32_t>(std::max(0, rect.x1 - rect.x0)),
+                    static_cast<uint32_t>(std::max(0, rect.y1 - rect.y0))};
   this->applyScissorState(scissor, ctx);
 }
 
@@ -213,21 +238,11 @@ SoVulkanRenderBackend::isFullTargetClear(const SoRenderParams & params,
   // pass can clear via its loadOp instead.  Empty viewports clear nothing.
   const SbVec2s & origin = params.viewport.getViewportOriginPixels();
   const SbVec2s & size = params.viewport.getViewportSizePixels();
-  const int32_t x0 = std::max(0, static_cast<int32_t>(origin[0]));
-  const int32_t y0 = std::max(
-    0, static_cast<int32_t>(target.extent.height) -
-       static_cast<int32_t>(origin[1]) -
-       static_cast<int32_t>(size[1]));
-  const int32_t x1 = std::min(static_cast<int32_t>(target.extent.width),
-                              static_cast<int32_t>(origin[0]) +
-                                static_cast<int32_t>(size[0]));
-  const int32_t y1 = std::min(
-    static_cast<int32_t>(target.extent.height),
-    static_cast<int32_t>(target.extent.height) -
-      static_cast<int32_t>(origin[1]));
-  return x0 == 0 && y0 == 0 &&
-    x1 == static_cast<int32_t>(target.extent.width) &&
-    y1 == static_cast<int32_t>(target.extent.height);
+  const VulkanViewportRect rect =
+    vulkanFlippedViewportRect(origin, size, target.extent);
+  return rect.x0 == 0 && rect.y0 == 0 &&
+    rect.x1 == static_cast<int32_t>(target.extent.width) &&
+    rect.y1 == static_cast<int32_t>(target.extent.height);
 }
 
 void
@@ -287,28 +302,18 @@ SoVulkanRenderBackend::recordClear(const SoRenderParams & params,
   // overwrite other viewports or the backing image outside the viewport.
   const SbVec2s & origin = params.viewport.getViewportOriginPixels();
   const SbVec2s & size = params.viewport.getViewportSizePixels();
-  const int32_t x0 = std::max(0, static_cast<int32_t>(origin[0]));
-  const int32_t y0 = std::max(
-    0, static_cast<int32_t>(target.extent.height) -
-         static_cast<int32_t>(origin[1]) -
-         static_cast<int32_t>(size[1]));
-  const int32_t x1 = std::min(static_cast<int32_t>(target.extent.width),
-                              static_cast<int32_t>(origin[0]) +
-                                static_cast<int32_t>(size[0]));
-  const int32_t y1 = std::min(
-    static_cast<int32_t>(target.extent.height),
-    static_cast<int32_t>(target.extent.height) -
-      static_cast<int32_t>(origin[1]));
-  if (x1 <= x0 || y1 <= y0) return;
+  const VulkanViewportRect rect =
+    vulkanFlippedViewportRect(origin, size, target.extent);
+  if (rect.x1 <= rect.x0 || rect.y1 <= rect.y0) return;
 
-  VkClearRect rect {};
-  rect.rect.offset = {x0, y0};
-  rect.rect.extent = {static_cast<uint32_t>(x1 - x0),
-                      static_cast<uint32_t>(y1 - y0)};
-  rect.baseArrayLayer = 0;
-  rect.layerCount = 1;
+  VkClearRect clearRect {};
+  clearRect.rect.offset = {rect.x0, rect.y0};
+  clearRect.rect.extent = {static_cast<uint32_t>(rect.x1 - rect.x0),
+                           static_cast<uint32_t>(rect.y1 - rect.y0)};
+  clearRect.baseArrayLayer = 0;
+  clearRect.layerCount = 1;
   vkCmdClearAttachments(ctx.buffer, attachmentCount, attachments, 1,
-                        &rect);
+                        &clearRect);
 }
 
 void
@@ -668,32 +673,8 @@ SoVulkanRenderBackend::recordDrawCommand(const SoDrawList & drawlist,
     ctx.lastLightingHandle = command.lightingHandle;
     ctx.lastLightingOffset = lightingDynamicOffset;
   }
-  uint32_t bindingOffsets[2] = { lightingDynamicOffset, uboDynamicOffset };
-  if (ctx.lastBoundLightingOffset != lightingDynamicOffset ||
-      ctx.lastBoundTextureSet != textureSet) {
-    // First draw of a new lighting handle / texture set: bind both sets with
-    // their dynamic offsets in one call (also covers the frame's first draw).
-    const VkDescriptorSet both[2] = {this->lightingDescriptorSet, textureSet};
-    vkBackendTrace(this->uboFrameIndex, "draw.bindDescSets2",
-                   "slot=%u", slotIndex);
-    vkCmdBindDescriptorSets(ctx.buffer,
-                            VK_PIPELINE_BIND_POINT_GRAPHICS,
-                            this->pipelineLayout, 0, 2, both, 2,
-                            bindingOffsets);
-    ctx.lastBoundLightingOffset = lightingDynamicOffset;
-    ctx.lastBoundTextureSet = textureSet;
-  }
-  else {
-    // Same lighting handle + texture set as the previous draw: only the
-    // per-draw UBO dynamic offset advances.  Re-bind set 1 alone (set 0 stays
-    // bound from the last 2-set bind) instead of re-emitting both sets.
-    vkBackendTrace(this->uboFrameIndex, "draw.bindDescSets1",
-                   "slot=%u", slotIndex);
-    vkCmdBindDescriptorSets(ctx.buffer,
-                            VK_PIPELINE_BIND_POINT_GRAPHICS,
-                            this->pipelineLayout, 1, 1, &textureSet, 1,
-                            &bindingOffsets[1]);
-  }
+  this->bindDrawDescriptorSets(ctx, textureSet, lightingDynamicOffset,
+                               uboDynamicOffset, slotIndex);
 
   const VkDeviceSize vertexOffset = entry.vertexOffset;
   const bool indexed =
@@ -1085,23 +1066,8 @@ SoVulkanRenderBackend::recordCommandBatch(const SoDrawList & drawlist,
     ctx.lastLightingHandle = command.lightingHandle;
     ctx.lastLightingOffset = lightingDynamicOffset;
   }
-  uint32_t bindingOffsets[2] = { lightingDynamicOffset, uboDynamicOffset };
-  if (ctx.lastBoundLightingOffset != lightingDynamicOffset ||
-      ctx.lastBoundTextureSet != textureSet) {
-    const VkDescriptorSet both[2] = {this->lightingDescriptorSet, textureSet};
-    vkCmdBindDescriptorSets(ctx.buffer,
-                            VK_PIPELINE_BIND_POINT_GRAPHICS,
-                            this->pipelineLayout, 0, 2, both, 2,
-                            bindingOffsets);
-    ctx.lastBoundLightingOffset = lightingDynamicOffset;
-    ctx.lastBoundTextureSet = textureSet;
-  }
-  else {
-    vkCmdBindDescriptorSets(ctx.buffer,
-                            VK_PIPELINE_BIND_POINT_GRAPHICS,
-                            this->pipelineLayout, 1, 1, &textureSet, 1,
-                            &bindingOffsets[1]);
-  }
+  this->bindDrawDescriptorSets(ctx, textureSet, lightingDynamicOffset,
+                               uboDynamicOffset, slotIndex);
 
   // Vertex buffer (binding 0).  The whole batch shares commands[0]'s geometry,
   // so one bind serves every instance.

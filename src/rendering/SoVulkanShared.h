@@ -13,6 +13,8 @@
 #include <cstdlib>
 #include <cstdint>
 #include <cstring>
+#include <cstdio>
+#include <cstdarg>
 #include <functional>
 #include <vector>
 
@@ -29,6 +31,27 @@ envFlagEnabled(const char * name)
   if (value == nullptr) return false;
   return std::strcmp(value, "0") != 0 && std::strcmp(value, "false") != 0 &&
          std::strcmp(value, "off") != 0;
+}
+
+// Permanent, shared initialization breadcrumb for the Vulkan renderer
+// bring-up path.  Every step from SoRenderBackend::initialize() down through
+// the concrete SoVulkanRenderBackend / SoRTXRenderBackend / SoVulkanRenderManager
+// and the Qt QuarterVulkanWidget orchestration emits one line, so a single
+// interleaved [VKINIT] log records the exact order and success/failure of the
+// whole initialization.  Gated by the same FC_VULKAN_BREADCRUMBS flag the
+// SoVulkanRenderManager [VKINIT]/frame breadcrumbs use, so one env var enables
+// the entire trace.  The point of permanence is that a backend bring-up bug
+// (a step skipped, an init/shutdown ordering issue, a half-failed initialize)
+// becomes directly visible in the log without re-adding instrumentation.
+inline void initBreadcrumb(const char * fmt, ...)
+{
+  if (!envFlagEnabled("FC_VULKAN_BREADCRUMBS")) return;
+  std::fprintf(stderr, "[VKINIT] ");
+  va_list args;
+  va_start(args, fmt);
+  std::vfprintf(stderr, fmt, args);
+  va_end(args);
+  std::fflush(stderr);
 }
 
 // Literal-name fast path: the per-call-site static resolves the flag once, so
@@ -65,12 +88,14 @@ public:
     return m_props;
   }
 
-  // Pick the first memory type matching `desired`, falling back to any type
-  // the device offers for this resource.  Returns false only when no type is
-  // usable (or no device is bound).
-  bool pick(const VkMemoryRequirements & requirements,
-            VkMemoryPropertyFlags desired,
-            uint32_t & memoryTypeIndex) const
+  // Pick the first memory type that exactly satisfies `desired`, with no
+  // fallback to a merely-compatible type.  On failure leaves memoryTypeIndex
+  // untouched and returns false.  This is the raster backend's policy: a
+  // buffer/image that cannot be placed in the requested property class is a
+  // hard error rather than a silent host-visible degradation.
+  bool pickExact(const VkMemoryRequirements & requirements,
+                 VkMemoryPropertyFlags desired,
+                 uint32_t & memoryTypeIndex) const
   {
     this->ensure();
     if (!m_valid) return false;
@@ -81,6 +106,21 @@ public:
         return true;
       }
     }
+    return false;
+  }
+
+  // Pick the first memory type matching `desired`, falling back to any type
+  // the device offers for this resource.  Returns false only when no type is
+  // usable (or no device is bound).  This is the RT backend's policy: the
+  // best-effort fallback keeps a renderer allocation on memory it can use
+  // rather than failing outright.
+  bool pick(const VkMemoryRequirements & requirements,
+            VkMemoryPropertyFlags desired,
+            uint32_t & memoryTypeIndex) const
+  {
+    if (this->pickExact(requirements, desired, memoryTypeIndex)) return true;
+    this->ensure();
+    if (!m_valid) return false;
     for (uint32_t i = 0; i < m_props.memoryTypeCount; ++i) {
       if (requirements.memoryTypeBits & (1u << i)) {
         memoryTypeIndex = i;

@@ -8,6 +8,7 @@
 #include "rendering/SoVulkanShared.h"
 #include "rendering/SoVulkanRenderBackend/SoVulkanMemPool.h"
 #include "rendering/SoVulkanRenderBackend/SoVulkanRecordContext.h"
+#include "rendering/SoVulkanRenderBackend/SoVulkanRenderPassCache.h"
 
 #include <Inventor/rendering/SoVulkanRenderTarget.h>
 
@@ -294,6 +295,7 @@ public:
   */
   void setWireframeOverlay(SbBool enabled);
   void setPointsOverlay(SbBool enabled);
+  void setTessellationOverlay(SbBool enabled);
   void setEdgeColor(const SbColor4f & color);
 
 private:
@@ -305,10 +307,6 @@ private:
   bool createLightingConstBuffer();
   bool createLightingDescriptorSet();
   bool createPipelineLayout();
-  bool createRenderPass(const SoVulkanRenderTarget & target,
-                        VkAttachmentLoadOp colorLoadOp,
-                        VkAttachmentLoadOp depthLoadOp,
-                        VkRenderPass & renderPass);
   bool createShaders(VkShaderModule & vertexModule,
                      VkShaderModule & fragmentModule);
   bool createWideLineShaders();
@@ -317,8 +315,6 @@ private:
   bool createBackgroundPipeline(const SoVulkanRenderTarget & target,
                                 VkRenderPass renderPass,
                                 VkPipeline & pipeline);
-  bool ensureFramebuffer(const SoVulkanRenderTarget * target,
-                         VkRenderPass renderPass);
   void recordBackground(const SoRenderParams & params,
                         const SoVulkanRenderTarget & target,
                         VkRenderPass renderPass,
@@ -434,6 +430,7 @@ private:
   bool buildWorkItems(const SoDrawList & drawlist,
                       const SoRenderParams & params,
                       bool wireframeOverlay, bool pointsOverlay,
+                      bool tessellationOverlay,
                       const float * overlayColor,
                       VkRenderPass renderPass,
                       std::vector<VulkanWorkItem> & out);
@@ -564,6 +561,14 @@ private:
   void applyViewportState(const VkViewport & viewport,
                           VulkanRecordContext & ctx);
   void applyScissorState(const VkRect2D & scissor, VulkanRecordContext & ctx);
+  // Bind the lighting (set 0) + texture/UBO (set 1) descriptor sets for a
+  // draw.  Re-binds set 1 alone when only the per-draw UBO dynamic offset
+  // advanced (shared by recordDrawCommand and recordCommandBatch).
+  void bindDrawDescriptorSets(VulkanRecordContext & ctx,
+                              VkDescriptorSet textureSet,
+                              uint32_t lightingDynamicOffset,
+                              uint32_t uboDynamicOffset,
+                              uint32_t slotIndex);
   void resetBoundState(VulkanRecordContext & ctx);
   void recordOverlayDepthClear(const SoRenderCommand & command,
                                const SoVulkanRenderTarget & target,
@@ -835,6 +840,11 @@ private:
   // Configured through the manager; never part of the shared render params.
   SbBool wireframeOverlay = FALSE;
   SbBool pointsOverlay = FALSE;
+  // Debug overlay: re-draw the triangle commands in polygon-LINES mode so
+  // the raw tessellation (triangle edges) is visible on top of the shaded
+  // geometry.  Distinct from the wireframe/edge overlay, which draws only
+  // the true B-Rep feature-edge line commands.
+  SbBool tessellationOverlay = FALSE;
   SbColor4f edgeColor = SbColor4f(0.05f, 0.05f, 0.05f, 1.0f);
 
   // Texture uploads gathered during updateGeometryCache().  On the own-queue
@@ -881,83 +891,16 @@ private:
   VkPipelineLayout backgroundPipelineLayout = VK_NULL_HANDLE;
 
   // Render passes are cached by their VkRenderPassCreateInfo identity
-  // (color/depth format, sample count, image layouts).  Pipelines are keyed
-  // on the render-pass handle (see PipelineKey), so reusing the same pass
-  // across targets that differ only in their images/extent keeps the
-  // pipeline cache warm -- in particular for swapchain targets whose images
-  // cycle every frame.
-  struct RenderPassIdentity {
-    VkFormat colorFormat = VK_FORMAT_B8G8R8A8_UNORM;
-    VkFormat depthFormat = VK_FORMAT_UNDEFINED;
-    VkSampleCountFlagBits sampleCount = VK_SAMPLE_COUNT_1_BIT;
-    VkImageLayout colorLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
-    VkImageLayout depthLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
-    // Load ops distinguish a render pass that clears its attachments at begin
-    // (full-target clear fast path, FC_VULKAN_RP_CLEAR) from one that loads
-    // them and clears via vkCmdClearAttachments.  Two passes that differ only
-    // in loadOp must not share a cache entry.
-    VkAttachmentLoadOp colorLoadOp = VK_ATTACHMENT_LOAD_OP_LOAD;
-    VkAttachmentLoadOp depthLoadOp = VK_ATTACHMENT_LOAD_OP_LOAD;
-
-    bool operator==(const RenderPassIdentity & other) const
-    {
-      return colorFormat == other.colorFormat &&
-        depthFormat == other.depthFormat &&
-        sampleCount == other.sampleCount &&
-        colorLayout == other.colorLayout &&
-        depthLayout == other.depthLayout &&
-        colorLoadOp == other.colorLoadOp &&
-        depthLoadOp == other.depthLoadOp;
-    }
-  };
-  struct RenderPassIdentityHash
-  {
-    size_t operator()(const RenderPassIdentity & key) const
-    {
-      size_t hash = std::hash<uint32_t>()(
-        static_cast<uint32_t>(key.colorFormat));
-      hash = hashCombine(hash,
-                         std::hash<uint32_t>()(static_cast<uint32_t>(key.depthFormat)));
-      hash = hashCombine(hash,
-                         std::hash<uint32_t>()(static_cast<uint32_t>(key.sampleCount)));
-      hash = hashCombine(hash,
-                         std::hash<uint32_t>()(static_cast<uint32_t>(key.colorLayout)));
-      hash = hashCombine(hash,
-                         std::hash<uint32_t>()(static_cast<uint32_t>(key.depthLayout)));
-      hash = hashCombine(hash,
-                         std::hash<uint32_t>()(static_cast<uint32_t>(key.colorLoadOp)));
-      hash = hashCombine(hash,
-                         std::hash<uint32_t>()(static_cast<uint32_t>(key.depthLoadOp)));
-      return hash;
-    }
-  };
-  RenderPassIdentity renderPassIdentity(const SoVulkanRenderTarget & target) const;
-  VkRenderPass getOrCreateRenderPass(const SoVulkanRenderTarget & target,
-                                     VkAttachmentLoadOp colorLoadOp,
-                                     VkAttachmentLoadOp depthLoadOp);
-  std::unordered_map<RenderPassIdentity, VkRenderPass, RenderPassIdentityHash>
-    renderPassCache;
-
-  // Render pass used by the current frame (looked up from renderPassCache).
-  VkRenderPass renderPass = VK_NULL_HANDLE;
-  // Whether the current frame's render pass clears the color/depth attachment
-  // via its loadOp (full-target-clear fast path).  When true, recordClear()
-  // skips the redundant vkCmdClearAttachments and the begin info supplies the
-  // corresponding clear value.
-  bool renderPassColorCleared = false;
-  bool renderPassDepthCleared = false;
-
-  // Framebuffer cached for the current target identity (image views +
-  // extent + render pass).  Swapchain targets cycle their images every
-  // frame, so this is recreated on any target change while the render pass
-  // itself survives in renderPassCache.
-  VkFramebuffer renderPassFramebuffer = VK_NULL_HANDLE;
-  VkRenderPass renderPassFramebufferPass = VK_NULL_HANDLE;
-  VkImage renderPassFramebufferColorImage = VK_NULL_HANDLE;
-  VkImageView renderPassFramebufferColorView = VK_NULL_HANDLE;
-  VkImage renderPassFramebufferDepthImage = VK_NULL_HANDLE;
-  VkImageView renderPassFramebufferDepthView = VK_NULL_HANDLE;
-  VkExtent2D renderPassFramebufferExtent {0, 0};
+  // (color/depth format, sample count, image layouts) plus the color/depth
+  // load ops.  Pipelines are keyed on the render-pass handle (see
+  // PipelineKey), so reusing the same pass across targets that differ only in
+  // their images/extent keeps the pipeline cache warm -- in particular for
+  // swapchain targets whose images cycle every frame.  The cache also keeps the
+  // per-target framebuffer, recreated on any target change while the render
+  // pass itself survives.  All of that state lives in the owned
+  // SoVulkanRenderPassCache so the backend records a frame with the current
+  // pass/framebuffer without duplicating the cache bookkeeping.
+  SoVulkanRenderPassCache renderPasses;
 
   // Pipeline cache: keyed by the retained state that affects the created
   // pipeline.  Vulkan pipelines are immutable, so every topology/fill/depth/
