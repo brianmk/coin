@@ -430,17 +430,6 @@ public:
   uint32_t sceneFpMainCount = 0;
   SbBool sceneFpValid = FALSE;
 
-  // Cheap draw-list fingerprint gate for the expensive graph-fingerprint walk.
-  // computeSceneFingerprint() hashes only the retained main commands (world
-  // matrices + geometry buffer pointers + counts), so it changes on a real
-  // geometry/transform edit but is invariant under camera motion.  When it
-  // matches the previous frame's value, computeGraphFingerprint() (a full scene
-  // tree walk) is skipped and the cached graph fingerprint is reused.
-  uint64_t drawFpCached = 0;
-  SoNode * drawFpScene = nullptr;
-  uint32_t drawFpMainCount = 0;
-  SbBool drawFpValid = FALSE;
-
   SoIRRenderAction irAction;
   //! Second IR action used to re-record the overlay/decoration scenes every
   //! frame (their node-ids churn with the camera, so they cannot be retained);
@@ -1667,29 +1656,19 @@ SoVulkanRenderManagerP::prepareRenderParams(SbBool clearwindow,
   // below.  They are re-recorded separately afterwards (cheap) and merged onto
   // this main list.
    SbBool irReplayed = FALSE;
-   // Cheap fast-path: the graph fingerprint walk is O(N) over the whole scene,
-   // and on a retained (replayed) frame with no scene change it is pure waste.
-   // The walk folds scene node-ids but deliberately SKIPS the camera, so the
-   // fingerprint is invariant under camera motion; the only thing that changes
-   // it is a change to the main scene graph.  An SoNodeSensor attached to the
-   // scene root fires whenever any descendant is notified (a field write or a
-   // child-list edit), which is precisely a main-scene change -- so when the
-   // sensor has NOT fired since the last walk, the cached fingerprint is still
-   // exact and the O(N) walk is skipped.  This catches every change the walk
-   // would (Coin propagates notify() up to the root), independent of any
-   // external revision wiring, and camera-only frames still produce the same
-   // (camera-invariant) fingerprint.
-   //
-   // The sensor firing is itself the replay gate, not the fingerprint: the
-   // fingerprint folds node identity only (pointer + node-id + child count),
-   // so a FIELD-ONLY write (material, transform, preselection state) leaves it
-   // unchanged.  Replaying after such a write is unsafe anyway: the write
-   // notifies the shape (SoShape::notify() drops its retained tessellation),
-   // so the retained list's raw geometry pointers may reference freed storage.
-   // Re-traverse whenever the sensor has fired since the last walk; camera
-   // motion alone never fires the scene-root sensor (the camera lives outside
-   // the scene graph), so camera-only frames still replay.
-   const SbBool graphChanged = this->sceneGraphDirty;
+   // The graph fingerprint walk is O(N) over the scene nodes, so on a retained
+   // (replayed) frame with no scene change at all it is pure waste.  The walk
+   // folds scene node-ids but deliberately skips camera, light, environment and
+   // tag/infra nodes, so the fingerprint is invariant under camera motion; the
+   // only thing that changes it is a change to a render-affecting node.  An
+   // SoNodeSensor attached to the scene root fires whenever any descendant is
+   // notified (a field write or a child-list edit, including the camera pose --
+   // FreeCAD keeps the camera inside the scene graph).  When the sensor has NOT
+   // fired since the last walk the cached fingerprint is still exact and the
+   // walk/re-traversal can be skipped via the branch below.  When it HAS fired
+   // we must recompute the fingerprint (see the else) to distinguish camera-only
+   // churn (identical fingerprint -> replay) from a real content change
+   // (different fingerprint -> re-traverse).
    uint64_t graphFp;
    const SbVec2s fpVpSize = this->viewportRegion.getViewportSizePixels();
     if (this->graphFingerprintValid && this->lastFpValid &&
@@ -1698,34 +1677,26 @@ SoVulkanRenderManagerP::prepareRenderParams(SbBool clearwindow,
       graphFp = this->graphFingerprint;
     }
     else {
-      // Recomputing computeGraphFingerprint() walks the ENTIRE scene-graph tree
-      // (graphFingerprintWalk, O(nodes) + geometry identity) and is measurable
-      // on a many-object scene (1000 boxes -> ~28 ms).  It only needs to run
-      // when the retained main draw list actually changed.  graphSceneDirty is
-      // set by a scene-root sensor that fires on ANY descendant notification,
-      // including the camera pose (FreeCAD keeps the camera inside the scene
-      // graph), so camera-orbit frames set it too -- and recomputing the full
-      // graph fingerprint there is pure waste: camera motion never changes the
-      // retained main-list content.  Gate the expensive walk on the cheap
-      // draw-list fingerprint (computeSceneFingerprint hashes only the retained
-      // commands: world matrix + geometry pointers + counts).  Camera-only
-      // frames produce the same draw-list fingerprint, so we keep the previous
-      // graph fingerprint (which is likewise camera-invariant) and the retained
-      // list replays instead of re-traversing.
-      const uint64_t drawFp = computeSceneFingerprint(
-        this->irAction, static_cast<int>(this->mainCommandCount));
-      if (this->drawFpValid && this->drawFpCached == drawFp &&
-          this->scene == this->drawFpScene &&
-          this->mainCommandCount == this->drawFpMainCount) {
-        graphFp = this->graphFingerprint;  // draw list unchanged -> reuse
-      }
-      else {
-        graphFp = this->computeGraphFingerprint();
-        this->drawFpCached = drawFp;
-        this->drawFpScene = this->scene;
-        this->drawFpMainCount = this->mainCommandCount;
-        this->drawFpValid = TRUE;
-      }
+      // Recompute the graph fingerprint whenever the scene sensor has fired.
+      // graphFingerprintWalk folds the node-id of every non-camera-coupled,
+      // render-affecting node, so a real content change that alters what the
+      // walk sees -- an add/remove, a geometry rebuild, a transform/model-matrix
+      // write, a material/selection field write, or a SoSwitch::whichChild
+      // visibility toggle -- bumps at least one folded id and produces a
+      // DIFFERENT fingerprint, correctly forcing a re-traverse below.  The
+      // root sensor also fires on camera pose/headlight motion, but those nodes
+      // are EXCLUDED from the walk, so camera-only frames yield an identical
+      // (camera-invariant) fingerprint and the retained main list replays.
+      //
+      // Do NOT short-circuit this walk with a cheap hash of the retained draw
+      // list: that is unsound.  The retained list is the PREVIOUS frame's graph
+      // output, so a visibility toggle (SoSwitch::whichChild) changes the scene
+      // without yet changing the retained commands -- their fingerprint is
+      // therefore unchanged, and skipping the walk would replay the stale list
+      // forever, leaving an object's show/hide state never reflected in the
+      // viewport.  The walk is the authoritative signal and is O(nodes) (a few
+      // mixHash per node), far cheaper than an actual re-traversal.
+      graphFp = this->computeGraphFingerprint();
       this->sceneGraphDirty = FALSE;
     }
    this->lastFpScene = this->scene;
