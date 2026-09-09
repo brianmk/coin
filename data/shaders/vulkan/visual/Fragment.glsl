@@ -8,6 +8,10 @@
 // according to the command's SoTextureModel.
 
 #version 450
+#extension GL_GOOGLE_include_directive : require
+
+// Shared lighting container + Blinn-Phong evaluators (see LightCommon.glsl).
+#include "../common/LightCommon.glsl"
 
 layout(push_constant) uniform PushConstants {
     mat4  u_proj;         // offset 0, 64 bytes
@@ -22,15 +26,13 @@ layout(push_constant) uniform PushConstants {
                           //   w = point primitive
 } pc;
 
-// Lighting constant block (written once per lighting setup per frame).
+// Lighting constant block (written once per lighting setup per frame).  The
+// light arrays match the shared CoinLightSet layout byte-for-byte (std140
+// offsets land at 16/144/272/400/528/656), so the container is shared with
+// the RT backend via LightCommon.glsl.
 layout(set = 0, binding = 0, std140) uniform LightingBlock {
     vec4  u_ambientLight;         // offset 0
-    vec4  u_lightType[8];         // offset 16
-    vec4  u_lightColor[8];        // offset 144
-    vec4  u_lightDirection[8];    // offset 272
-    vec4  u_lightPosition[8];     // offset 400
-    vec4  u_lightAttenuation[8];  // offset 528
-    vec4  u_lightSpotParams[8];   // offset 656
+    CoinLightSet lights;          // offset 16
 } lighting;
 
 // Per-draw block (material), selected by a dynamic offset.
@@ -53,58 +55,25 @@ layout(location = 3) in vec2 v_texcoord;
 
 layout(location = 0) out vec4 fragColor;
 
-const int COIN_MAX_LIGHTS = 8;
-
 // Per-fragment Blinn-Phong (matches the GL model's terms, but evaluated
 // here instead of per vertex): interpolated normals give a smooth diffuse
 // gradient and a soft specular highlight even on coarse tessellations.
+// The light container and the Blinn-Phong loop live in LightCommon.glsl and
+// are shared with the ray-tracing backend; this wrapper supplies the eye-space
+// vectors (raster evaluates in eye space) and the raster two-sided test.
 vec3 coin_vulkan_lighting(vec3 eyePos, vec3 eyeNormal, vec3 baseColor)
 {
     vec3 N = normalize(eyeNormal);
     vec3 V = normalize(-eyePos);
-    if (draw.u_materialParams.y > 0.5 && dot(N, V) < 0.0) {
+    if (draw.u_materialParams.y > 0.5 && gl_FrontFacing) {
         N = -N;
     }
-    vec3 litColor = lighting.u_ambientLight.rgb * draw.u_materialAmbient.rgb;
-
-    for (int i = 0; i < COIN_MAX_LIGHTS; ++i) {
-        if (i >= int(draw.u_materialParams.z)) break;
-
-        vec3 L = lighting.u_lightDirection[i].xyz;
-        float attenuation = 1.0;
-        float spotFactor = 1.0;
-        if (lighting.u_lightType[i].x > 0.5) {
-            vec3 lightVector = lighting.u_lightPosition[i].xyz - eyePos;
-            float distanceToLight = length(lightVector);
-            if (distanceToLight <= 0.0001) continue;
-            L = lightVector / distanceToLight;
-            vec3 att = lighting.u_lightAttenuation[i].xyz;
-            attenuation = 1.0 / max(att.z + att.y * distanceToLight +
-                                    att.x * distanceToLight * distanceToLight,
-                                    0.0001);
-            if (lighting.u_lightType[i].x > 1.5) {
-                vec3 coneDir = normalize(lighting.u_lightDirection[i].xyz);
-                vec3 fromLight =
-                    normalize(eyePos - lighting.u_lightPosition[i].xyz);
-                float spotCos = dot(coneDir, fromLight);
-                if (spotCos < lighting.u_lightSpotParams[i].x) continue;
-                spotFactor = pow(max(spotCos, 0.0),
-                                 lighting.u_lightSpotParams[i].y);
-            }
-        }
-
-        vec3 Ln = normalize(L);
-        float NdotL = max(dot(N, Ln), 0.0);
-        vec3 H = normalize(Ln + V);
-        float NdotH = max(dot(N, H), 0.0);
-        float shininess = max(draw.u_materialParams.x * 128.0, 0.0);
-        float specularFactor = shininess > 0.0 ? pow(NdotH, shininess) : 0.0;
-        vec3 diffuse = baseColor * NdotL;
-        vec3 specular = draw.u_materialSpecular.rgb * specularFactor;
-        litColor += lighting.u_lightColor[i].rgb * attenuation * spotFactor *
-                    (diffuse + specular);
-    }
-    return clamp(litColor + draw.u_emissiveColor.rgb, 0.0, 1.0);
+    vec3 ambientTerm = lighting.u_ambientLight.rgb * draw.u_materialAmbient.rgb;
+    int lightCount = int(draw.u_materialParams.z);
+    float shininess = max(draw.u_materialParams.x * 128.0, 0.0);
+    return coinGouraudCls(lighting.lights, lightCount, eyePos, N, V,
+                          baseColor, draw.u_materialSpecular.rgb, shininess,
+                          ambientTerm, draw.u_emissiveColor.rgb);
 }
 
 bool coin_vulkan_alpha_test_pass(float alpha, int function, float reference)

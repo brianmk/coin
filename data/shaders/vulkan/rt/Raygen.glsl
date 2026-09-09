@@ -21,6 +21,10 @@
 
 #version 460
 #extension GL_EXT_ray_tracing : require
+#extension GL_GOOGLE_include_directive : require
+
+// Shared lighting container + Blinn-Phong evaluators (see LightCommon.glsl).
+#include "../common/LightCommon.glsl"
 
 layout(set = 0, binding = 0) uniform accelerationStructureEXT tlas;
 layout(set = 0, binding = 1, rgba8) uniform image2D storageImage;
@@ -37,7 +41,9 @@ layout(set = 0, binding = 2, std140) uniform FrameBlock {
 } frame;
 
 // std430 mirror of the C++ RTMaterial record; one per draw command, indexed
-// by the instance custom index (the draw-list command index).
+// by the instance custom index (the draw-list command index).  The light
+// block is the shared CoinLightSet (byte-identical to the C++ RTMaterial
+// light arrays), so lighting is evaluated by the shared LightCommon helpers.
 struct RTMaterial {
     vec4  diffuse;
     vec4  ambient;
@@ -45,12 +51,7 @@ struct RTMaterial {
     vec4  emissive;
     vec4  params;          // x = shininess, y = twoSided, z = lightCount,
                            // w = shadingModel (0 = unlit, 1 = gouraud)
-    vec4  lightType[8];
-    vec4  lightColor[8];
-    vec4  lightDirection[8];
-    vec4  lightPosition[8];
-    vec4  lightAttenuation[8];
-    vec4  lightSpot[8];
+    CoinLightSet lights;
     vec4  triangleData;    // x = triangle-normal pool offset
     vec4  pbr;             // x = metalness, y = roughness, z = usePbr
 };
@@ -88,8 +89,6 @@ struct Payload {
 };
 layout(location = 0) rayPayloadEXT Payload payload;
 
-const int COIN_MAX_LIGHTS = 8;
-
 // SBT record indices (see createShaderBindingTable()).
 const uint SBT_HIT_PRIMARY = 0;
 const uint SBT_HIT_SHADOW  = 1;
@@ -117,38 +116,30 @@ vec3 sampleCosine(vec2 u)
 // Next-event-estimation direct lighting with shadow rays.  The producer's
 // light data is world-space (the standard IR convention), so the shading
 // terms and the shadow trace are evaluated directly in world space against
-// the world-space TLAS -- no view-space round-trip.
+// the world-space TLAS -- no view-space round-trip.  The per-light vector
+// resolution is the shared LightCommon helper; this wrapper adds the SBT
+// shadow ray and the Blinn-Phong branch.
 vec3 coin_rtx_directLighting(vec3 worldPos, vec3 worldN, RTMaterial mat)
 {
     vec3 N = normalize(worldN);
     vec3 V = normalize(frame.u_cameraPos.xyz - worldPos);
     vec3 lit = mat.ambient.rgb; // ambient light folded in by producer
     int lightCount = int(mat.params.z);
+    float shininess = max(mat.params.x * 128.0, 0.0);
     for (int i = 0; i < COIN_MAX_LIGHTS; ++i) {
         if (i >= lightCount) break;
 
         vec3 L;
-        float attenuation = 1.0;
-        float spotFactor = 1.0;
+        float attenuation;
+        float spotFactor;
         float distToLight = 1e30;
-        if (mat.lightType[i].x > 0.5) {
-            vec3 lightVector = mat.lightPosition[i].xyz - worldPos;
+        if (mat.lights.lightType[i].x > 0.5) {
+            vec3 lightVector = mat.lights.lightPosition[i].xyz - worldPos;
             distToLight = length(lightVector);
-            if (distToLight <= 0.0001) continue;
-            L = lightVector / distToLight;
-            vec3 att = mat.lightAttenuation[i].xyz;
-            attenuation = 1.0 / max(att.z + att.y * distToLight +
-                                    att.x * distToLight * distToLight, 0.0001);
-            if (mat.lightType[i].x > 1.5) {
-                vec3 coneDir = normalize(mat.lightDirection[i].xyz);
-                vec3 fromLight = normalize(worldPos - mat.lightPosition[i].xyz);
-                float spotCos = dot(coneDir, fromLight);
-                if (spotCos < mat.lightSpot[i].x) continue;
-                spotFactor = pow(max(spotCos, 0.0), mat.lightSpot[i].y);
-            }
         }
-        else {
-            L = mat.lightDirection[i].xyz;
+        if (!coinResolveLight(mat.lights, i, worldPos, L, attenuation,
+                              spotFactor)) {
+            continue;
         }
 
         L = normalize(L);
@@ -164,12 +155,9 @@ vec3 coin_rtx_directLighting(vec3 worldPos, vec3 worldN, RTMaterial mat)
                     L, distToLight - 0.001, 0);
         if (payload.occluded != 0u) continue;
 
-        vec3 H = normalize(normalize(L) + V);
-        float NdotH = max(dot(N, H), 0.0);
-        float shininess = max(mat.params.x * 128.0, 0.0);
-        float specularFactor = shininess > 0.0 ? pow(NdotH, shininess) : 0.0;
-        lit += mat.lightColor[i].rgb * attenuation * spotFactor *
-               (mat.diffuse.rgb * NdotL + mat.specular.rgb * specularFactor);
+        lit += mat.lights.lightColor[i].rgb * attenuation * spotFactor *
+               coinShadeLightCls(mat.lights, i, N, V, L, mat.diffuse.rgb,
+                                 mat.specular.rgb, shininess);
     }
     return clamp(lit, 0.0, 1.0);
 }

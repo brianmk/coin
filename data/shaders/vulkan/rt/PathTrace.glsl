@@ -21,6 +21,10 @@
 #extension GL_EXT_ray_query : require
 #extension GL_GOOGLE_include_directive : require
 
+// Shared lighting container + Blinn-Phong evaluators (see LightCommon.glsl),
+// pulled in first so RTMaterial can embed CoinLightSet.
+#include "../common/LightCommon.glsl"
+
 layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
 
 layout(set = 0, binding = 0) uniform accelerationStructureEXT tlas;
@@ -49,7 +53,9 @@ layout(set = 0, binding = 2, std140) uniform FrameBlock {
 } frame;
 
 // std430 mirror of the C++ RTMaterial record; one per draw command, indexed
-// by the instance custom index (the draw-list command index).
+// by the instance custom index (the draw-list command index).  The light
+// block is the shared CoinLightSet (byte-identical to the C++ RTMaterial
+// light arrays), so lighting is evaluated by the shared LightCommon helpers.
 struct RTMaterial {
     vec4  diffuse;
     vec4  ambient;
@@ -57,12 +63,7 @@ struct RTMaterial {
     vec4  emissive;
     vec4  params;          // x = shininess, y = twoSided, z = lightCount,
                            // w = shadingModel (0 = unlit, 1 = gouraud)
-    vec4  lightType[8];
-    vec4  lightColor[8];
-    vec4  lightDirection[8];
-    vec4  lightPosition[8];
-    vec4  lightAttenuation[8];
-    vec4  lightSpot[8];
+    CoinLightSet lights;
     vec4  triangleData;    // x = triangle-normal pool offset, y = normal count,
                            // z = NEE pool offset, w = NEE entry count
     vec4  pbr;             // x = metalness, y = roughness, z = usePbr,
@@ -137,9 +138,6 @@ layout(set = 0, binding = 14, std430) buffer AlbedoBuffer { vec4 albedos[]; };
 // path-tracing path and consumed by OIDN's 'motion' input / OptiX motion
 // guide; the previous frame's camera comes from u_prevViewProj.
 layout(set = 0, binding = 15, std430) buffer MotionBuffer { vec4 motions[]; };
-
-const int COIN_MAX_LIGHTS = 8;
-
 
 // Shading math, environment/IBL, BRDF and ray-query trace helpers are factored
 // into modules so this file keeps only the binding boilerplate + entry point.
