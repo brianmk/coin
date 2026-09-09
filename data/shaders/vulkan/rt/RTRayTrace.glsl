@@ -43,8 +43,16 @@ HitInfo traceClosest(vec3 origin, vec3 dir, float tMax)
     // transform.
     RTMaterial mat = matBuffer.materials[h.materialIndex];
     uint prim = rayQueryGetIntersectionPrimitiveIndexEXT(q, true);
-    uint normalIndex = uint(mat.triangleData.x) + prim;
-    vec3 objN = normalPoolBuffer.triangleNormals[normalIndex].xyz;
+    // Smooth shading: barycentric-interpolate the three object-space vertex
+    // normals the CPU stores per triangle (see appendTriangleNormals).  The
+    // pool holds 6 vec4 per triangle (3 normals + 3 positions); the normals
+    // live at prim*6 + {0,1,2}.  Positions are unused on this path.
+    vec2 bc = rayQueryGetIntersectionBarycentricsEXT(q, true);
+    uint triBase = uint(mat.triangleData.x) + prim * 6u;
+    vec3 objN =
+      normalPoolBuffer.triangleNormals[triBase + 0u].xyz * (1.0 - bc.x - bc.y) +
+      normalPoolBuffer.triangleNormals[triBase + 1u].xyz * bc.x +
+      normalPoolBuffer.triangleNormals[triBase + 2u].xyz * bc.y;
     if (dot(objN, objN) < 1e-12) {
         h.hit = false;
         return h;
@@ -147,7 +155,9 @@ float coin_rtx_ao(vec3 worldPos, vec3 worldN, vec2 seed)
 // The producer's light data is world-space (the standard IR convention), so
 // everything is evaluated directly in world space; the result is identical to
 // the eye-space evaluation because every quantity is a rotation of the same
-// scene and shading only consumes dot products.
+// scene and shading only consumes dot products.  The Blinn-Phong loop is the
+// shared LightCommon helper (space-agnostic); this wrapper supplies the world-
+// space vectors and the RT two-sided test.
 vec3 coin_rtx_gouraud(vec3 worldPos, vec3 worldNormal, vec3 baseColor,
                       RTMaterial mat)
 {
@@ -156,50 +166,19 @@ vec3 coin_rtx_gouraud(vec3 worldPos, vec3 worldNormal, vec3 baseColor,
     if (mat.params.y > 0.5 && dot(N, V) < 0.0) {
         N = -N;
     }
-    vec3 litColor = mat.ambient.rgb; // ambient light folded in by producer
     int lightCount = int(mat.params.z);
-    for (int i = 0; i < COIN_MAX_LIGHTS; ++i) {
-        if (i >= lightCount) break;
-
-        vec3 L = mat.lightDirection[i].xyz;
-        float attenuation = 1.0;
-        float spotFactor = 1.0;
-        if (mat.lightType[i].x > 0.5) {
-            vec3 lightVector = mat.lightPosition[i].xyz - worldPos;
-            float distanceToLight = length(lightVector);
-            if (distanceToLight <= 0.0001) continue;
-            L = lightVector / distanceToLight;
-            vec3 att = mat.lightAttenuation[i].xyz;
-            attenuation = 1.0 / max(att.z + att.y * distanceToLight +
-                                    att.x * distanceToLight * distanceToLight,
-                                    0.0001);
-            if (mat.lightType[i].x > 1.5) {
-                vec3 coneDir = normalize(mat.lightDirection[i].xyz);
-                vec3 fromLight = normalize(worldPos - mat.lightPosition[i].xyz);
-                float spotCos = dot(coneDir, fromLight);
-                if (spotCos < mat.lightSpot[i].x) continue;
-                spotFactor = pow(max(spotCos, 0.0), mat.lightSpot[i].y);
-            }
-        }
-
-        vec3 Ln = normalize(L);
-        float NdotL = max(dot(N, Ln), 0.0);
-        vec3 H = normalize(Ln + V);
-        float NdotH = max(dot(N, H), 0.0);
-        float shininess = max(mat.params.x * 128.0, 0.0);
-        float specularFactor = shininess > 0.0 ? pow(NdotH, shininess) : 0.0;
-        vec3 diffuse = baseColor * NdotL;
-        vec3 specular = mat.specular.rgb * specularFactor;
-        litColor += mat.lightColor[i].rgb * attenuation * spotFactor *
-                    (diffuse + specular);
-    }
-    return clamp(litColor + mat.emissive.rgb, 0.0, 1.0);
+    float shininess = max(mat.params.x * 128.0, 0.0);
+    return coinGouraudCls(mat.lights, lightCount, worldPos, N, V, baseColor,
+                          mat.specular.rgb, shininess, mat.ambient.rgb,
+                          mat.emissive.rgb);
 }
 
 // Next-event-estimation direct lighting with shadow rays.  The producer's
 // light data is world-space (the standard IR convention), so the shading
 // terms and the shadow query are evaluated directly in world space against
-// the world-space TLAS -- no view-space round-trip.
+// the world-space TLAS -- no view-space round-trip.  The per-light vector
+// resolution (type/attenuation/spot) is the shared LightCommon helper; this
+// wrapper adds the PBR/Blinn-Phong branch and the shadow transmittance query.
 vec3 coin_rtx_directLighting(vec3 worldPos, vec3 worldN, vec3 rayDir,
                              RTMaterial mat)
 {
@@ -207,32 +186,21 @@ vec3 coin_rtx_directLighting(vec3 worldPos, vec3 worldN, vec3 rayDir,
     vec3 V = normalize(frame.u_cameraPos.xyz - worldPos);
     vec3 lit = mat.ambient.rgb; // ambient light folded in by producer
     int lightCount = int(mat.params.z);
+    float shininess = max(mat.params.x * 128.0, 0.0);
     for (int i = 0; i < COIN_MAX_LIGHTS; ++i) {
         if (i >= lightCount) break;
 
         vec3 L;
-        float attenuation = 1.0;
-        float spotFactor = 1.0;
+        float attenuation;
+        float spotFactor;
         float distToLight = 1e30;
-        if (mat.lightType[i].x > 0.5) {
-            vec3 lightVector = mat.lightPosition[i].xyz - worldPos;
+        vec3 lightVector = mat.lights.lightPosition[i].xyz - worldPos;
+        if (mat.lights.lightType[i].x > 0.5) {
             distToLight = length(lightVector);
-            if (distToLight <= 0.0001) continue;
-            L = lightVector / distToLight;
-            vec3 att = mat.lightAttenuation[i].xyz;
-            attenuation = 1.0 / max(att.z + att.y * distToLight +
-                                    att.x * distToLight * distToLight,
-                                    0.0001);
-            if (mat.lightType[i].x > 1.5) {
-                vec3 coneDir = normalize(mat.lightDirection[i].xyz);
-                vec3 fromLight = normalize(worldPos - mat.lightPosition[i].xyz);
-                float spotCos = dot(coneDir, fromLight);
-                if (spotCos < mat.lightSpot[i].x) continue;
-                spotFactor = pow(max(spotCos, 0.0), mat.lightSpot[i].y);
-            }
         }
-        else {
-            L = mat.lightDirection[i].xyz;
+        if (!coinResolveLight(mat.lights, i, worldPos, L, attenuation,
+                              spotFactor)) {
+            continue;
         }
 
         L = normalize(L);
@@ -242,7 +210,7 @@ vec3 coin_rtx_directLighting(vec3 worldPos, vec3 worldN, vec3 rayDir,
         // Shadow ray: the light data is already world space, so it can be
         // used directly for the query against the world-space TLAS.
         float transm = shadowTransmittance(worldPos + worldN * 0.001, L,
-                                           distToLight - 0.001);
+                                            distToLight - 0.001);
         if (transm <= 1e-4) {
             continue;
         }
@@ -252,15 +220,12 @@ vec3 coin_rtx_directLighting(vec3 worldPos, vec3 worldN, vec3 rayDir,
             contribution = pbrEval(N, V, normalize(L), mat) * NdotL;
         }
         else {
-            vec3 H = normalize(normalize(L) + V);
-            float NdotH = max(dot(N, H), 0.0);
-            float shininess = max(mat.params.x * 128.0, 0.0);
-            float specularFactor = shininess > 0.0 ? pow(NdotH, shininess) : 0.0;
-            contribution = mat.diffuse.rgb * NdotL +
-                           mat.specular.rgb * specularFactor;
+            contribution = coinShadeLightCls(mat.lights, i, N, V, L,
+                                             mat.diffuse.rgb,
+                                             mat.specular.rgb, shininess);
         }
-        lit += transm * mat.lightColor[i].rgb * attenuation * spotFactor *
-               contribution;
+        lit += transm * mat.lights.lightColor[i].rgb * attenuation *
+               spotFactor * contribution;
     }
     return clamp(lit, 0.0, 1.0);
 }

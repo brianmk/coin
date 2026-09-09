@@ -27,6 +27,10 @@
 // visual program.
 
 #version 450
+#extension GL_GOOGLE_include_directive : require
+
+// Shared lighting container + Blinn-Phong evaluators (see LightCommon.glsl).
+#include "../common/LightCommon.glsl"
 
 layout(push_constant) uniform PushConstants {
     mat4  u_proj;         // offset 0, 64 bytes
@@ -41,15 +45,13 @@ layout(push_constant) uniform PushConstants {
                           //   w = point primitive
 } pc;
 
-// Lighting constant block (written once per lighting setup per frame).
+// Lighting constant block (written once per lighting setup per frame).  The
+// light arrays match the shared CoinLightSet layout byte-for-byte (std140
+// offsets land at 16/144/272/400/528/656) so both the raster and the RT
+// backends can consume the same container via LightCommon.glsl.
 layout(set = 0, binding = 0, std140) uniform LightingBlock {
     vec4  u_ambientLight;         // offset 0
-    vec4  u_lightType[8];         // offset 16
-    vec4  u_lightColor[8];        // offset 144
-    vec4  u_lightDirection[8];    // offset 272
-    vec4  u_lightPosition[8];     // offset 400
-    vec4  u_lightAttenuation[8];  // offset 528
-    vec4  u_lightSpotParams[8];   // offset 656
+    CoinLightSet lights;          // offset 16
 } lighting;
 
 // Per-draw block (view/model/material), selected by a dynamic offset.
