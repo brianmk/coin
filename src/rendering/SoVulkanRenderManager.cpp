@@ -39,7 +39,6 @@ static void vulkanSceneGraphChangedCallback(void * data, SoSensor * sensor);
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
-#include <execinfo.h>
 #include <limits>
 #include <memory>
 
@@ -852,15 +851,6 @@ SoVulkanRenderManager::initialize(SoVulkanDeviceContext * context)
 void
 SoVulkanRenderManager::shutdown(void)
 {
-  // TEMP-BT: locate who tears the backend down during initial open (delete me)
-  if (std::getenv("FC_VK_SHUT_DBG")) {
-    std::fprintf(stderr, "[SHUT-DBG] SoVulkanRenderManager::shutdown backend=%d rtx=%d\n",
-                 this->pimpl->backendInitialized ? 1 : 0,
-                 this->pimpl->rtxBackendInitialized ? 1 : 0);
-    void* bt[24]; int n = backtrace(bt, 24);
-    backtrace_symbols_fd(bt, n, 2);
-    std::fflush(stderr);
-  }
   if (this->pimpl->backendInitialized) {
     this->pimpl->backend.shutdown();
     this->pimpl->backendInitialized = FALSE;
