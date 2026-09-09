@@ -4,6 +4,7 @@
 // member functions for the "Core" concern of the Vulkan RTX backend.
 
 #include "rendering/SoRTXRenderBackend.h"
+#include "rendering/SoVulkanShared.h"
 #include <Inventor/errors/SoDebugError.h>
 #include <algorithm>
 #include <array>
@@ -13,6 +14,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <string>
+#include <vector>
 #include <rendering/SoRTXRenderBackend/SoRTXRenderBackendP.h>
 
 using namespace SoRTXBackend;
@@ -441,6 +443,9 @@ SoRTXRenderBackend::probeComputeQueue(void)
 SbBool
 SoRTXRenderBackend::initialize(const SoRenderBackendInitParams & params)
 {
+  SoVulkanShared::initBreadcrumb("SoRTXRenderBackend::initialize enter "
+                                 "alreadyInit=%d\n",
+                                 this->isInitialized() ? 1 : 0);
   if (this->isInitialized()) return TRUE;
 
   this->setInitParams(params);
@@ -450,12 +455,19 @@ SoRTXRenderBackend::initialize(const SoRenderBackendInitParams & params)
       deviceContext->physicalDevice == VK_NULL_HANDLE ||
       deviceContext->device == VK_NULL_HANDLE ||
       deviceContext->graphicsQueue == VK_NULL_HANDLE) {
+    SoVulkanShared::initBreadcrumb(
+      "SoRTXRenderBackend::initialize FAIL invalid device context\n");
     this->emitError(
       "SoRTXRenderBackend requires a SoVulkanDeviceContext in "
       "SoRenderBackendInitParams::userData");
     return FALSE;
   }
   if (deviceContext->apiVersion < VK_API_VERSION_1_2) {
+    SoVulkanShared::initBreadcrumb(
+      "SoRTXRenderBackend::initialize FAIL apiVersion %u.%u.%u < 1.2\n",
+      VK_API_VERSION_MAJOR(deviceContext->apiVersion),
+      VK_API_VERSION_MINOR(deviceContext->apiVersion),
+      VK_API_VERSION_PATCH(deviceContext->apiVersion));
     char buf[192];
     std::snprintf(buf, sizeof(buf),
                   "SoRTXRenderBackend requires a Vulkan 1.2+ device (device "
@@ -466,6 +478,16 @@ SoRTXRenderBackend::initialize(const SoRenderBackendInitParams & params)
     this->emitError(buf);
     return FALSE;
   }
+
+  SoVulkanShared::initBreadcrumb(
+    "SoRTXRenderBackend::initialize device=0x%llx pdev=0x%llx api=%u.%u.%u "
+    "computeFam=%u\n",
+    (unsigned long long)(uintptr_t)deviceContext->device,
+    (unsigned long long)(uintptr_t)deviceContext->physicalDevice,
+    VK_API_VERSION_MAJOR(deviceContext->apiVersion),
+    VK_API_VERSION_MINOR(deviceContext->apiVersion),
+    VK_API_VERSION_PATCH(deviceContext->apiVersion),
+    deviceContext->computeQueueFamilyIndex);
 
   this->instance = deviceContext->instance;
   this->physicalDevice = deviceContext->physicalDevice;
@@ -484,6 +506,8 @@ SoRTXRenderBackend::initialize(const SoRenderBackendInitParams & params)
   // Acquire a compute queue for the optional async-compute path, and report
   // the capability so a probe/check can verify.
   this->probeComputeQueue();
+  SoVulkanShared::initBreadcrumb(
+    "SoRTXRenderBackend::initialize probeComputeQueue done\n");
 
   // Cache the physical-device identity so the denoiser selection can gate the
   // CUDA/OptiX path on NVIDIA hardware (see SoRTXRenderBackend.h).
@@ -554,6 +578,9 @@ SoRTXRenderBackend::initialize(const SoRenderBackendInitParams & params)
       this->hasNvLinearSweptSpheres ? 1 : 0);
     fprintf(stderr, "%s\n", capsBuf);
   }
+  SoVulkanShared::initBreadcrumb(
+    "SoRTXRenderBackend::initialize nvidia=%d uuid=%d\n",
+    this->deviceIsNvidia ? 1 : 0, this->haveDeviceUUID ? 1 : 0);
 
   // The system loader only exports core entry points; resolve the ray
   // tracing KHR functions per-device.  Failing here means the device is
@@ -587,12 +614,16 @@ SoRTXRenderBackend::initialize(const SoRenderBackendInitParams & params)
       !this->vkGetAccelerationStructureDeviceAddressKHR ||
       !this->vkCmdWriteAccelerationStructuresPropertiesKHR ||
       !this->vkCmdCopyAccelerationStructureKHR) {
+    SoVulkanShared::initBreadcrumb(
+      "SoRTXRenderBackend::initialize FAIL resolve AS KHR entry points\n");
     this->emitError(
       "failed to resolve ray tracing KHR entry points; the device or "
       "loader does not provide VK_KHR_acceleration_structure");
     this->shutdown();
     return FALSE;
   }
+  SoVulkanShared::initBreadcrumb(
+    "SoRTXRenderBackend::initialize AS KHR entry points OK\n");
 
   // The ray tracing pipeline (VK_KHR_ray_tracing_pipeline) entry points
   // power the shader binding table dispatch.
@@ -608,12 +639,16 @@ SoRTXRenderBackend::initialize(const SoRenderBackendInitParams & params)
   if (!this->vkCreateRayTracingPipelinesKHR ||
       !this->vkGetRayTracingShaderGroupHandlesKHR ||
       !this->vkCmdTraceRaysKHR) {
+    SoVulkanShared::initBreadcrumb(
+      "SoRTXRenderBackend::initialize FAIL resolve RT pipeline entry points\n");
     this->emitError(
       "failed to resolve VK_KHR_ray_tracing_pipeline entry points; the "
       "device or loader does not provide the ray tracing pipeline");
     this->shutdown();
     return FALSE;
   }
+  SoVulkanShared::initBreadcrumb(
+    "SoRTXRenderBackend::initialize RT pipeline entry points OK\n");
 
   // Dispatch mode: the SBT pipeline is opt-in (FC_VULKAN_RT_SBT=1); the
   // default ray-query compute path avoids a hang in NVIDIA driver 610.x
@@ -658,31 +693,45 @@ SoRTXRenderBackend::initialize(const SoRenderBackendInitParams & params)
   this->sbtRecordSize += alignment - 1;
   this->sbtRecordSize -= this->sbtRecordSize % alignment;
 
+  SoVulkanShared::initBreadcrumb("SoRTXRenderBackend::initialize "
+                                 "creating resources\n");
   if (!this->createDescriptorSetLayout()) {
+    SoVulkanShared::initBreadcrumb(
+      "SoRTXRenderBackend::initialize FAIL createDescriptorSetLayout\n");
     this->emitError("failed to create RT descriptor set layout");
     this->shutdown();
     return FALSE;
   }
   if (!this->createDescriptorPool()) {
+    SoVulkanShared::initBreadcrumb(
+      "SoRTXRenderBackend::initialize FAIL createDescriptorPool\n");
     this->emitError("failed to create RT descriptor pool");
     this->shutdown();
     return FALSE;
   }
   if (!this->createShaderModules()) {
+    SoVulkanShared::initBreadcrumb(
+      "SoRTXRenderBackend::initialize FAIL createShaderModules\n");
     this->emitError("failed to create RT shader modules");
     this->shutdown();
     return FALSE;
   }
   if (!this->createPipelines()) {
+    SoVulkanShared::initBreadcrumb(
+      "SoRTXRenderBackend::initialize FAIL createPipelines\n");
     this->emitError("failed to create ray tracing pipeline");
     this->shutdown();
     return FALSE;
   }
   if (!this->createFrameBuffer()) {
+    SoVulkanShared::initBreadcrumb(
+      "SoRTXRenderBackend::initialize FAIL createFrameBuffer\n");
     this->emitError("failed to create RT frame uniform buffer");
     this->shutdown();
     return FALSE;
   }
+  SoVulkanShared::initBreadcrumb(
+    "SoRTXRenderBackend::initialize resource creation OK\n");
 
   // Optional path tracing tuning (kept out of the public API for now).
   if (const char * bounces = getenv("FC_VULKAN_PT_BOUNCES")) {
@@ -742,6 +791,7 @@ SoRTXRenderBackend::initialize(const SoRenderBackendInitParams & params)
   }
 
   this->setInitialized(TRUE);
+  SoVulkanShared::initBreadcrumb("SoRTXRenderBackend::initialize DONE\n");
   this->emitLog("initialized (Vulkan ray tracing)");
   return TRUE;
 }
@@ -1520,10 +1570,19 @@ SoRTXRenderBackend::dumpStorageImageIfRequested()
         FILE * f = fopen(fullpath, "wb");
         if (f) {
           fprintf(f, "P6\n%u %u\n255\n", w, h);
+          // Source rows are packed RGBA (4 bytes/px); the PPM is RGB, so
+          // copy 3 bytes per pixel (drop the alpha) instead of writing the
+          // raw row, which would interleave alpha into the color channels.
+          std::vector<unsigned char> row(static_cast<size_t>(w) * 3);
           const size_t rowbytes = static_cast<size_t>(w) * 4;
           for (uint32_t y = 0; y < h; ++y) {
             const unsigned char * r = src + (static_cast<size_t>(y) * rowbytes);
-            fwrite(r, 1, static_cast<size_t>(w) * 3, f);
+            for (uint32_t x = 0; x < w; ++x) {
+              row[3u * x + 0u] = r[4u * x + 0u];
+              row[3u * x + 1u] = r[4u * x + 1u];
+              row[3u * x + 2u] = r[4u * x + 2u];
+            }
+            fwrite(row.data(), 1, row.size(), f);
           }
           fclose(f);
           fprintf(stderr, "[RTDBG] dumpStorageImage: wrote %s %ux%u\n",
@@ -1539,6 +1598,238 @@ SoRTXRenderBackend::dumpStorageImageIfRequested()
 
   vkDestroyBuffer(this->device, staging, this->allocator);
   vkFreeMemory(this->device, stagingMem, this->allocator);
+}
+
+// Debug: dump the float accumulation buffer (what the present pass and the
+// denoiser actually consume) as an 8-bit PPM.  Mirrors
+// dumpStorageImageIfRequested() for the buffer instead of the single-sample
+// storage image.  Gated on FC_VULKAN_PT_DUMP_ACCUM with the same
+// FC_VULKAN_PT_DUMP_EVERY / FC_VULKAN_PT_DUMP_FRAME cadence.
+void
+SoRTXRenderBackend::dumpAccumBufferIfRequested()
+{
+  const char * path = getenv("FC_VULKAN_PT_DUMP_ACCUM");
+  if (!path) return;
+  if (this->accumBuffer == VK_NULL_HANDLE ||
+      this->ptBufferWidth == 0 || this->ptBufferHeight == 0) return;
+
+  const char * everystr = getenv("FC_VULKAN_PT_DUMP_EVERY");
+  const char * atstr = getenv("FC_VULKAN_PT_DUMP_FRAME");
+  const uint32_t dumpAt =
+    atstr ? static_cast<uint32_t>(std::atoi(atstr)) : this->ptMaxSamples;
+  bool ok = false;
+  if (everystr) {
+    const uint32_t every = static_cast<uint32_t>(std::atoi(everystr));
+    if (every == 0 || this->ptFrameIndex % every != 0) return;
+    ok = true;
+  } else if (this->ptFrameIndex != dumpAt || this->ptDumpDone) {
+    return;
+  }
+  if (ok) this->ptDumpDone = TRUE;
+
+  char fullpath[4096];
+  if (everystr) {
+    std::snprintf(fullpath, sizeof(fullpath), "%s.%03u.ppm", path,
+                  this->ptFrameIndex);
+  } else {
+    std::snprintf(fullpath, sizeof(fullpath), "%s", path);
+  }
+
+  const uint32_t w = this->ptBufferWidth;
+  const uint32_t h = this->ptBufferHeight;
+  const VkDeviceSize size =
+    static_cast<VkDeviceSize>(w) * h * 4 * sizeof(float);
+
+  VkBuffer staging = VK_NULL_HANDLE;
+  VkDeviceMemory stagingMem = VK_NULL_HANDLE;
+  if (!this->createHostVisibleBuffer(
+        size, VK_BUFFER_USAGE_TRANSFER_DST_BIT, staging, stagingMem)) {
+    fprintf(stderr, "[RTDBG] dumpAccum: createHostVisibleBuffer failed\n");
+    return;
+  }
+
+  VkCommandBuffer cmd = this->beginTransientCommandBuffer();
+  if (cmd == VK_NULL_HANDLE) {
+    vkDestroyBuffer(this->device, staging, this->allocator);
+    vkFreeMemory(this->device, stagingMem, this->allocator);
+    return;
+  }
+
+  VkMemoryBarrier bar {};
+  bar.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
+  bar.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
+  bar.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
+  vkCmdPipelineBarrier(cmd,
+                       VK_PIPELINE_STAGE_RAY_TRACING_SHADER_BIT_KHR |
+                         VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                       VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 1, &bar, 0,
+                       nullptr, 0, nullptr);
+  VkBufferCopy c {0, 0, size};
+  vkCmdCopyBuffer(cmd, this->accumBuffer, staging, 1, &c);
+  if (vkEndCommandBuffer(cmd) == VK_SUCCESS) {
+    VkSubmitInfo si {};
+    si.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
+    si.commandBufferCount = 1;
+    si.pCommandBuffers = &cmd;
+    if (vkQueueSubmit(this->queue, 1, &si, VK_NULL_HANDLE) == VK_SUCCESS &&
+        vkQueueWaitIdle(this->queue) == VK_SUCCESS) {
+      void * mapped = nullptr;
+      if (vkMapMemory(this->device, stagingMem, 0, size, 0, &mapped) !=
+            VK_SUCCESS ||
+          mapped == nullptr) {
+        fprintf(stderr, "[RTDBG] dumpAccum: vkMapMemory failed\n");
+      } else {
+        const float * src = static_cast<const float *>(mapped);
+        FILE * f = fopen(fullpath, "wb");
+        if (f) {
+          fprintf(f, "P6\n%u %u\n255\n", w, h);
+          std::vector<unsigned char> row(static_cast<size_t>(w) * 3);
+          for (uint32_t y = 0; y < h; ++y) {
+            const float * r = src + static_cast<size_t>(y) * w * 4;
+            for (uint32_t x = 0; x < w; ++x) {
+              const float a = r[x * 4 + 3];
+              const float inv = a > 1e-6f ? 1.0f / a : 0.0f;
+              for (int k = 0; k < 3; ++k) {
+                float v = r[x * 4 + k] * inv;
+                if (v < 0.0f) v = 0.0f;
+                if (v > 1.0f) v = 1.0f;
+                row[3u * x + k] = static_cast<unsigned char>(v * 255.0f + 0.5f);
+              }
+            }
+            fwrite(row.data(), 1, row.size(), f);
+          }
+          fclose(f);
+          fprintf(stderr, "[RTDBG] dumpAccum: wrote %s %ux%u\n", fullpath,
+                  w, h);
+        } else {
+          fprintf(stderr, "[RTDBG] dumpAccum: fopen %s failed\n", fullpath);
+        }
+        vkUnmapMemory(this->device, stagingMem);
+      }
+    }
+  }
+
+  vkDestroyBuffer(this->device, staging, this->allocator);
+  vkFreeMemory(this->device, stagingMem, this->allocator);
+}
+
+// Debug: dump the per-pixel G-buffers the tracer wrote this frame (the
+// first-bounce normal and hit position) as 8-bit PPMs into a directory.
+// Gated on FC_VULKAN_PT_DUMP_GBUF with the same
+// FC_VULKAN_PT_DUMP_EVERY / FC_VULKAN_PT_DUMP_FRAME cadence.
+void
+SoRTXRenderBackend::dumpGbuffersIfRequested()
+{
+  const char * dir = getenv("FC_VULKAN_PT_DUMP_GBUF");
+  if (!dir) return;
+  if (this->normalBuffer == VK_NULL_HANDLE ||
+      this->positionBuffer == VK_NULL_HANDLE ||
+      this->ptBufferWidth == 0 || this->ptBufferHeight == 0) return;
+
+  const char * everystr = getenv("FC_VULKAN_PT_DUMP_EVERY");
+  const char * atstr = getenv("FC_VULKAN_PT_DUMP_FRAME");
+  const uint32_t dumpAt =
+    atstr ? static_cast<uint32_t>(std::atoi(atstr)) : this->ptMaxSamples;
+  bool ok = false;
+  if (everystr) {
+    const uint32_t every = static_cast<uint32_t>(std::atoi(everystr));
+    if (every == 0 || this->ptFrameIndex % every != 0) return;
+    ok = true;
+  } else if (this->ptFrameIndex != dumpAt || this->ptDumpDone) {
+    return;
+  }
+  if (ok) this->ptDumpDone = TRUE;
+
+  const uint32_t w = this->ptBufferWidth;
+  const uint32_t h = this->ptBufferHeight;
+  const VkDeviceSize size =
+    static_cast<VkDeviceSize>(w) * h * 4 * sizeof(float);
+
+  char base[4096];
+  std::snprintf(base, sizeof(base), "%s/f%03u", dir, this->ptFrameIndex);
+  char normpath[4160];
+  char pospath[4160];
+  std::snprintf(normpath, sizeof(normpath), "%s_normals.ppm", base);
+  std::snprintf(pospath, sizeof(pospath), "%s_positions.ppm", base);
+
+  struct GBuf {
+    VkBuffer src;
+    const char * path;
+    int kind;  // 0 = normal (n*0.5+0.5), 1 = position ((p+50)/120)
+  };
+  const GBuf gbs[2] = {
+    {this->normalBuffer, normpath, 0},
+    {this->positionBuffer, pospath, 1},
+  };
+
+  std::vector<unsigned char> row(static_cast<size_t>(w) * 3);
+  for (const GBuf & gb : gbs) {
+    if (gb.src == VK_NULL_HANDLE) continue;
+    VkBuffer staging = VK_NULL_HANDLE;
+    VkDeviceMemory stagingMem = VK_NULL_HANDLE;
+    if (!this->createHostVisibleBuffer(
+          size, VK_BUFFER_USAGE_TRANSFER_DST_BIT, staging, stagingMem)) {
+      fprintf(stderr, "[RTDBG] dumpGbuf: createHostVisibleBuffer failed\n");
+      continue;
+    }
+    VkCommandBuffer cmd = this->beginTransientCommandBuffer();
+    if (cmd == VK_NULL_HANDLE) {
+      vkDestroyBuffer(this->device, staging, this->allocator);
+      vkFreeMemory(this->device, stagingMem, this->allocator);
+      continue;
+    }
+    VkMemoryBarrier bar {};
+    bar.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
+    bar.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
+    bar.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
+    vkCmdPipelineBarrier(cmd,
+                         VK_PIPELINE_STAGE_RAY_TRACING_SHADER_BIT_KHR |
+                           VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                         VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 1, &bar, 0,
+                         nullptr, 0, nullptr);
+    VkBufferCopy c {0, 0, size};
+    vkCmdCopyBuffer(cmd, gb.src, staging, 1, &c);
+    if (vkEndCommandBuffer(cmd) == VK_SUCCESS) {
+      VkSubmitInfo si {};
+      si.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
+      si.commandBufferCount = 1;
+      si.pCommandBuffers = &cmd;
+      if (vkQueueSubmit(this->queue, 1, &si, VK_NULL_HANDLE) == VK_SUCCESS &&
+          vkQueueWaitIdle(this->queue) == VK_SUCCESS) {
+        void * mapped = nullptr;
+        if (vkMapMemory(this->device, stagingMem, 0, size, 0, &mapped) !=
+              VK_SUCCESS ||
+            mapped == nullptr) {
+          fprintf(stderr, "[RTDBG] dumpGbuf: vkMapMemory failed\n");
+        } else {
+          const float * src = static_cast<const float *>(mapped);
+          FILE * f = fopen(gb.path, "wb");
+          if (f) {
+            fprintf(f, "P6\n%u %u\n255\n", w, h);
+            for (uint32_t y = 0; y < h; ++y) {
+              const float * r = src + static_cast<size_t>(y) * w * 4;
+              for (uint32_t x = 0; x < w; ++x) {
+                for (int k = 0; k < 3; ++k) {
+                  float v = gb.kind == 0 ? r[x * 4 + k] * 0.5f + 0.5f
+                                         : (r[x * 4 + k] + 50.0f) / 120.0f;
+                  if (v < 0.0f) v = 0.0f;
+                  if (v > 1.0f) v = 1.0f;
+                  row[3u * x + k] =
+                    static_cast<unsigned char>(v * 255.0f + 0.5f);
+                }
+              }
+              fwrite(row.data(), 1, row.size(), f);
+            }
+            fclose(f);
+            fprintf(stderr, "[RTDBG] dumpGbuf: wrote %s\n", gb.path);
+          }
+          vkUnmapMemory(this->device, stagingMem);
+        }
+      }
+    }
+    vkDestroyBuffer(this->device, staging, this->allocator);
+    vkFreeMemory(this->device, stagingMem, this->allocator);
+  }
 }
 
 SbBool
@@ -1643,6 +1934,8 @@ SbBool
   // The trace ran in the AS phase above and the queue is idle, so storageImage
   // holds the current ray-traced result (if the tracer is accumulating).
   this->dumpStorageImageIfRequested();
+  this->dumpAccumBufferIfRequested();
+  this->dumpGbuffersIfRequested();
 
   // The present pass is recorded into the caller's buffer (inside its
   // render pass); the trace ran in the AS phase above.  The descriptor set

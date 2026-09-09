@@ -30,6 +30,7 @@
 #include <algorithm>
 #include <cstddef>
 #include <cstdint>
+#include <cmath>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -127,6 +128,12 @@ SoVulkanRenderBackend::setPointsOverlay(SbBool enabled)
 }
 
 void
+SoVulkanRenderBackend::setTessellationOverlay(SbBool enabled)
+{
+  this->tessellationOverlay = enabled;
+}
+
+void
 SoVulkanRenderBackend::setEdgeColor(const SbColor4f & color)
 {
   this->edgeColor = color;
@@ -135,6 +142,9 @@ SoVulkanRenderBackend::setEdgeColor(const SbColor4f & color)
 SbBool
 SoVulkanRenderBackend::initialize(const SoRenderBackendInitParams & params)
 {
+  SoVulkanShared::initBreadcrumb("SoVulkanRenderBackend::initialize enter "
+                                 "alreadyInit=%d\n",
+                                 this->isInitialized() ? 1 : 0);
   if (this->isInitialized()) return TRUE;
 
   this->setInitParams(params);
@@ -144,11 +154,20 @@ SoVulkanRenderBackend::initialize(const SoRenderBackendInitParams & params)
       deviceContext->physicalDevice == VK_NULL_HANDLE ||
       deviceContext->device == VK_NULL_HANDLE ||
       deviceContext->graphicsQueue == VK_NULL_HANDLE) {
+    SoVulkanShared::initBreadcrumb(
+      "SoVulkanRenderBackend::initialize FAIL invalid device context\n");
     this->emitError(
       "SoVulkanRenderBackend requires a SoVulkanDeviceContext in "
       "SoRenderBackendInitParams::userData");
     return FALSE;
   }
+
+  SoVulkanShared::initBreadcrumb(
+    "SoVulkanRenderBackend::initialize device=0x%llx pdev=0x%llx "
+    "queueFam=%u\n",
+    (unsigned long long)(uintptr_t)deviceContext->device,
+    (unsigned long long)(uintptr_t)deviceContext->physicalDevice,
+    deviceContext->graphicsQueueFamilyIndex);
 
   this->physicalDevice = deviceContext->physicalDevice;
   this->device = deviceContext->device;
@@ -157,8 +176,22 @@ SoVulkanRenderBackend::initialize(const SoRenderBackendInitParams & params)
   this->allocator = deviceContext->allocator;
   this->memProps.setDevice(this->physicalDevice);
 
+  // Bind the render-pass/framebuffer cache to this device and hook its
+  // deferred resource release into the frame ring: an old framebuffer is
+  // destroyed a few frames after the submission that referenced it completes,
+  // rather than synchronously (which would race a still-executing frame).
+  SoVulkanShared::initBreadcrumb(
+    "SoVulkanRenderBackend::initialize renderPasses.setDevice\n");
+  this->renderPasses.setDevice(this->device, this->allocator);
+  this->renderPasses.setDeferredDestroy([this](std::function<void()> && fn) {
+    this->deferDestroy(std::move(fn));
+  });
+
   // Opt-in device-memory sub-allocator (FC_VULKAN_MEM_POOL).  Default off so
   // the behaviour is byte-for-byte the legacy path unless explicitly enabled.
+  SoVulkanShared::initBreadcrumb(
+    "SoVulkanRenderBackend::initialize memPool=%d\n",
+    SoVulkanShared::envFlagEnabled("FC_VULKAN_MEM_POOL") ? 1 : 0);
   if (SoVulkanShared::envFlagEnabled("FC_VULKAN_MEM_POOL")) {
     this->memPool = std::make_unique<SoVulkanMemPool>(
       this->device, this->allocator);
@@ -204,84 +237,140 @@ SoVulkanRenderBackend::initialize(const SoRenderBackendInitParams & params)
   };
   this->sampledR8 = sampledOptimal(VK_FORMAT_R8_UNORM);
   this->sampledR8G8 = sampledOptimal(VK_FORMAT_R8G8_UNORM);
+  SoVulkanShared::initBreadcrumb(
+    "SoVulkanRenderBackend::initialize features fillModeNonSolid=%d "
+    "sampledR8=%d sampledR8G8=%d\n",
+    this->fillModeNonSolid ? 1 : 0, this->sampledR8 ? 1 : 0,
+    this->sampledR8G8 ? 1 : 0);
 
   // Mark initialized before creating resources so that a failure in any
   // create*() below runs the full (null-tolerant) shutdown() cleanup
   // instead of leaking every handle created so far.
   this->setInitialized(TRUE);
 
+  SoVulkanShared::initBreadcrumb("SoVulkanRenderBackend::initialize "
+                                 "creating resources\n");
   if (!this->createCommandPool()) {
+    SoVulkanShared::initBreadcrumb(
+      "SoVulkanRenderBackend::initialize FAIL createCommandPool\n");
     this->emitError("failed to create Vulkan command pool");
     this->shutdown();
     return FALSE;
   }
+  SoVulkanShared::initBreadcrumb("SoVulkanRenderBackend::initialize "
+                                 "createCommandPool OK\n");
 
   if (!this->createDescriptorSetLayout()) {
+    SoVulkanShared::initBreadcrumb(
+      "SoVulkanRenderBackend::initialize FAIL createDescriptorSetLayout\n");
     this->emitError("failed to create Vulkan descriptor set layout");
     this->shutdown();
     return FALSE;
   }
+  SoVulkanShared::initBreadcrumb("SoVulkanRenderBackend::initialize "
+                                 "createDescriptorSetLayout OK\n");
 
   if (!this->createDescriptorPool()) {
+    SoVulkanShared::initBreadcrumb(
+      "SoVulkanRenderBackend::initialize FAIL createDescriptorPool\n");
     this->emitError("failed to create Vulkan descriptor pool");
     this->shutdown();
     return FALSE;
   }
+  SoVulkanShared::initBreadcrumb("SoVulkanRenderBackend::initialize "
+                                 "createDescriptorPool OK\n");
 
   if (!this->createLightingUniformBuffer()) {
+    SoVulkanShared::initBreadcrumb(
+      "SoVulkanRenderBackend::initialize FAIL createLightingUniformBuffer\n");
     this->emitError("failed to create Vulkan lighting uniform buffer");
     this->shutdown();
     return FALSE;
   }
+  SoVulkanShared::initBreadcrumb("SoVulkanRenderBackend::initialize "
+                                 "createLightingUniformBuffer OK\n");
 
   if (!this->createLightingConstBuffer()) {
+    SoVulkanShared::initBreadcrumb(
+      "SoVulkanRenderBackend::initialize FAIL createLightingConstBuffer\n");
     this->emitError("failed to create Vulkan lighting constant buffer");
     this->shutdown();
     return FALSE;
   }
+  SoVulkanShared::initBreadcrumb("SoVulkanRenderBackend::initialize "
+                                 "createLightingConstBuffer OK\n");
 
   if (!this->createLightingDescriptorSet()) {
+    SoVulkanShared::initBreadcrumb(
+      "SoVulkanRenderBackend::initialize FAIL createLightingDescriptorSet\n");
     this->emitError("failed to create Vulkan lighting descriptor set");
     this->shutdown();
     return FALSE;
   }
+  SoVulkanShared::initBreadcrumb("SoVulkanRenderBackend::initialize "
+                                 "createLightingDescriptorSet OK\n");
 
   if (!this->createWhiteTexture()) {
+    SoVulkanShared::initBreadcrumb(
+      "SoVulkanRenderBackend::initialize FAIL createWhiteTexture\n");
     this->emitError("failed to create Vulkan white fallback texture");
     this->shutdown();
     return FALSE;
   }
+  SoVulkanShared::initBreadcrumb("SoVulkanRenderBackend::initialize "
+                                 "createWhiteTexture OK\n");
 
   if (!this->createPipelineLayout()) {
+    SoVulkanShared::initBreadcrumb(
+      "SoVulkanRenderBackend::initialize FAIL createPipelineLayout\n");
     this->emitError("failed to create Vulkan pipeline layout");
     this->shutdown();
     return FALSE;
   }
+  SoVulkanShared::initBreadcrumb("SoVulkanRenderBackend::initialize "
+                                 "createPipelineLayout OK\n");
 
   if (!this->createShaders(this->vertexModule, this->fragmentModule)) {
+    SoVulkanShared::initBreadcrumb(
+      "SoVulkanRenderBackend::initialize FAIL createShaders\n");
     this->emitError("failed to create Vulkan shader modules");
     this->shutdown();
     return FALSE;
   }
+  SoVulkanShared::initBreadcrumb("SoVulkanRenderBackend::initialize "
+                                 "createShaders OK\n");
 
   if (!this->createWideLineShaders()) {
+    SoVulkanShared::initBreadcrumb(
+      "SoVulkanRenderBackend::initialize FAIL createWideLineShaders\n");
     this->emitError("failed to create Vulkan wide-line shader modules");
     this->shutdown();
     return FALSE;
   }
+  SoVulkanShared::initBreadcrumb("SoVulkanRenderBackend::initialize "
+                                 "createWideLineShaders OK\n");
 
   if (!this->createBackgroundResources()) {
+    SoVulkanShared::initBreadcrumb(
+      "SoVulkanRenderBackend::initialize FAIL createBackgroundResources\n");
     this->emitError("failed to create Vulkan background resources");
     this->shutdown();
     return FALSE;
   }
+  SoVulkanShared::initBreadcrumb("SoVulkanRenderBackend::initialize "
+                                 "createBackgroundResources OK\n");
 
   if (!this->createPipelineCache()) {
+    SoVulkanShared::initBreadcrumb(
+      "SoVulkanRenderBackend::initialize FAIL createPipelineCache\n");
     this->emitError("failed to create Vulkan pipeline cache");
     this->shutdown();
     return FALSE;
   }
+  SoVulkanShared::initBreadcrumb("SoVulkanRenderBackend::initialize "
+                                 "createPipelineCache OK\n");
 
+  SoVulkanShared::initBreadcrumb("SoVulkanRenderBackend::initialize DONE\n");
   this->emitLog("initialized");
   return TRUE;
 }
@@ -967,6 +1056,39 @@ SoVulkanRenderBackend::cacheFrameMatrices(const SoRenderParams & params)
               sizeof(float) * 16);
   this->frameDpr = params.devicePixelRatio > 0.0f
     ? params.devicePixelRatio : 1.0f;
+  if (std::getenv("FC_VULKAN_BREADCRUMBS")) {
+    // TEMP-VKINIT: project the (0..10) document-box center through the resolved
+    // frame camera and report NDC; |ndc|>1 means the frame camera is NOT
+    // framing the recorded geometry.
+    SbVec4f p(5.0f, 5.0f, 5.0f, 1.0f);
+    const float* v = this->frameViewFloats;
+    const float* pr = this->frameProjFloats;
+    float w[4];
+    for (int r = 0; r < 4; ++r) {
+      w[r] = v[r * 4 + 0] * p[0] + v[r * 4 + 1] * p[1]
+           + v[r * 4 + 2] * p[2] + v[r * 4 + 3] * p[3];
+    }
+    float ndc[4];
+    for (int r = 0; r < 4; ++r) {
+      ndc[r] = pr[r * 4 + 0] * w[0] + pr[r * 4 + 1] * w[1]
+             + pr[r * 4 + 2] * w[2] + pr[r * 4 + 3] * w[3];
+    }
+    if (std::fabs(ndc[3]) > 1e-6f) {
+      ndc[0] /= ndc[3]; ndc[1] /= ndc[3]; ndc[2] /= ndc[3];
+    }
+    // perspective proj near/far from pr[2][2]/pr[2][3]
+    float nearP = 0, farP = 0;
+    const float a = pr[2 * 4 + 2], b = pr[2 * 4 + 3];
+    if (std::fabs(a + 1.0f) > 1e-4f && std::fabs(a - 1.0f) > 1e-4f) {
+      nearP = b / (a + 1.0f);
+      farP = b / (a - 1.0f);
+    }
+    std::fprintf(stderr,
+      "[VKINIT] frameCam viewPos(eye)=%.2f,%.2f,%.2f projNear=%.4f far=%.4f "
+      "boxCenterNDC=(%.3f,%.3f,%.3f)\n",
+      w[0], w[1], w[2], nearP, farP, ndc[0], ndc[1], ndc[2]);
+    std::fflush(stderr);
+  }
 }
 
 void

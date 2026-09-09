@@ -35,9 +35,11 @@ static void vulkanSceneGraphChangedCallback(void * data, SoSensor * sensor);
 #include <algorithm>
 #include <chrono>
 #include <cmath>
+#include <cstdarg>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <execinfo.h>
 #include <limits>
 #include <memory>
 
@@ -309,6 +311,7 @@ public:
   SbColor4f backgroundBottomColor = SbColor4f(0.0f, 0.0f, 0.0f, 1.0f);
   SbBool wireframeOverlay = FALSE;
   SbBool pointsOverlay = FALSE;
+  SbBool tessellationOverlay = FALSE;
   SbColor4f edgeColor = SbColor4f(0.05f, 0.05f, 0.05f, 1.0f);
   SbBool clearWindow = TRUE;
   SbBool clearDepth = TRUE;
@@ -495,6 +498,11 @@ void
 SoVulkanRenderManager::setSceneGraph(SoNode * root)
 {
   SoNode *& stored = this->pimpl->scene;
+  // TEMP-VKINIT
+  if (stored != root) {
+    SoVulkanShared::initBreadcrumb("setSceneGraph scene %p (was %p)\n",
+                     static_cast<void*>(root), static_cast<void*>(stored));
+  }
   if (stored == root) {
     return;
   }
@@ -540,6 +548,9 @@ SoVulkanRenderManager::setOverlaySceneGraph(SoNode * root)
   if (stored) {
     stored->ref();
   }
+  // TEMP-VKINIT
+  SoVulkanShared::initBreadcrumb("setOverlaySceneGraph %s %p\n", root ? "overlay" : "NULL",
+                   static_cast<void*>(root));
 }
 
 SoNode *
@@ -562,6 +573,9 @@ SoVulkanRenderManager::setDecorationSceneGraph(SoNode * root)
   if (stored) {
     stored->ref();
   }
+  // TEMP-VKINIT
+  SoVulkanShared::initBreadcrumb("setDecorationSceneGraph %s %p\n", root ? "decor" : "NULL",
+                   static_cast<void*>(root));
 }
 
 SoNode *
@@ -596,6 +610,9 @@ SoVulkanRenderManager::setCamera(SoCamera * camera)
   if (stored) {
     stored->ref();
   }
+  // TEMP-VKINIT
+  SoVulkanShared::initBreadcrumb("setCamera %s %p\n", camera ? "cam" : "NULL",
+                   static_cast<void*>(camera));
 }
 
 SoCamera *
@@ -695,6 +712,13 @@ SoVulkanRenderManager::setPointsOverlay(SbBool enabled)
 }
 
 void
+SoVulkanRenderManager::setTessellationOverlay(SbBool enabled)
+{
+  this->pimpl->tessellationOverlay = enabled;
+  this->pimpl->backend.setTessellationOverlay(enabled);
+}
+
+void
 SoVulkanRenderManager::setEdgeColor(const SbColor4f & color)
 {
   this->pimpl->edgeColor = color;
@@ -711,6 +735,12 @@ SbBool
 SoVulkanRenderManager::getPointsOverlay(void) const
 {
   return this->pimpl->pointsOverlay;
+}
+
+SbBool
+SoVulkanRenderManager::getTessellationOverlay(void) const
+{
+  return this->pimpl->tessellationOverlay;
 }
 
 const SbColor4f &
@@ -766,15 +796,24 @@ SoVulkanRenderManager::initialize(SoVulkanDeviceContext * context)
   // device-lost fixed in SoRTXRenderBackend* (VUID-vkCmdDispatch-None-08114).
   // Do not chase it: the remedy (per-swapchain-image semaphores) is a Qt/
   // QVulkanWindow change, not a FreeCAD one.
+  // TEMP-VKINIT
+  SoVulkanShared::initBreadcrumb("initialize enter ctx.device=%p backendInit=%d rtx=%d\n",
+                   static_cast<void*>(context->device),
+                   this->pimpl->backendInitialized ? 1 : 0,
+                   this->pimpl->rayTracing ? 1 : 0);
+  // TEMP-VKINIT
   if (this->pimpl->backendInitialized && this->pimpl->initContext
       && this->pimpl->initContext->device == context->device) {
     this->pimpl->initContext = context;
+    SoVulkanShared::initBreadcrumb("initialize reuse (device unchanged)\n");
     return TRUE;
   }
 
+  SoVulkanShared::initBreadcrumb("initialize calling backend.initialize\n");
   SoRenderBackendInitParams params;
   params.userData = context;
   if (!this->pimpl->backend.initialize(params)) {
+    SoVulkanShared::initBreadcrumb("initialize FAILED backend.initialize\n");
     SoDebugError::postWarning("SoVulkanRenderManager::initialize",
                               "backend initialization failed");
     return FALSE;
@@ -783,6 +822,7 @@ SoVulkanRenderManager::initialize(SoVulkanDeviceContext * context)
   // Retain the borrowed context so ensureRayTracing() can bring the RT
   // backend up later if it was skipped at startup (path tracing off).
   this->pimpl->initContext = context;
+  SoVulkanShared::initBreadcrumb("initialize backend OK rtx=%d\n", this->pimpl->rtxBackendInitialized ? 1 : 0);
 
   // Ray tracing is best-effort and only attempted when it was requested
   // (setRayTracing(TRUE)).  A device created without the KHR extensions
@@ -791,21 +831,36 @@ SoVulkanRenderManager::initialize(SoVulkanDeviceContext * context)
   // re-initializes.  When it IS requested but unavailable, fall back to
   // the raster backend with a warning.
   if (this->pimpl->rayTracing) {
+    SoVulkanShared::initBreadcrumb("initialize requesting RTX backend\n");
     if (this->pimpl->rtxBackend.initialize(params)) {
       this->pimpl->rtxBackendInitialized = TRUE;
+      SoVulkanShared::initBreadcrumb("initialize RTX backend OK\n");
     }
     else {
+      SoVulkanShared::initBreadcrumb("initialize RTX backend FAILED (fallback)\n");
       SoDebugError::postWarning(
         "SoVulkanRenderManager::initialize",
         "ray-tracing backend unavailable; raster Vulkan backend will be used");
     }
   }
+  SoVulkanShared::initBreadcrumb("initialize DONE backendInit=%d rtxInit=%d\n",
+                                 this->pimpl->backendInitialized ? 1 : 0,
+                                 this->pimpl->rtxBackendInitialized ? 1 : 0);
   return TRUE;
 }
 
 void
 SoVulkanRenderManager::shutdown(void)
 {
+  // TEMP-BT: locate who tears the backend down during initial open (delete me)
+  if (std::getenv("FC_VK_SHUT_DBG")) {
+    std::fprintf(stderr, "[SHUT-DBG] SoVulkanRenderManager::shutdown backend=%d rtx=%d\n",
+                 this->pimpl->backendInitialized ? 1 : 0,
+                 this->pimpl->rtxBackendInitialized ? 1 : 0);
+    void* bt[24]; int n = backtrace(bt, 24);
+    backtrace_symbols_fd(bt, n, 2);
+    std::fflush(stderr);
+  }
   if (this->pimpl->backendInitialized) {
     this->pimpl->backend.shutdown();
     this->pimpl->backendInitialized = FALSE;
@@ -1275,6 +1330,9 @@ SoVulkanRenderManagerP::resolveActiveCamera()
   // No camera in the scene graph: fall back to the retained pointer (used by
   // overlay-only or programmatic render setups that manage a camera outside
   // the scene).
+  // TEMP-VKINIT
+  SoVulkanShared::initBreadcrumb("resolveActiveCamera FALLBACK to retained camera %p\n",
+                   static_cast<void*>(this->camera));
   return this->camera;
 }
 
@@ -1288,7 +1346,17 @@ void
 SoVulkanRenderManagerP::refreshActiveCamera()
 {
   SoCamera * resolved = this->resolveActiveCamera();
+  // TEMP-VKINIT
+  SoVulkanShared::initBreadcrumb("refreshActiveCamera resolved=%p retained=%p camv=%d\n",
+                   static_cast<void*>(resolved), static_cast<void*>(this->camera),
+                   this->cameraVersion);
   if (resolved && resolved != this->camera) {
+    if (getenv("FC_VULKAN_RT_DEBUG")) {
+      fprintf(stderr,
+              "[RTDBG] cameraNode swap resolved=%p stored=%p camv=%d\n",
+              static_cast<void *>(resolved), static_cast<void *>(this->camera),
+              this->cameraVersion);
+    }
     SoCamera *& stored = this->camera;
     if (stored) {
       stored->unref();
@@ -1310,8 +1378,25 @@ SoVulkanRenderManagerP::refreshActiveCamera()
                    (uint32_t)((int)(pos[2] * 256.0f)) ^
                    (uint32_t)((int)(fp[0] * 256.0f));
     if (fp1 != this->cameraPoseFingerprint) {
+      if (getenv("FC_VULKAN_RT_DEBUG")) {
+        fprintf(stderr,
+                "[RTDBG] cameraPose fp=%08x -> %08x pos=(%.6f,%.6f,%.6f) "
+                "fwd=(%.6f,%.6f,%.6f)\n",
+                this->cameraPoseFingerprint, fp1, pos[0], pos[1], pos[2],
+                fp[0], fp[1], fp[2]);
+      }
       this->cameraPoseFingerprint = fp1;
       this->cameraVersion++;
+    }
+    else if (getenv("FC_VULKAN_RT_DEBUG")) {
+      static uint32_t samp = 0;
+      if (samp < 150) {
+        ++samp;
+        fprintf(stderr,
+                "[RTDBG] cameraPose SAME fp=%08x pos=(%.6f,%.6f,%.6f) "
+                "fwd=(%.6f,%.6f,%.6f)\n",
+                fp1, pos[0], pos[1], pos[2], fp[0], fp[1], fp[2]);
+      }
     }
   }
 }
@@ -1543,12 +1628,21 @@ SoVulkanRenderManagerP::prepareRenderParams(SbBool clearwindow,
                                             SoRenderParams & params)
 {
   if (!this->backendInitialized || !this->renderTarget) {
+    // TEMP-VKINIT
+    SoVulkanShared::initBreadcrumb("prepareRenderParams BAIL: backend=%d rt=%d\n",
+                     this->backendInitialized ? 1 : 0,
+                     this->renderTarget ? 1 : 0);
     SoDebugError::postWarning("SoVulkanRenderManager::prepareRenderParams",
                               "backend %s, render target %s",
                               this->backendInitialized ? "initialized" : "NOT initialized",
                               this->renderTarget ? "set" : "NOT set");
     return FALSE;
   }
+  // TEMP-VKINIT
+  SoVulkanShared::initBreadcrumb("prepareRenderParams frame scene=%p camera=%p overlay=%p\n",
+                   static_cast<void*>(this->scene),
+                   static_cast<void*>(this->camera),
+                   static_cast<void*>(this->overlayScene));
 
   const long prepBcStart = vkRenderBreadcrumbEnabled() ? vkRenderBreadcrumbNowUs() : 0;
   const bool wantCpuTiming = frameTimingEnabled();
@@ -1656,19 +1750,20 @@ SoVulkanRenderManagerP::prepareRenderParams(SbBool clearwindow,
   // below.  They are re-recorded separately afterwards (cheap) and merged onto
   // this main list.
    SbBool irReplayed = FALSE;
-   // The graph fingerprint walk is O(N) over the scene nodes, so on a retained
-   // (replayed) frame with no scene change at all it is pure waste.  The walk
-   // folds scene node-ids but deliberately skips camera, light, environment and
-   // tag/infra nodes, so the fingerprint is invariant under camera motion; the
-   // only thing that changes it is a change to a render-affecting node.  An
-   // SoNodeSensor attached to the scene root fires whenever any descendant is
-   // notified (a field write or a child-list edit, including the camera pose --
-   // FreeCAD keeps the camera inside the scene graph).  When the sensor has NOT
-   // fired since the last walk the cached fingerprint is still exact and the
-   // walk/re-traversal can be skipped via the branch below.  When it HAS fired
-   // we must recompute the fingerprint (see the else) to distinguish camera-only
-   // churn (identical fingerprint -> replay) from a real content change
-   // (different fingerprint -> re-traverse).
+   // Cheap fast-path: the graph fingerprint walk is O(N) over the whole scene,
+   // so on a retained (replayed) frame with no scene change at all it is pure
+   // waste.  The walk folds scene node-ids but deliberately SKIPS camera, light,
+   // environment and tag/infra nodes, so the fingerprint is invariant under
+   // camera motion; the only thing that changes it is a change to a
+   // render-affecting node.  An SoNodeSensor attached to the scene root fires
+   // whenever any descendant is notified (a field write or a child-list edit,
+   // including the camera pose -- FreeCAD keeps the camera inside the scene
+   // graph).  When the sensor has NOT fired since the last walk the cached
+   // fingerprint is still exact and both the walk and the re-traversal can be
+   // skipped via the branch below.  When it HAS fired we must recompute the
+   // fingerprint (see the else) to distinguish camera-only churn (identity
+   // fingerprint -> replay) from a real content change (different fingerprint
+   // -> re-traverse).
    uint64_t graphFp;
    const SbVec2s fpVpSize = this->viewportRegion.getViewportSizePixels();
     if (this->graphFingerprintValid && this->lastFpValid &&
@@ -1705,6 +1800,21 @@ SoVulkanRenderManagerP::prepareRenderParams(SbBool clearwindow,
    this->lastFpValid = TRUE;
     if (this->scene || this->camera || this->overlayScene
         || this->decorationScene) {
+     if (breadcrumbsEnabled()) {
+       static long frames = 0;
+       if (++frames == 1 || frames % 30 == 0) {
+         std::fprintf(stderr,
+                      "[VKINIT] replayDecision frame=%ld dirty=%d fpValid=%d "
+                      "fpMatch=%d irReplay%d cmds=%u fp=0x%llx cachedFp=0x%llx\n",
+                      frames, sceneGraphDirty ? 1 : 0,
+                      graphFingerprintValid ? 1 : 0,
+                      (graphFingerprintValid && graphFp == this->graphFingerprint) ? 1 : 0,
+                      irReplayEnabled() ? 1 : 0,
+                      this->mainCommandCount, (unsigned long long)graphFp,
+                      (unsigned long long)this->graphFingerprint);
+         std::fflush(stderr);
+       }
+     }
      if (irReplayEnabled() && this->graphFingerprintValid &&
          graphFp == this->graphFingerprint) {
       // Camera-only frame: the main graph, the viewport, and the

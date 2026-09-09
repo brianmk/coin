@@ -162,16 +162,12 @@ SoVulkanRenderBackend::selectMemoryType(const VkMemoryRequirements & requirement
                                         const VkMemoryPropertyFlags desired,
                                         uint32_t & memoryTypeIndex)
 {
-  const VkPhysicalDeviceMemoryProperties & props = this->memProps.properties();
-  for (uint32_t i = 0; i < props.memoryTypeCount; ++i) {
-    if ((requirements.memoryTypeBits & (1u << i)) &&
-        (props.memoryTypes[i].propertyFlags & desired) == desired) {
-      memoryTypeIndex = i;
-      return true;
-    }
-  }
+  // Exact-match policy (no fallback): the selection loop lives in the shared
+  // SoVulkanShared::MemoryProperties so both backends route memory-type
+  // selection through one implementation; only the policy differs (the RT
+  // backend calls pick() to allow a best-effort fallback).
   memoryTypeIndex = 0;
-  return false;
+  return this->memProps.pickExact(requirements, desired, memoryTypeIndex);
 }
 
 bool

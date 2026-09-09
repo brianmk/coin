@@ -394,6 +394,9 @@ private:
                  VkCommandBuffer cmd);
   bool refitBlas(RTXCachedGeometry & entry, const SoRenderCommand & command,
                  VkCommandBuffer cmd);
+  bool blasBuildOrRefit(RTXCachedGeometry & entry,
+                        const SoRenderCommand & command, VkCommandBuffer cmd,
+                        bool refit);
   void destroyCacheEntry(RTXCachedGeometry & entry);
   bool buildTlas(const SoDrawList & drawlist, const SoRenderParams & params,
                  VkCommandBuffer cmd);
@@ -847,6 +850,14 @@ private:
   bool ensureNeePoolCapacity(VkDeviceSize bytes);
   void buildNeePool(const SoDrawList & drawlist);
 
+  // Shared grow-only pool (re)allocation used by ensureNormalPoolCapacity()
+  // and ensureNeePoolCapacity(): double the host-visible pool until the
+  // requested size fits, preserving the existing contents and used count.
+  bool ensurePoolCapacity(VkDeviceSize bytes, VkBuffer & poolBuffer,
+                          VkDeviceMemory & poolMemory, void *& poolMapped,
+                          VkDeviceSize & poolCapacity, VkDeviceSize & poolUsed,
+                          bool refreshDescriptors);
+
   // --- Cache bookkeeping ---------------------------------------------------
   std::vector<RTXCachedGeometry> geometryCache;
   std::unordered_map<const SoRenderCommand *, size_t> commandToCache;
@@ -1167,6 +1178,11 @@ private:
   void updateDenoise();
   //! Read the already-traced storage image back to a PPM (FC_VULKAN_PT_DUMP).
   void dumpStorageImageIfRequested();
+  //! Read the float accumulation buffer back to a PPM (FC_VULKAN_PT_DUMP_ACCUM).
+  void dumpAccumBufferIfRequested();
+  //! Read the per-pixel G-buffers (normal/position) back to PPMs
+  //! (FC_VULKAN_PT_DUMP_GBUF=<dir>).
+  void dumpGbuffersIfRequested();
   //! After publishing a denoised result at target: clear the denoise latch and
   //! transition to converged-idle so the viewport keeps the denoised image and
   //! stops the continuous-update loop.  Also used on the failure paths (with a

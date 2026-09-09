@@ -299,12 +299,15 @@ SoRTXRenderBackend::updatePathTracingState(const SoDrawList & /*drawlist*/,
     fprintf(stderr,
             "[RTDBG] ptState frame=%u viewChanged=%d sceneChanged=%d "
             "bgChanged=%d latch=%d accum=%d frameIndex=%u idle=%u "
-            "reproject=%d\n",
+            "reproject=%d camv=%u lastCamv=%u vp=%d,%d lastVp=%u,%u\n",
             params.frame,
             viewChanged ? 1 : 0, sceneChanged ? 1 : 0,
             backgroundChanged ? 1 : 0, this->ptStartLatch ? 1 : 0,
             this->ptAccumulating ? 1 : 0, this->ptFrameIndex,
-            this->ptIdleFrames, this->ptReprojectFrame ? 1 : 0);
+            this->ptIdleFrames, this->ptReprojectFrame ? 1 : 0,
+            params.cameraVersion, this->lastCameraVersion,
+            static_cast<int>(vpSize[0]), static_cast<int>(vpSize[1]),
+            this->lastViewportWidth, this->lastViewportHeight);
   }
 
   if (getenv("FC_VULKAN_PT_DEBUG")) {

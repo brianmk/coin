@@ -151,9 +151,11 @@ public:
   */
   void setWireframeOverlay(SbBool enabled);
   void setPointsOverlay(SbBool enabled);
+  void setTessellationOverlay(SbBool enabled);
   void setEdgeColor(const SbColor4f & color);
   SbBool getWireframeOverlay(void) const;
   SbBool getPointsOverlay(void) const;
+  SbBool getTessellationOverlay(void) const;
   const SbColor4f & getEdgeColor(void) const;
 
   void setClearEnabled(SbBool clearwindow, SbBool clearzbuffer);

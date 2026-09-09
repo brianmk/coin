@@ -445,18 +445,18 @@ soshape_emit_ir_commands(SoIRRenderAction * action, SoShape * shape,
     command.projMatrix = SoProjectionMatrixElement::get(state);
     if (clipDebug) {
       static int mmLog = 0;
-      if (mmLog++ < 6) {
+      if (mmLog++ < 40) {
         SbBool isId = FALSE;
         const SbMatrix & el = SoModelMatrixElement::get(state, isId);
         SbMatrix mm = command.modelMatrix;
-        fprintf(stderr, "[SHAPE] cmd rec pass=%d verts=%u model00=%.3f m11=%.3f "
-                        "m22=%.3f trans=(%.3f,%.3f,%.3f) isIdentity=%d "
-                        "el00=%.3f eltrans=(%.3f,%.3f,%.3f)\n",
+        fprintf(stderr, "[SHAPE] cmd rec type=%s pass=%d verts=%u topo=%d "
+                        "modelScale=(%.3f,%.3f,%.3f) trans=(%.3f,%.3f,%.3f)\n",
+                shape->getTypeId().getName().getString(),
                 static_cast<int>(command.pass),
                 static_cast<unsigned>(command.geometry.vertexCount),
+                static_cast<int>(geom.topology),
                 mm[0][0], mm[1][1], mm[2][2],
-                mm[3][0], mm[3][1], mm[3][2],
-                isId ? 1 : 0, el[0][0], el[3][0], el[3][1], el[3][2]);
+                mm[3][0], mm[3][1], mm[3][2]);
       }
     }
     SoRenderIR::fillMaterialFromState(
@@ -859,7 +859,7 @@ SoShape::IRRender(SoIRRenderAction * action)
   if (!action) return;
   if (getenv("FC_IR_BREADCRUMB")) {
     static int n = 0;
-    if (n++ < 10) fprintf(stderr, "[BC-IR] IRRender shape=%p type=%s\n",
+    if (n++ < 400) fprintf(stderr, "[BC-IR] IRRender shape=%p type=%s\n",
                           (void *)this,
                           this->getTypeId().getName().getString());
   }
@@ -877,6 +877,17 @@ SoShape::IRRender(SoIRRenderAction * action)
     SbVec3f center;
     this->getBBox(action, box, center);
     if (box.isEmpty()) return;
+    if (std::getenv("FC_IR_BREADCRUMB")) {
+      SbBool isId = FALSE;
+      const SbMatrix & mm = SoModelMatrixElement::get(state, isId);
+      std::fprintf(stderr, "[IR-BBOX] shape=%s bboxMin=(%.2f,%.2f,%.2f) "
+                  "bboxMax=(%.2f,%.2f,%.2f) modelScale=(%.3f,%.3f,%.3f)\n",
+                  this->getTypeId().getName().getString(),
+                  box.getMin()[0], box.getMin()[1], box.getMin()[2],
+                  box.getMax()[0], box.getMax()[1], box.getMax()[2],
+                  mm[0][0], mm[1][1], mm[2][2]);
+      std::fflush(stderr);
+    }
 
     const SbVec3f min = box.getMin();
     const SbVec3f max = box.getMax();
