@@ -103,7 +103,7 @@ SoRTXRenderBackend::createScratchBuffer(VkDeviceSize size)
   const VkDeviceAddress base = this->getDeviceAddress(this->scratchBuffer);
   const VkDeviceAddress offset = (alignment - (base % alignment)) % alignment;
   this->scratchAddress = base + offset;
-  if (getenv("FC_VULKAN_RT_DEBUG")) {
+  if (SoVulkanShared::envString("FC_VULKAN_RT_DEBUG")) {
     fprintf(stderr,
             "[RTDBG] scratch: requiredAlignment=%llu base=0x%llx "
             "aligned=0x%llx offset=%llu size=%llu\n",

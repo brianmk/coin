@@ -7,6 +7,7 @@
 #include "rendering/SoVulkanShared.h"
 
 #include <Inventor/rendering/SoVulkanRenderTarget.h>
+#include <Inventor/rendering/SoVulkanViewMode.h>
 
 #include <atomic>
 #include <cstddef>
@@ -192,7 +193,10 @@ public:
     the full accumulating path tracer (u_state.y == 1).  RtxModeOff leaves
     ptEnabled untouched (callers that want raster set ptEnabled false instead).
   */
-  enum class RtxViewMode { RtxModeOff = 0, RtxModeAmbientOcclusion, RtxModePathTrace, RtxModeEnvironment };
+  //! Shared with the embedding application (see SoVulkanViewMode.h).  Kept as
+  //! a nested alias so the existing SoRTXRenderBackend::RtxViewMode and
+  //! unqualified RtxViewMode::RtxModeX spellings keep working.
+  using RtxViewMode = SoVulkanViewMode;
 
   const char * getName() const override;
   SbBool initialize(const SoRenderBackendInitParams & params) override;
@@ -328,12 +332,12 @@ public:
     the light count can drop to zero once the scene is replayed, leaving the
     ray tracer with no lights and rendering surfaces at ambient-only
     (near-black).  Instead of deriving lights from the IR, the host pushes the
-    effective eye-space light set here and updateMaterials() uses it verbatim.
-    Passing an empty set returns the backend to the per-command IR lighting.
-    The \a ambient is the scene ambient (already intensity-scaled).
+    effective camera-anchored world-space set here and updateMaterials() uses
+    it verbatim.  Passing an empty light list returns the backend to the
+    per-command IR lighting.  \a lighting also carries the intensity-scaled
+    scene ambient.
   */
-  void setSceneLights(const std::vector<SoLightData> & lights,
-                      const SbVec3f & ambient);
+  void setSceneLights(const SoLightingData & lighting);
 
   /*!
     \brief Record the draw list into a caller-owned command buffer/render pass.
@@ -805,14 +809,14 @@ private:
   // allocating a fresh std::vector<RTMaterial> every frame.
   std::vector<RTMaterial> materialScratch;
   // Authoritative scene lighting pushed by the GL host via setSceneLights().
-  // When non-empty, updateMaterials() uses these eye-space lights instead of
-  // the per-command IR SoLightingData (whose captured light count can drop to
-  // zero on the retained/replayed path tracer, rendering surfaces black).
-  // The eye-space convention matches the IR fill (view-fixed, the RT shader
-  // converts back through frame.u_viewInverse), so a camera orbit keeps the
-  // headlight pointing at the camera without a per-frame re-derive.
-  std::vector<SoLightData> sceneLights;
-  SbVec3f sceneAmbient = SbVec3f(0.2f, 0.2f, 0.2f);
+  // When its light list is non-empty, updateMaterials() uses these
+  // camera-anchored world-space lights instead of the per-command IR
+  // SoLightingData (whose captured light count can drop to zero on the
+  // retained/replayed path tracer, rendering surfaces black).  The world-space
+  // convention matches the IR fill, so the RT shader consumes the directions
+  // directly; anchoring them to the camera keeps the headlight following the
+  // view without a per-frame re-derive in the backend.
+  SoLightingData sceneLighting;
   // Cached PBR/lighting env overrides.  These are loop-invariant per frame;
   // reading them once avoids a getenv()/envFlagEnabled() per command.
   bool rtPbrEnabled = false;

@@ -87,18 +87,11 @@ SoVulkanRenderBackend::setMaxFramesInFlight(const uint32_t count)
       VkBuffer newBuffer = VK_NULL_HANDLE;
       VkDeviceMemory newMemory = VK_NULL_HANDLE;
       void * newMapped = nullptr;
-      if (!this->createBuffer(totalBytes, VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT,
-                              newBuffer, newMemory, nullptr) ||
-          vkMapMemory(this->device, newMemory, 0, totalBytes, 0, &newMapped) !=
-            VK_SUCCESS) {
+      if (!this->createMappedBuffer(totalBytes,
+                                    VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT,
+                                    newBuffer, newMemory, &newMapped)) {
         this->emitError(
           "setMaxFramesInFlight: failed to resize lighting UBO");
-        if (newBuffer != VK_NULL_HANDLE) {
-          vkDestroyBuffer(this->device, newBuffer, this->allocator);
-        }
-        if (newMemory != VK_NULL_HANDLE) {
-          vkFreeMemory(this->device, newMemory, this->allocator);
-        }
       }
       else {
         this->swapLightingBuffer(newBuffer, newMemory, newMapped,
@@ -130,6 +123,12 @@ void
 SoVulkanRenderBackend::setEdgeColor(const SbColor4f & color)
 {
   this->edgeColor = color;
+}
+
+void
+SoVulkanRenderBackend::setSceneLights(const SoLightingData & lighting)
+{
+  this->sceneLighting = lighting;
 }
 
 SbBool
@@ -171,7 +170,7 @@ SoVulkanRenderBackend::initialize(const SoRenderBackendInitParams & params)
     unsigned int hw = std::thread::hardware_concurrency();
     this->maxRecordWorkers = hw == 0 ? 1 : hw;
     if (this->maxRecordWorkers > 8) this->maxRecordWorkers = 8;
-    const char * cap = std::getenv("FC_VULKAN_RECORD_WORKERS");
+    const char * cap = SoVulkanShared::envString("FC_VULKAN_RECORD_WORKERS");
     if (cap && cap[0]) {
       const unsigned int v = static_cast<unsigned int>(std::atoi(cap));
       if (v >= 1 && v < this->maxRecordWorkers) this->maxRecordWorkers = v;
@@ -318,12 +317,7 @@ SoVulkanRenderBackend::createCommandPool()
   // buffers from a SHARED pool would race its internal allocator.
   this->secondaryCommandPools.assign(this->maxRecordWorkers, VK_NULL_HANDLE);
   for (VkCommandPool & pool : this->secondaryCommandPools) {
-    VkCommandPoolCreateInfo sci {};
-    sci.sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO;
-    sci.flags = VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT |
-                VK_COMMAND_POOL_CREATE_TRANSIENT_BIT;
-    sci.queueFamilyIndex = this->queueFamilyIndex;
-    if (vkCreateCommandPool(this->device, &sci, this->allocator, &pool) !=
+    if (vkCreateCommandPool(this->device, &ci, this->allocator, &pool) !=
         VK_SUCCESS) {
       return false;
     }
@@ -707,18 +701,10 @@ SoVulkanRenderBackend::createLightingUniformBuffer()
   const VkDeviceSize totalBytes =
     static_cast<VkDeviceSize>(this->maxFramesInFlight) *
     static_cast<VkDeviceSize>(this->uboSlotsPerFrame) * this->uboSlotStride;
-  if (!this->createBuffer(totalBytes, VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT,
-                          this->lightingBuffer, this->lightingMemory,
-                          nullptr)) {
-    return false;
-  }
-  if (vkMapMemory(this->device, this->lightingMemory, 0, totalBytes, 0,
-                  &this->lightingMapped) != VK_SUCCESS) {
-    this->emitError("createLightingUniformBuffer: vkMapMemory failed");
-    vkDestroyBuffer(this->device, this->lightingBuffer, this->allocator);
-    vkFreeMemory(this->device, this->lightingMemory, this->allocator);
-    this->lightingBuffer = VK_NULL_HANDLE;
-    this->lightingMemory = VK_NULL_HANDLE;
+  if (!this->createMappedBuffer(totalBytes, VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT,
+                                this->lightingBuffer, this->lightingMemory,
+                                &this->lightingMapped)) {
+    this->emitError("createLightingUniformBuffer: buffer create/map failed");
     return false;
   }
   // The per-instance model-matrix ring parallels the lighting UBO ring
@@ -753,18 +739,11 @@ SoVulkanRenderBackend::createLightingConstBuffer()
   const VkDeviceSize totalBytes =
     static_cast<VkDeviceSize>(this->lightingConstMaxSlots) *
     this->lightingConstStride;
-  if (!this->createBuffer(totalBytes, VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT,
-                          this->lightingConstBuffer, this->lightingConstMemory,
-                          nullptr)) {
-    return false;
-  }
-  if (vkMapMemory(this->device, this->lightingConstMemory, 0, totalBytes, 0,
-                  &this->lightingConstMapped) != VK_SUCCESS) {
-    this->emitError("createLightingConstBuffer: vkMapMemory failed");
-    vkDestroyBuffer(this->device, this->lightingConstBuffer, this->allocator);
-    vkFreeMemory(this->device, this->lightingConstMemory, this->allocator);
-    this->lightingConstBuffer = VK_NULL_HANDLE;
-    this->lightingConstMemory = VK_NULL_HANDLE;
+  if (!this->createMappedBuffer(totalBytes, VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT,
+                                this->lightingConstBuffer,
+                                this->lightingConstMemory,
+                                &this->lightingConstMapped)) {
+    this->emitError("createLightingConstBuffer: buffer create/map failed");
     return false;
   }
   return true;
@@ -814,16 +793,9 @@ SoVulkanRenderBackend::growLightingUbo(const uint32_t minSlots)
   const VkDeviceSize totalBytes =
     static_cast<VkDeviceSize>(this->maxFramesInFlight) *
     static_cast<VkDeviceSize>(slots) * this->uboSlotStride;
-  if (!this->createBuffer(totalBytes, VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT,
-                          newBuffer, newMemory, nullptr)) {
+  if (!this->createMappedBuffer(totalBytes, VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT,
+                                newBuffer, newMemory, &newMapped)) {
     this->emitError("growLightingUbo: failed to allocate larger UBO");
-    return false;
-  }
-  if (vkMapMemory(this->device, newMemory, 0, totalBytes, 0, &newMapped) !=
-      VK_SUCCESS) {
-    this->emitError("growLightingUbo: vkMapMemory failed");
-    vkDestroyBuffer(this->device, newBuffer, this->allocator);
-    vkFreeMemory(this->device, newMemory, this->allocator);
     return false;
   }
 
@@ -838,7 +810,6 @@ SoVulkanRenderBackend::swapLightingBuffer(VkBuffer newBuffer,
 {
   const VkBuffer oldBuffer = this->lightingBuffer;
   const VkDeviceMemory oldMemory = this->lightingMemory;
-  void * oldMapped = this->lightingMapped;
   this->lightingBuffer = newBuffer;
   this->lightingMemory = newMemory;
   this->lightingMapped = newMapped;
@@ -853,17 +824,8 @@ SoVulkanRenderBackend::swapLightingBuffer(VkBuffer newBuffer,
 
   // The old buffer may still be referenced by a pending frame; destroy it
   // only after the batch ring wraps back around (flushPendingDestroys()).
-  const VkDevice device = this->device;
-  const VkAllocationCallbacks * allocator = this->allocator;
-  this->deferDestroy([device, allocator, oldBuffer, oldMemory, oldMapped]() {
-    if (oldMapped != nullptr) vkUnmapMemory(device, oldMemory);
-    if (oldBuffer != VK_NULL_HANDLE) {
-      vkDestroyBuffer(device, oldBuffer, allocator);
-    }
-    if (oldMemory != VK_NULL_HANDLE) {
-      vkFreeMemory(device, oldMemory, allocator);
-    }
-  });
+  // Freeing the memory implicitly unmaps it, so no explicit unmap is needed.
+  this->deferDestroyBufferMemory(oldBuffer, oldMemory);
 
   // Every descriptor set captured the old buffer handle at allocation time
   // (binding 0 is the lighting UBO).  Rewriting the binding of a set that is
@@ -1004,14 +966,9 @@ SoVulkanRenderBackend::deferDestroyCacheEntry(VulkanCachedCommand & entry)
       std::move(entry.wideLineBuffers);
     VkDevice device = this->device;
     const VkAllocationCallbacks * allocator = this->allocator;
-    this->deferDestroy([device, allocator, wideLine]() {
-      for (const VulkanCachedCommand::VulkanWideLineBuffer & slot : wideLine) {
-        if (slot.buffer != VK_NULL_HANDLE) {
-          vkDestroyBuffer(device, slot.buffer, allocator);
-        }
-        if (slot.memory != VK_NULL_HANDLE) {
-          vkFreeMemory(device, slot.memory, allocator);
-        }
+    this->deferDestroy([device, allocator, wideLine]() mutable {
+      for (VulkanCachedCommand::VulkanWideLineBuffer & slot : wideLine) {
+        slot.destroy(device, allocator);
       }
     });
     this->deferReleaseGeometryBlock(sharedBlockId);
@@ -1028,14 +985,9 @@ SoVulkanRenderBackend::deferDestroyCacheEntry(VulkanCachedCommand & entry)
     std::move(entry.wideLineBuffers);
   this->deferDestroy(
     [device, allocator, vertexBuffer, vertexMemory, indexBuffer,
-     indexMemory, wideLine]() {
-      for (const VulkanCachedCommand::VulkanWideLineBuffer & slot : wideLine) {
-        if (slot.buffer != VK_NULL_HANDLE) {
-          vkDestroyBuffer(device, slot.buffer, allocator);
-        }
-        if (slot.memory != VK_NULL_HANDLE) {
-          vkFreeMemory(device, slot.memory, allocator);
-        }
+     indexMemory, wideLine]() mutable {
+      for (VulkanCachedCommand::VulkanWideLineBuffer & slot : wideLine) {
+        slot.destroy(device, allocator);
       }
       if (indexBuffer != VK_NULL_HANDLE) {
         vkDestroyBuffer(device, indexBuffer, allocator);
@@ -1245,27 +1197,31 @@ SoVulkanRenderBackend::createPipelineLayout()
 }
 
 bool
+SoVulkanRenderBackend::createShaderModule(const uint32_t * code, size_t count,
+                                          VkShaderModule & module)
+{
+  VkShaderModuleCreateInfo ci {};
+  ci.sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO;
+  ci.codeSize = count * sizeof(uint32_t);
+  ci.pCode = code;
+  return vkCreateShaderModule(this->device, &ci, this->allocator, &module) ==
+    VK_SUCCESS;
+}
+
+bool
 SoVulkanRenderBackend::createShaders(VkShaderModule & vertex,
                                      VkShaderModule & fragment)
 {
-  auto load = [this](const uint32_t * code, size_t count,
-                     VkShaderModule & module) {
-    VkShaderModuleCreateInfo ci {};
-    ci.sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO;
-    ci.codeSize = count * sizeof(uint32_t);
-    ci.pCode = code;
-    return vkCreateShaderModule(this->device, &ci, this->allocator,
-                                &module) == VK_SUCCESS;
-  };
-
   vertex = VK_NULL_HANDLE;
   fragment = VK_NULL_HANDLE;
-  if (!load(coin_vulkan_visual_vertex_spirv,
-            coin_vulkan_visual_vertex_spirv_count, vertex)) {
+  if (!this->createShaderModule(coin_vulkan_visual_vertex_spirv,
+                                coin_vulkan_visual_vertex_spirv_count,
+                                vertex)) {
     return false;
   }
-  if (!load(coin_vulkan_visual_fragment_spirv,
-            coin_vulkan_visual_fragment_spirv_count, fragment)) {
+  if (!this->createShaderModule(coin_vulkan_visual_fragment_spirv,
+                                coin_vulkan_visual_fragment_spirv_count,
+                                fragment)) {
     vkDestroyShaderModule(this->device, vertex, this->allocator);
     vertex = VK_NULL_HANDLE;
     return false;
@@ -1276,24 +1232,14 @@ SoVulkanRenderBackend::createShaders(VkShaderModule & vertex,
 bool
 SoVulkanRenderBackend::createWideLineShaders()
 {
-  auto load = [this](const uint32_t * code, size_t count,
-                     VkShaderModule & module) {
-    VkShaderModuleCreateInfo ci {};
-    ci.sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO;
-    ci.codeSize = count * sizeof(uint32_t);
-    ci.pCode = code;
-    return vkCreateShaderModule(this->device, &ci, this->allocator,
-                                &module) == VK_SUCCESS;
-  };
-
-  if (!load(coin_vulkan_wide_line_vertex_spirv,
-            coin_vulkan_wide_line_vertex_spirv_count,
-            this->wideLineVertexModule)) {
+  if (!this->createShaderModule(coin_vulkan_wide_line_vertex_spirv,
+                                coin_vulkan_wide_line_vertex_spirv_count,
+                                this->wideLineVertexModule)) {
     return false;
   }
-  if (!load(coin_vulkan_wide_line_fragment_spirv,
-            coin_vulkan_wide_line_fragment_spirv_count,
-            this->wideLineFragmentModule)) {
+  if (!this->createShaderModule(coin_vulkan_wide_line_fragment_spirv,
+                                coin_vulkan_wide_line_fragment_spirv_count,
+                                this->wideLineFragmentModule)) {
     vkDestroyShaderModule(this->device, this->wideLineVertexModule,
                           this->allocator);
     this->wideLineVertexModule = VK_NULL_HANDLE;
@@ -1305,27 +1251,17 @@ SoVulkanRenderBackend::createWideLineShaders()
 bool
 SoVulkanRenderBackend::createBackgroundResources()
 {
-  if (getenv("FC_VULKAN_BREADCRUMBS")) {
+  if (SoVulkanShared::envFlagEnabled("FC_VULKAN_BREADCRUMBS")) {
     fprintf(stderr, "[VK-TRACE] SoVulkanRenderBackend::createBackgroundResources enter\n");
   }
-  auto load = [this](const uint32_t * code, size_t count,
-                     VkShaderModule & module) {
-    VkShaderModuleCreateInfo ci {};
-    ci.sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO;
-    ci.codeSize = count * sizeof(uint32_t);
-    ci.pCode = code;
-    return vkCreateShaderModule(this->device, &ci, this->allocator,
-                                &module) == VK_SUCCESS;
-  };
-
-  if (!load(coin_vulkan_background_vertex_spirv,
-            coin_vulkan_background_vertex_spirv_count,
-            this->backgroundVertexModule)) {
+  if (!this->createShaderModule(coin_vulkan_background_vertex_spirv,
+                                coin_vulkan_background_vertex_spirv_count,
+                                this->backgroundVertexModule)) {
     return false;
   }
-  if (!load(coin_vulkan_background_fragment_spirv,
-            coin_vulkan_background_fragment_spirv_count,
-            this->backgroundFragmentModule)) {
+  if (!this->createShaderModule(coin_vulkan_background_fragment_spirv,
+                                coin_vulkan_background_fragment_spirv_count,
+                                this->backgroundFragmentModule)) {
     vkDestroyShaderModule(this->device, this->backgroundVertexModule,
                           this->allocator);
     this->backgroundVertexModule = VK_NULL_HANDLE;

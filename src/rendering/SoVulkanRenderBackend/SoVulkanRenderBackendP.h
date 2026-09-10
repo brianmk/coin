@@ -36,6 +36,11 @@
 #include <unistd.h>
 #endif
 
+// Declared in SoRenderBackend.h; only referenced by the frame-stats helper
+// below, so a forward declaration keeps this header from pulling the backend
+// interface in.
+struct SoRenderParams;
+
 namespace CoinVulkanDetail {
 
   // ---- [TRC] per-step recording traces (FC_VULKAN_TRACE) ----
@@ -45,7 +50,7 @@ namespace CoinVulkanDetail {
   // environment does not change mid-process).
   inline bool vkBackendTraceEnabled()
   {
-    static const bool enabled = std::getenv("FC_VULKAN_TRACE") != nullptr;
+    static const bool enabled = SoVulkanShared::envString("FC_VULKAN_TRACE") != nullptr;
     return enabled;
   }
 
@@ -94,7 +99,7 @@ namespace CoinVulkanDetail {
 // claiming a slot for skipped commands, so this worst case is a safe upper
 // bound.
   inline uint32_t
-countDrawCommands(const SoDrawList & drawlist, const int overlayFillMode)
+countDrawCommands(const SoDrawList & drawlist, const int wireframeFillMode)
 {
   uint32_t draws = 0;
   const int num = drawlist.getNumCommands();
@@ -102,7 +107,7 @@ countDrawCommands(const SoDrawList & drawlist, const int overlayFillMode)
     const SoRenderCommand & command = drawlist.getCommand(i);
     if (command.pass == SO_RENDERPASS_OVERLAY) continue;
     ++draws;
-    if (overlayFillMode >= 0 &&
+    if (wireframeFillMode >= 0 &&
         command.pass != SO_RENDERPASS_TRANSPARENT) {
       ++draws;
     }
@@ -142,52 +147,197 @@ countCompositeCommands(const SoDrawList & drawlist)
   return draws;
 }
 
+// --- Viewport / scissor coordinate helpers --------------------------------
+// Coin/OpenGL viewport, scissor and clear rectangles are anchored at the
+// bottom-left; Vulkan's are top-left.  Every site that converts one used to
+// re-derive the same clamped, Y-flipped x0/y0/x1/y1 by hand (six copies), so
+// the flip math lives here once.
+
+struct FlippedRect {
+  int32_t x0 = 0;
+  int32_t y0 = 0;
+  int32_t x1 = 0;
+  int32_t y1 = 0;
+};
+
+// Clamp a bottom-left rectangle (origin x/y and size w/h) into a top-left
+// target, flipping Y around the target height.  x0<=x1 and y0<=y1 always
+// hold; an empty result has x0==x1 or y0==y1.
+  inline FlippedRect
+clampFlippedRect(const int32_t originX, const int32_t originY,
+                 const int32_t width, const int32_t height,
+                 const VkExtent2D & target)
+{
+  FlippedRect r;
+  r.x0 = std::max(0, originX);
+  r.y0 = std::max(0, static_cast<int32_t>(target.height) - originY - height);
+  r.x1 = std::min(static_cast<int32_t>(target.width), originX + width);
+  r.y1 = std::min(static_cast<int32_t>(target.height),
+                  static_cast<int32_t>(target.height) - originY);
+  return r;
+}
+
+  inline VkRect2D
+toVkRect(const FlippedRect & r)
+{
+  VkRect2D rect {};
+  rect.offset = {r.x0, r.y0};
+  rect.extent = {static_cast<uint32_t>(std::max(0, r.x1 - r.x0)),
+                 static_cast<uint32_t>(std::max(0, r.y1 - r.y0))};
+  return rect;
+}
+
+// --- Wide-line predicate --------------------------------------------------
+// A line is drawn through the CPU wide-line expansion path when its width
+// exceeds 1px or it carries a stipple pattern.  The overlay wireframe/point
+// redraw (fillModeOverride >= 0) stays on the plain line path.  Four copies
+// of this rule existed; they now share one definition.
+
+  inline bool
+isPatternedLine(const SoRenderCommand & command)
+{
+  const uint16_t pattern = command.state.raster.linePattern;
+  return pattern != 0xFFFF && pattern != 0;
+}
+
+  inline bool
+isWideLine(const SoRenderCommand & command, const int fillModeOverride)
+{
+  const SoPrimitiveTopology topology = command.geometry.topology;
+  const bool lineTopology = topology == SO_TOPOLOGY_LINES ||
+    topology == SO_TOPOLOGY_LINE_STRIP;
+  return lineTopology && fillModeOverride < 0 &&
+    (command.state.raster.lineWidth > 1.0f || isPatternedLine(command));
+}
+
+// True when an overlay command spans the whole frame viewport (the selection/
+// preselection highlight): such geometry is frame-camera geometry and must be
+// projected/viewed with the frame matrices, not the command's own recorded
+// camera.  Overlays that carry their own sub-viewport (the navigation cube)
+// return false and keep their own camera.  The identical test lived in
+// updateLightingUniforms() and recordDrawCommand().
+  inline bool
+isFrameCameraOverlay(const SoRenderCommand & command,
+                     const SoRenderParams & params)
+{
+  if (command.pass != SO_RENDERPASS_OVERLAY) return false;
+  const SbVec2s frameSize = params.viewport.getViewportSizePixels();
+  return command.state.raster.viewportWidth == frameSize[0] &&
+    command.state.raster.viewportHeight == frameSize[1];
+}
+
+// --- [BLACK] frame diagnostic ---------------------------------------------
+// Gated by FC_VULKAN_BLACK_DEBUG, this counts the draw list by pass/topology
+// and prints one line.  The identical counting loop + fprintf appeared in
+// renderInternal() and recordFrame(); both call this now.
+
+struct VulkanFrameStats {
+  int tri = 0;
+  int triLit = 0;
+  int triUnlit = 0;
+  int line = 0;
+  int overlay = 0;
+  int trans = 0;
+};
+
+  inline VulkanFrameStats
+collectFrameStats(const SoDrawList & drawlist)
+{
+  VulkanFrameStats s;
+  for (int i = 0; i < drawlist.getNumCommands(); ++i) {
+    const SoRenderCommand & c = drawlist.getCommand(i);
+    if (c.pass == SO_RENDERPASS_OVERLAY) s.overlay++;
+    else if (c.pass == SO_RENDERPASS_TRANSPARENT) s.trans++;
+    if (c.geometry.topology == SO_TOPOLOGY_TRIANGLES) {
+      s.tri++;
+      if (c.material.shadingModel == SO_SHADING_LEGACY_GOURAUD) s.triLit++;
+      else s.triUnlit++;
+    }
+    if (c.geometry.topology == SO_TOPOLOGY_LINES ||
+        c.geometry.topology == SO_TOPOLOGY_LINE_STRIP) {
+      s.line++;
+    }
+  }
+  return s;
+}
+
+// `overlaysOnly` is printed when >= 0 (renderInternal); pass -1 to omit it
+// (recordFrame's line format).
+  inline void
+logBlackFrameStats(const SoDrawList & drawlist, const SoRenderParams & params,
+                   const int frame, const int overlaysOnly)
+{
+  const VulkanFrameStats s = collectFrameStats(drawlist);
+  if (overlaysOnly >= 0) {
+    std::fprintf(stderr,
+                 "[BLACK] frame=%d overlaysOnly=%d flags=0x%x "
+                 "clear=(%.2f,%.2f,%.2f,%.2f) "
+                 "cmds=%d tri=%d(lit=%d unlit=%d) line=%d overlay=%d trans=%d\n",
+                 frame, overlaysOnly, static_cast<unsigned>(params.flags),
+                 params.clearColor[0], params.clearColor[1],
+                 params.clearColor[2], params.clearColor[3],
+                 drawlist.getNumCommands(), s.tri, s.triLit, s.triUnlit,
+                 s.line, s.overlay, s.trans);
+  }
+  else {
+    std::fprintf(stderr,
+                 "[BLACK] recordFrame frame=%d flags=0x%x "
+                 "clear=(%.2f,%.2f,%.2f,%.2f) "
+                 "cmds=%d tri=%d(lit=%d unlit=%d) line=%d overlay=%d trans=%d\n",
+                 frame, static_cast<unsigned>(params.flags),
+                 params.clearColor[0], params.clearColor[1],
+                 params.clearColor[2], params.clearColor[3],
+                 drawlist.getNumCommands(), s.tri, s.triLit, s.triUnlit,
+                 s.line, s.overlay, s.trans);
+  }
+}
+
 // FNV-1a over a float stream, sampling up to sampleCount elements spread
 // uniformly across the buffer (the first and last elements are always
 // included).  The producer's per-frame arena hands out the same pointers
 // for unchanged layouts, so pointer identity alone cannot detect in-place
 // content edits; the hash closes that hole at a fraction of the cost of a
 // full scan.
+// Sample `sampleCount` elements spread uniformly across a buffer (first and
+// last always included) and fold their bit patterns into an FNV-1a hash.
+// `toBits` converts one element to the uint64 the mixer consumes.  Shared by
+// the float and uint32 entry points, which differ only in that conversion.
+  template <typename T, typename ToBits>
   inline uint64_t
-hashFloats(const float * values, size_t count, size_t sampleCount)
+hashSampled(const T * values, size_t count, size_t sampleCount, ToBits toBits)
 {
   uint64_t hash = 1469598103934665603ULL;
   if (!values || count == 0) return hash;
   CoinRenderDetail::fnvMix(hash, static_cast<uint64_t>(count));
   if (count <= sampleCount) {
     for (size_t i = 0; i < count; ++i) {
-      uint32_t bits = 0;
-      std::memcpy(&bits, &values[i], sizeof(bits));
-      CoinRenderDetail::fnvMix(hash, static_cast<uint64_t>(bits));
+      CoinRenderDetail::fnvMix(hash, toBits(values[i]));
     }
     return hash;
   }
   for (size_t s = 0; s < sampleCount; ++s) {
     const size_t i = s * (count - 1) / (sampleCount - 1);
-    uint32_t bits = 0;
-    std::memcpy(&bits, &values[i], sizeof(bits));
-    CoinRenderDetail::fnvMix(hash, static_cast<uint64_t>(bits));
+    CoinRenderDetail::fnvMix(hash, toBits(values[i]));
   }
   return hash;
 }
 
   inline uint64_t
+hashFloats(const float * values, size_t count, size_t sampleCount)
+{
+  return hashSampled(values, count, sampleCount, [](const float value) {
+    uint32_t bits = 0;
+    std::memcpy(&bits, &value, sizeof(bits));
+    return static_cast<uint64_t>(bits);
+  });
+}
+
+  inline uint64_t
 hashUint32(const uint32_t * values, size_t count, size_t sampleCount)
 {
-  uint64_t hash = 1469598103934665603ULL;
-  if (!values || count == 0) return hash;
-  CoinRenderDetail::fnvMix(hash, static_cast<uint64_t>(count));
-  if (count <= sampleCount) {
-    for (size_t i = 0; i < count; ++i) {
-      CoinRenderDetail::fnvMix(hash, static_cast<uint64_t>(values[i]));
-    }
-    return hash;
-  }
-  for (size_t s = 0; s < sampleCount; ++s) {
-    const size_t i = s * (count - 1) / (sampleCount - 1);
-    CoinRenderDetail::fnvMix(hash, static_cast<uint64_t>(values[i]));
-  }
-  return hash;
+  return hashSampled(values, count, sampleCount, [](const uint32_t value) {
+    return static_cast<uint64_t>(value);
+  });
 }
 
   inline uint64_t
@@ -280,7 +430,6 @@ hashTextureContent(const SoTextureData & texture)
 // without any per-command vertex-state objects.
 constexpr uint32_t VULKAN_VERTEX_STRIDE = 32;
 constexpr int MAX_VERTEX_COUNT = 10000000;
-constexpr int MAX_SHADER_LIGHTS = SO_MAX_SHADER_LIGHTS;
 
 struct alignas(16) VulkanPushConstants {
   float proj[16];       // projection matrix (view/model live in the UBO)
@@ -315,11 +464,13 @@ static_assert(sizeof(VulkanBackgroundPush) == 48,
 
 // The lighting constant block is the standardized SoLightingBlock (the
 // single authoritative std140 mirror of the visual shaders' LightingBlock
-// uniform, set 0 binding 0).  It is written ONCE per unique lightingHandle
-// per frame into a small ring -- world-space setups transformed to eye space
-// by SoRenderIR::fillLightingBlock() with the frame view -- and every draw
-// referencing the same handle binds that same slot through a dynamic offset,
-// so the 8-light setup is never recomputed or re-written per draw.
+// uniform, set 0 binding 0).  It is written once per frame into a small ring
+// -- world-space setups transformed to eye space by
+// SoRenderIR::fillLightingBlock() with the frame view -- and every draw binds
+// its slot through a dynamic offset, so a setup is never recomputed or
+// re-written per draw.  Normally a single slot holds the host-pushed
+// authoritative set (every handle maps to it); without one, a slot is packed
+// per distinct lightingHandle.
 using VulkanLightingUbo = SoLightingBlock;
 static_assert(sizeof(VulkanLightingUbo) == 784,
               "VulkanLightingUbo must match LightingBlock std140 layout");

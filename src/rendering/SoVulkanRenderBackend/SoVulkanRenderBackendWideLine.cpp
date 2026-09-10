@@ -50,33 +50,20 @@ SoVulkanRenderBackend::ensureInstanceModelBuffer(VkDeviceSize bytes)
     return true;
   }
   if (this->instanceModelBuffer != VK_NULL_HANDLE) {
-    const VkDevice device = this->device;
-    const VkAllocationCallbacks * allocator = this->allocator;
     const VkBuffer oldBuffer = this->instanceModelBuffer;
     const VkDeviceMemory oldMemory = this->instanceModelMemory;
     this->instanceModelBuffer = VK_NULL_HANDLE;
     this->instanceModelMemory = VK_NULL_HANDLE;
     this->instanceModelMapped = nullptr;
     this->instanceModelCapacity = 0;
-    this->deferDestroy([device, allocator, oldBuffer, oldMemory]() {
-      if (oldBuffer != VK_NULL_HANDLE) {
-        vkDestroyBuffer(device, oldBuffer, allocator);
-      }
-      if (oldMemory != VK_NULL_HANDLE) {
-        vkFreeMemory(device, oldMemory, allocator);
-      }
-    });
+    this->deferDestroyBufferMemory(oldBuffer, oldMemory);
   }
   const VkDeviceSize cap = std::max<VkDeviceSize>(bytes, 64u);
-  if (!this->createBuffer(cap, VK_BUFFER_USAGE_VERTEX_BUFFER_BIT,
-                          this->instanceModelBuffer, this->instanceModelMemory,
-                          nullptr)) {
-    this->emitError("ensureInstanceModelBuffer: failed to create buffer");
-    return false;
-  }
-  if (vkMapMemory(this->device, this->instanceModelMemory, 0, cap, 0,
-                  &this->instanceModelMapped) != VK_SUCCESS) {
-    this->emitError("ensureInstanceModelBuffer: vkMapMemory failed");
+  if (!this->createMappedBuffer(cap, VK_BUFFER_USAGE_VERTEX_BUFFER_BIT,
+                                this->instanceModelBuffer,
+                                this->instanceModelMemory,
+                                &this->instanceModelMapped)) {
+    this->emitError("ensureInstanceModelBuffer: buffer create/map failed");
     return false;
   }
   this->instanceModelCapacity = cap;
@@ -503,39 +490,24 @@ SoVulkanRenderBackend::expandWideLines(VulkanCachedCommand & entry,
   // it synchronously, since a still-executing frame may reference it.
   if (slot.size < needed) {
     if (slot.buffer != VK_NULL_HANDLE || slot.memory != VK_NULL_HANDLE) {
-      const VkDevice device = this->device;
-      const VkAllocationCallbacks * allocator = this->allocator;
       const VkBuffer oldBuffer = slot.buffer;
       const VkDeviceMemory oldMemory = slot.memory;
       slot.buffer = VK_NULL_HANDLE;
       slot.memory = VK_NULL_HANDLE;
       slot.mapped = nullptr;
       slot.size = 0;
-      this->deferDestroy([device, allocator, oldBuffer, oldMemory]() {
-        if (oldBuffer != VK_NULL_HANDLE) {
-          vkDestroyBuffer(device, oldBuffer, allocator);
-        }
-        if (oldMemory != VK_NULL_HANDLE) {
-          vkFreeMemory(device, oldMemory, allocator);
-        }
-      });
+      this->deferDestroyBufferMemory(oldBuffer, oldMemory);
     }
-    if (!this->createBuffer(needed, VK_BUFFER_USAGE_VERTEX_BUFFER_BIT,
-                            slot.buffer, slot.memory, nullptr)) {
-      this->emitError("expandWideLines: failed to create quad buffer");
+    // Persistent host mapping.  The buffer is HOST_VISIBLE | HOST_COHERENT, so
+    // the GPU observes a memcpy without any explicit flush, and keeping the
+    // mapping alive avoids a vkMapMemory/vkUnmapMemory pair every frame.
+    if (!this->createMappedBuffer(needed, VK_BUFFER_USAGE_VERTEX_BUFFER_BIT,
+                                  slot.buffer, slot.memory, &slot.mapped)) {
+      this->emitError("expandWideLines: quad buffer create/map failed");
       slot.size = 0;
       return false;
     }
     slot.size = needed;
-    // Establish the persistent host mapping.  The buffer is HOST_VISIBLE |
-    // HOST_COHERENT, so the GPU observes a memcpy without any explicit flush,
-    // and keeping the mapping alive avoids a vkMapMemory/vkUnmapMemory pair on
-    // every subsequent frame for this slot.
-    if (vkMapMemory(this->device, slot.memory, 0, needed, 0, &slot.mapped)
-        != VK_SUCCESS) {
-      this->emitError("expandWideLines: vkMapMemory failed");
-      return false;
-    }
     std::memcpy(slot.mapped, quads, static_cast<size_t>(needed));
   }
   else {

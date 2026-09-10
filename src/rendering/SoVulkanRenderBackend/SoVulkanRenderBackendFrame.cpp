@@ -39,13 +39,12 @@ namespace {
 
 long vkBackendRenderNowUs()
 {
-  return (long)std::chrono::duration_cast<std::chrono::microseconds>(
-    std::chrono::steady_clock::now().time_since_epoch()).count();
+  return SoVulkanShared::steadyNowUs();
 }
 
 double vkBackendRenderNowMs()
 {
-  return vkBackendRenderNowUs() * 0.001;
+  return SoVulkanShared::steadyNowMs();
 }
 
 // Phase timing for the fcprobe profile harness ([RTDBG] cpuTimingRaster),
@@ -60,38 +59,18 @@ bool vkBackendFrameTimingEnabled()
 
 bool vkBackendRenderBreadcrumbEnabled()
 {
-  static const bool enabled = std::getenv("FC_GUI_OPEN_BREADCRUMB") != nullptr;
-  return enabled;
+  return SoVulkanShared::breadcrumbsEnabled();
 }
+
+int vkBackendRenderBreadcrumbLogBudget = 0;
 
 void vkBackendRenderBreadcrumbSince(long startUs, long thresholdUs, const char* phase)
 {
-  if (!vkBackendRenderBreadcrumbEnabled()) {
-    return;
-  }
-  static int logged = 0;
-  const long now = vkBackendRenderNowUs();
-  if (logged < 30 && now - startUs >= thresholdUs) {
-    ++logged;
-    std::fprintf(stderr, "[VKBACKEND] %ld %s dur_us=%ld\n", startUs, phase, now - startUs);
-    std::fflush(stderr);
-  }
+  SoVulkanShared::breadcrumbSince(vkBackendRenderBreadcrumbLogBudget,
+                                  "[VKBACKEND]", startUs, thresholdUs, phase);
 }
 
 } // namespace
-
-// True when a command draws through the CPU wide-line expansion path (which is
-// not batchable -- each instance needs its own clip-space expansion).
-static bool vkIsWideLine(const SoRenderCommand & c)
-{
-  const bool line =
-    c.geometry.topology == SO_TOPOLOGY_LINES ||
-    c.geometry.topology == SO_TOPOLOGY_LINE_STRIP;
-  if (!line) return false;
-  const bool patterned =
-    c.state.raster.linePattern != 0xFFFF && c.state.raster.linePattern != 0;
-  return c.state.raster.lineWidth > 1.0f || patterned;
-}
 
 // Two commands can be drawn as ONE instanced draw only when they share every
 // pipeline, descriptor-set and push-constant input and differ solely by their
@@ -430,6 +409,95 @@ SoVulkanRenderBackend::shutdown()
   this->emitLog("shutdown");
 }
 
+const SoVulkanRenderTarget *
+SoVulkanRenderBackend::validateRenderTarget(const SoRenderParams & params) const
+{
+  const auto * target =
+    static_cast<const SoVulkanRenderTarget *>(params.renderTarget);
+  if (target == nullptr || target->colorImageView == VK_NULL_HANDLE ||
+      target->colorImage == VK_NULL_HANDLE || target->extent.width == 0 ||
+      target->extent.height == 0) {
+    this->emitError("invalid Vulkan render target");
+    return nullptr;
+  }
+  return target;
+}
+
+const SoVulkanRenderTarget *
+SoVulkanRenderBackend::prepareExternalFrame(
+    const SoDrawList & drawlist, const SoRenderParams & params,
+    VkCommandBuffer commandBuffer, VkRenderPass renderPass,
+    const char * caller, const bool overlaysOnly,
+    const bool reserveCompositeSlots, ExternalFrameTiming * timing)
+{
+  if (!this->isInitialized()) {
+    char msg[128];
+    std::snprintf(msg, sizeof(msg), "%s called before backend initialization",
+                  caller);
+    this->emitError(msg);
+    return nullptr;
+  }
+  if (!params.renderTarget) {
+    char msg[192];
+    std::snprintf(msg, sizeof(msg),
+                  "%s called without a SoVulkanRenderTarget in "
+                  "SoRenderParams::renderTarget", caller);
+    this->emitError(msg);
+    return nullptr;
+  }
+  if (commandBuffer == VK_NULL_HANDLE || renderPass == VK_NULL_HANDLE) {
+    char msg[160];
+    std::snprintf(msg, sizeof(msg),
+                  "%s called without a command buffer and render pass",
+                  caller);
+    this->emitError(msg);
+    return nullptr;
+  }
+  const SoVulkanRenderTarget * target = this->validateRenderTarget(params);
+  if (target == nullptr) return nullptr;
+
+  // External passes are caller-supplied LOAD render passes, so no attachment
+  // is cleared by a loadOp here: recordClear() must emit vkCmdClearAttachments.
+  this->renderPassColorCleared = false;
+  this->renderPassDepthCleared = false;
+
+  this->cacheFrameMatrices(params);
+  const bool wantCpuTiming = timing != nullptr;
+  double t0 = wantCpuTiming ? SoVulkanShared::steadyNowMs() : 0.0;
+  this->beginFrame();
+  this->updateLightingSetup(drawlist);
+  if (wantCpuTiming) {
+    const double t1 = SoVulkanShared::steadyNowMs();
+    timing->setupMs = t1 - t0;
+    t0 = t1;
+  }
+  this->updateGeometryCache(drawlist, overlaysOnly,
+                            params.geometryContentUnchanged);
+  if (wantCpuTiming) {
+    const double t1 = SoVulkanShared::steadyNowMs();
+    timing->geomMs = t1 - t0;
+    t0 = t1;
+  }
+  // The composite path never goes through recordFrame(), so it must reserve
+  // the lighting slots its overlay/residual draws consume here; otherwise the
+  // cursor keeps climbing across frames and overflows the ring.
+  if (reserveCompositeSlots &&
+      !this->prepareLightingSlots(countCompositeCommands(drawlist))) {
+    this->emitError("failed to reserve lighting UBO slots");
+    return nullptr;
+  }
+  if (!this->flushPendingTextureUploadsExternal()) {
+    char msg[128];
+    std::snprintf(msg, sizeof(msg), "%s: texture upload failed", caller);
+    this->emitError(msg);
+    return nullptr;
+  }
+  if (wantCpuTiming) {
+    timing->texMs = SoVulkanShared::steadyNowMs() - t0;
+  }
+  return target;
+}
+
 SbBool
 SoVulkanRenderBackend::renderInternal(const SoDrawList & drawlist,
                                       const SoRenderParams & params,
@@ -452,40 +520,12 @@ SoVulkanRenderBackend::renderInternal(const SoDrawList & drawlist,
 
   if (COIN_VULKAN_ENV_FLAG("FC_VULKAN_BLACK_DEBUG")) {
     static int blackFrame = 0;
-    int nTri = 0, nLine = 0, nOverlay = 0, nTrans = 0, nTriLit = 0;
-    int nTriUnlit = 0;
-    for (int i = 0; i < drawlist.getNumCommands(); ++i) {
-      const SoRenderCommand & c = drawlist.getCommand(i);
-      if (c.pass == SO_RENDERPASS_OVERLAY) nOverlay++;
-      else if (c.pass == SO_RENDERPASS_TRANSPARENT) nTrans++;
-      if (c.geometry.topology == SO_TOPOLOGY_TRIANGLES) {
-        nTri++;
-        if (c.material.shadingModel == SO_SHADING_LEGACY_GOURAUD) nTriLit++;
-        else nTriUnlit++;
-      }
-      if (c.geometry.topology == SO_TOPOLOGY_LINES ||
-          c.geometry.topology == SO_TOPOLOGY_LINE_STRIP) {
-        nLine++;
-      }
-    }
-    fprintf(stderr,
-            "[BLACK] frame=%d overlaysOnly=%d flags=0x%x clear=(%.2f,%.2f,%.2f,%.2f) "
-            "cmds=%d tri=%d(lit=%d unlit=%d) line=%d overlay=%d trans=%d\n",
-            blackFrame++, static_cast<int>(overlaysOnly),
-            static_cast<unsigned>(params.flags), params.clearColor[0],
-            params.clearColor[1], params.clearColor[2], params.clearColor[3],
-            drawlist.getNumCommands(), nTri, nTriLit, nTriUnlit, nLine,
-            nOverlay, nTrans);
+    logBlackFrameStats(drawlist, params, blackFrame++,
+                       overlaysOnly ? 1 : 0);
   }
 
-  const auto * target =
-    static_cast<const SoVulkanRenderTarget *>(params.renderTarget);
-  if (target->colorImageView == VK_NULL_HANDLE ||
-      target->colorImage == VK_NULL_HANDLE || target->extent.width == 0 ||
-      target->extent.height == 0) {
-    this->emitError("invalid Vulkan render target");
-    return FALSE;
-  }
+  const SoVulkanRenderTarget * target = this->validateRenderTarget(params);
+  if (target == nullptr) return FALSE;
 
   this->cacheFrameMatrices(params);
 
@@ -721,27 +761,7 @@ SoVulkanRenderBackend::renderExternal(const SoDrawList & drawlist,
                                       VkRenderPass renderPass,
                                       VkFramebuffer framebuffer)
 {
-  if (!this->isInitialized()) {
-    this->emitError("renderExternal called before backend initialization");
-    return FALSE;
-  }
-  if (!params.renderTarget) {
-    this->emitError(
-      "renderExternal called without a SoVulkanRenderTarget in "
-      "SoRenderParams::renderTarget");
-    return FALSE;
-  }
-  if (commandBuffer == VK_NULL_HANDLE || renderPass == VK_NULL_HANDLE) {
-    this->emitError(
-      "renderExternal called without a command buffer and render pass");
-    return FALSE;
-  }
-
-  // The external render pass is supplied by the caller (typically created with
-  // LOAD loadOps and layered over a pre-existing image), so no attachment is
-  // cleared by a loadOp here: recordClear() must emit vkCmdClearAttachments.
-  this->renderPassColorCleared = false;
-  this->renderPassDepthCleared = false;
+  const long externalBcStart = vkBackendRenderBreadcrumbEnabled() ? vkBackendRenderNowUs() : 0;
 
   if (COIN_VULKAN_ENV_FLAG("FC_VULKAN_BLACK_DEBUG"))
     fprintf(stderr, "[BLACK] renderExternal ENTER frame=%d cmds=%d\n",
@@ -749,33 +769,13 @@ SoVulkanRenderBackend::renderExternal(const SoDrawList & drawlist,
 
   this->debugValidateDrawList(drawlist);
 
-  const auto * target =
-    static_cast<const SoVulkanRenderTarget *>(params.renderTarget);
-  if (target->colorImageView == VK_NULL_HANDLE ||
-      target->colorImage == VK_NULL_HANDLE || target->extent.width == 0 ||
-      target->extent.height == 0) {
-    this->emitError("invalid Vulkan render target");
-    return FALSE;
-  }
-
-  this->cacheFrameMatrices(params);
-  const long externalBcStart = vkBackendRenderBreadcrumbEnabled() ? vkBackendRenderNowUs() : 0;
   const bool wantCpuTiming = vkBackendFrameTimingEnabled();
-  double setupMs = 0.0, geomMs = 0.0, texMs = 0.0, recordMs = 0.0;
-  const double cpuT0 = wantCpuTiming ? vkBackendRenderNowMs() : 0.0;
-  this->beginFrame();
-  this->updateLightingSetup(drawlist);
-  const double cpuT1 = wantCpuTiming ? vkBackendRenderNowMs() : 0.0;
-  const long geometryBcStart = vkBackendRenderBreadcrumbEnabled() ? vkBackendRenderNowUs() : 0;
-  this->updateGeometryCache(drawlist, false, params.geometryContentUnchanged);
-  vkBackendRenderBreadcrumbSince(geometryBcStart, 5000, "renderExternal updateGeometryCache end");
-  const double cpuT2 = wantCpuTiming ? vkBackendRenderNowMs() : 0.0;
-  const long textureBcStart = vkBackendRenderBreadcrumbEnabled() ? vkBackendRenderNowUs() : 0;
-  if (!this->flushPendingTextureUploadsExternal()) {
-    this->emitError("renderExternal: texture upload failed");
-    return FALSE;
-  }
-  vkBackendRenderBreadcrumbSince(textureBcStart, 5000, "renderExternal flushPendingTextureUploadsExternal end");
+  ExternalFrameTiming timing;
+  const SoVulkanRenderTarget * target = this->prepareExternalFrame(
+    drawlist, params, commandBuffer, renderPass, "renderExternal",
+    /*overlaysOnly*/ false, /*reserveCompositeSlots*/ false,
+    wantCpuTiming ? &timing : nullptr);
+  if (target == nullptr) return FALSE;
 
   // The M1c/M1d secondary path records with RENDER_PASS_CONTINUE inheritance,
   // which needs the framebuffer matching the caller's pass + swapchain image.
@@ -788,7 +788,7 @@ SoVulkanRenderBackend::renderExternal(const SoDrawList & drawlist,
     return FALSE;
   }
 
-  const double cpuT3 = wantCpuTiming ? vkBackendRenderNowMs() : 0.0;
+  const double recordT0 = wantCpuTiming ? vkBackendRenderNowMs() : 0.0;
   const long recordBcStart = vkBackendRenderBreadcrumbEnabled() ? vkBackendRenderNowUs() : 0;
   this->recordContext.buffer = commandBuffer;
   const bool recorded = this->recordFrame(drawlist, params, *target, renderPass,
@@ -796,15 +796,14 @@ SoVulkanRenderBackend::renderExternal(const SoDrawList & drawlist,
   vkBackendRenderBreadcrumbSince(recordBcStart, 5000, "renderExternal recordFrame end");
   this->recordContext.buffer = VK_NULL_HANDLE;
   if (wantCpuTiming) {
-    setupMs = cpuT1 - cpuT0;
-    geomMs = cpuT2 - cpuT1;
-    texMs = cpuT3 - cpuT2;
-    recordMs = vkBackendRenderNowMs() - cpuT3;
-    const double totalMs = recordMs + texMs + geomMs + setupMs;
+    const double recordMs = vkBackendRenderNowMs() - recordT0;
+    const double totalMs = recordMs + timing.texMs + timing.geomMs +
+                           timing.setupMs;
     std::fprintf(stderr,
                  "[RTDBG] cpuTimingRaster mode=full setup=%.2f geom=%.2f "
                  "tex=%.2f record=%.2f total=%.2f\n",
-                 setupMs, geomMs, texMs, recordMs, totalMs);
+                 timing.setupMs, timing.geomMs, timing.texMs, recordMs,
+                 totalMs);
     std::fflush(stderr);
   }
   vkBackendRenderBreadcrumbSince(externalBcStart, 5000, "renderExternal end");
@@ -817,64 +816,19 @@ SoVulkanRenderBackend::renderExternalOverlay(const SoDrawList & drawlist,
                                              VkCommandBuffer commandBuffer,
                                              VkRenderPass renderPass)
 {
-  if (!this->isInitialized()) {
-    this->emitError(
-      "renderExternalOverlay called before backend initialization");
-    return FALSE;
-  }
-  if (!params.renderTarget) {
-    this->emitError(
-      "renderExternalOverlay called without a SoVulkanRenderTarget in "
-      "SoRenderParams::renderTarget");
-    return FALSE;
-  }
-  if (commandBuffer == VK_NULL_HANDLE || renderPass == VK_NULL_HANDLE) {
-    this->emitError(
-      "renderExternalOverlay called without a command buffer and render "
-      "pass");
-    return FALSE;
-  }
-
-  // External passes are caller-supplied LOAD render passes; see renderExternal().
-  this->renderPassColorCleared = false;
-  this->renderPassDepthCleared = false;
-
   if (COIN_VULKAN_ENV_FLAG("FC_VULKAN_BLACK_DEBUG"))
     fprintf(stderr, "[BLACK] renderExternalOverlay ENTER frame=%d cmds=%d\n",
             this->uboFrameIndex, drawlist.getNumCommands());
 
-  const auto * target =
-    static_cast<const SoVulkanRenderTarget *>(params.renderTarget);
-  if (target->colorImageView == VK_NULL_HANDLE ||
-      target->colorImage == VK_NULL_HANDLE || target->extent.width == 0 ||
-      target->extent.height == 0) {
-    this->emitError("invalid Vulkan render target");
-    return FALSE;
-  }
-
-  this->cacheFrameMatrices(params);
   const bool wantCpuTiming = vkBackendFrameTimingEnabled();
-  double setupMs = 0.0, geomMs = 0.0, texMs = 0.0, recordMs = 0.0;
-  const double cpuT0 = wantCpuTiming ? vkBackendRenderNowMs() : 0.0;
-  this->beginFrame();
-  this->updateLightingSetup(drawlist);
-  const double cpuT1 = wantCpuTiming ? vkBackendRenderNowMs() : 0.0;
-  this->updateGeometryCache(drawlist, true, params.geometryContentUnchanged);
-  const double cpuT2 = wantCpuTiming ? vkBackendRenderNowMs() : 0.0;
+  ExternalFrameTiming timing;
+  const SoVulkanRenderTarget * target = this->prepareExternalFrame(
+    drawlist, params, commandBuffer, renderPass, "renderExternalOverlay",
+    /*overlaysOnly*/ true, /*reserveCompositeSlots*/ true,
+    wantCpuTiming ? &timing : nullptr);
+  if (target == nullptr) return FALSE;
 
-  // This path never goes through recordFrame(), so reserve the slots it will
-  // otherwise the cursor keeps climbing across frames and eventually
-  // overflows the lighting UBO.
-  if (!this->prepareLightingSlots(countCompositeCommands(drawlist))) {
-    this->emitError("failed to reserve lighting UBO slots");
-    return FALSE;
-  }
-  if (!this->flushPendingTextureUploadsExternal()) {
-    this->emitError("renderExternalOverlay: texture upload failed");
-    return FALSE;
-  }
-
-  const double cpuT3 = wantCpuTiming ? vkBackendRenderNowMs() : 0.0;
+  const double recordT0 = wantCpuTiming ? vkBackendRenderNowMs() : 0.0;
   this->recordContext.buffer = commandBuffer;
   this->recordTracedComposite(drawlist, params, *target, renderPass,
                               this->recordContext);
@@ -882,15 +836,14 @@ SoVulkanRenderBackend::renderExternalOverlay(const SoDrawList & drawlist,
                            this->recordContext);
   this->recordContext.buffer = VK_NULL_HANDLE;
   if (wantCpuTiming) {
-    setupMs = cpuT1 - cpuT0;
-    geomMs = cpuT2 - cpuT1;
-    texMs = cpuT3 - cpuT2;
-    recordMs = vkBackendRenderNowMs() - cpuT3;
-    const double totalMs = recordMs + texMs + geomMs + setupMs;
+    const double recordMs = vkBackendRenderNowMs() - recordT0;
+    const double totalMs = recordMs + timing.texMs + timing.geomMs +
+                           timing.setupMs;
     std::fprintf(stderr,
                  "[RTDBG] cpuTimingRaster mode=overlay setup=%.2f geom=%.2f "
                  "tex=%.2f record=%.2f total=%.2f\n",
-                 setupMs, geomMs, texMs, recordMs, totalMs);
+                 timing.setupMs, timing.geomMs, timing.texMs, recordMs,
+                 totalMs);
     std::fflush(stderr);
   }
   return TRUE;
@@ -904,7 +857,7 @@ SoVulkanRenderBackend::buildWorkItems(const SoDrawList & drawlist,
                                       VkRenderPass renderPass,
                                       std::vector<VulkanWorkItem> & out)
 {
-  const int overlayFillMode = wireframeOverlay
+  const int wireframeFillMode = wireframeOverlay
     ? SoDrawStyleElement::LINES
     : (pointsOverlay ? SoDrawStyleElement::POINTS : -1);
   const std::vector<int> & order = drawlist.getSortedOrder();
@@ -932,12 +885,7 @@ SoVulkanRenderBackend::buildWorkItems(const SoDrawList & drawlist,
         const SoRenderCommand & command = drawlist.getCommand(index);
         if (command.pass == SO_RENDERPASS_OVERLAY) continue;
         if (command.pass != SO_RENDERPASS_TRANSPARENT) continue;
-        if (!command.geometry.positions || command.geometry.vertexCount == 0)
-          continue;
-        const auto found = this->commandToCache.find(&command);
-        if (found == this->commandToCache.end()) continue;
-        if (this->gpuCache[found->second].vertexBuffer == VK_NULL_HANDLE)
-          continue;
+        if (!this->findCachedDrawable(command)) continue;
         VulkanWorkItem item;
         item.single = &command;
         item.count = 1;
@@ -961,13 +909,8 @@ SoVulkanRenderBackend::buildWorkItems(const SoDrawList & drawlist,
         if (command.pass == SO_RENDERPASS_OVERLAY) continue;
         if (command.pass == SO_RENDERPASS_TRANSPARENT) continue;
         if (!command.state.depth.enabled) continue; // on-top annotation (later)
-        if (!command.geometry.positions || command.geometry.vertexCount == 0)
-          continue;
-        if (vkIsWideLine(command)) continue;        // CPU-expanded per command
-        const auto found = this->commandToCache.find(&command);
-        if (found == this->commandToCache.end()) continue;
-        if (this->gpuCache[found->second].vertexBuffer == VK_NULL_HANDLE)
-          continue;
+        if (isWideLine(command, -1)) continue;      // CPU-expanded per command
+        if (!this->findCachedDrawable(command)) continue;
         buckets[vkBatchKey(command, contentHashOf(command))].push_back(&command);
       }
       for (auto & kv : buckets) {
@@ -1001,23 +944,18 @@ SoVulkanRenderBackend::buildWorkItems(const SoDrawList & drawlist,
 
     // Wireframe/point overlay: re-draw opaque geometry in the requested fill
     // mode using a uniform edge color.
-    if (!transparent && overlayFillMode >= 0) {
+    if (!transparent && wireframeFillMode >= 0) {
       for (int i = 0; i < drawlist.getNumCommands(); ++i) {
         const int index =
           i < static_cast<int>(order.size()) ? order[i] : i;
         const SoRenderCommand & command = drawlist.getCommand(index);
         if (command.pass == SO_RENDERPASS_OVERLAY) continue;
         if (command.pass == SO_RENDERPASS_TRANSPARENT) continue;
-        if (!command.geometry.positions || command.geometry.vertexCount == 0)
-          continue;
-        const auto found = this->commandToCache.find(&command);
-        if (found == this->commandToCache.end()) continue;
-        if (this->gpuCache[found->second].vertexBuffer == VK_NULL_HANDLE)
-          continue;
+        if (!this->findCachedDrawable(command)) continue;
         VulkanWorkItem item;
         item.single = &command;
         item.count = 1;
-        item.fillModeOverride = overlayFillMode;
+        item.fillModeOverride = wireframeFillMode;
         item.uniformColorOverride = overlayColor;
         item.slotBase = nextSlot++;
         out.push_back(item);
@@ -1031,11 +969,7 @@ SoVulkanRenderBackend::buildWorkItems(const SoDrawList & drawlist,
     const SoRenderCommand & command = drawlist.getCommand(i);
     if (command.pass == SO_RENDERPASS_OVERLAY) continue;
     if (command.state.depth.enabled) continue;
-    if (!command.geometry.positions || command.geometry.vertexCount == 0)
-      continue;
-    const auto found = this->commandToCache.find(&command);
-    if (found == this->commandToCache.end()) continue;
-    if (this->gpuCache[found->second].vertexBuffer == VK_NULL_HANDLE) continue;
+    if (!this->findCachedDrawable(command)) continue;
     VulkanWorkItem item;
     item.single = &command;
     item.count = 1;
@@ -1178,29 +1112,7 @@ SoVulkanRenderBackend::recordFrame(const SoDrawList & drawlist,
   }
   if (COIN_VULKAN_ENV_FLAG("FC_VULKAN_BLACK_DEBUG")) {
     static int blackFrame = 0;
-    int nTri = 0, nLine = 0, nOverlay = 0, nTrans = 0, nTriLit = 0;
-    int nTriUnlit = 0;
-    for (int i = 0; i < drawlist.getNumCommands(); ++i) {
-      const SoRenderCommand & c = drawlist.getCommand(i);
-      if (c.pass == SO_RENDERPASS_OVERLAY) nOverlay++;
-      else if (c.pass == SO_RENDERPASS_TRANSPARENT) nTrans++;
-      if (c.geometry.topology == SO_TOPOLOGY_TRIANGLES) {
-        nTri++;
-        if (c.material.shadingModel == SO_SHADING_LEGACY_GOURAUD) nTriLit++;
-        else nTriUnlit++;
-      }
-      if (c.geometry.topology == SO_TOPOLOGY_LINES ||
-          c.geometry.topology == SO_TOPOLOGY_LINE_STRIP) {
-        nLine++;
-      }
-    }
-    fprintf(stderr,
-            "[BLACK] recordFrame frame=%d flags=0x%x clear=(%.2f,%.2f,%.2f,%.2f) "
-            "cmds=%d tri=%d(lit=%d unlit=%d) line=%d overlay=%d trans=%d\n",
-            blackFrame++, static_cast<unsigned>(params.flags),
-            params.clearColor[0], params.clearColor[1], params.clearColor[2],
-            params.clearColor[3], drawlist.getNumCommands(), nTri, nTriLit,
-            nTriUnlit, nLine, nOverlay, nTrans);
+    logBlackFrameStats(drawlist, params, blackFrame++, -1);
   }
   this->applyViewport(params, target, ctx);
   this->recordClear(params, target, this->renderPassColorCleared,
@@ -1223,13 +1135,13 @@ SoVulkanRenderBackend::recordFrame(const SoDrawList & drawlist,
     this->edgeColor[3]
   };
   // Parse the FC_VULKAN_EDGE_COLOR override (a diagnostic switch) once; it is
-  // process-lifetime and this runs on the overlay path, so two getenv() calls
+  // process-lifetime and this runs on the overlay path, so two env reads
   // per frame is pure overhead.  Only RGB is taken from the hex value; alpha
   // keeps the configured edgeColor's.
   struct EdgeColorOverride { bool present; float rgb[3]; };
   static const EdgeColorOverride edgeOverride = []() {
     EdgeColorOverride o{false, {0.0f, 0.0f, 0.0f}};
-    const char * hex = getenv("FC_VULKAN_EDGE_COLOR");
+    const char * hex = SoVulkanShared::envString("FC_VULKAN_EDGE_COLOR");
     if (hex) {
       unsigned int value = 0;
       if (sscanf(hex, "%x", &value) == 1) {
@@ -1249,7 +1161,7 @@ SoVulkanRenderBackend::recordFrame(const SoDrawList & drawlist,
   // No overlay when neither is requested; otherwise re-draw opaque geometry
   // in the requested draw style (SoDrawStyleElement encoding: LINES=1,
   // POINTS=2) using a uniform edge color.
-  const int overlayFillMode = wireframeOverlay
+  const int wireframeFillMode = wireframeOverlay
     ? SoDrawStyleElement::LINES
     : (pointsOverlay ? SoDrawStyleElement::POINTS : -1);
   if (COIN_VULKAN_ENV_FLAG("FC_VULKAN_BACKEND_DEBUG")) {
@@ -1257,7 +1169,7 @@ SoVulkanRenderBackend::recordFrame(const SoDrawList & drawlist,
     if (overlayLog++ < 3) {
       fprintf(stderr,
               "[OVL] wireframe=%d points=%d fillMode=%d edgeColor=(%.2f,%.2f,%.2f,%.2f)\n",
-              wireframeOverlay ? 1 : 0, pointsOverlay ? 1 : 0, overlayFillMode,
+              wireframeOverlay ? 1 : 0, pointsOverlay ? 1 : 0, wireframeFillMode,
               overlayColor[0], overlayColor[1], overlayColor[2], overlayColor[3]);
     }
   }
@@ -1266,7 +1178,7 @@ SoVulkanRenderBackend::recordFrame(const SoDrawList & drawlist,
   // overlay redraws) before recording, so slotIndex can never overflow the
   // ring allocation (VUID-vkCmdBindDescriptorSets-pDynamicOffsets-01972).
   if (!this->prepareLightingSlots(countDrawCommands(drawlist,
-                                                    overlayFillMode))) {
+                                                    wireframeFillMode))) {
     return FALSE;
   }
 

@@ -72,14 +72,12 @@ bool frameTimingEnabled()
 
 long vkRenderBreadcrumbNowUs()
 {
-  return (long)std::chrono::duration_cast<std::chrono::microseconds>(
-    std::chrono::steady_clock::now().time_since_epoch()).count();
+  return SoVulkanShared::steadyNowUs();
 }
 
 bool vkRenderBreadcrumbEnabled()
 {
-  static const bool enabled = SoVulkanShared::envFlagEnabled("FC_GUI_OPEN_BREADCRUMB");
-  return enabled;
+  return SoVulkanShared::breadcrumbsEnabled();
 }
 
 int vkLightFrameDbgBudget = 192;
@@ -94,18 +92,12 @@ int vkLightFpDbgBudget = 192;
   std::fflush(stderr);
 }
 
+int vkRenderBreadcrumbLogBudget = 0;
+
 void vkRenderBreadcrumbSince(long startUs, long thresholdUs, const char* phase)
 {
-  if (!vkRenderBreadcrumbEnabled()) {
-    return;
-  }
-  static int logged = 0;
-  const long now = vkRenderBreadcrumbNowUs();
-  if (logged < 30 && now - startUs >= thresholdUs) {
-    ++logged;
-    std::fprintf(stderr, "[VKRENDER] %ld %s dur_us=%ld\n", startUs, phase, now - startUs);
-    std::fflush(stderr);
-  }
+  SoVulkanShared::breadcrumbSince(vkRenderBreadcrumbLogBudget, "[VKRENDER]",
+                                  startUs, thresholdUs, phase);
 }
 
 // When FC_VULKAN_CLIP_VERBOSE is set, the near/far probe below logs every
@@ -174,10 +166,10 @@ uint64_t computeSceneFingerprint(const SoIRRenderAction & action, int mainCount)
 // FC_VULKAN_IR_REPLAY=0 to force a full scene re-traversal every frame.
 bool irReplayEnabled()
 {
-  static const bool enabled = []() {
-    const char * value = std::getenv("FC_VULKAN_IR_REPLAY");
-    return !(value && value[0] == '0');
-  }();
+  // On by default; the shared helper honors the full 0/false/off opt-out set
+  // (this site used to accept only a leading '0', unlike every other flag).
+  static const bool enabled =
+    SoVulkanShared::envFlagEnabled("FC_VULKAN_IR_REPLAY", true);
   return enabled;
 }
 
@@ -310,6 +302,10 @@ public:
   SbBool wireframeOverlay = FALSE;
   SbBool pointsOverlay = FALSE;
   SbColor4f edgeColor = SbColor4f(0.05f, 0.05f, 0.05f, 1.0f);
+  //! Last settings blob applied through setViewSettings(), and whether one has
+  //! been applied yet (so the first call always applies).
+  SoVulkanViewSettings viewSettings;
+  SbBool viewSettingsApplied = FALSE;
   SbBool clearWindow = TRUE;
   SbBool clearDepth = TRUE;
   void * renderTarget = nullptr;
@@ -461,7 +457,42 @@ public:
                              SbBool clearzbuffer,
                              SoDrawList *& drawlist,
                              SoRenderParams & params);
+
+  // Dump the [CLIP] diagnostic trace (env-gated by FC_VULKAN_CLIP_DEBUG;
+  // FC_VULKAN_CLIP_VERBOSE adds the per-25-frame verbose lines).  Extracted
+  // from prepareRenderParams() so the per-frame hot path stays readable; the
+  // body is inert unless the flag is set.
+  void dumpClipDebug(SoDrawList & list, const SoRenderParams & params);
+
+  // Run `fn` against the RT backend only when it is initialized; otherwise
+  // emit the standard "not initialized" warning naming `caller`.  `unavailable`
+  // is the per-setter tail the caller used ("setting ignored", "path tracing
+  // is unavailable", ...), preserved so existing log greps keep matching.
+  // Collapses the identical guard+warning boilerplate the RT setters repeated.
+  template <typename F>
+  void withRtx(const char * caller, const char * unavailable, F && fn)
+  {
+    if (!this->rtxBackendInitialized) {
+      SoDebugError::postWarning(
+        caller, "ray-tracing backend is not initialized; %s", unavailable);
+      return;
+    }
+    fn(this->rtxBackend);
+  }
 };
+
+// Retained-pointer assignment: keep the new node referenced and drop the old
+// one, no-op when unchanged.  The three scene setters, setCamera() and
+// refreshActiveCamera() all performed this exact refcount dance by hand.
+template <typename T>
+static void
+setRetainedNode(T *& slot, T * node)
+{
+  if (slot == node) return;
+  if (slot) slot->unref();
+  slot = node;
+  if (slot) slot->ref();
+}
 
 // Mark the graph fingerprint dirty when any part of the main scene is notified
 // (a field write or child-list edit anywhere in the subtree) -- the exact
@@ -494,17 +525,10 @@ SoVulkanRenderManager::~SoVulkanRenderManager()
 void
 SoVulkanRenderManager::setSceneGraph(SoNode * root)
 {
-  SoNode *& stored = this->pimpl->scene;
-  if (stored == root) {
+  if (this->pimpl->scene == root) {
     return;
   }
-  if (stored) {
-    stored->unref();
-  }
-  stored = root;
-  if (stored) {
-    stored->ref();
-  }
+  setRetainedNode(this->pimpl->scene, root);
   // The bbox is cached in world space; a different scene graph invalidates it.
   this->pimpl->sceneBBoxCached = false;
   this->pimpl->sceneBBoxScene = nullptr;
@@ -529,17 +553,7 @@ SoVulkanRenderManager::getSceneGraph(void) const
 void
 SoVulkanRenderManager::setOverlaySceneGraph(SoNode * root)
 {
-  SoNode *& stored = this->pimpl->overlayScene;
-  if (stored == root) {
-    return;
-  }
-  if (stored) {
-    stored->unref();
-  }
-  stored = root;
-  if (stored) {
-    stored->ref();
-  }
+  setRetainedNode(this->pimpl->overlayScene, root);
 }
 
 SoNode *
@@ -551,17 +565,7 @@ SoVulkanRenderManager::getOverlaySceneGraph(void) const
 void
 SoVulkanRenderManager::setDecorationSceneGraph(SoNode * root)
 {
-  SoNode *& stored = this->pimpl->decorationScene;
-  if (stored == root) {
-    return;
-  }
-  if (stored) {
-    stored->unref();
-  }
-  stored = root;
-  if (stored) {
-    stored->ref();
-  }
+  setRetainedNode(this->pimpl->decorationScene, root);
 }
 
 SoNode *
@@ -585,17 +589,7 @@ SoVulkanRenderManager::setCamera(SoCamera * camera)
   // destroyed and this raw pointer dangles, crashing the next render
   // (segfault in setClippingPlanes / SoBase::isOfType).  Keep the camera
   // alive for as long as the manager references it.
-  SoCamera *& stored = this->pimpl->camera;
-  if (stored == camera) {
-    return;
-  }
-  if (stored) {
-    stored->unref();
-  }
-  stored = camera;
-  if (stored) {
-    stored->ref();
-  }
+  setRetainedNode(this->pimpl->camera, camera);
 }
 
 SoCamera *
@@ -699,6 +693,55 @@ SoVulkanRenderManager::setEdgeColor(const SbColor4f & color)
 {
   this->pimpl->edgeColor = color;
   this->pimpl->backend.setEdgeColor(color);
+}
+
+void
+SoVulkanRenderManager::setViewSettings(const SoVulkanViewSettings & settings)
+{
+  // Single diff for the whole blob: the individual setters are unconditional,
+  // so re-applying an unchanged blob every frame would be pure waste.
+  if (this->pimpl->viewSettingsApplied
+      && settings == this->pimpl->viewSettings) {
+    return;
+  }
+  this->pimpl->viewSettings = settings;
+  this->pimpl->viewSettingsApplied = TRUE;
+
+  this->setBackgroundColor(settings.backgroundColor);
+  this->setBackgroundGradient(settings.backgroundGradient,
+                              settings.backgroundTop,
+                              settings.backgroundBottom);
+  this->setWireframeOverlay(settings.wireframeOverlay ? TRUE : FALSE);
+  this->setPointsOverlay(settings.pointsOverlay ? TRUE : FALSE);
+  this->setEdgeColor(settings.edgeColor);
+
+  // The RTX-forwarded fields are only meaningful once the RT backend exists;
+  // applying them earlier emits the "not initialized" warnings.  A raster-only
+  // view never builds it, and a later build is covered by
+  // invalidateViewSettings() (the renderer invalidates when the RTX engine is
+  // created), which re-applies this blob.
+  if (this->pimpl->rtxBackendInitialized) {
+    this->setViewMode(settings.viewMode);
+    this->setEnvMap(settings.envMap);
+    this->setPathTracingBounces(
+      static_cast<uint32_t>(settings.pathTracingBounces));
+    this->setPathTracingSettleFrames(
+      static_cast<uint32_t>(settings.pathTracingSettleFrames));
+    this->setPathTracingMaxSamples(
+      static_cast<uint32_t>(settings.pathTracingMaxSamples));
+    this->setPathTracingDenoiseEnabled(settings.pathTracingDenoise ? TRUE
+                                                                    : FALSE);
+    this->setPathTracingDenoiser(settings.pathTracingDenoiser.empty()
+                                   ? nullptr
+                                   : settings.pathTracingDenoiser.c_str());
+    this->setPathTracingDenoiserScale(settings.pathTracingDenoiserScale);
+  }
+}
+
+void
+SoVulkanRenderManager::invalidateViewSettings(void)
+{
+  this->pimpl->viewSettingsApplied = FALSE;
 }
 
 SbBool
@@ -908,55 +951,52 @@ SoVulkanRenderManager::getRayTracingActive(void) const
 void
 SoVulkanRenderManager::setPathTracingEnabled(SbBool enabled)
 {
-  if (!this->pimpl->rtxBackendInitialized) {
-    SoDebugError::postWarning("SoVulkanRenderManager::setPathTracingEnabled",
-                              "ray-tracing backend is not initialized; "
-                              "path tracing is unavailable");
-    return;
-  }
-  this->pimpl->rtxBackend.setPathTracingEnabled(enabled);
+  this->pimpl->withRtx("SoVulkanRenderManager::setPathTracingEnabled",
+                       "path tracing is unavailable",
+                       [enabled](SoRTXRenderBackend & rtx) {
+                         rtx.setPathTracingEnabled(enabled);
+                       });
 }
 
 void
-SoVulkanRenderManager::setViewMode(int mode)
+SoVulkanRenderManager::setViewMode(SoVulkanViewMode mode)
 {
-  if (!this->pimpl->rtxBackendInitialized) {
-    SoDebugError::postWarning("SoVulkanRenderManager::setViewMode",
-                              "ray-tracing backend is not initialized; "
-                              "view mode is unavailable");
-    return;
-  }
-  this->pimpl->rtxBackend.setViewMode(
-    static_cast<SoRTXRenderBackend::RtxViewMode>(mode));
+  this->pimpl->withRtx("SoVulkanRenderManager::setViewMode",
+                       "view mode is unavailable",
+                       [mode](SoRTXRenderBackend & rtx) {
+                         rtx.setViewMode(mode);
+                       });
 }
 
-int
+SoVulkanViewMode
 SoVulkanRenderManager::getViewMode(void) const
 {
-  if (!this->pimpl->rtxBackendInitialized) return 0;
-  return static_cast<int>(this->pimpl->rtxBackend.getViewMode());
+  if (!this->pimpl->rtxBackendInitialized) return SoVulkanViewMode::RtxModeOff;
+  return this->pimpl->rtxBackend.getViewMode();
 }
 
 void
 SoVulkanRenderManager::setEnvMap(const int index)
 {
-  if (!this->pimpl->rtxBackendInitialized) {
-    SoDebugError::postWarning("SoVulkanRenderManager::setEnvMap",
-                              "ray-tracing backend is not initialized; "
-                              "environment is unavailable");
-    return;
-  }
-  this->pimpl->rtxBackend.setEnvMap(index);
+  this->pimpl->withRtx("SoVulkanRenderManager::setEnvMap",
+                       "environment is unavailable",
+                       [index](SoRTXRenderBackend & rtx) {
+                         rtx.setEnvMap(index);
+                       });
 }
 
 void
-SoVulkanRenderManager::setSceneLights(const std::vector<SoLightData> & lights,
-                                      const SbVec3f & ambient)
+SoVulkanRenderManager::setSceneLights(const SoLightingData & lighting)
 {
-  if (!this->pimpl->rtxBackendInitialized) {
-    return;
+  // Both Vulkan backends share the authoritative viewer-light set.  The raster
+  // executor would otherwise light from the world-fixed IR capture, so its
+  // highlights would not follow the camera the way Coin GL (and the RT path)
+  // do.  The raster backend is always available; the RT backend only once its
+  // device resources are up (a later push reaches it).
+  this->pimpl->backend.setSceneLights(lighting);
+  if (this->pimpl->rtxBackendInitialized) {
+    this->pimpl->rtxBackend.setSceneLights(lighting);
   }
-  this->pimpl->rtxBackend.setSceneLights(lights, ambient);
 }
 
 int
@@ -988,13 +1028,11 @@ SoVulkanRenderManager::getPathTracingEnabled(void) const
 void
 SoVulkanRenderManager::setPathTracingStart(SbBool start)
 {
-  if (!this->pimpl->rtxBackendInitialized) {
-    SoDebugError::postWarning("SoVulkanRenderManager::setPathTracingStart",
-                              "ray-tracing backend is not initialized; "
-                              "path tracing is unavailable");
-    return;
-  }
-  this->pimpl->rtxBackend.setPathTracingStart(start);
+  this->pimpl->withRtx("SoVulkanRenderManager::setPathTracingStart",
+                       "path tracing is unavailable",
+                       [start](SoRTXRenderBackend & rtx) {
+                         rtx.setPathTracingStart(start);
+                       });
 }
 
 SbBool
@@ -1021,73 +1059,61 @@ SoVulkanRenderManager::getPathTracingSampleCount(void) const
 void
 SoVulkanRenderManager::setPathTracingBounces(const uint32_t bounces)
 {
-  if (!this->pimpl->rtxBackendInitialized) {
-    SoDebugError::postWarning("SoVulkanRenderManager::setPathTracingBounces",
-                              "ray-tracing backend is not initialized; "
-                              "setting ignored");
-    return;
-  }
-  this->pimpl->rtxBackend.setPathTracingBounces(bounces);
+  this->pimpl->withRtx("SoVulkanRenderManager::setPathTracingBounces",
+                       "setting ignored",
+                       [bounces](SoRTXRenderBackend & rtx) {
+                         rtx.setPathTracingBounces(bounces);
+                       });
 }
 
 void
 SoVulkanRenderManager::setPathTracingSettleFrames(const uint32_t frames)
 {
-  if (!this->pimpl->rtxBackendInitialized) {
-    SoDebugError::postWarning(
-      "SoVulkanRenderManager::setPathTracingSettleFrames",
-      "ray-tracing backend is not initialized; setting ignored");
-    return;
-  }
-  this->pimpl->rtxBackend.setPathTracingSettleFrames(frames);
+  this->pimpl->withRtx("SoVulkanRenderManager::setPathTracingSettleFrames",
+                       "setting ignored",
+                       [frames](SoRTXRenderBackend & rtx) {
+                         rtx.setPathTracingSettleFrames(frames);
+                       });
 }
 
 void
 SoVulkanRenderManager::setPathTracingMaxSamples(const uint32_t samples)
 {
-  if (!this->pimpl->rtxBackendInitialized) {
-    SoDebugError::postWarning(
-      "SoVulkanRenderManager::setPathTracingMaxSamples",
-      "ray-tracing backend is not initialized; setting ignored");
-    return;
-  }
-  this->pimpl->rtxBackend.setPathTracingMaxSamples(samples);
+  this->pimpl->withRtx("SoVulkanRenderManager::setPathTracingMaxSamples",
+                       "setting ignored",
+                       [samples](SoRTXRenderBackend & rtx) {
+                         rtx.setPathTracingMaxSamples(samples);
+                       });
 }
 
 void
 SoVulkanRenderManager::setPathTracingDenoiseEnabled(SbBool enabled)
 {
-  if (!this->pimpl->rtxBackendInitialized) {
-    SoDebugError::postWarning(
-      "SoVulkanRenderManager::setPathTracingDenoiseEnabled",
-      "ray-tracing backend is not initialized; setting ignored");
-    return;
-  }
-  this->pimpl->rtxBackend.setPathTracingDenoiseEnabled(enabled);
+  this->pimpl->withRtx("SoVulkanRenderManager::setPathTracingDenoiseEnabled",
+                       "setting ignored",
+                       [enabled](SoRTXRenderBackend & rtx) {
+                         rtx.setPathTracingDenoiseEnabled(enabled);
+                       });
 }
 
 void
 SoVulkanRenderManager::setPathTracingDenoiser(const char * denoiser)
 {
-  if (!this->pimpl->rtxBackendInitialized) {
-    SoDebugError::postWarning(
-      "SoVulkanRenderManager::setPathTracingDenoiser",
-      "ray-tracing backend is not initialized; setting ignored");
-    return;
-  }
-  this->pimpl->rtxBackend.setDenoiserFilter(denoiser);
+  this->pimpl->withRtx("SoVulkanRenderManager::setPathTracingDenoiser",
+                       "setting ignored",
+                       [denoiser](SoRTXRenderBackend & rtx) {
+                         rtx.setDenoiserFilter(denoiser);
+                       });
 }
 
 void
 SoVulkanRenderManager::setPathTracingDenoiserScale(const float scale)
 {
-  if (!this->pimpl->rtxBackendInitialized) {
-    SoDebugError::postWarning(
-      "SoVulkanRenderManager::setPathTracingDenoiserScale",
-      "ray-tracing backend is not initialized; setting ignored");
-    return;
-  }
-  this->pimpl->rtxBackend.setDenoiserScale(scale);
+  this->pimpl->withRtx("SoVulkanRenderManager::setPathTracingDenoiserScale",
+                       "setting ignored",
+                       [scale](SoRTXRenderBackend & rtx) {
+                         rtx.setDenoiserScale(scale);
+                       });
 }
 
 void
@@ -1201,7 +1227,7 @@ SoVulkanRenderManagerP::computeGraphFingerprint() const
   mixHash(h, reinterpret_cast<uintptr_t>(this->scene));
   mixHash(h, reinterpret_cast<uintptr_t>(this->overlayScene));
   mixHash(h, reinterpret_cast<uintptr_t>(this->decorationScene));
-  if (std::getenv("FC_VULKAN_LIGHTREPLAY_DBG")) {
+  if (SoVulkanShared::envString("FC_VULKAN_LIGHTREPLAY_DBG")) {
     uint64_t hScene = 0xcbf29ce484222325ULL;
     uint64_t hOverlay = 0xcbf29ce484222325ULL;
     uint64_t hDecor = 0xcbf29ce484222325ULL;
@@ -1289,12 +1315,7 @@ SoVulkanRenderManagerP::refreshActiveCamera()
 {
   SoCamera * resolved = this->resolveActiveCamera();
   if (resolved && resolved != this->camera) {
-    SoCamera *& stored = this->camera;
-    if (stored) {
-      stored->unref();
-    }
-    stored = resolved;
-    stored->ref();
+    setRetainedNode(this->camera, resolved);
     this->cameraVersion++;
   }
   else if (resolved == this->camera) {
@@ -2096,7 +2117,7 @@ SoVulkanRenderManagerP::prepareRenderParams(SbBool clearwindow,
       }
     }
   }
-  if (std::getenv("FC_VULKAN_LIGHTREPLAY_DBG") && vkLightFrameDbgBudget-- > 0) {
+  if (SoVulkanShared::envString("FC_VULKAN_LIGHTREPLAY_DBG") && vkLightFrameDbgBudget-- > 0) {
     const SbMatrix & v = params.viewMatrix;
     float qx = 0, qy = 0, qz = 0, qw = 1;
     SbVec3f camPos(0.0f, 0.0f, 0.0f);
@@ -2188,193 +2209,202 @@ SoVulkanRenderManagerP::prepareRenderParams(SbBool clearwindow,
 
   // Reconstruct near/far from the recorded projection matrix and compare with
   // the auto-clipped values so mismatches (per-object clipping) are obvious.
-  if (clipDebugEnabled()) {
-    static int frames = 0;
-    ++frames;
-    if (clipVerboseEnabled() || frames == 10 || frames == 50 ||
-        frames % 25 == 0) {
-      SbMatrix m = params.projMatrix;
-      SbMatrix v = params.viewMatrix;
-      // OpenGL-style perspective: col2=(0,0,a,-1), col3=(0,0,b,0) with
-      // a=-(f+n)/(f-n), b=-2fn/(f-n)  ->  n=b/(a-1), f=b/(a+1).
-      // Depth-range form (ortho): m22=-2/(f-n), m32=-(f+n)/(f-n)
-      // ->  n=(m32+1)/m22, f=(m32-1)/m22.
-      float nearf = -1.0f, farf = -1.0f;
-      if (m[2][3] == -1.0f && m[3][3] == 0.0f) {
-        const float a = m[2][2];
-        const float b = m[3][2];
-        nearf = b / (a - 1.0f);
-        farf = b / (a + 1.0f);
-      }
-      else {
-        const float m22 = m[2][2];
-        const float m32 = m[3][2];
-        if (m22 != 0.0f) {
-          nearf = (m32 + 1.0f) / m22;
-          farf = (m32 - 1.0f) / m22;
-        }
-      }
-      fprintf(stderr,
-              "[CLIP] cmd0 cam-near=%.4f cam-far=%.4f use-near=%.4f use-far=%.4f "
-              "focal=%.4f pos=(%.2f,%.2f,%.2f) "
-              "ncd=%.4f fcd=%.4f cmds=%d m00=%.3f m11=%.3f m22=%.4f m32=%.4f m23=%.4f\n",
-              this->camera ? this->camera->nearDistance.getValue() : -1.0f,
-              this->camera ? this->camera->farDistance.getValue() : -1.0f,
-              this->computedNear, this->computedFar,
-              this->camera ? this->camera->focalDistance.getValue() : -1.0f,
-              this->camera ? this->camera->position.getValue()[0] : 0.0f,
-              this->camera ? this->camera->position.getValue()[1] : 0.0f,
-              this->camera ? this->camera->position.getValue()[2] : 0.0f,
-              nearf, farf,
-              list.getNumCommands(), m[0][0], m[1][1], m[2][2], m[3][2], m[2][3]);
-      if (list.getNumCommands() > 0) {
-        const int show = std::min(4, static_cast<int>(list.getNumCommands()));
-        for (int ci = 0; ci < show; ++ci) {
-          const SoRenderCommand & c0 = list.getCommand(ci);
-          SbMatrix cm;
-          c0.modelMatrix.getValue(cm);
-          fprintf(stderr,
-                  "[CLIP] cmd%d pass=%d verts=%u model00=%.3f trans=(%.3f,%.3f,%.3f) "
-                  "m11=%.3f m22=%.3f\n",
-                  ci, static_cast<int>(c0.pass),
-                  c0.geometry.vertexCount,
-                  cm[0][0], cm[3][0], cm[3][1], cm[3][2],
-                  cm[1][1], cm[2][2]);
-          if (ci == 0 && c0.geometry.positions && c0.geometry.vertexCount >= 3) {
-            const float * p = c0.geometry.positions;
-            float mnx = 1e30f, mny = 1e30f, mnz = 1e30f, mxx = -1e30f, myy = -1e30f, mzz = -1e30f;
-            const unsigned nv = c0.geometry.vertexCount;
-            for (unsigned v = 0; v < nv; ++v) {
-              mnx = std::min(mnx, p[v*3+0]); mny = std::min(mny, p[v*3+1]); mnz = std::min(mnz, p[v*3+2]);
-              mxx = std::max(mxx, p[v*3+0]); myy = std::max(myy, p[v*3+1]); mzz = std::max(mzz, p[v*3+2]);
-            }
-            fprintf(stderr, "[CLIP] cmd0 verts0=(%.2f,%.2f,%.2f) bbox=[%.2f,%.2f]x[%.2f,%.2f]x[%.2f,%.2f]\n",
-                    p[0], p[1], p[2], mnx, mxx, mny, myy, mnz, mzz);
-          }
-          if (ci == 2 && c0.geometry.positions && c0.geometry.vertexCount >= 3) {
-            const float * p = c0.geometry.positions;
-            float mnx = 1e30f, mny = 1e30f, mnz = 1e30f, mxx = -1e30f, myy = -1e30f, mzz = -1e30f;
-            const unsigned nv = c0.geometry.vertexCount;
-            for (unsigned v = 0; v < nv; ++v) {
-              mnx = std::min(mnx, p[v*3+0]); mny = std::min(mny, p[v*3+1]); mnz = std::min(mnz, p[v*3+2]);
-              mxx = std::max(mxx, p[v*3+0]); myy = std::max(myy, p[v*3+1]); mzz = std::max(mzz, p[v*3+2]);
-            }
-            fprintf(stderr, "[CLIP] cmd2 verts0=(%.2f,%.2f,%.2f) bbox=[%.2f,%.2f]x[%.2f,%.2f]x[%.2f,%.2f]\n",
-                    p[0], p[1], p[2], mnx, mxx, mny, myy, mnz, mzz);
-          }
-        }
-      }
-      // Compare the box-center position in camera space derived from the
-      // camera NODE's own fields vs the harvested params.viewMatrix.  If they
-      // disagree, the matrix the GPU uses is not built from this camera node.
-      if (this->camera && this->scene) {
-        SoGetBoundingBoxAction bba(this->viewportRegion);
-        bba.apply(this->scene);
-        SbBox3f wbox = bba.getBoundingBox();
-        if (!wbox.isEmpty()) {
-          SbVec3f center = wbox.getCenter();
-          SbVec3f camBased, mtxBased;
-          SbMatrix camMat, rotMat;
-          camMat.setTranslate(-this->camera->position.getValue());
-          rotMat = this->camera->orientation.getValue().inverse();
-          camMat.multRight(rotMat);
-          camMat.multVecMatrix(center, camBased);
-          params.viewMatrix.multVecMatrix(center, mtxBased);
-          float q0, q1, q2, q3;
-          this->camera->orientation.getValue().getValue(q0, q1, q2, q3);
-          fprintf(stderr,
-                  "[CLIP] centerCam cam=(%.2f,%.2f,%.2f) mtx=(%.2f,%.2f,%.2f) "
-                  "quat=(%.3f,%.3f,%.3f,%.3f) dist=%.2f\n",
-                  camBased[0], camBased[1], camBased[2],
-                  mtxBased[0], mtxBased[1], mtxBased[2],
-                  q0, q1, q2, q3,
-                  (this->camera->position.getValue() - center).length());
-        }
-      }
-    }
-    static int typeLogged = 0;
-    if (typeLogged++ < 3 && this->camera && list.getNumCommands() > 0) {
-      fprintf(stderr, "[CLIP] camera-type=%s pos=(%.3f,%.3f,%.3f) ortho=%d persp=%d camptr=%p\n",
-              this->camera->getTypeId().getName().getString(),
-              this->camera->position.getValue()[0],
-              this->camera->position.getValue()[1],
-              this->camera->position.getValue()[2],
-              this->camera->isOfType(SoOrthographicCamera::getClassTypeId()) ? 1 : 0,
-              this->camera->isOfType(SoPerspectiveCamera::getClassTypeId()) ? 1 : 0,
-              (void*)this->camera);
-    }
+  this->dumpClipDebug(list, params);
 
-    // Cross-check the near/far source: transform the scene bounding box by
-    // the ACTUAL view matrix (what the GPU uses) and print the z-range, so a
-    // mismatch with the [CLIP] boxz (from setClippingPlanes' own transform)
-    // is obvious.  This isolates whether the near plane is cutting geometry
-    // because setClippingPlanes computes a wrong camera-space box.
-    if (frames % 250 == 0 && this->scene) {
-      SoGetBoundingBoxAction bboxAction(this->viewportRegion);
-      bboxAction.apply(this->scene);
-      SbBox3f wbox = bboxAction.getBoundingBox();
-      if (!wbox.isEmpty()) {
-        float zmin = 1e30f, zmax = -1e30f;
-        const SbVec3f & mn = wbox.getMin();
-        const SbVec3f & mx = wbox.getMax();
-        for (int ix = 0; ix < 2; ++ix) {
-          for (int iy = 0; iy < 2; ++iy) {
-            for (int iz = 0; iz < 2; ++iz) {
-              SbVec3f c(ix ? mx[0] : mn[0],
-                        iy ? mx[1] : mn[1],
-                        iz ? mx[2] : mn[2]);
-              SbVec3f v;
-              params.viewMatrix.multVecMatrix(c, v);
-              zmin = std::min(zmin, v[2]);
-              zmax = std::max(zmax, v[2]);
-            }
-          }
-        }
-        SbVec3f center = wbox.getCenter();
-        fprintf(stderr,
-                "[CLIP] viewbox worldCenter=(%.2f,%.2f,%.2f) "
-                "worldSize=(%.2f,%.2f,%.2f) viewZ=[%.3f,%.3f]\n",
-                center[0], center[1], center[2],
-                wbox.getSize()[0], wbox.getSize()[1], wbox.getSize()[2],
-                zmin, zmax);
+  return TRUE;
+}
+
+
+// [CLIP] diagnostic trace, env-gated by FC_VULKAN_CLIP_DEBUG (verbose adds
+// FC_VULKAN_CLIP_VERBOSE).  Kept out of prepareRenderParams() so the frame
+// hot path is not dominated by this print-only branch.
+void
+SoVulkanRenderManagerP::dumpClipDebug(SoDrawList & list,
+                                      const SoRenderParams & params)
+{
+  static int frames = 0;
+  ++frames;
+  if (clipVerboseEnabled() || frames == 10 || frames == 50 ||
+      frames % 25 == 0) {
+    SbMatrix m = params.projMatrix;
+    SbMatrix v = params.viewMatrix;
+    // OpenGL-style perspective: col2=(0,0,a,-1), col3=(0,0,b,0) with
+    // a=-(f+n)/(f-n), b=-2fn/(f-n)  ->  n=b/(a-1), f=b/(a+1).
+    // Depth-range form (ortho): m22=-2/(f-n), m32=-(f+n)/(f-n)
+    // ->  n=(m32+1)/m22, f=(m32-1)/m22.
+    float nearf = -1.0f, farf = -1.0f;
+    if (m[2][3] == -1.0f && m[3][3] == 0.0f) {
+      const float a = m[2][2];
+      const float b = m[3][2];
+      nearf = b / (a - 1.0f);
+      farf = b / (a + 1.0f);
+    }
+    else {
+      const float m22 = m[2][2];
+      const float m32 = m[3][2];
+      if (m22 != 0.0f) {
+        nearf = (m32 + 1.0f) / m22;
+        farf = (m32 - 1.0f) / m22;
       }
     }
-
-    // Project the first few commands' vertices into NDC the same way the
-    // backend vertex shader does (gl_Position = proj * view * model * pos,
-    // column-vector math on column-major matrices) to see whether the model
-    // geometry actually lands inside the clip volume at this view.
-    if (frames % 250 == 0 && list.getNumCommands() > 0) {
-      auto mv = [](const SbMatrix & M, float x, float y, float z,
-                   float * ox, float * oy, float * oz, float * ow) {
-        *ox = M[0][0] * x + M[1][0] * y + M[2][0] * z + M[3][0];
-        *oy = M[0][1] * x + M[1][1] * y + M[2][1] * z + M[3][1];
-        *oz = M[0][2] * x + M[1][2] * y + M[2][2] * z + M[3][2];
-        *ow = M[0][3] * x + M[1][3] * y + M[2][3] * z + M[3][3];
-      };
+    fprintf(stderr,
+            "[CLIP] cmd0 cam-near=%.4f cam-far=%.4f use-near=%.4f use-far=%.4f "
+            "focal=%.4f pos=(%.2f,%.2f,%.2f) "
+            "ncd=%.4f fcd=%.4f cmds=%d m00=%.3f m11=%.3f m22=%.4f m32=%.4f m23=%.4f\n",
+            this->camera ? this->camera->nearDistance.getValue() : -1.0f,
+            this->camera ? this->camera->farDistance.getValue() : -1.0f,
+            this->computedNear, this->computedFar,
+            this->camera ? this->camera->focalDistance.getValue() : -1.0f,
+            this->camera ? this->camera->position.getValue()[0] : 0.0f,
+            this->camera ? this->camera->position.getValue()[1] : 0.0f,
+            this->camera ? this->camera->position.getValue()[2] : 0.0f,
+            nearf, farf,
+            list.getNumCommands(), m[0][0], m[1][1], m[2][2], m[3][2], m[2][3]);
+    if (list.getNumCommands() > 0) {
       const int show = std::min(4, static_cast<int>(list.getNumCommands()));
-      for (int i = 0; i < show; ++i) {
-        const SoRenderCommand & cmd = list.getCommand(i);
-        const SoGeometryDesc & geo = cmd.geometry;
-        if (!geo.positions || geo.vertexCount == 0) continue;
-        float x = geo.positions[0], y = geo.positions[1], z = geo.positions[2];
-        float wx, wy, wz, ww;
-        mv(cmd.modelMatrix, x, y, z, &wx, &wy, &wz, &ww);
-        float vx, vy, vz, vw;
-        mv(params.viewMatrix, wx, wy, wz, &vx, &vy, &vz, &vw);
-        float nx, ny, nz, nw;
-        mv(params.projMatrix, vx, vy, vz, &nx, &ny, &nz, &nw);
+      for (int ci = 0; ci < show; ++ci) {
+        const SoRenderCommand & c0 = list.getCommand(ci);
+        SbMatrix cm;
+        c0.modelMatrix.getValue(cm);
         fprintf(stderr,
-                "[CLIP] cmd%d pass=%d verts=%d cull=%d "
-                "world=(%.3f,%.3f,%.3f) viewz=%.3f ndc=(%.3f,%.3f,%.3f,%.3f)\n",
-                i, static_cast<int>(cmd.pass), static_cast<int>(geo.vertexCount),
-                static_cast<int>(cmd.state.raster.cullMode),
-                wx, wy, wz, vz, nx, ny, nz, nw);
+                "[CLIP] cmd%d pass=%d verts=%u model00=%.3f trans=(%.3f,%.3f,%.3f) "
+                "m11=%.3f m22=%.3f\n",
+                ci, static_cast<int>(c0.pass),
+                c0.geometry.vertexCount,
+                cm[0][0], cm[3][0], cm[3][1], cm[3][2],
+                cm[1][1], cm[2][2]);
+        if (ci == 0 && c0.geometry.positions && c0.geometry.vertexCount >= 3) {
+          const float * p = c0.geometry.positions;
+          float mnx = 1e30f, mny = 1e30f, mnz = 1e30f, mxx = -1e30f, myy = -1e30f, mzz = -1e30f;
+          const unsigned nv = c0.geometry.vertexCount;
+          for (unsigned v = 0; v < nv; ++v) {
+            mnx = std::min(mnx, p[v*3+0]); mny = std::min(mny, p[v*3+1]); mnz = std::min(mnz, p[v*3+2]);
+            mxx = std::max(mxx, p[v*3+0]); myy = std::max(myy, p[v*3+1]); mzz = std::max(mzz, p[v*3+2]);
+          }
+          fprintf(stderr, "[CLIP] cmd0 verts0=(%.2f,%.2f,%.2f) bbox=[%.2f,%.2f]x[%.2f,%.2f]x[%.2f,%.2f]\n",
+                  p[0], p[1], p[2], mnx, mxx, mny, myy, mnz, mzz);
+        }
+        if (ci == 2 && c0.geometry.positions && c0.geometry.vertexCount >= 3) {
+          const float * p = c0.geometry.positions;
+          float mnx = 1e30f, mny = 1e30f, mnz = 1e30f, mxx = -1e30f, myy = -1e30f, mzz = -1e30f;
+          const unsigned nv = c0.geometry.vertexCount;
+          for (unsigned v = 0; v < nv; ++v) {
+            mnx = std::min(mnx, p[v*3+0]); mny = std::min(mny, p[v*3+1]); mnz = std::min(mnz, p[v*3+2]);
+            mxx = std::max(mxx, p[v*3+0]); myy = std::max(myy, p[v*3+1]); mzz = std::max(mzz, p[v*3+2]);
+          }
+          fprintf(stderr, "[CLIP] cmd2 verts0=(%.2f,%.2f,%.2f) bbox=[%.2f,%.2f]x[%.2f,%.2f]x[%.2f,%.2f]\n",
+                  p[0], p[1], p[2], mnx, mxx, mny, myy, mnz, mzz);
+        }
+      }
+    }
+    // Compare the box-center position in camera space derived from the
+    // camera NODE's own fields vs the harvested params.viewMatrix.  If they
+    // disagree, the matrix the GPU uses is not built from this camera node.
+    if (this->camera && this->scene) {
+      SoGetBoundingBoxAction bba(this->viewportRegion);
+      bba.apply(this->scene);
+      SbBox3f wbox = bba.getBoundingBox();
+      if (!wbox.isEmpty()) {
+        SbVec3f center = wbox.getCenter();
+        SbVec3f camBased, mtxBased;
+        SbMatrix camMat, rotMat;
+        camMat.setTranslate(-this->camera->position.getValue());
+        rotMat = this->camera->orientation.getValue().inverse();
+        camMat.multRight(rotMat);
+        camMat.multVecMatrix(center, camBased);
+        params.viewMatrix.multVecMatrix(center, mtxBased);
+        float q0, q1, q2, q3;
+        this->camera->orientation.getValue().getValue(q0, q1, q2, q3);
+        fprintf(stderr,
+                "[CLIP] centerCam cam=(%.2f,%.2f,%.2f) mtx=(%.2f,%.2f,%.2f) "
+                "quat=(%.3f,%.3f,%.3f,%.3f) dist=%.2f\n",
+                camBased[0], camBased[1], camBased[2],
+                mtxBased[0], mtxBased[1], mtxBased[2],
+                q0, q1, q2, q3,
+                (this->camera->position.getValue() - center).length());
       }
     }
   }
+  static int typeLogged = 0;
+  if (typeLogged++ < 3 && this->camera && list.getNumCommands() > 0) {
+    fprintf(stderr, "[CLIP] camera-type=%s pos=(%.3f,%.3f,%.3f) ortho=%d persp=%d camptr=%p\n",
+            this->camera->getTypeId().getName().getString(),
+            this->camera->position.getValue()[0],
+            this->camera->position.getValue()[1],
+            this->camera->position.getValue()[2],
+            this->camera->isOfType(SoOrthographicCamera::getClassTypeId()) ? 1 : 0,
+            this->camera->isOfType(SoPerspectiveCamera::getClassTypeId()) ? 1 : 0,
+            (void*)this->camera);
+  }
 
-  return TRUE;
+  // Cross-check the near/far source: transform the scene bounding box by
+  // the ACTUAL view matrix (what the GPU uses) and print the z-range, so a
+  // mismatch with the [CLIP] boxz (from setClippingPlanes' own transform)
+  // is obvious.  This isolates whether the near plane is cutting geometry
+  // because setClippingPlanes computes a wrong camera-space box.
+  if (frames % 250 == 0 && this->scene) {
+    SoGetBoundingBoxAction bboxAction(this->viewportRegion);
+    bboxAction.apply(this->scene);
+    SbBox3f wbox = bboxAction.getBoundingBox();
+    if (!wbox.isEmpty()) {
+      float zmin = 1e30f, zmax = -1e30f;
+      const SbVec3f & mn = wbox.getMin();
+      const SbVec3f & mx = wbox.getMax();
+      for (int ix = 0; ix < 2; ++ix) {
+        for (int iy = 0; iy < 2; ++iy) {
+          for (int iz = 0; iz < 2; ++iz) {
+            SbVec3f c(ix ? mx[0] : mn[0],
+                      iy ? mx[1] : mn[1],
+                      iz ? mx[2] : mn[2]);
+            SbVec3f v;
+            params.viewMatrix.multVecMatrix(c, v);
+            zmin = std::min(zmin, v[2]);
+            zmax = std::max(zmax, v[2]);
+          }
+        }
+      }
+      SbVec3f center = wbox.getCenter();
+      fprintf(stderr,
+              "[CLIP] viewbox worldCenter=(%.2f,%.2f,%.2f) "
+              "worldSize=(%.2f,%.2f,%.2f) viewZ=[%.3f,%.3f]\n",
+              center[0], center[1], center[2],
+              wbox.getSize()[0], wbox.getSize()[1], wbox.getSize()[2],
+              zmin, zmax);
+    }
+  }
+
+  // Project the first few commands' vertices into NDC the same way the
+  // backend vertex shader does (gl_Position = proj * view * model * pos,
+  // column-vector math on column-major matrices) to see whether the model
+  // geometry actually lands inside the clip volume at this view.
+  if (frames % 250 == 0 && list.getNumCommands() > 0) {
+    auto mv = [](const SbMatrix & M, float x, float y, float z,
+                 float * ox, float * oy, float * oz, float * ow) {
+      *ox = M[0][0] * x + M[1][0] * y + M[2][0] * z + M[3][0];
+      *oy = M[0][1] * x + M[1][1] * y + M[2][1] * z + M[3][1];
+      *oz = M[0][2] * x + M[1][2] * y + M[2][2] * z + M[3][2];
+      *ow = M[0][3] * x + M[1][3] * y + M[2][3] * z + M[3][3];
+    };
+    const int show = std::min(4, static_cast<int>(list.getNumCommands()));
+    for (int i = 0; i < show; ++i) {
+      const SoRenderCommand & cmd = list.getCommand(i);
+      const SoGeometryDesc & geo = cmd.geometry;
+      if (!geo.positions || geo.vertexCount == 0) continue;
+      float x = geo.positions[0], y = geo.positions[1], z = geo.positions[2];
+      float wx, wy, wz, ww;
+      mv(cmd.modelMatrix, x, y, z, &wx, &wy, &wz, &ww);
+      float vx, vy, vz, vw;
+      mv(params.viewMatrix, wx, wy, wz, &vx, &vy, &vz, &vw);
+      float nx, ny, nz, nw;
+      mv(params.projMatrix, vx, vy, vz, &nx, &ny, &nz, &nw);
+      fprintf(stderr,
+              "[CLIP] cmd%d pass=%d verts=%d cull=%d "
+              "world=(%.3f,%.3f,%.3f) viewz=%.3f ndc=(%.3f,%.3f,%.3f,%.3f)\n",
+              i, static_cast<int>(cmd.pass), static_cast<int>(geo.vertexCount),
+              static_cast<int>(cmd.state.raster.cullMode),
+              wx, wy, wz, vz, nx, ny, nz, nw);
+    }
+  }
 }
 
 SoVulkanRenderBackend *

@@ -130,7 +130,7 @@ SoRTXRenderBackend::configureOidnFilter()
 #if COIN_BUILD_OIDN
   this->setupOidnDevice();
   if (!this->oidnDevice) {
-    if (getenv("FC_VULKAN_PT_DENOISER_DEBUG")) {
+    if (SoVulkanShared::envString("FC_VULKAN_PT_DENOISER_DEBUG")) {
       fprintf(stderr, "[DENOISE] OIDN device null\n");
     }
     return false;
@@ -199,7 +199,7 @@ SoRTXRenderBackend::createDenoiseBackend()
     // First resolution, no explicit preference: honour the env var, then fall
     // back to the default (OIDN).  An explicit "none" selection is a real
     // user choice and must not be overwritten by the env/default fallback.
-    if (const char * sel = getenv("FC_VULKAN_PT_DENOISER")) {
+    if (const char * sel = SoVulkanShared::envString("FC_VULKAN_PT_DENOISER")) {
       if (std::strcmp(sel, "rtx") == 0) {
         this->denoiseKind = DenoiseRtx;
         this->denoiseKindPref = DenoiseRtx;
@@ -225,7 +225,7 @@ SoRTXRenderBackend::createDenoiseBackend()
   }
   this->denoiseKindDirty = false;
 
-  if (getenv("FC_VULKAN_PT_DENOISER_DEBUG")) {
+  if (SoVulkanShared::envString("FC_VULKAN_PT_DENOISER_DEBUG")) {
     fprintf(stderr,
             "[DENOISE] resolved kind=%d explicit=%d pref=%d ptEnabled=%d\n",
             static_cast<int>(this->denoiseKind),
@@ -370,7 +370,7 @@ SoRTXRenderBackend::createDenoiseBackend()
 #if COIN_BUILD_RTX_DENOISER
   if (this->denoiseKind == DenoiseRtx) {
     this->rtxModelKind = []() {
-      const char * m = getenv("FC_VULKAN_PT_RTX_MODEL");
+      const char * m = SoVulkanShared::envString("FC_VULKAN_PT_RTX_MODEL");
       if (m && std::strcmp(m, "TEMPORAL") == 0)
         return OPTIX_DENOISER_MODEL_KIND_TEMPORAL_AOV;
       if (m && std::strcmp(m, "ALBEDO") == 0) return OPTIX_DENOISER_MODEL_KIND_AOV;
@@ -383,7 +383,7 @@ SoRTXRenderBackend::createDenoiseBackend()
     // vendor-neutral: on an AMD/Intel RT-capable device it renders fine, so
     // only the denoiser must be gated here and degraded to OIDN.
     if (!this->deviceIsNvidia) {
-      if (getenv("FC_VULKAN_PT_DENOISER_DEBUG")) {
+      if (SoVulkanShared::envString("FC_VULKAN_PT_DENOISER_DEBUG")) {
         fprintf(stderr,
                 "[DENOISE] RTX denoiser unavailable: Vulkan device vendor "
                 "0x%04x is not NVIDIA; using OIDN\n",
@@ -448,7 +448,7 @@ SoRTXRenderBackend::createDenoiseBackend()
   if (this->denoiseKind == DenoiseRtx && this->rtxDenoiser) configured = true;
 #endif
   if (!configured) {
-    if (getenv("FC_VULKAN_PT_DENOISER_DEBUG")) {
+    if (SoVulkanShared::envString("FC_VULKAN_PT_DENOISER_DEBUG")) {
       fprintf(stderr, "[DENOISE] no backend configured for kind=%d\n",
               static_cast<int>(this->denoiseKind));
     }
@@ -459,7 +459,7 @@ SoRTXRenderBackend::createDenoiseBackend()
   this->denoiserActive = true;
   this->denoiseStagedWidth = this->denoiseWidth;
   this->denoiseStagedHeight = this->denoiseHeight;
-  if (getenv("FC_VULKAN_PT_DENOISER_DEBUG")) {
+  if (SoVulkanShared::envString("FC_VULKAN_PT_DENOISER_DEBUG")) {
     fprintf(stderr, "[DENOISE] backend configured kind=%d active=%s\n",
             static_cast<int>(this->denoiseKind),
             this->denoiserActive ? "yes" : "no");
@@ -470,7 +470,7 @@ SoRTXRenderBackend::createDenoiseBackend()
 void
 SoRTXRenderBackend::submitDenoiseCopy(VkCommandBuffer cmd)
 {
-  const bool async = getenv("FC_VULKAN_ASYNC_COMPUTE") != nullptr &&
+  const bool async = SoVulkanShared::envString("FC_VULKAN_ASYNC_COMPUTE") != nullptr &&
     this->hasComputeQueue && this->computeQueue != VK_NULL_HANDLE;
   VkQueue q = async ? this->computeQueue : this->queue;
   VkSubmitInfo si {};
@@ -505,7 +505,7 @@ SoRTXRenderBackend::submitDenoiseCopy(VkCommandBuffer cmd)
       wi.pSemaphores = &this->asyncComputeTimeline;
       wi.pValues = &value;
       vkWaitSemaphores(this->device, &wi, UINT64_MAX);
-      if (getenv("FC_VULKAN_ASYNC_COMPUTE_TIMING")) {
+      if (SoVulkanShared::envString("FC_VULKAN_ASYNC_COMPUTE_TIMING")) {
         fprintf(stderr, "[ASYNC] compute copy signalled timeline value=%llu\n",
                 static_cast<unsigned long long>(value));
       }
@@ -559,7 +559,7 @@ SoRTXRenderBackend::ensureAsyncComputeTimeline()
     return false;
   }
   this->asyncComputeTimelineValue = 0;
-  if (getenv("FC_VULKAN_ASYNC_COMPUTE_TIMING")) {
+  if (SoVulkanShared::envString("FC_VULKAN_ASYNC_COMPUTE_TIMING")) {
     fprintf(stderr, "[ASYNC] created compute timeline semaphore\n");
   }
   return true;
@@ -864,7 +864,7 @@ SoRTXRenderBackend::updateDenoise()
         this->denoiseResultReady = FALSE;
         this->convergeAfterDenoise();
       }
-      if (getenv("FC_VULKAN_PT_DENOISE_TIMING")) {
+      if (SoVulkanShared::envString("FC_VULKAN_PT_DENOISE_TIMING")) {
         fprintf(stderr, "[DENOISE] OIDN async worker published (%ux%u)\n",
                 w, h);
       }
@@ -998,7 +998,7 @@ SoRTXRenderBackend::updateDenoise()
       this->denoiseResultReady = FALSE;
       this->convergeAfterDenoise();
     }
-    if (getenv("FC_VULKAN_PT_DENOISE_TIMING")) {
+    if (SoVulkanShared::envString("FC_VULKAN_PT_DENOISE_TIMING")) {
       const double t1 = std::chrono::duration<double>(
         std::chrono::steady_clock::now().time_since_epoch()).count();
       fprintf(stderr, "[DENOISE] kind=2 frame denoise took %.1f ms (%ux%u)\n",
@@ -1171,7 +1171,7 @@ SoRTXRenderBackend::updateDenoise()
         // unsupported input image format).  Surface the first such failure as
         // a warning; the worker is a background thread so this cannot corrupt
         // the render state, and the in-shader edge-stopped mean still shows.
-        if (getenv("FC_VULKAN_PT_DENOISER_DEBUG")) {
+        if (SoVulkanShared::envString("FC_VULKAN_PT_DENOISER_DEBUG")) {
           const char * omsg = nullptr;
           const OIDNError oerr = oidnGetDeviceError(this->oidnDevice, &omsg);
           if (oerr != OIDN_ERROR_NONE) {
@@ -1193,7 +1193,7 @@ SoRTXRenderBackend::updateDenoise()
         // atomics are independent), fall through the worker-running guard, and
         // convergeAfterDenoise() with denoiseResultReady=FALSE -- publishing no
         // denoised result so the run idled on the raw/edge-stopped image.
-        if (getenv("FC_VULKAN_PT_DENOISE_TIMING")) {
+        if (SoVulkanShared::envString("FC_VULKAN_PT_DENOISE_TIMING")) {
           const auto wEnd = std::chrono::steady_clock::now();
           fprintf(stderr, "[DENOISE] OIDN async worker total=%.1fms (%ux%u)\n",
                   std::chrono::duration<double, std::milli>(wEnd - wStart).count(),
@@ -1205,7 +1205,7 @@ SoRTXRenderBackend::updateDenoise()
       // here.  The present pass for THIS frame already shows the fresh
       // in-shader edge-stopped mean; the denoised result is published on the
       // frame that observes oidnWorkerDone (copy-back + converge below).
-      if (getenv("FC_VULKAN_PT_DENOISE_TIMING")) {
+      if (SoVulkanShared::envString("FC_VULKAN_PT_DENOISE_TIMING")) {
         fprintf(stderr, "[DENOISE] OIDN async worker launched (%ux%u)\n", w, h);
       }
       return;
@@ -1451,7 +1451,7 @@ void
 rtxLogCallback(unsigned int level, const char * tag, const char * message,
                void * /*cbdata*/)
 {
-  if (getenv("FC_VULKAN_PT_DENOISER_DEBUG") || level <= 2) {
+  if (SoVulkanShared::envString("FC_VULKAN_PT_DENOISER_DEBUG") || level <= 2) {
     fprintf(stderr, "[RTX-DENOISER] level=%u tag=%s: %s\n", level,
             tag ? tag : "", message ? message : "");
   }
@@ -1515,7 +1515,7 @@ SoRTXRenderBackend::initRtxCuda()
     // A UUID was available, but none of the CUDA devices matched it.  Do not
     // silently fall back to another GPU: importing memory into a different
     // CUDA context would bind the denoiser to the wrong physical device.
-    if (getenv("FC_VULKAN_PT_DENOISER_DEBUG")) {
+    if (SoVulkanShared::envString("FC_VULKAN_PT_DENOISER_DEBUG")) {
       fprintf(stderr,
               "[RTX-DENOISER] no CUDA device matches the Vulkan device UUID "
               "(count=%d)\n",
@@ -1712,7 +1712,7 @@ SoRTXRenderBackend::createRtxInteropBuffer(size_t bytes,
     (externalMem.compatibleHandleTypes &
      VK_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_FD_BIT) != 0;
   if (!exportable || !compatibleOpaque) {
-    if (getenv("FC_VULKAN_PT_DENOISER_DEBUG")) {
+    if (SoVulkanShared::envString("FC_VULKAN_PT_DENOISER_DEBUG")) {
       fprintf(stderr,
               "[RTX-DENOISER] CUDA external buffer is not exportable: "
               "features=0x%x compatible=0x%x usage=0x%x bytes=%zu\n",
@@ -1754,7 +1754,7 @@ SoRTXRenderBackend::createRtxInteropBuffer(size_t bytes,
   ai.pNext = &allocFlags;
   if (vkAllocateMemory(this->device, &ai, this->allocator, &memory) !=
       VK_SUCCESS) {
-    if (getenv("FC_VULKAN_PT_DENOISER_DEBUG")) {
+    if (SoVulkanShared::envString("FC_VULKAN_PT_DENOISER_DEBUG")) {
       fprintf(stderr,
               "[RTX-DENOISER] failed to allocate external CUDA/Vulkan "
               "buffer: bytes=%zu dedicatedOnly=%d memoryType=%u\n",
@@ -1925,7 +1925,7 @@ SoRTXRenderBackend::ensureRtxInteropSemaphores()
   }
   this->rtxVkToCudaSignalPending = false;
   this->rtxCudaSignalPending = false;
-  if (getenv("FC_VULKAN_PT_DENOISER_DEBUG")) {
+  if (SoVulkanShared::envString("FC_VULKAN_PT_DENOISER_DEBUG")) {
     fprintf(stderr, "[RTX-DENOISER] CUDA/Vulkan semaphores ready=%s\n",
             ok ? "yes" : "no");
   }

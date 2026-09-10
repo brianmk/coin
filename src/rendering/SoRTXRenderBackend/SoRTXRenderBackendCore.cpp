@@ -425,7 +425,7 @@ SoRTXRenderBackend::probeComputeQueue(void)
       this->hasComputeQueue = (this->computeQueue != VK_NULL_HANDLE);
     }
   }
-  if (getenv("FC_VULKAN_RT_DEBUG")) {
+  if (SoVulkanShared::envString("FC_VULKAN_RT_DEBUG")) {
     fprintf(stderr,
             "[RTDBG] computeCaps family=%u idx=%u req=%d computeQueue=%d "
             "computeCount=%u flags=0x%x\n",
@@ -516,12 +516,19 @@ SoRTXRenderBackend::initialize(const SoRenderBackendInitParams & params)
   }
   this->haveDeviceUUID = deviceUUIDNonZero;
 
-  // Probe the created device's optional capability extensions once, so the
-  // shader/builder paths can select the best available technique at run time
-  // instead of querying the extension list every frame.  Only recordings --
-  // the features themselves must have been requested by the embedding app
-  // (QuarterVulkanWidget) when the device was created.
-  {
+  // Capability flags: prefer the embedding application's probe (passed via
+  // SoVulkanDeviceContext::caps) so the extension-name list lives in exactly
+  // one place; only enumerate the device when the application supplied no
+  // caps (offscreen/test contexts).  The features themselves must have been
+  // requested by the embedding app when the device was created.
+  if (deviceContext->capsValid) {
+    this->hasPositionFetch = deviceContext->caps.positionFetch;
+    this->hasOpacityMicromap = deviceContext->caps.opacityMicromap;
+    this->hasNvCluster = deviceContext->caps.nvCluster;
+    this->hasNvPartitioned = deviceContext->caps.nvPartitioned;
+    this->hasNvLinearSweptSpheres = deviceContext->caps.nvLinearSweptSpheres;
+  }
+  else {
     uint32_t extCount = 0;
     vkEnumerateDeviceExtensionProperties(this->physicalDevice, nullptr,
                                          &extCount, nullptr);
@@ -544,16 +551,16 @@ SoRTXRenderBackend::initialize(const SoRenderBackendInitParams & params)
       hasExt("VK_NV_partitioned_acceleration_structure");
     this->hasNvLinearSweptSpheres =
       hasExt("VK_NV_ray_tracing_linear_swept_spheres");
-    char capsBuf[192];
-    std::snprintf(
-      capsBuf, sizeof(capsBuf),
-      "[RTDBG] caps positionFetch=%d opacityMicromap=%d "
-      "nvCluster=%d nvPartitioned=%d nvLinearSweptSpheres=%d",
-      this->hasPositionFetch ? 1 : 0, this->hasOpacityMicromap ? 1 : 0,
-      this->hasNvCluster ? 1 : 0, this->hasNvPartitioned ? 1 : 0,
-      this->hasNvLinearSweptSpheres ? 1 : 0);
-    fprintf(stderr, "%s\n", capsBuf);
   }
+  char capsBuf[192];
+  std::snprintf(
+    capsBuf, sizeof(capsBuf),
+    "[RTDBG] caps positionFetch=%d opacityMicromap=%d "
+    "nvCluster=%d nvPartitioned=%d nvLinearSweptSpheres=%d",
+    this->hasPositionFetch ? 1 : 0, this->hasOpacityMicromap ? 1 : 0,
+    this->hasNvCluster ? 1 : 0, this->hasNvPartitioned ? 1 : 0,
+    this->hasNvLinearSweptSpheres ? 1 : 0);
+  fprintf(stderr, "%s\n", capsBuf);
 
   // The system loader only exports core entry points; resolve the ray
   // tracing KHR functions per-device.  Failing here means the device is
@@ -685,41 +692,41 @@ SoRTXRenderBackend::initialize(const SoRenderBackendInitParams & params)
   }
 
   // Optional path tracing tuning (kept out of the public API for now).
-  if (const char * bounces = getenv("FC_VULKAN_PT_BOUNCES")) {
+  if (const char * bounces = SoVulkanShared::envString("FC_VULKAN_PT_BOUNCES")) {
     const int value = std::atoi(bounces);
     if (value >= 1 && value <= 16) {
       this->ptMaxBounces = static_cast<uint32_t>(value);
     }
   }
-  if (const char * settle = getenv("FC_VULKAN_PT_SETTLE")) {
+  if (const char * settle = SoVulkanShared::envString("FC_VULKAN_PT_SETTLE")) {
     const int value = std::atoi(settle);
     if (value >= 1 && value <= 120) {
       this->ptSettleFrames = static_cast<uint32_t>(value);
     }
   }
-  if (const char * maxsamples = getenv("FC_VULKAN_PT_MAXSAMPLES")) {
+  if (const char * maxsamples = SoVulkanShared::envString("FC_VULKAN_PT_MAXSAMPLES")) {
     const int value = std::atoi(maxsamples);
     if (value >= 1 && value <= 100000) {
       this->ptMaxSamples = static_cast<uint32_t>(value);
     }
   }
   // Adaptive sampling tuning (see PathTrace.glsl u_adaptive).
-  if (const char * adaptive = getenv("FC_VULKAN_PT_ADAPTIVE")) {
+  if (const char * adaptive = SoVulkanShared::envString("FC_VULKAN_PT_ADAPTIVE")) {
     this->ptAdaptiveEnabled = std::atoi(adaptive) != 0 ? TRUE : FALSE;
   }
-  if (const char * minsamples = getenv("FC_VULKAN_PT_MIN_SAMPLES")) {
+  if (const char * minsamples = SoVulkanShared::envString("FC_VULKAN_PT_MIN_SAMPLES")) {
     const int value = std::atoi(minsamples);
     if (value >= 1 && value <= 256) {
       this->ptAdaptiveMinSamples = static_cast<uint32_t>(value);
     }
   }
-  if (const char * threshold = getenv("FC_VULKAN_PT_THRESHOLD")) {
+  if (const char * threshold = SoVulkanShared::envString("FC_VULKAN_PT_THRESHOLD")) {
     const float value = static_cast<float>(std::atof(threshold));
     if (value > 0.0f && value <= 1.0f) {
       this->ptAdaptiveThreshold = value;
     }
   }
-  if (const char * stopfraction = getenv("FC_VULKAN_PT_STOP_FRACTION")) {
+  if (const char * stopfraction = SoVulkanShared::envString("FC_VULKAN_PT_STOP_FRACTION")) {
     const float value = static_cast<float>(std::atof(stopfraction));
     // 0 disables the fraction-based auto-stop (run to the sample cap only).
     if (value >= 0.0f && value <= 1.0f) {
@@ -730,14 +737,14 @@ SoRTXRenderBackend::initialize(const SoRenderBackendInitParams & params)
   // mean (outlier spikes) with that mean.  FC_VULKAN_PT_FIREFLY is the
   // standard-deviation multiplier; 0 disables it (on by default at 5.0, the
   // member default) so the override only needs to set 0 to turn it off.
-  if (const char * firefly = getenv("FC_VULKAN_PT_FIREFLY")) {
+  if (const char * firefly = SoVulkanShared::envString("FC_VULKAN_PT_FIREFLY")) {
     const float value = static_cast<float>(std::atof(firefly));
     if (value >= 0.0f) {
       this->ptFireflySigma = value;
     }
   }
   // Temporal reprojection: carry converged samples across camera moves.
-  if (const char * temporal = getenv("FC_VULKAN_PT_TEMPORAL")) {
+  if (const char * temporal = SoVulkanShared::envString("FC_VULKAN_PT_TEMPORAL")) {
     this->ptTemporalEnabled = std::atoi(temporal) != 0 ? TRUE : FALSE;
   }
 
@@ -1384,7 +1391,7 @@ SoRTXRenderBackend::render(const SoDrawList & drawlist,
     this->updateDenoise();
     this->swapPathTracingHistory();
   }
-  if (getenv("FC_VULKAN_RT_DEBUG")) {
+  if (SoVulkanShared::envString("FC_VULKAN_RT_DEBUG")) {
     fprintf(stderr, "[RTDBG] submit=%d wait=%d asOk=%d traceOk=%d\n",
             static_cast<int>(submitResult), static_cast<int>(waitResult),
             asOk ? 1 : 0, traceOk ? 1 : 0);
@@ -1411,7 +1418,7 @@ SoRTXRenderBackend::render(const SoDrawList & drawlist,
 void
 SoRTXRenderBackend::dumpStorageImageIfRequested()
 {
-  const char * path = getenv("FC_VULKAN_PT_DUMP");
+  const char * path = SoVulkanShared::envString("FC_VULKAN_PT_DUMP");
   if (!path) return;
   if (this->storageImage == VK_NULL_HANDLE ||
       this->storageWidth == 0 || this->storageHeight == 0) return;
@@ -1419,8 +1426,8 @@ SoRTXRenderBackend::dumpStorageImageIfRequested()
   // FC_VULKAN_PT_DUMP_EVERY=N: dump every N frames (frame-index-suffixed),
   // letting one run capture the whole progressive sequence.  Otherwise dump
   // one frame at FC_VULKAN_PT_DUMP_FRAME (default = the sample cap).
-  const char * everystr = getenv("FC_VULKAN_PT_DUMP_EVERY");
-  const char * atstr = getenv("FC_VULKAN_PT_DUMP_FRAME");
+  const char * everystr = SoVulkanShared::envString("FC_VULKAN_PT_DUMP_EVERY");
+  const char * atstr = SoVulkanShared::envString("FC_VULKAN_PT_DUMP_FRAME");
   const uint32_t dumpAt =
     atstr ? static_cast<uint32_t>(std::atoi(atstr)) : this->ptMaxSamples;
   bool ok = false;
@@ -1443,102 +1450,35 @@ SoRTXRenderBackend::dumpStorageImageIfRequested()
 
   const uint32_t w = this->storageWidth;
   const uint32_t h = this->storageHeight;
-  const VkDeviceSize size = static_cast<VkDeviceSize>(w) * h * 4;
 
-  VkBuffer staging = VK_NULL_HANDLE;
-  VkDeviceMemory stagingMem = VK_NULL_HANDLE;
-  if (!this->createHostVisibleBuffer(
-        size, VK_BUFFER_USAGE_TRANSFER_DST_BIT, staging, stagingMem)) {
-    fprintf(stderr, "[RTDBG] dumpStorageImage: createHostVisibleBuffer failed\n");
-    return;
-  }
-
-  VkCommandBuffer cmd = this->beginTransientCommandBuffer();
-  if (cmd == VK_NULL_HANDLE) {
-    vkDestroyBuffer(this->device, staging, this->allocator);
-    vkFreeMemory(this->device, stagingMem, this->allocator);
-    return;
-  }
-
-  VkImageMemoryBarrier toTfr {};
-  toTfr.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
-  toTfr.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
-  toTfr.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
-  toTfr.oldLayout = VK_IMAGE_LAYOUT_GENERAL;
-  toTfr.newLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
-  toTfr.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-  toTfr.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-  toTfr.image = this->storageImage;
-  toTfr.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
-  toTfr.subresourceRange.levelCount = 1;
-  toTfr.subresourceRange.layerCount = 1;
-  vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,
-                       VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, nullptr, 0,
-                       nullptr, 1, &toTfr);
-
-  VkBufferImageCopy region {};
-  region.bufferOffset = 0;
-  region.bufferRowLength = 0;
-  region.bufferImageHeight = 0;
-  region.imageSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
-  region.imageSubresource.layerCount = 1;
-  region.imageExtent = {w, h, 1};
-  vkCmdCopyImageToBuffer(cmd, this->storageImage,
-                         VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, staging, 1,
-                         &region);
-
-  VkImageMemoryBarrier toGeneral {};
-  toGeneral.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
-  toGeneral.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
-  toGeneral.dstAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
-  toGeneral.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
-  toGeneral.newLayout = VK_IMAGE_LAYOUT_GENERAL;
-  toGeneral.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-  toGeneral.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-  toGeneral.image = this->storageImage;
-  toGeneral.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
-  toGeneral.subresourceRange.levelCount = 1;
-  toGeneral.subresourceRange.layerCount = 1;
-  vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_TRANSFER_BIT,
-                       VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, 0, 0, nullptr, 0,
-                       nullptr, 1, &toGeneral);
-
-  if (vkEndCommandBuffer(cmd) == VK_SUCCESS) {
-    VkSubmitInfo si {};
-    si.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
-    si.commandBufferCount = 1;
-    si.pCommandBuffers = &cmd;
-    if (vkQueueSubmit(this->queue, 1, &si, VK_NULL_HANDLE) == VK_SUCCESS &&
-        vkQueueWaitIdle(this->queue) == VK_SUCCESS) {
-      void * mapped = nullptr;
-      if (vkMapMemory(this->device, stagingMem, 0, size, 0, &mapped) !=
-            VK_SUCCESS ||
-          mapped == nullptr) {
-        fprintf(stderr, "[RTDBG] dumpStorageImage: vkMapMemory failed\n");
-      } else {
-        const unsigned char * src = static_cast<const unsigned char *>(mapped);
-        FILE * f = fopen(fullpath, "wb");
-        if (f) {
-          fprintf(f, "P6\n%u %u\n255\n", w, h);
-          const size_t rowbytes = static_cast<size_t>(w) * 4;
-          for (uint32_t y = 0; y < h; ++y) {
-            const unsigned char * r = src + (static_cast<size_t>(y) * rowbytes);
-            fwrite(r, 1, static_cast<size_t>(w) * 3, f);
-          }
-          fclose(f);
-          fprintf(stderr, "[RTDBG] dumpStorageImage: wrote %s %ux%u\n",
-                  fullpath, w, h);
-        } else {
-          fprintf(stderr, "[RTDBG] dumpStorageImage: fopen %s failed\n",
-                  fullpath);
+  // Shared image-to-host dump primitive (staging alloc + one-shot submit +
+  // map), so this no longer hand-rolls its own command buffer/submit/wait.
+  const SoVulkanShared::MemoryTypePicker pick =
+    [this](const VkMemoryRequirements & req, VkMemoryPropertyFlags desired,
+           uint32_t & index) {
+      return this->memProps.pick(req, desired, index);
+    };
+  SoVulkanShared::dumpImageToHost(
+    this->device, this->queue, this->transientPool, this->allocator,
+    this->storageImage, VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_LAYOUT_GENERAL, w, h,
+    pick, [&](const void * mapped) {
+      const unsigned char * src = static_cast<const unsigned char *>(mapped);
+      FILE * f = fopen(fullpath, "wb");
+      if (f) {
+        fprintf(f, "P6\n%u %u\n255\n", w, h);
+        const size_t rowbytes = static_cast<size_t>(w) * 4;
+        for (uint32_t y = 0; y < h; ++y) {
+          const unsigned char * r =
+            src + (static_cast<size_t>(y) * rowbytes);
+          fwrite(r, 1, static_cast<size_t>(w) * 3, f);
         }
-        vkUnmapMemory(this->device, stagingMem);
+        fclose(f);
+        fprintf(stderr, "[RTDBG] dumpStorageImage: wrote %s %ux%u\n", fullpath,
+                w, h);
+      } else {
+        fprintf(stderr, "[RTDBG] dumpStorageImage: fopen %s failed\n", fullpath);
       }
-    }
-  }
-
-  vkDestroyBuffer(this->device, staging, this->allocator);
-  vkFreeMemory(this->device, stagingMem, this->allocator);
+    });
 }
 
 SbBool
