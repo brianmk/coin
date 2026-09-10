@@ -61,7 +61,16 @@ const int COIN_MAX_LIGHTS = 8;
 vec3 coin_vulkan_lighting(vec3 eyePos, vec3 eyeNormal, vec3 baseColor)
 {
     vec3 N = normalize(eyeNormal);
-    vec3 V = normalize(-eyePos);
+    // View vector to the viewer.  For a perspective camera the viewer is the
+    // eye-space origin, so -eyePos is correct.  For an orthographic camera the
+    // viewer is at infinity: the view direction is the constant eye-space +Z.
+    // Using -eyePos there made dot(N, V) cross zero inside the silhouette (at
+    // r/R = sqrt(1 - (R/D)^2) instead of at the silhouette), so the two-sided
+    // normal flip below triggered over the front surface and drew a hard-edged
+    // dark ring.  u_proj[2][3] is the perspective-divide term: 0 for an
+    // orthographic projection, -1 for a perspective one.
+    vec3 V = (pc.u_proj[2][3] == 0.0) ? vec3(0.0, 0.0, 1.0)
+                                      : normalize(-eyePos);
     if (draw.u_materialParams.y > 0.5 && dot(N, V) < 0.0) {
         N = -N;
     }
