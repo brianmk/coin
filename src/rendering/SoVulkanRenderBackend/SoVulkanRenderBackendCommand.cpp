@@ -29,6 +29,69 @@
 
 using namespace CoinVulkanDetail;
 
+namespace {
+
+// Pack the per-draw push-constant block.  Shared by the single-draw and
+// instanced-batch recorders: they differ only in the wide-line/stipple fields
+// (the batch path is never wide-line and stipples nothing, so it passes
+// stippleFactor=0 / stipplePatternBits=0 / wideLine=false).
+VulkanPushConstants
+packPushConstants(const SoRenderCommand & command,
+                  const VulkanCachedCommand & entry,
+                  const float * uniformColorOverride,
+                  const float * projFloats, const float dpr,
+                  const float stippleFactor, const float stipplePatternBits,
+                  const bool wideLine)
+{
+  VulkanPushConstants push {};
+  std::memcpy(push.proj, projFloats, sizeof(float) * 16);
+  const SbVec4f & color = command.material.diffuse;
+  const bool useOverrideColor = uniformColorOverride != nullptr;
+  push.color[0] = useOverrideColor ? uniformColorOverride[0] : color[0];
+  push.color[1] = useOverrideColor ? uniformColorOverride[1] : color[1];
+  push.color[2] = useOverrideColor ? uniformColorOverride[2] : color[2];
+  push.color[3] = useOverrideColor ? uniformColorOverride[3] : color[3];
+  push.flags[0] = (entry.colorKey && !useOverrideColor) ? 1.0f : 0.0f;
+  push.flags[1] =
+    command.material.vertexColorAlphaIncludesOpacity ? 1.0f : 0.0f;
+  const bool textured = command.material.texture.pixels &&
+                        command.material.texture.width > 0 &&
+                        command.material.texture.height > 0;
+  push.flags[2] = (textured && !useOverrideColor) ? 1.0f : 0.0f;
+  push.flags[3] = command.material.textureAlphaIncludesOpacity ? 1.0f : 0.0f;
+  push.texParams[0] = static_cast<float>(command.material.texture.model);
+  push.texParams[1] = static_cast<float>(command.state.alphaTest.function);
+  push.texParams[2] = command.state.alphaTest.reference;
+  push.texParams[3] =
+    (command.material.flags & SO_MAT_IS_PIXEL_TEXT) ? 1.0f : 0.0f;
+  const SbVec4f & blendColor = command.material.texture.blendColor;
+  push.texBlend[0] = blendColor[0];
+  push.texBlend[1] = blendColor[1];
+  push.texBlend[2] = blendColor[2];
+  push.texBlend[3] = blendColor[3];
+  // Point size from the retained state, scaled by the device pixel ratio (the
+  // viewport is in device pixels; SoDrawStyle sizes are logical points).
+  push.pointSize = std::max(1.0f, command.state.raster.pointSize) * dpr;
+  push.lineParams[0] = stippleFactor;
+  // Slot y serves two masters: the wide-line shader reads the stipple pattern
+  // bits here, the visual shader reads the round-point flag.  A draw never
+  // reaches both shaders, so the slot is safe to share.
+  push.lineParams[1] = (wideLine && stipplePatternBits != 0.0f)
+    ? stipplePatternBits
+    : (command.state.raster.pointShape == SO_POINT_SHAPE_ROUND ? 1.0f : 0.0f);
+  // Point primitives (e.g. Sketcher vertex dots) render as round dots; the
+  // IR/Vulkan path has no marker-bitmap rasterization.
+  if (command.geometry.topology == SO_TOPOLOGY_POINTS) {
+    push.lineParams[1] = 1.0f;
+  }
+  push.lineParams[2] = wideLine ? 1.0f : 0.0f;
+  push.lineParams[3] =
+    command.geometry.topology == SO_TOPOLOGY_POINTS ? 1.0f : 0.0f;
+  return push;
+}
+
+} // namespace
+
 void
 SoVulkanRenderBackend::resetBoundState(VulkanRecordContext & ctx)
 {
@@ -105,23 +168,10 @@ SoVulkanRenderBackend::applyViewport(const SoRenderParams & params,
   // Clamp the clear region to the target so an off-screen viewport (origin
   // outside the target, or a size exceeding the extent) never generates a
   // clear outside the render area.
-  const int32_t x0 = std::max(0, static_cast<int32_t>(origin[0]));
-  const int32_t y0 = std::max(
-    0, static_cast<int32_t>(target.extent.height) -
-         static_cast<int32_t>(origin[1]) -
-         static_cast<int32_t>(size[1]));
-  const int32_t x1 = std::min(static_cast<int32_t>(target.extent.width),
-                              static_cast<int32_t>(origin[0]) +
-                                static_cast<int32_t>(size[0]));
-  const int32_t y1 = std::min(
-    static_cast<int32_t>(target.extent.height),
-    static_cast<int32_t>(target.extent.height) -
-      static_cast<int32_t>(origin[1]));
-  VkRect2D scissor {};
-  scissor.offset = {x0, y0};
-  scissor.extent = {static_cast<uint32_t>(std::max(0, x1 - x0)),
-                    static_cast<uint32_t>(std::max(0, y1 - y0))};
-  this->applyScissorState(scissor, ctx);
+  this->applyScissorState(
+    toVkRect(clampFlippedRect(origin[0], origin[1], size[0], size[1],
+                              target.extent)),
+    ctx);
 }
 
 // Apply a per-command viewport (recorded by the IR producer from
@@ -157,24 +207,11 @@ SoVulkanRenderBackend::applyCommandViewport(const SoRenderCommand & command,
 
   // The per-command viewport also bounds the draw region; mirror the
   // scissor clamp used by applyViewport().
-  const int32_t x0 = std::max(0, static_cast<int32_t>(raster.viewportX));
-  const int32_t y0 = std::max(
-    0, static_cast<int32_t>(target.extent.height) -
-         static_cast<int32_t>(raster.viewportY) -
-         static_cast<int32_t>(raster.viewportHeight));
-  const int32_t x1 =
-    std::min(static_cast<int32_t>(target.extent.width),
-             static_cast<int32_t>(raster.viewportX) +
-               static_cast<int32_t>(raster.viewportWidth));
-  const int32_t y1 = std::min(
-    static_cast<int32_t>(target.extent.height),
-    static_cast<int32_t>(target.extent.height) -
-      static_cast<int32_t>(raster.viewportY));
-  VkRect2D scissor {};
-  scissor.offset = {x0, y0};
-  scissor.extent = {static_cast<uint32_t>(std::max(0, x1 - x0)),
-                    static_cast<uint32_t>(std::max(0, y1 - y0))};
-  this->applyScissorState(scissor, ctx);
+  this->applyScissorState(
+    toVkRect(clampFlippedRect(raster.viewportX, raster.viewportY,
+                              raster.viewportWidth, raster.viewportHeight,
+                              target.extent)),
+    ctx);
 }
 
 void
@@ -213,21 +250,11 @@ SoVulkanRenderBackend::isFullTargetClear(const SoRenderParams & params,
   // pass can clear via its loadOp instead.  Empty viewports clear nothing.
   const SbVec2s & origin = params.viewport.getViewportOriginPixels();
   const SbVec2s & size = params.viewport.getViewportSizePixels();
-  const int32_t x0 = std::max(0, static_cast<int32_t>(origin[0]));
-  const int32_t y0 = std::max(
-    0, static_cast<int32_t>(target.extent.height) -
-       static_cast<int32_t>(origin[1]) -
-       static_cast<int32_t>(size[1]));
-  const int32_t x1 = std::min(static_cast<int32_t>(target.extent.width),
-                              static_cast<int32_t>(origin[0]) +
-                                static_cast<int32_t>(size[0]));
-  const int32_t y1 = std::min(
-    static_cast<int32_t>(target.extent.height),
-    static_cast<int32_t>(target.extent.height) -
-      static_cast<int32_t>(origin[1]));
-  return x0 == 0 && y0 == 0 &&
-    x1 == static_cast<int32_t>(target.extent.width) &&
-    y1 == static_cast<int32_t>(target.extent.height);
+  const FlippedRect r = clampFlippedRect(origin[0], origin[1], size[0], size[1],
+                                         target.extent);
+  return r.x0 == 0 && r.y0 == 0 &&
+    r.x1 == static_cast<int32_t>(target.extent.width) &&
+    r.y1 == static_cast<int32_t>(target.extent.height);
 }
 
 void
@@ -287,24 +314,12 @@ SoVulkanRenderBackend::recordClear(const SoRenderParams & params,
   // overwrite other viewports or the backing image outside the viewport.
   const SbVec2s & origin = params.viewport.getViewportOriginPixels();
   const SbVec2s & size = params.viewport.getViewportSizePixels();
-  const int32_t x0 = std::max(0, static_cast<int32_t>(origin[0]));
-  const int32_t y0 = std::max(
-    0, static_cast<int32_t>(target.extent.height) -
-         static_cast<int32_t>(origin[1]) -
-         static_cast<int32_t>(size[1]));
-  const int32_t x1 = std::min(static_cast<int32_t>(target.extent.width),
-                              static_cast<int32_t>(origin[0]) +
-                                static_cast<int32_t>(size[0]));
-  const int32_t y1 = std::min(
-    static_cast<int32_t>(target.extent.height),
-    static_cast<int32_t>(target.extent.height) -
-      static_cast<int32_t>(origin[1]));
-  if (x1 <= x0 || y1 <= y0) return;
+  const FlippedRect r = clampFlippedRect(origin[0], origin[1], size[0], size[1],
+                                         target.extent);
+  if (r.x1 <= r.x0 || r.y1 <= r.y0) return;
 
   VkClearRect rect {};
-  rect.rect.offset = {x0, y0};
-  rect.rect.extent = {static_cast<uint32_t>(x1 - x0),
-                      static_cast<uint32_t>(y1 - y0)};
+  rect.rect = toVkRect(r);
   rect.baseArrayLayer = 0;
   rect.layerCount = 1;
   vkCmdClearAttachments(ctx.buffer, attachmentCount, attachments, 1,
@@ -325,19 +340,10 @@ SoVulkanRenderBackend::recordOverlayDepthClear(const SoRenderCommand & command,
   // The overlay rect is stored in Coin/OpenGL (bottom-left) coordinates by
   // the producer; mirror the Y-flip applied by applyScissor().
   const SoRasterState & raster = command.state.raster;
-  const int32_t x0 = std::max(0, static_cast<int32_t>(raster.scissorX));
-  const int32_t y0 = std::max(
-    0, static_cast<int32_t>(target.extent.height) -
-         static_cast<int32_t>(raster.scissorY) -
-         static_cast<int32_t>(raster.scissorHeight));
-  const int32_t x1 = std::min(static_cast<int32_t>(target.extent.width),
-                              static_cast<int32_t>(raster.scissorX) +
-                                static_cast<int32_t>(raster.scissorWidth));
-  const int32_t y1 = std::min(
-    static_cast<int32_t>(target.extent.height),
-    static_cast<int32_t>(target.extent.height) -
-      static_cast<int32_t>(raster.scissorY));
-  if (x1 <= x0 || y1 <= y0) {
+  const FlippedRect r = clampFlippedRect(raster.scissorX, raster.scissorY,
+                                         raster.scissorWidth,
+                                         raster.scissorHeight, target.extent);
+  if (r.x1 <= r.x0 || r.y1 <= r.y0) {
     return;
   }
 
@@ -348,9 +354,7 @@ SoVulkanRenderBackend::recordOverlayDepthClear(const SoRenderCommand & command,
   attachment.clearValue.depthStencil.stencil = 0;
 
   VkClearRect rect {};
-  rect.rect.offset = {x0, y0};
-  rect.rect.extent = {static_cast<uint32_t>(x1 - x0),
-                      static_cast<uint32_t>(y1 - y0)};
+  rect.rect = toVkRect(r);
   rect.baseArrayLayer = 0;
   rect.layerCount = 1;
   vkCmdClearAttachments(ctx.buffer, 1, &attachment, 1, &rect);
@@ -395,12 +399,33 @@ SoVulkanRenderBackend::updateLightingSetup(const SoDrawList & drawlist)
     occupiedSlots = 1;
   }
 
+  // When the GL host pushed authoritative viewer lights, pack that single
+  // camera-anchored set once and point every command at it, instead of
+  // deriving per-command IR lighting.  The set is world-space and the visual
+  // shaders light in eye space, so it is packed through the frame view exactly
+  // like the IR setups below (fillLightingBlock applies the eye transform).
+  VkDeviceSize sceneLightOffset = 0;
+  if (!this->sceneLighting.lights.empty()) {
+    const uint32_t slot = std::min(occupiedSlots, 7u);
+    const VkDeviceSize offset =
+      static_cast<VkDeviceSize>(frameBase + slot) * this->lightingConstStride;
+    VulkanLightingUbo * u = reinterpret_cast<VulkanLightingUbo *>(
+      static_cast<char *>(this->lightingConstMapped) + offset);
+    SoRenderIR::fillLightingBlock(*u, this->sceneLighting, &frameView);
+    sceneLightOffset = offset;
+    ++occupiedSlots;
+  }
+
   for (int i = 0; i < drawlist.getNumCommands(); ++i) {
     const SoRenderCommand & command = drawlist.getCommand(i);
     const SoLightingHandle handle = command.lightingHandle;
     if (handle == 0 ||
         this->lightingSlotOffsets.find(handle) !=
           this->lightingSlotOffsets.end()) {
+      continue;
+    }
+    if (sceneLightOffset != 0) {
+      this->lightingSlotOffsets[handle] = sceneLightOffset;
       continue;
     }
     const SoLightingData * lighting = drawlist.getLighting(handle);
@@ -456,11 +481,7 @@ SoVulkanRenderBackend::updateLightingUniforms(const SoDrawList & drawlist,
   // own recorded matrices (whose near/far fields are stale and which lag
   // one frame behind during navigation).  Overlays that carry their own
   // viewport (the navigation cube sub-scene) keep their own camera.
-  const SbVec2s frameSize = params.viewport.getViewportSizePixels();
-  const bool frameCameraOverlay =
-    command.pass == SO_RENDERPASS_OVERLAY
-    && command.state.raster.viewportWidth == frameSize[0]
-    && command.state.raster.viewportHeight == frameSize[1];
+  const bool frameCameraOverlay = isFrameCameraOverlay(command, params);
   if (command.state.raster.scissorEnabled
       && command.pass == SO_RENDERPASS_OVERLAY && !frameCameraOverlay) {
     command.viewMatrix.getValue(m);
@@ -495,12 +516,20 @@ SoVulkanRenderBackend::updateLightingUniforms(const SoDrawList & drawlist,
     : (material.shadingModel == SO_SHADING_LEGACY_GOURAUD ? 1.0f : 0.0f);
 
   // Light count is consumed by the fragment shader loop; it is a per-material
-  // value carried here (the lighting block itself holds the array).
-  const SoLightingData * lighting = drawlist.getLighting(command.lightingHandle);
-  static const SoLightingData emptyLighting;
-  if (!lighting) lighting = &emptyLighting;
-  const int count = std::min<int>(static_cast<int>(lighting->lights.size()),
-                                  MAX_SHADER_LIGHTS);
+  // value carried here (the lighting block itself holds the array).  When the
+  // host pushed authoritative viewer lights, every command references that
+  // single set, so the count comes from it rather than the IR capture.
+  int count = 0;
+  if (!this->sceneLighting.lights.empty()) {
+    count = this->sceneLighting.lightCount();
+  }
+  else {
+    const SoLightingData * lighting =
+      drawlist.getLighting(command.lightingHandle);
+    static const SoLightingData emptyLighting;
+    if (!lighting) lighting = &emptyLighting;
+    count = lighting->lightCount();
+  }
   ubo.materialParams[2] = static_cast<float>(count);
 
   if (this->lightingMapped && this->uboSlotStride > 0) {
@@ -510,6 +539,67 @@ SoVulkanRenderBackend::updateLightingUniforms(const SoDrawList & drawlist,
 }
 
 
+
+VkDeviceSize
+SoVulkanRenderBackend::uboSlotOffset(const uint32_t slotIndex) const
+{
+  return ((this->uboFrameIndex % this->maxFramesInFlight) *
+            this->uboSlotsPerFrame + slotIndex) * this->uboSlotStride;
+}
+
+void
+SoVulkanRenderBackend::bindDrawDescriptors(const SoRenderCommand & command,
+                                           const uint32_t uboDynamicOffset,
+                                           const uint32_t slotIndex,
+                                           VulkanRecordContext & ctx)
+{
+  // Bind set 0 (lighting constant, dynamic offset per handle) and set 1
+  // (per-draw UBO + texture, dynamic offset).  Lighting is the same for every
+  // command sharing a handle, so its block was written once per handle by
+  // updateLightingSetup() and is merely referenced here.
+  VkDescriptorSet textureSet = this->resolveTextureSet(command);
+  if (textureSet == VK_NULL_HANDLE) {
+    textureSet = this->whiteDescriptorSet;
+  }
+  // Cache the lighting dynamic offset per handle: a frame's retained commands
+  // almost always share ONE handle, so only the first draw of a new handle
+  // pays the unordered_map lookup in lightingOffsetFor().  Set 0 re-binds only
+  // when the handle (its dynamic offset) actually changes; set 1 must re-bind
+  // every draw because its dynamic offset is the per-draw UBO slot.
+  uint32_t lightingDynamicOffset = ctx.lastLightingOffset;
+  if (command.lightingHandle != ctx.lastLightingHandle) {
+    lightingDynamicOffset =
+      static_cast<uint32_t>(this->lightingOffsetFor(command));
+    ctx.lastLightingHandle = command.lightingHandle;
+    ctx.lastLightingOffset = lightingDynamicOffset;
+  }
+  uint32_t bindingOffsets[2] = { lightingDynamicOffset, uboDynamicOffset };
+  if (ctx.lastBoundLightingOffset != lightingDynamicOffset ||
+      ctx.lastBoundTextureSet != textureSet) {
+    // First draw of a new lighting handle / texture set: bind both sets with
+    // their dynamic offsets in one call (also covers the frame's first draw).
+    const VkDescriptorSet both[2] = {this->lightingDescriptorSet, textureSet};
+    vkBackendTrace(this->uboFrameIndex, "draw.bindDescSets2",
+                   "slot=%u", slotIndex);
+    vkCmdBindDescriptorSets(ctx.buffer,
+                            VK_PIPELINE_BIND_POINT_GRAPHICS,
+                            this->pipelineLayout, 0, 2, both, 2,
+                            bindingOffsets);
+    ctx.lastBoundLightingOffset = lightingDynamicOffset;
+    ctx.lastBoundTextureSet = textureSet;
+  }
+  else {
+    // Same lighting handle + texture set as the previous draw: only the
+    // per-draw UBO dynamic offset advances.  Re-bind set 1 alone (set 0 stays
+    // bound from the last 2-set bind) instead of re-emitting both sets.
+    vkBackendTrace(this->uboFrameIndex, "draw.bindDescSets1",
+                   "slot=%u", slotIndex);
+    vkCmdBindDescriptorSets(ctx.buffer,
+                            VK_PIPELINE_BIND_POINT_GRAPHICS,
+                            this->pipelineLayout, 1, 1, &textureSet, 1,
+                            &bindingOffsets[1]);
+  }
+}
 
 void
 SoVulkanRenderBackend::recordDrawCommand(const SoDrawList & drawlist,
@@ -574,14 +664,8 @@ SoVulkanRenderBackend::recordDrawCommand(const SoDrawList & drawlist,
   // Wide-line rendering mirrors the GL wide-line path: line width > 1 or a
   // stipple pattern expands each segment into a quad.  The overlay
   // wireframe/point redraws keep the plain line path.
-  const bool lineTopology = command.geometry.topology == SO_TOPOLOGY_LINES ||
-    command.geometry.topology == SO_TOPOLOGY_LINE_STRIP;
-  const bool patternedLine =
-    command.state.raster.linePattern != 0xFFFF &&
-    command.state.raster.linePattern != 0;
-  const bool useWideLine =
-    lineTopology && fillModeOverride < 0 &&
-    (command.state.raster.lineWidth > 1.0f || patternedLine);
+  const bool useWideLine = isWideLine(command, fillModeOverride);
+  const bool patternedLine = isPatternedLine(command);
   // Line stipple mirrors classic GL (glLineStipple): each pattern bit
   // covers linePatternScaleFactor PIXELS in screen space.  The fragment
   // shader tests the bit selected by floor(distance / factor) % 16.
@@ -642,58 +726,10 @@ SoVulkanRenderBackend::recordDrawCommand(const SoDrawList & drawlist,
     }
     return;
   }
-  const VkDeviceSize uboOffset =
-    ((this->uboFrameIndex % this->maxFramesInFlight) *
-       this->uboSlotsPerFrame + slotIndex) *
-    this->uboSlotStride;
+  const VkDeviceSize uboOffset = this->uboSlotOffset(slotIndex);
   const uint32_t uboDynamicOffset = static_cast<uint32_t>(uboOffset);
 
-  // Bind set 0 (lighting constant, dynamic offset per handle) and set 1
-  // (per-draw UBO + texture, dynamic offset).  Lighting is the same for every
-  // command sharing a handle, so its block was written once per handle by
-  // updateLightingSetup() and is merely referenced here.
-  VkDescriptorSet textureSet = this->resolveTextureSet(command);
-  if (textureSet == VK_NULL_HANDLE) {
-    textureSet = this->whiteDescriptorSet;
-  }
-  // Cache the lighting dynamic offset per handle: a frame's retained commands
-  // almost always share ONE handle, so only the first draw of a new handle
-  // pays the unordered_map lookup in lightingOffsetFor().  Set 0 re-binds only
-  // when the handle (its dynamic offset) actually changes; set 1 must re-bind
-  // every draw because its dynamic offset is the per-draw UBO slot below.
-  uint32_t lightingDynamicOffset = ctx.lastLightingOffset;
-  if (command.lightingHandle != ctx.lastLightingHandle) {
-    lightingDynamicOffset =
-      static_cast<uint32_t>(this->lightingOffsetFor(command));
-    ctx.lastLightingHandle = command.lightingHandle;
-    ctx.lastLightingOffset = lightingDynamicOffset;
-  }
-  uint32_t bindingOffsets[2] = { lightingDynamicOffset, uboDynamicOffset };
-  if (ctx.lastBoundLightingOffset != lightingDynamicOffset ||
-      ctx.lastBoundTextureSet != textureSet) {
-    // First draw of a new lighting handle / texture set: bind both sets with
-    // their dynamic offsets in one call (also covers the frame's first draw).
-    const VkDescriptorSet both[2] = {this->lightingDescriptorSet, textureSet};
-    vkBackendTrace(this->uboFrameIndex, "draw.bindDescSets2",
-                   "slot=%u", slotIndex);
-    vkCmdBindDescriptorSets(ctx.buffer,
-                            VK_PIPELINE_BIND_POINT_GRAPHICS,
-                            this->pipelineLayout, 0, 2, both, 2,
-                            bindingOffsets);
-    ctx.lastBoundLightingOffset = lightingDynamicOffset;
-    ctx.lastBoundTextureSet = textureSet;
-  }
-  else {
-    // Same lighting handle + texture set as the previous draw: only the
-    // per-draw UBO dynamic offset advances.  Re-bind set 1 alone (set 0 stays
-    // bound from the last 2-set bind) instead of re-emitting both sets.
-    vkBackendTrace(this->uboFrameIndex, "draw.bindDescSets1",
-                   "slot=%u", slotIndex);
-    vkCmdBindDescriptorSets(ctx.buffer,
-                            VK_PIPELINE_BIND_POINT_GRAPHICS,
-                            this->pipelineLayout, 1, 1, &textureSet, 1,
-                            &bindingOffsets[1]);
-  }
+  this->bindDrawDescriptors(command, uboDynamicOffset, slotIndex, ctx);
 
   const VkDeviceSize vertexOffset = entry.vertexOffset;
   const bool indexed =
@@ -715,7 +751,6 @@ SoVulkanRenderBackend::recordDrawCommand(const SoDrawList & drawlist,
                                uniformColorOverride != nullptr);
   vkBackendTrace(this->uboFrameIndex, "draw.uboWrite", "slot=%u", slotIndex);
 
-  VulkanPushConstants push {};
   SbMat projValue;
   // Overlay-pass geometry that carries its own camera and viewport (the
   // navigation cube sub-scene) uses its own projection; overlay geometry
@@ -723,11 +758,7 @@ SoVulkanRenderBackend::recordDrawCommand(const SoDrawList & drawlist,
   // highlight) is frame-camera geometry and must share the frame projection
   // in params, otherwise it is projected through the scene camera's stale
   // near/far fields and lags behind navigation (see updateLightingUniforms).
-  const SbVec2s frameSize = params.viewport.getViewportSizePixels();
-  const bool frameCameraOverlay =
-    command.pass == SO_RENDERPASS_OVERLAY
-    && command.state.raster.viewportWidth == frameSize[0]
-    && command.state.raster.viewportHeight == frameSize[1];
+  const bool frameCameraOverlay = isFrameCameraOverlay(command, params);
   if (overlayPass && !frameCameraOverlay) {
     command.projMatrix.getValue(projValue);
   }
@@ -785,69 +816,9 @@ SoVulkanRenderBackend::recordDrawCommand(const SoDrawList & drawlist,
               pp[3][0], pp[3][1], pp[3][2], pp[3][3]);
     }
   }
-  std::memcpy(push.proj, &projValue[0][0], sizeof(float) * 16);
-  const SbVec4f & color = command.material.diffuse;
-  const bool useOverrideColor = uniformColorOverride != nullptr;
-  push.color[0] = useOverrideColor ? uniformColorOverride[0] : color[0];
-  push.color[1] = useOverrideColor ? uniformColorOverride[1] : color[1];
-  push.color[2] = useOverrideColor ? uniformColorOverride[2] : color[2];
-  push.color[3] = useOverrideColor ? uniformColorOverride[3] : color[3];
-  push.flags[0] = (entry.colorKey && !useOverrideColor) ? 1.0f : 0.0f;
-  push.flags[1] =
-    command.material.vertexColorAlphaIncludesOpacity ? 1.0f : 0.0f;
-  const bool textured = command.material.texture.pixels &&
-                        command.material.texture.width > 0 &&
-                        command.material.texture.height > 0;
-  push.flags[2] = (textured && !useOverrideColor) ? 1.0f : 0.0f;
-  push.flags[3] = command.material.textureAlphaIncludesOpacity
-                    ? 1.0f : 0.0f;
-  push.texParams[0] =
-    static_cast<float>(command.material.texture.model);
-  push.texParams[1] =
-    static_cast<float>(command.state.alphaTest.function);
-  push.texParams[2] = command.state.alphaTest.reference;
-  push.texParams[3] =
-    (command.material.flags & SO_MAT_IS_PIXEL_TEXT) ? 1.0f : 0.0f;
-  const SbVec4f & blendColor = command.material.texture.blendColor;
-  push.texBlend[0] = blendColor[0];
-  push.texBlend[1] = blendColor[1];
-  push.texBlend[2] = blendColor[2];
-  push.texBlend[3] = blendColor[3];
-  // Point size from the retained state (SoDrawStyle::pointSize via
-  // SoPointSizeElement); GL multiplies by the device pixel ratio because
-  // its viewport is in device pixels -- Vulkan viewports are too, so the
-  // same value applies directly.  Applies to point primitives and to
-  // VK_POLYGON_MODE_POINT (the wireframe/points overlay).
-  // The GL path scales width/size by the device-pixel ratio because the
-  // viewport is in device pixels while SoDrawStyle width/point-size are
-  // logical points (so a 2pt line is 2*dpr device px on a scaled display).
-  // The Vulkan viewport is device pixels too, so apply the same ratio here
-  // for parity; otherwise lines/points render 1/dpr too thin on a fractional
-  // (e.g. 1.25 / 1.5 / 2.0) scaling display.  frameDpr is hoisted per frame.
-  const float dpr = this->frameDpr;
-  push.pointSize = std::max(1.0f, command.state.raster.pointSize) * dpr;
-  push.lineParams[0] = push.lineParams[1] = push.lineParams[2] = 0.0f;
-  push.lineParams[3] = 0.0f;
-  push.lineParams[0] = stippleFactor;
-  // Slot y serves two masters: the wide-line shader reads the stipple
-  // pattern bits here, the visual shader reads the round-point flag.  A
-  // draw never reaches both shaders, so the slot is safe to share.
-  push.lineParams[1] = (useWideLine && patternedLine)
-    ? stipplePatternBits
-    : (command.state.raster.pointShape == SO_POINT_SHAPE_ROUND ? 1.0f : 0.0f);
-  // Point primitives (e.g. Sketcher vertex "dots" via SoMarkerSet, whose
-  // CIRCLE_FILLED marker is the intended glyph) render as round dots: the
-  // IR/Vulkan path has no marker-bitmap rasterization, so a filled round
-  // point (fragment-shader round discard) reproduces the dot appearance
-  // instead of a featureless (often sub-pixel) square.  Nothing scene-side
-  // sets SO_POINT_SHAPE_ROUND (SoRenderIR forces SQUARE in the blend state),
-  // so default every point primitive to round.
-  if (command.geometry.topology == SO_TOPOLOGY_POINTS) {
-    push.lineParams[1] = 1.0f;
-  }
-  push.lineParams[2] = useWideLine ? 1.0f : 0.0f;
-  push.lineParams[3] = command.geometry.topology == SO_TOPOLOGY_POINTS
-    ? 1.0f : 0.0f;
+  const VulkanPushConstants push = packPushConstants(
+    command, entry, uniformColorOverride, &projValue[0][0], this->frameDpr,
+    stippleFactor, stipplePatternBits, useWideLine);
 
   vkBackendTrace(this->uboFrameIndex, "draw.pushConstants", "slot=%u",
                  slotIndex);
@@ -870,8 +841,9 @@ SoVulkanRenderBackend::recordDrawCommand(const SoDrawList & drawlist,
             "fillMode=%d fillModeOverride=%d overlayPass=%d transparent=%d vbuf=%p vertexCount=%u\n",
             (const void*)&command, static_cast<int>(command.pass),
             static_cast<int>(command.geometry.topology),
-            color[0], color[1], color[2], color[3],
-            useOverrideColor ? 1 : 0,
+            command.material.diffuse[0], command.material.diffuse[1],
+            command.material.diffuse[2], command.material.diffuse[3],
+            uniformColorOverride != nullptr ? 1 : 0,
             push.color[0], push.color[1], push.color[2], push.color[3],
             push.flags[0], push.flags[1], push.flags[2], push.flags[3],
             push.lineParams[0], push.lineParams[1], push.lineParams[2],
@@ -937,7 +909,8 @@ SoVulkanRenderBackend::recordDrawCommand(const SoDrawList & drawlist,
     // the wide-line pipeline draws it as a triangle list.  Binds here so
     // the projection matrix (projValue) is already resolved.
     if (!this->expandWideLines(entry, command, params, projValue,
-                               std::max(1.0f, command.state.raster.lineWidth) * dpr)) {
+                               std::max(1.0f, command.state.raster.lineWidth) *
+                                 this->frameDpr)) {
       return;
     }
     VkDeviceSize wideOffset = 0;
@@ -1036,16 +1009,7 @@ SoVulkanRenderBackend::recordCommandBatch(const SoDrawList & drawlist,
   const VulkanCachedCommand & entryRef = this->gpuCache[found->second];
   if (entryRef.vertexBuffer == VK_NULL_HANDLE) return false;
 
-  bool useWideLine = false;
-  if (command.geometry.topology == SO_TOPOLOGY_LINES ||
-      command.geometry.topology == SO_TOPOLOGY_LINE_STRIP) {
-    const bool patternedLine =
-      command.state.raster.linePattern != 0xFFFF &&
-      command.state.raster.linePattern != 0;
-    useWideLine = fillModeOverride < 0 &&
-      (command.state.raster.lineWidth > 1.0f || patternedLine);
-  }
-  if (useWideLine) {
+  if (isWideLine(command, fillModeOverride)) {
     // Not batchable; caller falls back to per-command draws.
     return false;
   }
@@ -1065,43 +1029,13 @@ SoVulkanRenderBackend::recordCommandBatch(const SoDrawList & drawlist,
   // pre-pass reserved countDrawCommands() slots, so this cannot overflow.
   const uint32_t slotIndex = ctx.uboCmdIndex;
   ctx.uboCmdIndex += count;
-  const VkDeviceSize uboOffset =
-    ((this->uboFrameIndex % this->maxFramesInFlight) *
-       this->uboSlotsPerFrame + slotIndex) *
-    this->uboSlotStride;
+  const VkDeviceSize uboOffset = this->uboSlotOffset(slotIndex);
   const uint32_t uboDynamicOffset = static_cast<uint32_t>(uboOffset);
 
   // Descriptor set 0 (lighting constant) + set 1 (per-draw UBO + texture).
   // Lighting and texture are group-constant (batch key guarantees it), so bind
   // once using commands[0].
-  VkDescriptorSet textureSet = this->resolveTextureSet(command);
-  if (textureSet == VK_NULL_HANDLE) {
-    textureSet = this->whiteDescriptorSet;
-  }
-  uint32_t lightingDynamicOffset = ctx.lastLightingOffset;
-  if (command.lightingHandle != ctx.lastLightingHandle) {
-    lightingDynamicOffset =
-      static_cast<uint32_t>(this->lightingOffsetFor(command));
-    ctx.lastLightingHandle = command.lightingHandle;
-    ctx.lastLightingOffset = lightingDynamicOffset;
-  }
-  uint32_t bindingOffsets[2] = { lightingDynamicOffset, uboDynamicOffset };
-  if (ctx.lastBoundLightingOffset != lightingDynamicOffset ||
-      ctx.lastBoundTextureSet != textureSet) {
-    const VkDescriptorSet both[2] = {this->lightingDescriptorSet, textureSet};
-    vkCmdBindDescriptorSets(ctx.buffer,
-                            VK_PIPELINE_BIND_POINT_GRAPHICS,
-                            this->pipelineLayout, 0, 2, both, 2,
-                            bindingOffsets);
-    ctx.lastBoundLightingOffset = lightingDynamicOffset;
-    ctx.lastBoundTextureSet = textureSet;
-  }
-  else {
-    vkCmdBindDescriptorSets(ctx.buffer,
-                            VK_PIPELINE_BIND_POINT_GRAPHICS,
-                            this->pipelineLayout, 1, 1, &textureSet, 1,
-                            &bindingOffsets[1]);
-  }
+  this->bindDrawDescriptors(command, uboDynamicOffset, slotIndex, ctx);
 
   // Vertex buffer (binding 0).  The whole batch shares commands[0]'s geometry,
   // so one bind serves every instance.
@@ -1119,50 +1053,14 @@ SoVulkanRenderBackend::recordCommandBatch(const SoDrawList & drawlist,
   this->updateLightingUniforms(drawlist, command, params, uboOffset,
                                uniformColorOverride != nullptr);
 
-  // Push constants (group-constant).
-  VulkanPushConstants push {};
-  SbMat projValue;
-  // Batches are recorded only from the main (non-overlay) passes, so every
-  // command projects with the frame camera (mirrors recordDrawCommand's
-  // frameCameraOverlay=false branch).
-  std::memcpy(projValue, this->frameProjFloats, sizeof(float) * 16);
-  std::memcpy(push.proj, &projValue[0][0], sizeof(float) * 16);
-  const SbVec4f & color = command.material.diffuse;
-  const bool useOverrideColor = uniformColorOverride != nullptr;
-  push.color[0] = useOverrideColor ? uniformColorOverride[0] : color[0];
-  push.color[1] = useOverrideColor ? uniformColorOverride[1] : color[1];
-  push.color[2] = useOverrideColor ? uniformColorOverride[2] : color[2];
-  push.color[3] = useOverrideColor ? uniformColorOverride[3] : color[3];
-  push.flags[0] = (entryRef.colorKey && !useOverrideColor) ? 1.0f : 0.0f;
-  push.flags[1] =
-    command.material.vertexColorAlphaIncludesOpacity ? 1.0f : 0.0f;
-  const bool textured = command.material.texture.pixels &&
-                        command.material.texture.width > 0 &&
-                        command.material.texture.height > 0;
-  push.flags[2] = (textured && !useOverrideColor) ? 1.0f : 0.0f;
-  push.flags[3] = command.material.textureAlphaIncludesOpacity ? 1.0f : 0.0f;
-  push.texParams[0] = static_cast<float>(command.material.texture.model);
-  push.texParams[1] = static_cast<float>(command.state.alphaTest.function);
-  push.texParams[2] = command.state.alphaTest.reference;
-  push.texParams[3] =
-    (command.material.flags & SO_MAT_IS_PIXEL_TEXT) ? 1.0f : 0.0f;
-  const SbVec4f & blendColor = command.material.texture.blendColor;
-  push.texBlend[0] = blendColor[0];
-  push.texBlend[1] = blendColor[1];
-  push.texBlend[2] = blendColor[2];
-  push.texBlend[3] = blendColor[3];
-  const float dpr = this->frameDpr;
-  push.pointSize = std::max(1.0f, command.state.raster.pointSize) * dpr;
-  push.lineParams[0] = push.lineParams[1] = push.lineParams[2] = 0.0f;
-  push.lineParams[3] = 0.0f;
-  push.lineParams[1] =
-    command.state.raster.pointShape == SO_POINT_SHAPE_ROUND ? 1.0f : 0.0f;
-  if (command.geometry.topology == SO_TOPOLOGY_POINTS) {
-    push.lineParams[1] = 1.0f;
-  }
-  push.lineParams[2] = 0.0f;
-  push.lineParams[3] =
-    command.geometry.topology == SO_TOPOLOGY_POINTS ? 1.0f : 0.0f;
+  // Push constants (group-constant).  Batches are recorded only from the main
+  // (non-overlay) passes, so every command projects with the frame camera and
+  // the wide-line/stipple fields are unused (mirrors recordDrawCommand's
+  // frameCameraOverlay=false, non-wide-line branch).
+  const VulkanPushConstants push = packPushConstants(
+    command, entryRef, uniformColorOverride, this->frameProjFloats,
+    this->frameDpr, /*stippleFactor*/ 0.0f, /*stipplePatternBits*/ 0.0f,
+    /*wideLine*/ false);
 
   vkCmdPushConstants(ctx.buffer, this->pipelineLayout,
                       VK_SHADER_STAGE_VERTEX_BIT |

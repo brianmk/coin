@@ -495,6 +495,17 @@ struct SoLightData {
 struct SoLightingData {
   SbVec3f ambient = SbVec3f(0.2f, 0.2f, 0.2f);
   std::vector<SoLightData> lights;
+
+  //! Number of lights a shader evaluates for this setup: the stored lights
+  //! clamped to the fixed shader capacity.  The block packer and every backend
+  //! that carries the count in a per-draw uniform share this one definition.
+  int lightCount() const
+  {
+    return static_cast<int>(
+      this->lights.size() < static_cast<size_t>(SO_MAX_SHADER_LIGHTS)
+        ? this->lights.size()
+        : static_cast<size_t>(SO_MAX_SHADER_LIGHTS));
+  }
 };
 
 namespace SoRenderIR {
@@ -507,6 +518,19 @@ namespace SoRenderIR {
 */
 COIN_DLL_API SoLightData lightToEye(const SoLightData & world,
                                     const SbMatrix & view);
+
+/*!
+  \brief Transform one eye-space light into world space for \a inverseView.
+
+  The exact inverse of lightToEye(): pass the inverse of the world-to-eye
+  view matrix.  Applications use this when they derive a camera-anchored light
+  set (Coin GL's view-relative three-point lighting) and must hand the
+  renderer world-space lights, so the eye<->world convention lives here rather
+  than being re-derived at each call site.  Directions are rotated; positions
+  are transformed fully; spot cone parameters are carried unchanged.
+*/
+COIN_DLL_API SoLightData lightToWorld(const SoLightData & eye,
+                                      const SbMatrix & inverseView);
 
 } // namespace SoRenderIR
 

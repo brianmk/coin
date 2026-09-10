@@ -27,6 +27,67 @@
 
 using namespace CoinVulkanDetail;
 
+VkPipeline
+SoVulkanRenderBackend::createGraphicsPipeline(
+  VkPipelineLayout layout, VkRenderPass renderPass,
+  const VkPipelineShaderStageCreateInfo stages[2],
+  const VkPipelineVertexInputStateCreateInfo & vertexInput,
+  const VkPipelineInputAssemblyStateCreateInfo & inputAssembly,
+  const VkPipelineRasterizationStateCreateInfo & rasterization,
+  VkSampleCountFlagBits sampleCount,
+  const VkPipelineDepthStencilStateCreateInfo & depthStencil,
+  const VkPipelineColorBlendAttachmentState & blendAttachment)
+{
+  // Fixed state shared by every graphics pipeline: viewport/scissor are
+  // dynamic, one color attachment, no logic op, one sample count.
+  VkPipelineViewportStateCreateInfo viewportState {};
+  viewportState.sType = VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO;
+  viewportState.viewportCount = 1;
+  viewportState.scissorCount = 1;
+
+  VkPipelineMultisampleStateCreateInfo multisample {};
+  multisample.sType = VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO;
+  multisample.rasterizationSamples = sampleCount;
+
+  VkPipelineColorBlendStateCreateInfo colorBlend {};
+  colorBlend.sType = VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO;
+  colorBlend.logicOpEnable = VK_FALSE;
+  colorBlend.attachmentCount = 1;
+  colorBlend.pAttachments = &blendAttachment;
+
+  const VkDynamicState dynamicStates[] = {
+    VK_DYNAMIC_STATE_VIEWPORT,
+    VK_DYNAMIC_STATE_SCISSOR,
+  };
+  VkPipelineDynamicStateCreateInfo dynamicState {};
+  dynamicState.sType = VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO;
+  dynamicState.dynamicStateCount = 2;
+  dynamicState.pDynamicStates = dynamicStates;
+
+  VkGraphicsPipelineCreateInfo ci {};
+  ci.sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO;
+  ci.stageCount = 2;
+  ci.pStages = stages;
+  ci.pVertexInputState = &vertexInput;
+  ci.pInputAssemblyState = &inputAssembly;
+  ci.pViewportState = &viewportState;
+  ci.pRasterizationState = &rasterization;
+  ci.pMultisampleState = &multisample;
+  ci.pDepthStencilState = &depthStencil;
+  ci.pColorBlendState = &colorBlend;
+  ci.pDynamicState = &dynamicState;
+  ci.layout = layout;
+  ci.renderPass = renderPass;
+  ci.subpass = 0;
+
+  VkPipeline created = VK_NULL_HANDLE;
+  if (vkCreateGraphicsPipelines(this->device, this->pipelineCacheHandle, 1,
+                                &ci, this->allocator, &created) != VK_SUCCESS) {
+    return VK_NULL_HANDLE;
+  }
+  return created;
+}
+
 bool
 SoVulkanRenderBackend::createBackgroundPipeline(
   const SoVulkanRenderTarget & target,
@@ -65,12 +126,6 @@ SoVulkanRenderBackend::createBackgroundPipeline(
   inputAssembly.topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
   inputAssembly.primitiveRestartEnable = VK_FALSE;
 
-  VkPipelineViewportStateCreateInfo viewportState {};
-  viewportState.sType =
-    VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO;
-  viewportState.viewportCount = 1;
-  viewportState.scissorCount = 1;
-
   VkPipelineRasterizationStateCreateInfo rasterization {};
   rasterization.sType =
     VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO;
@@ -80,11 +135,6 @@ SoVulkanRenderBackend::createBackgroundPipeline(
   rasterization.cullMode = VK_CULL_MODE_NONE;
   rasterization.frontFace = VK_FRONT_FACE_COUNTER_CLOCKWISE;
   rasterization.lineWidth = 1.0f;
-
-  VkPipelineMultisampleStateCreateInfo multisample {};
-  multisample.sType =
-    VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO;
-  multisample.rasterizationSamples = target.sampleCount;
 
   // The gradient fills the whole viewport and writes no depth so geometry
   // drawn afterwards is unaffected.
@@ -103,44 +153,11 @@ SoVulkanRenderBackend::createBackgroundPipeline(
     VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT;
   blendAttachment.blendEnable = VK_FALSE;
 
-  VkPipelineColorBlendStateCreateInfo colorBlend {};
-  colorBlend.sType =
-    VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO;
-  colorBlend.logicOpEnable = VK_FALSE;
-  colorBlend.attachmentCount = 1;
-  colorBlend.pAttachments = &blendAttachment;
-
-  const VkDynamicState dynamicStates[] = {
-    VK_DYNAMIC_STATE_VIEWPORT,
-    VK_DYNAMIC_STATE_SCISSOR,
-  };
-  VkPipelineDynamicStateCreateInfo dynamicState {};
-  dynamicState.sType =
-    VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO;
-  dynamicState.dynamicStateCount = 2;
-  dynamicState.pDynamicStates = dynamicStates;
-
-  VkGraphicsPipelineCreateInfo ci {};
-  ci.sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO;
-  ci.stageCount = 2;
-  ci.pStages = stages;
-  ci.pVertexInputState = &vertexInput;
-  ci.pInputAssemblyState = &inputAssembly;
-  ci.pViewportState = &viewportState;
-  ci.pRasterizationState = &rasterization;
-  ci.pMultisampleState = &multisample;
-  ci.pDepthStencilState = &depthStencil;
-  ci.pColorBlendState = &colorBlend;
-  ci.pDynamicState = &dynamicState;
-  ci.layout = this->backgroundPipelineLayout;
-  ci.renderPass = renderPass;
-  ci.subpass = 0;
-
-  VkPipeline created = VK_NULL_HANDLE;
-  const VkResult result =
-    vkCreateGraphicsPipelines(this->device, this->pipelineCacheHandle, 1, &ci,
-                              this->allocator, &created);
-  if (result != VK_SUCCESS) {
+  const VkPipeline created = this->createGraphicsPipeline(
+    this->backgroundPipelineLayout, renderPass, stages, vertexInput,
+    inputAssembly, rasterization, target.sampleCount, depthStencil,
+    blendAttachment);
+  if (created == VK_NULL_HANDLE) {
     this->emitError("failed to create Vulkan background pipeline");
     this->backgroundPipelineCache[key] = VK_NULL_HANDLE;
     pipeline = VK_NULL_HANDLE;
@@ -171,35 +188,20 @@ SoVulkanRenderBackend::recordBackground(const SoRenderParams & params,
   // applyViewport()); geometry drawn afterwards restores its own viewport.
   const SbVec2s & origin = params.viewport.getViewportOriginPixels();
   const SbVec2s & size = params.viewport.getViewportSizePixels();
-  const int32_t x0 = std::max(0, static_cast<int32_t>(origin[0]));
-  const int32_t y0 = std::max(
-    0, static_cast<int32_t>(target.extent.height) -
-         static_cast<int32_t>(origin[1]) -
-         static_cast<int32_t>(size[1]));
-  const int32_t x1 = std::min(static_cast<int32_t>(target.extent.width),
-                              static_cast<int32_t>(origin[0]) +
-                                static_cast<int32_t>(size[0]));
-  const int32_t y1 = std::min(
-    static_cast<int32_t>(target.extent.height),
-    static_cast<int32_t>(target.extent.height) -
-      static_cast<int32_t>(origin[1]));
-  const int32_t w = std::max(0, x1 - x0);
-  const int32_t h = std::max(0, y1 - y0);
-  if (w == 0 || h == 0) return;
+  const VkRect2D rect = toVkRect(clampFlippedRect(
+    origin[0], origin[1], size[0], size[1], target.extent));
+  if (rect.extent.width == 0 || rect.extent.height == 0) return;
 
   VkViewport viewport {};
-  viewport.x = static_cast<float>(x0);
-  viewport.y = static_cast<float>(y0);
-  viewport.width = static_cast<float>(w);
-  viewport.height = static_cast<float>(h);
+  viewport.x = static_cast<float>(rect.offset.x);
+  viewport.y = static_cast<float>(rect.offset.y);
+  viewport.width = static_cast<float>(rect.extent.width);
+  viewport.height = static_cast<float>(rect.extent.height);
   viewport.minDepth = 0.0f;
   viewport.maxDepth = 1.0f;
   this->applyViewportState(viewport, ctx);
 
-  VkRect2D scissor {};
-  scissor.offset = {x0, y0};
-  scissor.extent = {static_cast<uint32_t>(w), static_cast<uint32_t>(h)};
-  this->applyScissorState(scissor, ctx);
+  this->applyScissorState(rect, ctx);
 
   this->applyPipeline(pipeline, ctx);
 
@@ -212,10 +214,10 @@ SoVulkanRenderBackend::recordBackground(const SoRenderParams & params,
   push.bottomColor[1] = params.backgroundBottomColor[1];
   push.bottomColor[2] = params.backgroundBottomColor[2];
   push.bottomColor[3] = params.backgroundBottomColor[3];
-  push.viewport[0] = static_cast<float>(w);
-  push.viewport[1] = static_cast<float>(h);
-  push.viewport[2] = static_cast<float>(x0);
-  push.viewport[3] = static_cast<float>(y0);
+  push.viewport[0] = static_cast<float>(rect.extent.width);
+  push.viewport[1] = static_cast<float>(rect.extent.height);
+  push.viewport[2] = static_cast<float>(rect.offset.x);
+  push.viewport[3] = static_cast<float>(rect.offset.y);
   vkCmdPushConstants(ctx.buffer, this->backgroundPipelineLayout,
                       VK_SHADER_STAGE_VERTEX_BIT |
                         VK_SHADER_STAGE_FRAGMENT_BIT,
@@ -377,15 +379,7 @@ SoVulkanRenderBackend::getOrCreatePipeline(const SoRenderCommand & command,
   // segments into quads on the CPU and draws them with the wide-line
   // pipeline as triangle lists, mirroring the GL wide-line geometry shader.
   // The overlay wireframe redraw stays on the plain line path.
-  const bool lineTopology = command.geometry.topology == SO_TOPOLOGY_LINES ||
-    command.geometry.topology == SO_TOPOLOGY_LINE_STRIP;
-  const bool patternedLine =
-    command.state.raster.linePattern != 0xFFFF &&
-    command.state.raster.linePattern != 0;
-  const bool useWideLine =
-    lineTopology && fillModeOverride < 0 &&
-    (command.state.raster.lineWidth > 1.0f || patternedLine);
-  key.wideLine = useWideLine;
+  key.wideLine = isWideLine(command, fillModeOverride);
   key.renderPass = pass;
   key.topology = command.geometry.topology;
   key.fillMode = overlay ? static_cast<uint8_t>(fillModeOverride)
@@ -580,12 +574,6 @@ SoVulkanRenderBackend::getOrCreatePipeline(const SoRenderCommand & command,
     : topologyToVk(command.geometry.topology);
   inputAssembly.primitiveRestartEnable = VK_FALSE;
 
-  VkPipelineViewportStateCreateInfo viewportState {};
-  viewportState.sType =
-    VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO;
-  viewportState.viewportCount = 1;
-  viewportState.scissorCount = 1;
-
   VkPipelineRasterizationStateCreateInfo rasterization {};
   rasterization.sType =
     VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO;
@@ -629,11 +617,6 @@ SoVulkanRenderBackend::getOrCreatePipeline(const SoRenderCommand & command,
   rasterization.depthBiasEnable = depthBias ? VK_TRUE : VK_FALSE;
   rasterization.depthBiasConstantFactor = depthBiasConstant;
   rasterization.depthBiasSlopeFactor = depthBiasSlope;
-
-  VkPipelineMultisampleStateCreateInfo multisample {};
-  multisample.sType =
-    VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO;
-  multisample.rasterizationSamples = target.sampleCount;
 
   VkPipelineDepthStencilStateCreateInfo depthStencil {};
   depthStencil.sType =
@@ -689,44 +672,10 @@ SoVulkanRenderBackend::getOrCreatePipeline(const SoRenderCommand & command,
     blendAttachment.alphaBlendOp = VK_BLEND_OP_ADD;
   }
 
-  VkPipelineColorBlendStateCreateInfo colorBlend {};
-  colorBlend.sType =
-    VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO;
-  colorBlend.logicOpEnable = VK_FALSE;
-  colorBlend.attachmentCount = 1;
-  colorBlend.pAttachments = &blendAttachment;
-
-  const VkDynamicState dynamicStates[] = {
-    VK_DYNAMIC_STATE_VIEWPORT,
-    VK_DYNAMIC_STATE_SCISSOR,
-  };
-  VkPipelineDynamicStateCreateInfo dynamicState {};
-  dynamicState.sType =
-    VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO;
-  dynamicState.dynamicStateCount = 2;
-  dynamicState.pDynamicStates = dynamicStates;
-
-  VkGraphicsPipelineCreateInfo ci {};
-  ci.sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO;
-  ci.stageCount = 2;
-  ci.pStages = stages;
-  ci.pVertexInputState = &vertexInput;
-  ci.pInputAssemblyState = &inputAssembly;
-  ci.pViewportState = &viewportState;
-  ci.pRasterizationState = &rasterization;
-  ci.pMultisampleState = &multisample;
-  ci.pDepthStencilState = &depthStencil;
-  ci.pColorBlendState = &colorBlend;
-  ci.pDynamicState = &dynamicState;
-  ci.layout = this->pipelineLayout;
-  ci.renderPass = pass;
-  ci.subpass = 0;
-
-  VkPipeline created = VK_NULL_HANDLE;
-  const VkResult result =
-    vkCreateGraphicsPipelines(this->device, this->pipelineCacheHandle, 1, &ci,
-                              this->allocator, &created);
-  if (result != VK_SUCCESS) {
+  const VkPipeline created = this->createGraphicsPipeline(
+    this->pipelineLayout, pass, stages, vertexInput, inputAssembly,
+    rasterization, target.sampleCount, depthStencil, blendAttachment);
+  if (created == VK_NULL_HANDLE) {
     this->emitError("failed to create Vulkan graphics pipeline");
     this->pipelineCache[key] = VK_NULL_HANDLE;
     if (cacheEntry) {

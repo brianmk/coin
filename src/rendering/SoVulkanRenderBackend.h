@@ -146,6 +146,23 @@ struct VulkanCachedCommand {
     //! retained draw list with an unchanged camera.
     uint64_t expandFingerprint = 0;
     uint32_t expandVertexCount = 0;
+
+    // Release the slot's buffer + memory and reset it to the empty state.
+    // Singular teardown used by both the synchronous and the deferred cache
+    // destroy paths.
+    void destroy(VkDevice device, const VkAllocationCallbacks * allocator)
+    {
+      if (buffer != VK_NULL_HANDLE) {
+        vkDestroyBuffer(device, buffer, allocator);
+        buffer = VK_NULL_HANDLE;
+      }
+      if (memory != VK_NULL_HANDLE) {
+        vkFreeMemory(device, memory, allocator);
+        memory = VK_NULL_HANDLE;
+      }
+      mapped = nullptr;
+      size = 0;
+    }
   };
   std::vector<VulkanWideLineBuffer> wideLineBuffers;
   uint32_t wideLineVertexCount = 0;
@@ -296,6 +313,18 @@ public:
   void setPointsOverlay(SbBool enabled);
   void setEdgeColor(const SbColor4f & color);
 
+  /*!
+    \brief Provide the authoritative viewer lighting (GL host -> raster backend).
+
+    \a lighting is the camera-anchored world-space viewer light set (headlight,
+    backlight, fill light) plus the intensity-scaled scene ambient.  When its
+    light list is non-empty the executor uses this single set for every command
+    instead of the per-command IR capture, so the raster Vulkan path lights the
+    scene exactly like the RT backend (and follows the camera like Coin GL).
+    Passing an empty light list restores the per-command IR lighting.
+  */
+  void setSceneLights(const SoLightingData & lighting);
+
 private:
   // --- Initialization helpers -------------------------------------------
   bool createCommandPool();
@@ -314,9 +343,27 @@ private:
   bool createWideLineShaders();
   bool createBackgroundResources();
   bool createPipelineCache();
+  // Wrap a SPIR-V blob in a VkShaderModule.  The three shader-pair creators
+  // used to define the same create-module lambda each.
+  bool createShaderModule(const uint32_t * code, size_t count,
+                          VkShaderModule & module);
   bool createBackgroundPipeline(const SoVulkanRenderTarget & target,
                                 VkRenderPass renderPass,
                                 VkPipeline & pipeline);
+  // Assemble and create a graphics pipeline from the caller-supplied varying
+  // state (stages/vertex input/input assembly/raster/depth-stencil/blend
+  // attachment).  The fixed state shared by every pipeline (dynamic viewport+
+  // scissor, multisample, color-blend wrapper, create info) lives here; the
+  // visual and background pipelines both route through it.
+  VkPipeline createGraphicsPipeline(
+    VkPipelineLayout layout, VkRenderPass renderPass,
+    const VkPipelineShaderStageCreateInfo stages[2],
+    const VkPipelineVertexInputStateCreateInfo & vertexInput,
+    const VkPipelineInputAssemblyStateCreateInfo & inputAssembly,
+    const VkPipelineRasterizationStateCreateInfo & rasterization,
+    VkSampleCountFlagBits sampleCount,
+    const VkPipelineDepthStencilStateCreateInfo & depthStencil,
+    const VkPipelineColorBlendAttachmentState & blendAttachment);
   bool ensureFramebuffer(const SoVulkanRenderTarget * target,
                          VkRenderPass renderPass);
   void recordBackground(const SoRenderParams & params,
@@ -356,6 +403,12 @@ private:
   void updateGeometryCache(const SoDrawList & drawlist, bool overlaysOnly = false,
                            bool geometryContentUnchanged = false);
   VulkanCachedCommand & getOrCreateCache(const SoRenderCommand * command);
+  // Return the GPU cache entry for a drawable command, or nullptr when the
+  // command carries no geometry, is absent from the cache, or has no vertex
+  // buffer.  The worklist builder repeated this three-check filter at every
+  // bucket.
+  const VulkanCachedCommand * findCachedDrawable(
+    const SoRenderCommand & command) const;
   void uploadGeometry(VulkanCachedCommand & entry,
                       const SoRenderCommand & command);
   bool uploadGeometryShared(VulkanCachedCommand & entry,
@@ -375,6 +428,10 @@ private:
   uint32_t allocateGeometryBlock(VkDeviceSize capacity);
   bool allocateGeometryArena(uint32_t blockId, VkDeviceSize size,
                              VkDeviceSize & offset);
+  // Unmap + destroy the buffer + free the memory of a geometry block and
+  // reset it to the empty state.  Shared by releaseGeometryBlock() and
+  // destroyAllGeometryBlocks(), which previously repeated the teardown.
+  void releaseGeometryBlockResources(VulkanGeometryBlock & block);
   void releaseGeometryBlock(uint32_t blockId);
   void deferReleaseGeometryBlock(uint32_t blockId);
   void destroyAllGeometryBlocks();
@@ -514,6 +571,19 @@ private:
   // loadOp instead of a vkCmdClearAttachments region clear.
   bool isFullTargetClear(const SoRenderParams & params,
                          const SoVulkanRenderTarget & target) const;
+  // Byte offset of a per-draw lighting-UBO / instance-model ring slot within
+  // the current frame's ring half.  Both the single-draw and batch recorders
+  // derived this from their slot index identically.
+  VkDeviceSize uboSlotOffset(uint32_t slotIndex) const;
+  // Resolve and bind descriptor set 0 (lighting constant, dynamic offset) and
+  // set 1 (per-draw UBO + texture, dynamic offset) for one draw.  Set 0
+  // re-binds only when the lighting handle's offset actually changes; set 1
+  // always advances with the per-draw UBO offset.  Shared by the single-draw
+  // and batch recorders.
+  void bindDrawDescriptors(const SoRenderCommand & command,
+                           uint32_t uboDynamicOffset,
+                           uint32_t slotIndex,
+                           VulkanRecordContext & ctx);
   void recordDrawCommand(const SoDrawList & drawlist,
                          const SoRenderCommand & command,
                          const SoVulkanRenderTarget & target,
@@ -588,6 +658,30 @@ private:
                    VulkanRecordContext & ctx,
                    VkFramebuffer inheritFramebuffer);
 
+  // Shared prologue of renderExternal()/renderExternalOverlay(): validate the
+  // common preconditions and target, advance the frame (matrices, frame
+  // boundary, lighting setup, geometry cache) and flush pending texture
+  // uploads.  Returns the validated target, or nullptr after emitting the
+  // caller-specific error.  `reserveCompositeSlots` reserves the
+  // countCompositeCommands() lighting slots the overlay path needs (the full
+  // path reserves inside recordFrame()).  A non-null `timing` receives the
+  // setup/geom/tex sub-phase durations for the [RTDBG] line.
+  struct ExternalFrameTiming {
+    double setupMs = 0.0;
+    double geomMs = 0.0;
+    double texMs = 0.0;
+  };
+  const SoVulkanRenderTarget * prepareExternalFrame(
+      const SoDrawList & drawlist, const SoRenderParams & params,
+      VkCommandBuffer commandBuffer, VkRenderPass renderPass,
+      const char * caller, bool overlaysOnly, bool reserveCompositeSlots,
+      ExternalFrameTiming * timing);
+  // Validate params.renderTarget (non-null, image views set, non-zero extent),
+  // emitting "invalid Vulkan render target" on failure.  Used by every render
+  // entry point.
+  const SoVulkanRenderTarget * validateRenderTarget(
+      const SoRenderParams & params) const;
+
   // --- Vulkan resource helpers -------------------------------------------
   bool createBuffer(VkDeviceSize size,
                     VkBufferUsageFlags usage,
@@ -623,6 +717,18 @@ private:
                                   VkMemoryPropertyFlags desiredProperties,
                                   VkBuffer & buffer, VkDeviceMemory & memory,
                                   const void * data = nullptr);
+  // Create a HOST_VISIBLE | HOST_COHERENT buffer and establish its persistent
+  // mapping in one step.  On any failure buffer/memory are left null and
+  // *mapped null, with nothing allocated.  Used by every per-frame UBO / ring
+  // buffer (lighting ring, lighting constant ring, instance-model ring, wide-
+  // line quad slots), which all share the same create+map+rollback shape.
+  bool createMappedBuffer(VkDeviceSize size, VkBufferUsageFlags usage,
+                          VkBuffer & buffer, VkDeviceMemory & memory,
+                          void ** mapped);
+  // Defer destruction of a buffer + its memory to the deferred-destruction
+  // ring (the submission that may still reference it must drain first).  Null
+  // handles are ignored, so callers need not pre-check.
+  void deferDestroyBufferMemory(VkBuffer buffer, VkDeviceMemory memory);
   // Ensure the per-instance model-matrix buffer holds at least `bytes`
   // (HOST_VISIBLE | HOST_COHERENT, persistently mapped).  Recreates + remaps
   // on growth; the old buffer is released through the deferred ring.
@@ -822,6 +928,13 @@ private:
   // by updateLightingSetup() before recording and consumed by
   // updateLightingUniforms()/recordDrawCommand().
   std::unordered_map<SoLightingHandle, VkDeviceSize> lightingSlotOffsets;
+
+  // Authoritative viewer lighting pushed by the GL host via setSceneLights().
+  // When its light list is non-empty, updateLightingSetup() uses this
+  // camera-anchored world-space set for every command instead of the
+  // per-command IR SoLightingData, so the raster path matches the RT path and
+  // the GL viewer's view-relative lights.
+  SoLightingData sceneLighting;
 
   // Resources replaced during recording are destroyed maxFramesInFlight
   // frames later, after the submissions that still reference them have
