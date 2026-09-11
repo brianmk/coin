@@ -1,0 +1,1074 @@
+<!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Transitional//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-transitional.dtd">
+<html xmlns="http://www.w3.org/1999/xhtml">
+<head>
+<meta http-equiv="Content-Type" content="text/xhtml;charset=UTF-8"/>
+<meta http-equiv="X-UA-Compatible" content="IE=9"/>
+<meta name="generator" content="Doxygen 1.10.0"/>
+<meta name="viewport" content="width=device-width, initial-scale=1"/>
+<!-- BEGIN opengraph metadata -->
+<meta property="og:title" content="Doxygen Awesome" />
+<meta property="og:image" content="https://repository-images.githubusercontent.com/348492097/4f16df80-88fb-11eb-9d31-4015ff22c452" />
+<meta property="og:description" content="Custom CSS theme for doxygen html-documentation with lots of customization parameters." />
+<meta property="og:url" content="https://jothepro.github.io/doxygen-awesome-css/" />
+<!-- END opengraph metadata -->
+<!-- BEGIN twitter metadata -->
+<meta name="twitter:image:src" content="https://repository-images.githubusercontent.com/348492097/4f16df80-88fb-11eb-9d31-4015ff22c452" />
+<meta name="twitter:title" content="Doxygen Awesome" />
+<meta name="twitter:description" content="Custom CSS theme for doxygen html-documentation with lots of customization parameters." />
+<!-- END twitter metadata -->
+<title>Coin: SoElement Class Reference</title>
+<link href="tabs.css" rel="stylesheet" type="text/css"/>
+<link rel="icon" type="image/svg+xml" href="logo.drawio.svg"/>
+<script type="text/javascript" src="jquery.js"></script>
+<script type="text/javascript" src="dynsections.js"></script>
+<script type="text/javascript" src="doxygen-awesome-darkmode-toggle.js"></script>
+<script type="text/javascript" src="doxygen-awesome-fragment-copy-button.js"></script>
+<script type="text/javascript" src="doxygen-awesome-paragraph-link.js"></script>
+<script type="text/javascript" src="doxygen-awesome-interactive-toc.js"></script>
+<script type="text/javascript" src="doxygen-awesome-tabs.js"></script>
+<script type="text/javascript" src="toggle-alternative-theme.js"></script>
+<script type="text/javascript">
+    DoxygenAwesomeFragmentCopyButton.init()
+    DoxygenAwesomeDarkModeToggle.init()
+    DoxygenAwesomeParagraphLink.init()
+    DoxygenAwesomeInteractiveToc.init()
+    DoxygenAwesomeTabs.init()
+</script>
+<link href="navtree.css" rel="stylesheet" type="text/css"/>
+<script type="text/javascript" src="resize.js"></script>
+<script type="text/javascript" src="navtreedata.js"></script>
+<script type="text/javascript" src="navtree.js"></script>
+<script type="text/javascript" src="cookie.js"></script>
+<link href="search/search.css" rel="stylesheet" type="text/css"/>
+<script type="text/javascript" src="search/searchdata.js"></script>
+<script type="text/javascript" src="search/search.js"></script>
+<link href="doxygen.css" rel="stylesheet" type="text/css" />
+<link href="doxygen-awesome.css" rel="stylesheet" type="text/css"/>
+<link href="custom.css" rel="stylesheet" type="text/css"/>
+<link href="doxygen-awesome-sidebar-only.css" rel="stylesheet" type="text/css"/>
+<link href="doxygen-awesome-sidebar-only-darkmode-toggle.css" rel="stylesheet" type="text/css"/>
+<link href="custom-alternative.css" rel="stylesheet" type="text/css"/>
+</head>
+<body>
+<!-- https://tholman.com/github-corners/ -->
+<a href="https://github.com/coin3d/coin" class="github-corner" title="View source on GitHub" target="_blank" rel="noopener noreferrer">
+    <svg viewBox="0 0 250 250" width="40" height="40" style="position: absolute; top: 0; border: 0; right: 0; z-index: 99;" aria-hidden="true">
+    <path d="M0,0 L115,115 L130,115 L142,142 L250,250 L250,0 Z"></path><path d="M128.3,109.0 C113.8,99.7 119.0,89.6 119.0,89.6 C122.0,82.7 120.5,78.6 120.5,78.6 C119.2,72.0 123.4,76.3 123.4,76.3 C127.3,80.9 125.5,87.3 125.5,87.3 C122.9,97.6 130.6,101.9 134.4,103.2" fill="currentColor" style="transform-origin: 130px 106px;" class="octo-arm"></path><path d="M115.0,115.0 C114.9,115.1 118.7,116.5 119.8,115.4 L133.7,101.6 C136.9,99.2 139.9,98.4 142.2,98.6 C133.8,88.0 127.5,74.4 143.8,58.0 C148.5,53.4 154.0,51.2 159.7,51.0 C160.3,49.4 163.2,43.6 171.4,40.1 C171.4,40.1 176.1,42.5 178.8,56.2 C183.1,58.6 187.2,61.8 190.9,65.4 C194.5,69.0 197.7,73.2 200.1,77.6 C213.8,80.2 216.3,84.9 216.3,84.9 C212.7,93.1 206.9,96.0 205.4,96.6 C205.1,102.4 203.0,107.8 198.3,112.5 C181.9,128.9 168.3,122.5 157.7,114.1 C157.9,116.9 156.7,120.9 152.7,124.9 L141.0,136.5 C139.8,137.7 141.6,141.9 141.8,141.8 Z" fill="currentColor" class="octo-body"></path></svg></a><style>.github-corner:hover .octo-arm{animation:octocat-wave 560ms ease-in-out}@keyframes octocat-wave{0%,100%{transform:rotate(0)}20%,60%{transform:rotate(-25deg)}40%,80%{transform:rotate(10deg)}}@media (max-width:500px){.github-corner:hover .octo-arm{animation:none}.github-corner .octo-arm{animation:octocat-wave 560ms ease-in-out}}</style>
+<div id="top"><!-- do not remove this div, it is closed by doxygen! -->
+<div id="titlearea">
+<table cellspacing="0" cellpadding="0">
+ <tbody>
+ <tr style="height: 56px;">
+  <td id="projectlogo"><img alt="Logo" src="Coin_logo.png"/></td>
+  <td id="projectalign" style="padding-left: 0.5em;">
+   <div id="projectname">Coin
+   &#160;<span id="projectnumber">4.0.10</span>
+   </div>
+   <div id="projectbrief">Coin3D core library</div>
+  </td>
+ </tr>
+ </tbody>
+</table>
+</div>
+<!-- end header part -->
+<!-- Generated by Doxygen 1.10.0 -->
+<script type="text/javascript">
+/* @license magnet:?xt=urn:btih:d3d9a9a6595521f9666a5e94cc830dab83b65699&amp;dn=expat.txt MIT */
+var searchBox = new SearchBox("searchBox", "search/",'.html');
+/* @license-end */
+</script>
+<script type="text/javascript" src="menudata.js"></script>
+<script type="text/javascript" src="menu.js"></script>
+<script type="text/javascript">
+/* @license magnet:?xt=urn:btih:d3d9a9a6595521f9666a5e94cc830dab83b65699&amp;dn=expat.txt MIT */
+$(function() {
+  initMenu('',true,false,'search.php','Search');
+  $(function() { init_search(); });
+});
+/* @license-end */
+</script>
+<div id="main-nav"></div>
+</div><!-- top -->
+<div id="side-nav" class="ui-resizable side-nav-resizable">
+  <div id="nav-tree">
+    <div id="nav-tree-contents">
+      <div id="nav-sync" class="sync"></div>
+    </div>
+  </div>
+  <div id="splitbar" style="-moz-user-select:none;" 
+       class="ui-resizable-handle">
+  </div>
+</div>
+<script type="text/javascript">
+/* @license magnet:?xt=urn:btih:d3d9a9a6595521f9666a5e94cc830dab83b65699&amp;dn=expat.txt MIT */
+$(function(){initNavTree('classSoElement.html',''); initResizable(); });
+/* @license-end */
+</script>
+<div id="doc-content">
+<!-- window showing the filter options -->
+<div id="MSearchSelectWindow"
+     onmouseover="return searchBox.OnSearchSelectShow()"
+     onmouseout="return searchBox.OnSearchSelectHide()"
+     onkeydown="return searchBox.OnSearchSelectKey(event)">
+</div>
+
+<!-- iframe showing the search results (closed by default) -->
+<div id="MSearchResultsWindow">
+<div id="MSearchResults">
+<div class="SRPage">
+<div id="SRIndex">
+<div id="SRResults"></div>
+<div class="SRStatus" id="Loading">Loading...</div>
+<div class="SRStatus" id="Searching">Searching...</div>
+<div class="SRStatus" id="NoMatches">No Matches</div>
+</div>
+</div>
+</div>
+</div>
+
+<div class="header">
+  <div class="summary">
+<a href="#pub-methods">Public Member Functions</a> &#124;
+<a href="#pub-static-methods">Static Public Member Functions</a> &#124;
+<a href="#pro-methods">Protected Member Functions</a> &#124;
+<a href="#pro-static-methods">Static Protected Member Functions</a> &#124;
+<a href="#pro-attribs">Protected Attributes</a> &#124;
+<a href="#pro-static-attribs">Static Protected Attributes</a> &#124;
+<a href="classSoElement-members.html">List of all members</a>  </div>
+  <div class="headertitle"><div class="title">SoElement Class Reference<span class="mlabels"><span class="mlabel">abstract</span></span><div class="ingroups"><a class="el" href="group__coin__elements.html">Element Classes</a></div></div></div>
+</div><!--header-->
+<div class="contents">
+
+<p><a class="el" href="classSoElement.html" title="SoElement is the abstract base class for all elements.">SoElement</a> is the abstract base class for all elements.  
+ <a href="#details">More...</a></p>
+
+<p><code>#include &lt;<a class="el" href="SoElement_8h_source.html">Inventor/elements/SoElement.h</a>&gt;</code></p>
+<div class="dynheader">
+Inheritance diagram for SoElement:</div>
+<div class="dyncontent">
+ <div class="center">
+  <img src="classSoElement.png" usemap="#SoElement_map" alt=""/>
+  <map id="SoElement_map" name="SoElement_map">
+<area href="classSoAccumulatedElement.html" title="The SoAccumulatedElement class is an abstract class for storing accumulated state." alt="SoAccumulatedElement" shape="rect" coords="212,56,414,80"/>
+<area href="classSoCacheElement.html" title="The SoCacheElement class stores and manages the open caches." alt="SoCacheElement" shape="rect" coords="212,112,414,136"/>
+<area href="classSoCacheHintElement.html" title="The SoCacheHintElement class is yet to be documented." alt="SoCacheHintElement" shape="rect" coords="212,168,414,192"/>
+<area href="classSoCullElement.html" title="The SoCullElement class is used internally for render and pick culling." alt="SoCullElement" shape="rect" coords="212,224,414,248"/>
+<area href="classSoDepthBufferElement.html" title="The SoDepthBufferElement controls the depth buffer settings." alt="SoDepthBufferElement" shape="rect" coords="212,280,414,304"/>
+<area href="classSoFloatElement.html" title="SoFloatElement is an abstract base class for elements that consists of a single float value." alt="SoFloatElement" shape="rect" coords="212,336,414,360"/>
+<area href="classSoGLCacheContextElement.html" title="The SoGLCacheContextElement class handles the OpenGL cache for a context." alt="SoGLCacheContextElement" shape="rect" coords="212,392,414,416"/>
+<area href="classSoGLRenderPassElement.html" title="The SoGLRenderPassElement class is yet to be documented." alt="SoGLRenderPassElement" shape="rect" coords="212,448,414,472"/>
+<area href="classSoGLUpdateAreaElement.html" title="The SoGLUpdateAreaElement class is yet to be documented." alt="SoGLUpdateAreaElement" shape="rect" coords="212,504,414,528"/>
+<area href="classSoGLVBOElement.html" title="The SoGLVBOElement class is used to store VBO state." alt="SoGLVBOElement" shape="rect" coords="212,560,414,584"/>
+<area href="classSoInt32Element.html" title="The SoInt32Element class is the base class for elements that simply store a 32-bit integer." alt="SoInt32Element" shape="rect" coords="212,616,414,640"/>
+<area href="classSoLazyElement.html" title="The SoLazyElement class is used to handle material and shape properties." alt="SoLazyElement" shape="rect" coords="212,672,414,696"/>
+<area href="classSoLocalBBoxMatrixElement.html" title="The SoLocalBBoxMatrixElement class is yet to be documented." alt="SoLocalBBoxMatrixElement" shape="rect" coords="212,728,414,752"/>
+<area href="classSoMultiTextureCoordinateElement.html" title="The SoMultiTextureCoordinateElement class is yet to be documented." alt="SoMultiTextureCoordinateElement" shape="rect" coords="212,784,414,808"/>
+<area href="classSoMultiTextureEnabledElement.html" title="The SoMultiTextureEnabledElement class is an element which stores whether texturing is enabled or not..." alt="SoMultiTextureEnabledElement" shape="rect" coords="212,840,414,864"/>
+<area href="classSoMultiTextureImageElement.html" title="The SoMultiTextureImageElement class is yet to be documented." alt="SoMultiTextureImageElement" shape="rect" coords="212,896,414,920"/>
+<area href="classSoOverrideElement.html" title="The SoOverrideElement maintains a list of overridable elements and a list over which elements should ..." alt="SoOverrideElement" shape="rect" coords="212,952,414,976"/>
+<area href="classSoPickRayElement.html" title="The SoPickRayElement class is yet to be documented." alt="SoPickRayElement" shape="rect" coords="212,1008,414,1032"/>
+<area href="classSoProfilerElement.html" title="The SoProfilerElement element class is for registering statistics during scene graph traversals." alt="SoProfilerElement" shape="rect" coords="212,1064,414,1088"/>
+<area href="classSoReplacedElement.html" title="The SoReplacedElement class is an abstract element superclass." alt="SoReplacedElement" shape="rect" coords="212,1120,414,1144"/>
+<area href="classSoResetMatrixElement.html" alt="SoResetMatrixElement" shape="rect" coords="212,1176,414,1200"/>
+<area href="classSoShapeHintsElement.html" title="The SoShapeHintsElement class is yet to be documented." alt="SoShapeHintsElement" shape="rect" coords="212,1232,414,1256"/>
+<area href="classSoShapeStyleElement.html" title="The SoShapeStyleElement class is yet to be documented." alt="SoShapeStyleElement" shape="rect" coords="212,1288,414,1312"/>
+<area href="classSoTextureCombineElement.html" title="The SoTextureCombineElement class is yet to be documented." alt="SoTextureCombineElement" shape="rect" coords="212,1344,414,1368"/>
+<area href="classSoTextureOverrideElement.html" title="The SoTextureOverrideElement makes it possible to override texture elements." alt="SoTextureOverrideElement" shape="rect" coords="212,1400,414,1424"/>
+<area href="classSoViewportRegionElement.html" title="The SoViewportRegionElement class is yet to be documented." alt="SoViewportRegionElement" shape="rect" coords="212,1456,414,1480"/>
+<area href="classSoWindowElement.html" title="The SoWindowElement class is used to store current window attributes." alt="SoWindowElement" shape="rect" coords="212,1512,414,1536"/>
+  </map>
+</div></div>
+<table class="memberdecls">
+<tr class="heading"><td colspan="2"><h2 class="groupheader"><a id="pub-methods" name="pub-methods"></a>
+Public Member Functions</h2></td></tr>
+<tr class="memitem:a9ce2a1034d3bb27910ce9a3eea6e64e5" id="r_a9ce2a1034d3bb27910ce9a3eea6e64e5"><td class="memItemLeft" align="right" valign="top"><a class="el" href="classSbList.html">virtual</a>&#160;</td><td class="memItemRight" valign="bottom"><a class="el" href="#a9ce2a1034d3bb27910ce9a3eea6e64e5">~SoElement</a> ()</td></tr>
+<tr class="separator:a9ce2a1034d3bb27910ce9a3eea6e64e5"><td class="memSeparator" colspan="2">&#160;</td></tr>
+<tr class="memitem:a4a6e2a38cdbbdd1dccbb3e9928e68d55" id="r_a4a6e2a38cdbbdd1dccbb3e9928e68d55"><td class="memItemLeft" align="right" valign="top"><a class="el" href="classSbList.html">virtual</a> <a class="el" href="classSoElement.html">SoElement</a> *&#160;</td><td class="memItemRight" valign="bottom"><a class="el" href="#a4a6e2a38cdbbdd1dccbb3e9928e68d55">copyMatchInfo</a> (<a class="el" href="classSbList.html">void</a>) <a class="el" href="classSbList.html">const</a> =0</td></tr>
+<tr class="separator:a4a6e2a38cdbbdd1dccbb3e9928e68d55"><td class="memSeparator" colspan="2">&#160;</td></tr>
+<tr class="memitem:a2605d7b8bb04419d287df1202e6dd858" id="r_a2605d7b8bb04419d287df1202e6dd858"><td class="memItemLeft" align="right" valign="top"><a id="a2605d7b8bb04419d287df1202e6dd858" name="a2605d7b8bb04419d287df1202e6dd858"></a>
+int&#160;</td><td class="memItemRight" valign="bottom"><b>getDepth</b> (<a class="el" href="classSbList.html">void</a>) <a class="el" href="classSbList.html">const</a></td></tr>
+<tr class="separator:a2605d7b8bb04419d287df1202e6dd858"><td class="memSeparator" colspan="2">&#160;</td></tr>
+<tr class="memitem:a9dad36865b17b7eca80694c81c2c2498" id="r_a9dad36865b17b7eca80694c81c2c2498"><td class="memItemLeft" align="right" valign="top">int&#160;</td><td class="memItemRight" valign="bottom"><a class="el" href="#a9dad36865b17b7eca80694c81c2c2498">getStackIndex</a> (<a class="el" href="classSbList.html">void</a>) <a class="el" href="classSbList.html">const</a></td></tr>
+<tr class="separator:a9dad36865b17b7eca80694c81c2c2498"><td class="memSeparator" colspan="2">&#160;</td></tr>
+<tr class="memitem:aa13a3cd44030e3fe914e7bfeea5058e4" id="r_aa13a3cd44030e3fe914e7bfeea5058e4"><td class="memItemLeft" align="right" valign="top"><a class="el" href="classSbList.html">const</a> <a class="el" href="classSoType.html">SoType</a>&#160;</td><td class="memItemRight" valign="bottom"><a class="el" href="#aa13a3cd44030e3fe914e7bfeea5058e4">getTypeId</a> (<a class="el" href="classSbList.html">void</a>) <a class="el" href="classSbList.html">const</a></td></tr>
+<tr class="separator:aa13a3cd44030e3fe914e7bfeea5058e4"><td class="memSeparator" colspan="2">&#160;</td></tr>
+<tr class="memitem:a620552c04e13e74ac19bfdb3cebca818" id="r_a620552c04e13e74ac19bfdb3cebca818"><td class="memItemLeft" align="right" valign="top"><a class="el" href="classSbList.html">virtual</a> <a class="el" href="classSbList.html">void</a>&#160;</td><td class="memItemRight" valign="bottom"><a class="el" href="#a620552c04e13e74ac19bfdb3cebca818">init</a> (<a class="el" href="classSoState.html">SoState</a> *state)</td></tr>
+<tr class="separator:a620552c04e13e74ac19bfdb3cebca818"><td class="memSeparator" colspan="2">&#160;</td></tr>
+<tr class="memitem:a50b30f50781837a7aedc5cdbd25c5ecb" id="r_a50b30f50781837a7aedc5cdbd25c5ecb"><td class="memItemLeft" align="right" valign="top"><a class="el" href="classSbList.html">virtual</a> SbBool&#160;</td><td class="memItemRight" valign="bottom"><a class="el" href="#a50b30f50781837a7aedc5cdbd25c5ecb">matches</a> (<a class="el" href="classSbList.html">const</a> <a class="el" href="classSoElement.html">SoElement</a> *element) <a class="el" href="classSbList.html">const</a> =0</td></tr>
+<tr class="separator:a50b30f50781837a7aedc5cdbd25c5ecb"><td class="memSeparator" colspan="2">&#160;</td></tr>
+<tr class="memitem:a47fb7cba01227fed02b5d48d7797dddb" id="r_a47fb7cba01227fed02b5d48d7797dddb"><td class="memItemLeft" align="right" valign="top"><a class="el" href="classSbList.html">virtual</a> <a class="el" href="classSbList.html">void</a>&#160;</td><td class="memItemRight" valign="bottom"><a class="el" href="#a47fb7cba01227fed02b5d48d7797dddb">pop</a> (<a class="el" href="classSoState.html">SoState</a> *state, <a class="el" href="classSbList.html">const</a> <a class="el" href="classSoElement.html">SoElement</a> *<a class="el" href="classSbList.html">prevTopElement</a>)</td></tr>
+<tr class="separator:a47fb7cba01227fed02b5d48d7797dddb"><td class="memSeparator" colspan="2">&#160;</td></tr>
+<tr class="memitem:a80417133fe0e879d0a8a23c3d1548a61" id="r_a80417133fe0e879d0a8a23c3d1548a61"><td class="memItemLeft" align="right" valign="top"><a class="el" href="classSbList.html">virtual</a> <a class="el" href="classSbList.html">void</a>&#160;</td><td class="memItemRight" valign="bottom"><a class="el" href="#a80417133fe0e879d0a8a23c3d1548a61">print</a> (<a class="el" href="classSbList.html">FILE</a> *<a class="el" href="classSbList.html">file</a>=<a class="el" href="classSbList.html">stdout</a>) <a class="el" href="classSbList.html">const</a></td></tr>
+<tr class="separator:a80417133fe0e879d0a8a23c3d1548a61"><td class="memSeparator" colspan="2">&#160;</td></tr>
+<tr class="memitem:a69fc44b31adb066ba40bbc555298b107" id="r_a69fc44b31adb066ba40bbc555298b107"><td class="memItemLeft" align="right" valign="top"><a class="el" href="classSbList.html">virtual</a> <a class="el" href="classSbList.html">void</a>&#160;</td><td class="memItemRight" valign="bottom"><a class="el" href="#a69fc44b31adb066ba40bbc555298b107">push</a> (<a class="el" href="classSoState.html">SoState</a> *state)</td></tr>
+<tr class="separator:a69fc44b31adb066ba40bbc555298b107"><td class="memSeparator" colspan="2">&#160;</td></tr>
+<tr class="memitem:a8508119bc6d937ab882f45f86745d2e1" id="r_a8508119bc6d937ab882f45f86745d2e1"><td class="memItemLeft" align="right" valign="top"><a id="a8508119bc6d937ab882f45f86745d2e1" name="a8508119bc6d937ab882f45f86745d2e1"></a>
+<a class="el" href="classSbList.html">void</a>&#160;</td><td class="memItemRight" valign="bottom"><b>setDepth</b> (<a class="el" href="classSbList.html">const</a> int <a class="el" href="#a60e3b7f1344de81f7d6a198e7655235f">depth</a>)</td></tr>
+<tr class="separator:a8508119bc6d937ab882f45f86745d2e1"><td class="memSeparator" colspan="2">&#160;</td></tr>
+</table><table class="memberdecls">
+<tr class="heading"><td colspan="2"><h2 class="groupheader"><a id="pub-static-methods" name="pub-static-methods"></a>
+Static Public Member Functions</h2></td></tr>
+<tr class="memitem:ad2a2e4a49f1cccadc601e75a51048391" id="r_ad2a2e4a49f1cccadc601e75a51048391"><td class="memItemLeft" align="right" valign="top"><a class="el" href="classSbList.html">static</a> int&#160;</td><td class="memItemRight" valign="bottom"><a class="el" href="#ad2a2e4a49f1cccadc601e75a51048391">getClassStackIndex</a> (<a class="el" href="classSbList.html">void</a>)</td></tr>
+<tr class="separator:ad2a2e4a49f1cccadc601e75a51048391"><td class="memSeparator" colspan="2">&#160;</td></tr>
+<tr class="memitem:a2c70e4edee66676d8f682b7a4afda037" id="r_a2c70e4edee66676d8f682b7a4afda037"><td class="memItemLeft" align="right" valign="top"><a class="el" href="classSbList.html">static</a> <a class="el" href="classSoType.html">SoType</a>&#160;</td><td class="memItemRight" valign="bottom"><a class="el" href="#a2c70e4edee66676d8f682b7a4afda037">getClassTypeId</a> (<a class="el" href="classSbList.html">void</a>)</td></tr>
+<tr class="separator:a2c70e4edee66676d8f682b7a4afda037"><td class="memSeparator" colspan="2">&#160;</td></tr>
+<tr class="memitem:a5ac8400720c4ab228dec79bf301d7647" id="r_a5ac8400720c4ab228dec79bf301d7647"><td class="memItemLeft" align="right" valign="top"><a class="el" href="classSbList.html">static</a> <a class="el" href="classSoType.html">SoType</a>&#160;</td><td class="memItemRight" valign="bottom"><a class="el" href="#a5ac8400720c4ab228dec79bf301d7647">getIdFromStackIndex</a> (<a class="el" href="classSbList.html">const</a> int <a class="el" href="#a3babbcafa83800192cee2acb1a8edd6f">stackIndex</a>)</td></tr>
+<tr class="separator:a5ac8400720c4ab228dec79bf301d7647"><td class="memSeparator" colspan="2">&#160;</td></tr>
+<tr class="memitem:aff64aac9bd872ce52ac5dfbfa36c36dc" id="r_aff64aac9bd872ce52ac5dfbfa36c36dc"><td class="memItemLeft" align="right" valign="top"><a class="el" href="classSbList.html">static</a> int&#160;</td><td class="memItemRight" valign="bottom"><a class="el" href="#aff64aac9bd872ce52ac5dfbfa36c36dc">getNumStackIndices</a> (<a class="el" href="classSbList.html">void</a>)</td></tr>
+<tr class="separator:aff64aac9bd872ce52ac5dfbfa36c36dc"><td class="memSeparator" colspan="2">&#160;</td></tr>
+<tr class="memitem:a53244db0aff108029f890d602b904890" id="r_a53244db0aff108029f890d602b904890"><td class="memItemLeft" align="right" valign="top"><a class="el" href="classSbList.html">static</a> <a class="el" href="classSbList.html">void</a>&#160;</td><td class="memItemRight" valign="bottom"><a class="el" href="#a53244db0aff108029f890d602b904890">initClass</a> (<a class="el" href="classSbList.html">void</a>)</td></tr>
+<tr class="separator:a53244db0aff108029f890d602b904890"><td class="memSeparator" colspan="2">&#160;</td></tr>
+<tr class="memitem:af00f2621eec54163e7d1eb5ae7e81ad5" id="r_af00f2621eec54163e7d1eb5ae7e81ad5"><td class="memItemLeft" align="right" valign="top"><a class="el" href="classSbList.html">static</a> <a class="el" href="classSbList.html">void</a>&#160;</td><td class="memItemRight" valign="bottom"><a class="el" href="#af00f2621eec54163e7d1eb5ae7e81ad5">initElements</a> (<a class="el" href="classSbList.html">void</a>)</td></tr>
+<tr class="separator:af00f2621eec54163e7d1eb5ae7e81ad5"><td class="memSeparator" colspan="2">&#160;</td></tr>
+</table><table class="memberdecls">
+<tr class="heading"><td colspan="2"><h2 class="groupheader"><a id="pro-methods" name="pro-methods"></a>
+Protected Member Functions</h2></td></tr>
+<tr class="memitem:a34312a1075fc6b90b3e5ccf5875c8c79" id="r_a34312a1075fc6b90b3e5ccf5875c8c79"><td class="memItemLeft" align="right" valign="top">&#160;</td><td class="memItemRight" valign="bottom"><a class="el" href="#a34312a1075fc6b90b3e5ccf5875c8c79">SoElement</a> (<a class="el" href="classSbList.html">void</a>)</td></tr>
+<tr class="separator:a34312a1075fc6b90b3e5ccf5875c8c79"><td class="memSeparator" colspan="2">&#160;</td></tr>
+<tr class="memitem:a0e8be07975fe3b35ada441ba224d3925" id="r_a0e8be07975fe3b35ada441ba224d3925"><td class="memItemLeft" align="right" valign="top"><a class="el" href="classSbList.html">void</a>&#160;</td><td class="memItemRight" valign="bottom"><a class="el" href="#a0e8be07975fe3b35ada441ba224d3925">capture</a> (<a class="el" href="classSoState.html">SoState</a> *<a class="el" href="classSbList.html">const</a> state) <a class="el" href="classSbList.html">const</a></td></tr>
+<tr class="separator:a0e8be07975fe3b35ada441ba224d3925"><td class="memSeparator" colspan="2">&#160;</td></tr>
+<tr class="memitem:af2cb75d0745c3d87f85283f3615fd59c" id="r_af2cb75d0745c3d87f85283f3615fd59c"><td class="memItemLeft" align="right" valign="top"><a class="el" href="classSbList.html">virtual</a> <a class="el" href="classSbList.html">void</a>&#160;</td><td class="memItemRight" valign="bottom"><a class="el" href="#af2cb75d0745c3d87f85283f3615fd59c">captureThis</a> (<a class="el" href="classSoState.html">SoState</a> *state) <a class="el" href="classSbList.html">const</a></td></tr>
+<tr class="separator:af2cb75d0745c3d87f85283f3615fd59c"><td class="memSeparator" colspan="2">&#160;</td></tr>
+<tr class="memitem:aed4f064b7a75a0b53ad1c1120dbbb2b4" id="r_aed4f064b7a75a0b53ad1c1120dbbb2b4"><td class="memItemLeft" align="right" valign="top"><a class="el" href="classSoElement.html">SoElement</a> *&#160;</td><td class="memItemRight" valign="bottom"><a class="el" href="#aed4f064b7a75a0b53ad1c1120dbbb2b4">getNextFree</a> (<a class="el" href="classSbList.html">void</a>) <a class="el" href="classSbList.html">const</a></td></tr>
+<tr class="separator:aed4f064b7a75a0b53ad1c1120dbbb2b4"><td class="memSeparator" colspan="2">&#160;</td></tr>
+<tr class="memitem:a56f12d96fc005383d218c2f5a8732ab2" id="r_a56f12d96fc005383d218c2f5a8732ab2"><td class="memItemLeft" align="right" valign="top"><a class="el" href="classSoElement.html">SoElement</a> *&#160;</td><td class="memItemRight" valign="bottom"><a class="el" href="#a56f12d96fc005383d218c2f5a8732ab2">getNextInStack</a> (<a class="el" href="classSbList.html">void</a>) <a class="el" href="classSbList.html">const</a></td></tr>
+<tr class="separator:a56f12d96fc005383d218c2f5a8732ab2"><td class="memSeparator" colspan="2">&#160;</td></tr>
+<tr class="memitem:a84b9e1b74e61a4c8383650a33dc7a9c8" id="r_a84b9e1b74e61a4c8383650a33dc7a9c8"><td class="memItemLeft" align="right" valign="top"><a class="el" href="classSbList.html">void</a>&#160;</td><td class="memItemRight" valign="bottom"><a class="el" href="#a84b9e1b74e61a4c8383650a33dc7a9c8">setStackIndex</a> (<a class="el" href="classSbList.html">const</a> int index)</td></tr>
+<tr class="separator:a84b9e1b74e61a4c8383650a33dc7a9c8"><td class="memSeparator" colspan="2">&#160;</td></tr>
+<tr class="memitem:a48d6dbea777d2eee021a788cf896ecaa" id="r_a48d6dbea777d2eee021a788cf896ecaa"><td class="memItemLeft" align="right" valign="top"><a class="el" href="classSbList.html">void</a>&#160;</td><td class="memItemRight" valign="bottom"><a class="el" href="#a48d6dbea777d2eee021a788cf896ecaa">setTypeId</a> (<a class="el" href="classSbList.html">const</a> <a class="el" href="classSoType.html">SoType</a> <a class="el" href="#a3acf0e425bc7ef0a812df905a39fb269">typeId</a>)</td></tr>
+<tr class="separator:a48d6dbea777d2eee021a788cf896ecaa"><td class="memSeparator" colspan="2">&#160;</td></tr>
+</table><table class="memberdecls">
+<tr class="heading"><td colspan="2"><h2 class="groupheader"><a id="pro-static-methods" name="pro-static-methods"></a>
+Static Protected Member Functions</h2></td></tr>
+<tr class="memitem:a6e4a8ae82aae7ac4d2516929a2e62d1d" id="r_a6e4a8ae82aae7ac4d2516929a2e62d1d"><td class="memItemLeft" align="right" valign="top"><a class="el" href="classSbList.html">static</a> int&#160;</td><td class="memItemRight" valign="bottom"><a class="el" href="#a6e4a8ae82aae7ac4d2516929a2e62d1d">createStackIndex</a> (<a class="el" href="classSbList.html">const</a> <a class="el" href="classSoType.html">SoType</a> id)</td></tr>
+<tr class="separator:a6e4a8ae82aae7ac4d2516929a2e62d1d"><td class="memSeparator" colspan="2">&#160;</td></tr>
+<tr class="memitem:ab8cb20060c9b527c8b2e343b1cf4032a" id="r_ab8cb20060c9b527c8b2e343b1cf4032a"><td class="memItemLeft" align="right" valign="top"><a class="el" href="classSbList.html">static</a> <a class="el" href="classSbList.html">const</a> <a class="el" href="classSoElement.html">SoElement</a> *&#160;</td><td class="memItemRight" valign="bottom"><a class="el" href="#ab8cb20060c9b527c8b2e343b1cf4032a">getConstElement</a> (<a class="el" href="classSoState.html">SoState</a> *<a class="el" href="classSbList.html">const</a> state, <a class="el" href="classSbList.html">const</a> int <a class="el" href="#a3babbcafa83800192cee2acb1a8edd6f">stackIndex</a>)</td></tr>
+<tr class="separator:ab8cb20060c9b527c8b2e343b1cf4032a"><td class="memSeparator" colspan="2">&#160;</td></tr>
+<tr class="memitem:a30c40ecaa79d6b140278fe906273e714" id="r_a30c40ecaa79d6b140278fe906273e714"><td class="memItemLeft" align="right" valign="top"><a class="el" href="classSbList.html">static</a> <a class="el" href="classSoElement.html">SoElement</a> *&#160;</td><td class="memItemRight" valign="bottom"><a class="el" href="#a30c40ecaa79d6b140278fe906273e714">getElement</a> (<a class="el" href="classSoState.html">SoState</a> *<a class="el" href="classSbList.html">const</a> state, <a class="el" href="classSbList.html">const</a> int <a class="el" href="#a3babbcafa83800192cee2acb1a8edd6f">stackIndex</a>)</td></tr>
+<tr class="separator:a30c40ecaa79d6b140278fe906273e714"><td class="memSeparator" colspan="2">&#160;</td></tr>
+</table><table class="memberdecls">
+<tr class="heading"><td colspan="2"><h2 class="groupheader"><a id="pro-attribs" name="pro-attribs"></a>
+Protected Attributes</h2></td></tr>
+<tr class="memitem:a60e3b7f1344de81f7d6a198e7655235f" id="r_a60e3b7f1344de81f7d6a198e7655235f"><td class="memItemLeft" align="right" valign="top">int&#160;</td><td class="memItemRight" valign="bottom"><a class="el" href="#a60e3b7f1344de81f7d6a198e7655235f">depth</a></td></tr>
+<tr class="separator:a60e3b7f1344de81f7d6a198e7655235f"><td class="memSeparator" colspan="2">&#160;</td></tr>
+<tr class="memitem:a3babbcafa83800192cee2acb1a8edd6f" id="r_a3babbcafa83800192cee2acb1a8edd6f"><td class="memItemLeft" align="right" valign="top">int&#160;</td><td class="memItemRight" valign="bottom"><a class="el" href="#a3babbcafa83800192cee2acb1a8edd6f">stackIndex</a></td></tr>
+<tr class="separator:a3babbcafa83800192cee2acb1a8edd6f"><td class="memSeparator" colspan="2">&#160;</td></tr>
+<tr class="memitem:a3acf0e425bc7ef0a812df905a39fb269" id="r_a3acf0e425bc7ef0a812df905a39fb269"><td class="memItemLeft" align="right" valign="top"><a class="el" href="classSoType.html">SoType</a>&#160;</td><td class="memItemRight" valign="bottom"><a class="el" href="#a3acf0e425bc7ef0a812df905a39fb269">typeId</a></td></tr>
+<tr class="separator:a3acf0e425bc7ef0a812df905a39fb269"><td class="memSeparator" colspan="2">&#160;</td></tr>
+</table><table class="memberdecls">
+<tr class="heading"><td colspan="2"><h2 class="groupheader"><a id="pro-static-attribs" name="pro-static-attribs"></a>
+Static Protected Attributes</h2></td></tr>
+<tr class="memitem:a3ab188deb13cb1a8c1b40ee365fce944" id="r_a3ab188deb13cb1a8c1b40ee365fce944"><td class="memItemLeft" align="right" valign="top"><a class="el" href="classSbList.html">static</a> int&#160;</td><td class="memItemRight" valign="bottom"><a class="el" href="#a3ab188deb13cb1a8c1b40ee365fce944">classStackIndex</a></td></tr>
+<tr class="separator:a3ab188deb13cb1a8c1b40ee365fce944"><td class="memSeparator" colspan="2">&#160;</td></tr>
+<tr class="memitem:a8e7258ccd9bda58158a370fc16455bbc" id="r_a8e7258ccd9bda58158a370fc16455bbc"><td class="memItemLeft" align="right" valign="top"><a class="el" href="classSbList.html">static</a> <a class="el" href="classSoTypeList.html">SoTypeList</a> *&#160;</td><td class="memItemRight" valign="bottom"><a class="el" href="#a8e7258ccd9bda58158a370fc16455bbc">stackToType</a></td></tr>
+<tr class="separator:a8e7258ccd9bda58158a370fc16455bbc"><td class="memSeparator" colspan="2">&#160;</td></tr>
+</table>
+<a name="details" id="details"></a><h2 class="groupheader">Detailed Description</h2>
+<div class="textblock"><p><a class="el" href="classSoElement.html" title="SoElement is the abstract base class for all elements.">SoElement</a> is the abstract base class for all elements. </p>
+<p>This is the base class for all the element classes in Coin. </p>
+</div><h2 class="groupheader">Constructor &amp; Destructor Documentation</h2>
+<a id="a9ce2a1034d3bb27910ce9a3eea6e64e5" name="a9ce2a1034d3bb27910ce9a3eea6e64e5"></a>
+<h2 class="memtitle"><span class="permalink"><a href="#a9ce2a1034d3bb27910ce9a3eea6e64e5">&#9670;&#160;</a></span>~SoElement()</h2>
+
+<div class="memitem">
+<div class="memproto">
+<table class="mlabels">
+  <tr>
+  <td class="mlabels-left">
+      <table class="memname">
+        <tr>
+          <td class="memname">SoElement::~SoElement </td>
+          <td>(</td>
+          <td class="paramname"><span class="paramname"></span></td><td>)</td>
+          <td></td>
+        </tr>
+      </table>
+  </td>
+  <td class="mlabels-right">
+<span class="mlabels"><span class="mlabel">virtual</span></span>  </td>
+  </tr>
+</table>
+</div><div class="memdoc">
+<p>The destructor. </p>
+
+</div>
+</div>
+<a id="a34312a1075fc6b90b3e5ccf5875c8c79" name="a34312a1075fc6b90b3e5ccf5875c8c79"></a>
+<h2 class="memtitle"><span class="permalink"><a href="#a34312a1075fc6b90b3e5ccf5875c8c79">&#9670;&#160;</a></span>SoElement()</h2>
+
+<div class="memitem">
+<div class="memproto">
+<table class="mlabels">
+  <tr>
+  <td class="mlabels-left">
+      <table class="memname">
+        <tr>
+          <td class="memname">SoElement::SoElement </td>
+          <td>(</td>
+          <td class="paramtype"><a class="el" href="classSbList.html">void</a></td>          <td class="paramname"><span class="paramname"></span></td><td>)</td>
+          <td></td>
+        </tr>
+      </table>
+  </td>
+  <td class="mlabels-right">
+<span class="mlabels"><span class="mlabel">protected</span></span>  </td>
+  </tr>
+</table>
+</div><div class="memdoc">
+<p>The constructor. To create element instances, use <a class="el" href="classSoType.html#ad15f940d61a3de702d1132bb39bf9dfb">SoType::createInstance()</a> for the elements type identifier. </p>
+
+</div>
+</div>
+<h2 class="groupheader">Member Function Documentation</h2>
+<a id="a0e8be07975fe3b35ada441ba224d3925" name="a0e8be07975fe3b35ada441ba224d3925"></a>
+<h2 class="memtitle"><span class="permalink"><a href="#a0e8be07975fe3b35ada441ba224d3925">&#9670;&#160;</a></span>capture()</h2>
+
+<div class="memitem">
+<div class="memproto">
+<table class="mlabels">
+  <tr>
+  <td class="mlabels-left">
+      <table class="memname">
+        <tr>
+          <td class="memname"><a class="el" href="classSbList.html">void</a> SoElement::capture </td>
+          <td>(</td>
+          <td class="paramtype"><a class="el" href="classSoState.html">SoState</a> *<a class="el" href="classSbList.html">const</a></td>          <td class="paramname"><span class="paramname"><em>state</em></span></td><td>)</td>
+          <td> const</td>
+        </tr>
+      </table>
+  </td>
+  <td class="mlabels-right">
+<span class="mlabels"><span class="mlabel">inline</span><span class="mlabel">protected</span></span>  </td>
+  </tr>
+</table>
+</div><div class="memdoc">
+<p>This function does whatever is necessary in the state for caching purposes. If should be called by subclasses of <a class="el" href="classSoElement.html" title="SoElement is the abstract base class for all elements.">SoElement</a> whenever any value in the element is accessed. </p>
+
+</div>
+</div>
+<a id="af2cb75d0745c3d87f85283f3615fd59c" name="af2cb75d0745c3d87f85283f3615fd59c"></a>
+<h2 class="memtitle"><span class="permalink"><a href="#af2cb75d0745c3d87f85283f3615fd59c">&#9670;&#160;</a></span>captureThis()</h2>
+
+<div class="memitem">
+<div class="memproto">
+<table class="mlabels">
+  <tr>
+  <td class="mlabels-left">
+      <table class="memname">
+        <tr>
+          <td class="memname"><a class="el" href="classSbList.html">void</a> SoElement::captureThis </td>
+          <td>(</td>
+          <td class="paramtype"><a class="el" href="classSoState.html">SoState</a> *</td>          <td class="paramname"><span class="paramname"><em>state</em></span></td><td>)</td>
+          <td> const</td>
+        </tr>
+      </table>
+  </td>
+  <td class="mlabels-right">
+<span class="mlabels"><span class="mlabel">protected</span><span class="mlabel">virtual</span></span>  </td>
+  </tr>
+</table>
+</div><div class="memdoc">
+<p>Adds the element to the cache. </p>
+
+<p>Reimplemented in <a class="el" href="classSoAccumulatedElement.html#a4040c56acb3754543c9b959befd89d9b">SoAccumulatedElement</a>.</p>
+
+</div>
+</div>
+<a id="a4a6e2a38cdbbdd1dccbb3e9928e68d55" name="a4a6e2a38cdbbdd1dccbb3e9928e68d55"></a>
+<h2 class="memtitle"><span class="permalink"><a href="#a4a6e2a38cdbbdd1dccbb3e9928e68d55">&#9670;&#160;</a></span>copyMatchInfo()</h2>
+
+<div class="memitem">
+<div class="memproto">
+<table class="mlabels">
+  <tr>
+  <td class="mlabels-left">
+      <table class="memname">
+        <tr>
+          <td class="memname"><a class="el" href="classSoElement.html">SoElement</a> * SoElement::copyMatchInfo </td>
+          <td>(</td>
+          <td class="paramtype"><a class="el" href="classSbList.html">void</a></td>          <td class="paramname"><span class="paramname"></span></td><td>)</td>
+          <td> const</td>
+        </tr>
+      </table>
+  </td>
+  <td class="mlabels-right">
+<span class="mlabels"><span class="mlabel">pure virtual</span></span>  </td>
+  </tr>
+</table>
+</div><div class="memdoc">
+<p>This function creates a copy of the element that contains enough information to enable the <a class="el" href="#a50b30f50781837a7aedc5cdbd25c5ecb">matches()</a> function to work.</p>
+<p>Used to help with scene graph traversal caching operations. </p>
+
+<p>Implemented in <a class="el" href="classSoGLShaderProgramElement.html#a18687aa1d6f09fe55f1a41eaa43ba648">SoGLShaderProgramElement</a>, <a class="el" href="classSoGLUpdateAreaElement.html#a189d2e2595e9203fe628004f4177d3c9">SoGLUpdateAreaElement</a>, <a class="el" href="classSoPickRayElement.html#a60205555fae28a0df757ce1ceb7a9596">SoPickRayElement</a>, <a class="el" href="classSoReplacedElement.html#a00e6284ffd706b1e0d717d0619894635">SoReplacedElement</a>, <a class="el" href="classSoTextureOverrideElement.html#a78c5f8e6248af895efee344f0a7220f7">SoTextureOverrideElement</a>, <a class="el" href="classSoViewportRegionElement.html#ace0e8abd991ac17f04c3abd0e8d3f739">SoViewportRegionElement</a>, <a class="el" href="classSoProfilerElement.html#abe6d57437c157101e0ba860a4f757cb0">SoProfilerElement</a>, <a class="el" href="classSoAccumulatedElement.html#a72d6d5404e9b8eebb14fa697460969be">SoAccumulatedElement</a>, <a class="el" href="classSoCacheElement.html#a4afce4c9d8ae47b3ac398e0584d5d388">SoCacheElement</a>, <a class="el" href="classSoCacheHintElement.html#a222f4b0f8662fc0e3016cb4df0569ca3">SoCacheHintElement</a>, <a class="el" href="classSoCullElement.html#af246cdda3b9668b5ff59eb3887994e6b">SoCullElement</a>, <a class="el" href="classSoDepthBufferElement.html#a5b2b4cc76b9d3d47ea665951380a91e6">SoDepthBufferElement</a>, <a class="el" href="classSoFloatElement.html#aea85430c5b25969d59ae865198da783d">SoFloatElement</a>, <a class="el" href="classSoFontNameElement.html#a0886b8d821be173050b7a86975c6dfcc">SoFontNameElement</a>, <a class="el" href="classSoGLCacheContextElement.html#ab775f3ea5582ebeda93d2f480d8e9180">SoGLCacheContextElement</a>, <a class="el" href="classSoGLRenderPassElement.html#a1c520979a1e9e90584b393467db6e4b8">SoGLRenderPassElement</a>, <a class="el" href="classSoGLVBOElement.html#a53cbe87b7763e64772407221d99e07c1">SoGLVBOElement</a>, <a class="el" href="classSoInt32Element.html#a7ff7d3340739b1004d614e6150506eee">SoInt32Element</a>, <a class="el" href="classSoLazyElement.html#a8fb51d739714620955892e57f621c163">SoLazyElement</a>, <a class="el" href="classSoLightAttenuationElement.html#a771b2fca96ed5af1c81110d8ded7c752">SoLightAttenuationElement</a>, <a class="el" href="classSoLocalBBoxMatrixElement.html#a14cc56266bf0a0cd2889e8ac157622af">SoLocalBBoxMatrixElement</a>, <a class="el" href="classSoMultiTextureCoordinateElement.html#ae38c980ef574037692daf208060e261d">SoMultiTextureCoordinateElement</a>, <a class="el" href="classSoMultiTextureEnabledElement.html#a116e93119cc2d2710d2b441c94e126db">SoMultiTextureEnabledElement</a>, <a class="el" href="classSoMultiTextureImageElement.html#a396c31a18d391bb75072314b4fef7727">SoMultiTextureImageElement</a>, <a class="el" href="classSoOverrideElement.html#a3264d48c3502ac5b208cc593350669ee">SoOverrideElement</a>, <a class="el" href="classSoShapeHintsElement.html#a0d338355d39e0e9c9332681013cf0ed9">SoShapeHintsElement</a>, <a class="el" href="classSoShapeStyleElement.html#ad0a596c9ccef513b13002914164601a3">SoShapeStyleElement</a>, <a class="el" href="classSoTextureCombineElement.html#a30cdae112d2f3e9d155d8d01738380f9">SoTextureCombineElement</a>, <a class="el" href="classSoWindowElement.html#a3a0ae3e0bda6cfafde7191dbc9825053">SoWindowElement</a>, and <a class="el" href="classSoResetMatrixElement.html#a0ff9af31b58f18c8a5db03167e52d9c3">SoResetMatrixElement</a>.</p>
+
+</div>
+</div>
+<a id="a6e4a8ae82aae7ac4d2516929a2e62d1d" name="a6e4a8ae82aae7ac4d2516929a2e62d1d"></a>
+<h2 class="memtitle"><span class="permalink"><a href="#a6e4a8ae82aae7ac4d2516929a2e62d1d">&#9670;&#160;</a></span>createStackIndex()</h2>
+
+<div class="memitem">
+<div class="memproto">
+<table class="mlabels">
+  <tr>
+  <td class="mlabels-left">
+      <table class="memname">
+        <tr>
+          <td class="memname">int SoElement::createStackIndex </td>
+          <td>(</td>
+          <td class="paramtype"><a class="el" href="classSbList.html">const</a> <a class="el" href="classSoType.html">SoType</a></td>          <td class="paramname"><span class="paramname"><em>typeId</em></span></td><td>)</td>
+          <td></td>
+        </tr>
+      </table>
+  </td>
+  <td class="mlabels-right">
+<span class="mlabels"><span class="mlabel">static</span><span class="mlabel">protected</span></span>  </td>
+  </tr>
+</table>
+</div><div class="memdoc">
+<p>Returns the value of a new available stack index. </p>
+
+</div>
+</div>
+<a id="ad2a2e4a49f1cccadc601e75a51048391" name="ad2a2e4a49f1cccadc601e75a51048391"></a>
+<h2 class="memtitle"><span class="permalink"><a href="#ad2a2e4a49f1cccadc601e75a51048391">&#9670;&#160;</a></span>getClassStackIndex()</h2>
+
+<div class="memitem">
+<div class="memproto">
+<table class="mlabels">
+  <tr>
+  <td class="mlabels-left">
+      <table class="memname">
+        <tr>
+          <td class="memname">int SoElement::getClassStackIndex </td>
+          <td>(</td>
+          <td class="paramtype"><a class="el" href="classSbList.html">void</a></td>          <td class="paramname"><span class="paramname"></span></td><td>)</td>
+          <td></td>
+        </tr>
+      </table>
+  </td>
+  <td class="mlabels-right">
+<span class="mlabels"><span class="mlabel">static</span></span>  </td>
+  </tr>
+</table>
+</div><div class="memdoc">
+<p>This static method returns the state stack index for the class. </p>
+
+</div>
+</div>
+<a id="a2c70e4edee66676d8f682b7a4afda037" name="a2c70e4edee66676d8f682b7a4afda037"></a>
+<h2 class="memtitle"><span class="permalink"><a href="#a2c70e4edee66676d8f682b7a4afda037">&#9670;&#160;</a></span>getClassTypeId()</h2>
+
+<div class="memitem">
+<div class="memproto">
+<table class="mlabels">
+  <tr>
+  <td class="mlabels-left">
+      <table class="memname">
+        <tr>
+          <td class="memname"><a class="el" href="classSoType.html">SoType</a> SoElement::getClassTypeId </td>
+          <td>(</td>
+          <td class="paramtype"><a class="el" href="classSbList.html">void</a></td>          <td class="paramname"><span class="paramname"></span></td><td>)</td>
+          <td></td>
+        </tr>
+      </table>
+  </td>
+  <td class="mlabels-right">
+<span class="mlabels"><span class="mlabel">static</span></span>  </td>
+  </tr>
+</table>
+</div><div class="memdoc">
+<p>This static method returns the <a class="el" href="classSoType.html" title="The SoType class is the basis for the runtime type system in Coin.">SoType</a> object associated with objects of this class. </p>
+
+</div>
+</div>
+<a id="ab8cb20060c9b527c8b2e343b1cf4032a" name="ab8cb20060c9b527c8b2e343b1cf4032a"></a>
+<h2 class="memtitle"><span class="permalink"><a href="#ab8cb20060c9b527c8b2e343b1cf4032a">&#9670;&#160;</a></span>getConstElement()</h2>
+
+<div class="memitem">
+<div class="memproto">
+<table class="mlabels">
+  <tr>
+  <td class="mlabels-left">
+      <table class="memname">
+        <tr>
+          <td class="memname"><a class="el" href="classSbList.html">void</a> <a class="el" href="classSbList.html">const</a> <a class="el" href="classSoElement.html">SoElement</a> * SoElement::getConstElement </td>
+          <td>(</td>
+          <td class="paramtype"><a class="el" href="classSoState.html">SoState</a> *<a class="el" href="classSbList.html">const</a></td>          <td class="paramname"><span class="paramname"><em>state</em>, </span></td>
+        </tr>
+        <tr>
+          <td class="paramkey"></td>
+          <td></td>
+          <td class="paramtype"><a class="el" href="classSbList.html">const</a> int</td>          <td class="paramname"><span class="paramname"><em>stackIndex</em></span>&#160;)</td>
+        </tr>
+      </table>
+  </td>
+  <td class="mlabels-right">
+<span class="mlabels"><span class="mlabel">inline</span><span class="mlabel">static</span><span class="mlabel">protected</span></span>  </td>
+  </tr>
+</table>
+</div><div class="memdoc">
+<p>This method returns a reference to the top element of the class with stack index <em>stackIndex</em>. The returned element is non-mutable.</p>
+<p>(Don't try to be clever and cast away the constness &ndash; if the returned instance is modified, strange, hard to find and generally wonderful bugs will most likely start to happen.)</p>
+<p>If no instance can be returned, <code>NULL</code> is returned.</p>
+<dl class="section see"><dt>See also</dt><dd><a class="el" href="classSoElement.html" title="SoElement is the abstract base class for all elements.">SoElement</a> * <a class="el" href="#a30c40ecaa79d6b140278fe906273e714">SoElement::getElement(SoState * const state, const int stackIndex)</a> </dd></dl>
+
+</div>
+</div>
+<a id="a30c40ecaa79d6b140278fe906273e714" name="a30c40ecaa79d6b140278fe906273e714"></a>
+<h2 class="memtitle"><span class="permalink"><a href="#a30c40ecaa79d6b140278fe906273e714">&#9670;&#160;</a></span>getElement()</h2>
+
+<div class="memitem">
+<div class="memproto">
+<table class="mlabels">
+  <tr>
+  <td class="mlabels-left">
+      <table class="memname">
+        <tr>
+          <td class="memname"><a class="el" href="classSoElement.html">SoElement</a> * SoElement::getElement </td>
+          <td>(</td>
+          <td class="paramtype"><a class="el" href="classSoState.html">SoState</a> *<a class="el" href="classSbList.html">const</a></td>          <td class="paramname"><span class="paramname"><em>state</em>, </span></td>
+        </tr>
+        <tr>
+          <td class="paramkey"></td>
+          <td></td>
+          <td class="paramtype"><a class="el" href="classSbList.html">const</a> int</td>          <td class="paramname"><span class="paramname"><em>stackIndex</em></span>&#160;)</td>
+        </tr>
+      </table>
+  </td>
+  <td class="mlabels-right">
+<span class="mlabels"><span class="mlabel">inline</span><span class="mlabel">static</span><span class="mlabel">protected</span></span>  </td>
+  </tr>
+</table>
+</div><div class="memdoc">
+<p>This method returns the top instance (in the <em>state</em> stack) of the element class with stack index <em>stackIndex</em>.</p>
+<p>The returned instance is writable. To make this instance, some lazy evaluation may have to be performed, so use <a class="el" href="#ab8cb20060c9b527c8b2e343b1cf4032a">getConstElement()</a> instead if the instance shouldn't be modified.</p>
+<p>If no instance is available and cannot be made, <code>NULL</code> is returned.</p>
+<dl class="section see"><dt>See also</dt><dd>const <a class="el" href="classSoElement.html" title="SoElement is the abstract base class for all elements.">SoElement</a> * <a class="el" href="#ab8cb20060c9b527c8b2e343b1cf4032a">SoElement::getConstElement(SoState * const state, const int stackIndex)</a> </dd></dl>
+
+</div>
+</div>
+<a id="a5ac8400720c4ab228dec79bf301d7647" name="a5ac8400720c4ab228dec79bf301d7647"></a>
+<h2 class="memtitle"><span class="permalink"><a href="#a5ac8400720c4ab228dec79bf301d7647">&#9670;&#160;</a></span>getIdFromStackIndex()</h2>
+
+<div class="memitem">
+<div class="memproto">
+<table class="mlabels">
+  <tr>
+  <td class="mlabels-left">
+      <table class="memname">
+        <tr>
+          <td class="memname"><a class="el" href="classSoType.html">SoType</a> SoElement::getIdFromStackIndex </td>
+          <td>(</td>
+          <td class="paramtype"><a class="el" href="classSbList.html">const</a> int</td>          <td class="paramname"><span class="paramname"><em>stackIndex</em></span></td><td>)</td>
+          <td></td>
+        </tr>
+      </table>
+  </td>
+  <td class="mlabels-right">
+<span class="mlabels"><span class="mlabel">static</span></span>  </td>
+  </tr>
+</table>
+</div><div class="memdoc">
+<p>Returns the <a class="el" href="classSoType.html" title="The SoType class is the basis for the runtime type system in Coin.">SoType</a> identifier for the element class with element state stack index <em>stackIndex</em>. </p>
+
+</div>
+</div>
+<a id="aed4f064b7a75a0b53ad1c1120dbbb2b4" name="aed4f064b7a75a0b53ad1c1120dbbb2b4"></a>
+<h2 class="memtitle"><span class="permalink"><a href="#aed4f064b7a75a0b53ad1c1120dbbb2b4">&#9670;&#160;</a></span>getNextFree()</h2>
+
+<div class="memitem">
+<div class="memproto">
+<table class="mlabels">
+  <tr>
+  <td class="mlabels-left">
+      <table class="memname">
+        <tr>
+          <td class="memname"><a class="el" href="classSoElement.html">SoElement</a> * SoElement::getNextFree </td>
+          <td>(</td>
+          <td class="paramtype"><a class="el" href="classSbList.html">void</a></td>          <td class="paramname"><span class="paramname"></span></td><td>)</td>
+          <td> const</td>
+        </tr>
+      </table>
+  </td>
+  <td class="mlabels-right">
+<span class="mlabels"><span class="mlabel">protected</span></span>  </td>
+  </tr>
+</table>
+</div><div class="memdoc">
+<p>Returns the next free element, i.e. the next element up in the stack. </p>
+
+</div>
+</div>
+<a id="a56f12d96fc005383d218c2f5a8732ab2" name="a56f12d96fc005383d218c2f5a8732ab2"></a>
+<h2 class="memtitle"><span class="permalink"><a href="#a56f12d96fc005383d218c2f5a8732ab2">&#9670;&#160;</a></span>getNextInStack()</h2>
+
+<div class="memitem">
+<div class="memproto">
+<table class="mlabels">
+  <tr>
+  <td class="mlabels-left">
+      <table class="memname">
+        <tr>
+          <td class="memname"><a class="el" href="classSoElement.html">SoElement</a> * SoElement::getNextInStack </td>
+          <td>(</td>
+          <td class="paramtype"><a class="el" href="classSbList.html">void</a></td>          <td class="paramname"><span class="paramname"></span></td><td>)</td>
+          <td> const</td>
+        </tr>
+      </table>
+  </td>
+  <td class="mlabels-right">
+<span class="mlabels"><span class="mlabel">protected</span></span>  </td>
+  </tr>
+</table>
+</div><div class="memdoc">
+<p>Returns the next element down in the stack. Should be used in <a class="el" href="#a69fc44b31adb066ba40bbc555298b107">push()</a> to get the previous element.</p>
+<p>This method has a slightly misleading name, but we didn't change it to stay compatible with the original SGI Inventor API. </p>
+
+</div>
+</div>
+<a id="aff64aac9bd872ce52ac5dfbfa36c36dc" name="aff64aac9bd872ce52ac5dfbfa36c36dc"></a>
+<h2 class="memtitle"><span class="permalink"><a href="#aff64aac9bd872ce52ac5dfbfa36c36dc">&#9670;&#160;</a></span>getNumStackIndices()</h2>
+
+<div class="memitem">
+<div class="memproto">
+<table class="mlabels">
+  <tr>
+  <td class="mlabels-left">
+      <table class="memname">
+        <tr>
+          <td class="memname">int SoElement::getNumStackIndices </td>
+          <td>(</td>
+          <td class="paramtype"><a class="el" href="classSbList.html">void</a></td>          <td class="paramname"><span class="paramname"></span></td><td>)</td>
+          <td></td>
+        </tr>
+      </table>
+  </td>
+  <td class="mlabels-right">
+<span class="mlabels"><span class="mlabel">static</span></span>  </td>
+  </tr>
+</table>
+</div><div class="memdoc">
+<p>Returns the number of allocated element stack index slots. </p>
+
+</div>
+</div>
+<a id="a9dad36865b17b7eca80694c81c2c2498" name="a9dad36865b17b7eca80694c81c2c2498"></a>
+<h2 class="memtitle"><span class="permalink"><a href="#a9dad36865b17b7eca80694c81c2c2498">&#9670;&#160;</a></span>getStackIndex()</h2>
+
+<div class="memitem">
+<div class="memproto">
+      <table class="memname">
+        <tr>
+          <td class="memname">int SoElement::getStackIndex </td>
+          <td>(</td>
+          <td class="paramtype"><a class="el" href="classSbList.html">void</a></td>          <td class="paramname"><span class="paramname"></span></td><td>)</td>
+          <td> const</td>
+        </tr>
+      </table>
+</div><div class="memdoc">
+<p>Returns the stack index for an element instance. </p>
+
+</div>
+</div>
+<a id="aa13a3cd44030e3fe914e7bfeea5058e4" name="aa13a3cd44030e3fe914e7bfeea5058e4"></a>
+<h2 class="memtitle"><span class="permalink"><a href="#aa13a3cd44030e3fe914e7bfeea5058e4">&#9670;&#160;</a></span>getTypeId()</h2>
+
+<div class="memitem">
+<div class="memproto">
+      <table class="memname">
+        <tr>
+          <td class="memname"><a class="el" href="classSbList.html">const</a> <a class="el" href="classSoType.html">SoType</a> SoElement::getTypeId </td>
+          <td>(</td>
+          <td class="paramtype"><a class="el" href="classSbList.html">void</a></td>          <td class="paramname"><span class="paramname"></span></td><td>)</td>
+          <td> const</td>
+        </tr>
+      </table>
+</div><div class="memdoc">
+<p>Returns the type identification of an object derived from a class inheriting <a class="el" href="classSoElement.html" title="SoElement is the abstract base class for all elements.">SoElement</a>. This is used for runtime type checking and "downward" casting.</p>
+<p>For a more thorough explanation of the runtime type identification functionality, see the documentation of <a class="el" href="classSoBase.html#a873b521c1386368d4d63ff893856590a" title="Returns the type identification of an object derived from a class inheriting SoBase....">SoBase::getTypeId()</a>. </p>
+
+</div>
+</div>
+<a id="a620552c04e13e74ac19bfdb3cebca818" name="a620552c04e13e74ac19bfdb3cebca818"></a>
+<h2 class="memtitle"><span class="permalink"><a href="#a620552c04e13e74ac19bfdb3cebca818">&#9670;&#160;</a></span>init()</h2>
+
+<div class="memitem">
+<div class="memproto">
+<table class="mlabels">
+  <tr>
+  <td class="mlabels-left">
+      <table class="memname">
+        <tr>
+          <td class="memname"><a class="el" href="classSbList.html">void</a> SoElement::init </td>
+          <td>(</td>
+          <td class="paramtype"><a class="el" href="classSoState.html">SoState</a> *</td>          <td class="paramname"><span class="paramname"><em>state</em></span></td><td>)</td>
+          <td></td>
+        </tr>
+      </table>
+  </td>
+  <td class="mlabels-right">
+<span class="mlabels"><span class="mlabel">virtual</span></span>  </td>
+  </tr>
+</table>
+</div><div class="memdoc">
+<p>This function initializes the element type in the given <a class="el" href="classSoState.html" title="The SoState class manages the Coin scene graph traversal state data.">SoState</a>. It is called for the first element of each enabled element type in <a class="el" href="classSoState.html" title="The SoState class manages the Coin scene graph traversal state data.">SoState</a> objects. </p>
+
+<p>Reimplemented in <a class="el" href="classSoGLShadowCullingElement.html#aea92c7644528790375de71a3f4d3b4c6">SoGLShadowCullingElement</a>, <a class="el" href="classSoShadowStyleElement.html#a822173bfd661d0b06492e7a3e2e5720c">SoShadowStyleElement</a>, <a class="el" href="classSoAccumulatedElement.html#a1f41432ac1cc47efbcfc8facaa76437c">SoAccumulatedElement</a>, <a class="el" href="classSoAmbientColorElement.html#a7cd176caf464030ebcd9d1efa85f3843">SoAmbientColorElement</a>, <a class="el" href="classSoAnnoText3CharOrientElement.html#adc8b82948aafb5042500fd4bed7ce3c9">SoAnnoText3CharOrientElement</a>, <a class="el" href="classSoAnnoText3FontSizeHintElement.html#a04e5f4160cb56b4cc6227089cb624829">SoAnnoText3FontSizeHintElement</a>, <a class="el" href="classSoAnnoText3RenderPrintElement.html#a42af36718b83e5cb14f679533c707be3">SoAnnoText3RenderPrintElement</a>, <a class="el" href="classSoBBoxModelMatrixElement.html#a1e5ffa753a532c1041a46a7343ae7c59">SoBBoxModelMatrixElement</a>, <a class="el" href="classSoBumpMapCoordinateElement.html#a0a364ea38981c11cbce92873eeb7140e">SoBumpMapCoordinateElement</a>, <a class="el" href="classSoBumpMapElement.html#a733b3055d746e8ce7edae1f17e836f45">SoBumpMapElement</a>, <a class="el" href="classSoBumpMapMatrixElement.html#ab7202ee7511b0a784fce1e016088c509">SoBumpMapMatrixElement</a>, <a class="el" href="classSoCacheElement.html#aadab87921250121725051483a8087a7e">SoCacheElement</a>, <a class="el" href="classSoCacheHintElement.html#a6e9c29853bfc6b173ca58400bee725ce">SoCacheHintElement</a>, <a class="el" href="classSoClipPlaneElement.html#ade829965deda32d1f3cdbb7682d19623">SoClipPlaneElement</a>, <a class="el" href="classSoComplexityElement.html#aab03d2a2d76f9957b75fbf44117b4962">SoComplexityElement</a>, <a class="el" href="classSoComplexityTypeElement.html#a3990dd47010dcf8986065e6ebe1952f4">SoComplexityTypeElement</a>, <a class="el" href="classSoCoordinateElement.html#a0f776c4ca8120450e1afa5b79b1865f8">SoCoordinateElement</a>, <a class="el" href="classSoCreaseAngleElement.html#abaab89e558e24e4aaf44f5a5c4c71dc7">SoCreaseAngleElement</a>, <a class="el" href="classSoCullElement.html#af5893230eb788e073f5b75cfcb40f1c0">SoCullElement</a>, <a class="el" href="classSoDecimationPercentageElement.html#a6940d02b0c454626859677cddfd2477e">SoDecimationPercentageElement</a>, <a class="el" href="classSoDecimationTypeElement.html#a3585548ae8f914535b1527f35728cdd3">SoDecimationTypeElement</a>, <a class="el" href="classSoDepthBufferElement.html#a3b61eca028fbe0c3adaf021740cdcc51">SoDepthBufferElement</a>, <a class="el" href="classSoDevicePixelRatioElement.html#adc54fffa396dce144fce91fd0d63db96">SoDevicePixelRatioElement</a>, <a class="el" href="classSoDiffuseColorElement.html#a89ffc5bd110068eab4b7bb176b294400">SoDiffuseColorElement</a>, <a class="el" href="classSoDrawStyleElement.html#a5ac6192f7efe8d90d860ee8c1d8e0d0b">SoDrawStyleElement</a>, <a class="el" href="classSoEmissiveColorElement.html#ab3ef6bc23b0a1e05e1d7a17b2e2160ef">SoEmissiveColorElement</a>, <a class="el" href="classSoEnvironmentElement.html#a169a72381c334ba05b120815b40e35c7">SoEnvironmentElement</a>, <a class="el" href="classSoFloatElement.html#a0b0b6c59c7d79e1598d1996d343ab63c">SoFloatElement</a>, <a class="el" href="classSoFocalDistanceElement.html#a4bc5f3a0bc64f5d5747327f41290f7f2">SoFocalDistanceElement</a>, <a class="el" href="classSoFontNameElement.html#aeb71ab98c7597676a50307c962a90d65">SoFontNameElement</a>, <a class="el" href="classSoFontSizeElement.html#a94f258a758ed91aaa012268afa651466">SoFontSizeElement</a>, <a class="el" href="classSoGeoElement.html#a39a4c6bae7632a7f4dce97445580b133">SoGeoElement</a>, <a class="el" href="classSoGLCacheContextElement.html#a22ddbfbad162cfae82f8507f625d97f6">SoGLCacheContextElement</a>, <a class="el" href="classSoGLClipPlaneElement.html#a18c5373b3756338f0802a47fd0aac753">SoGLClipPlaneElement</a>, <a class="el" href="classSoGLColorIndexElement.html#a0400011277998cfbbbf7cc2c49fbea9a">SoGLColorIndexElement</a>, <a class="el" href="classSoGLDepthBufferElement.html#a7cd0d08df6d0697b59e47db03d6081a7">SoGLDepthBufferElement</a>, <a class="el" href="classSoGLDrawStyleElement.html#ad68c67de2a87ef0d4bb125e840449fec">SoGLDrawStyleElement</a>, <a class="el" href="classSoGLEnvironmentElement.html#ab93ec33a0966174d6c2932d5999e8c5c">SoGLEnvironmentElement</a>, <a class="el" href="classSoGLLazyElement.html#a23ed55c5b50a1ade505f0cf0e3aae8b7">SoGLLazyElement</a>, <a class="el" href="classSoGLLightIdElement.html#afa694f1049db5b3be2d19b07a270c3d4">SoGLLightIdElement</a>, <a class="el" href="classSoGLLinePatternElement.html#a13f7d9a7002339c3b412daeed306cae6">SoGLLinePatternElement</a>, <a class="el" href="classSoGLLineWidthElement.html#acba910985640ebe454ad4c05b9bf3a39">SoGLLineWidthElement</a>, <a class="el" href="classSoGLModelMatrixElement.html#ae97af571fe835b53070945cc0611b0d1">SoGLModelMatrixElement</a>, <a class="el" href="classSoGLMultiTextureCoordinateElement.html#a4c39be6b356865e7b6f1e00fa8302d66">SoGLMultiTextureCoordinateElement</a>, <a class="el" href="classSoGLMultiTextureEnabledElement.html#a619a16106f6fae272a585f888578c9e2">SoGLMultiTextureEnabledElement</a>, <a class="el" href="classSoGLMultiTextureImageElement.html#a4bc423fc1d90e1cdb4b5335948161277">SoGLMultiTextureImageElement</a>, <a class="el" href="classSoGLMultiTextureMatrixElement.html#ac415a6a2b44397dc24e0f53810d2376b">SoGLMultiTextureMatrixElement</a>, <a class="el" href="classSoGLNormalElement.html#abc975666e8c84e65ae3fbaee5a07e53e">SoGLNormalElement</a>, <a class="el" href="classSoGLPointSizeElement.html#aeeb0eed83e52012c776727076dd2ea7f">SoGLPointSizeElement</a>, <a class="el" href="classSoGLPolygonOffsetElement.html#aa7c4663e4605cafac3754a9a7ff595a1">SoGLPolygonOffsetElement</a>, <a class="el" href="classSoGLRenderPassElement.html#a0a9910e95c8133bef76d5917fe31198c">SoGLRenderPassElement</a>, <a class="el" href="classSoGLShaderProgramElement.html#a92dac74b1fa6bdcf9e139577d4af9b83">SoGLShaderProgramElement</a>, <a class="el" href="classSoGLShapeHintsElement.html#ae856331a65dda8684dc58d73372e1633">SoGLShapeHintsElement</a>, <a class="el" href="classSoGLUpdateAreaElement.html#af9155f163fb5cd8b4ea35cfbd029deab">SoGLUpdateAreaElement</a>, <a class="el" href="classSoGLVBOElement.html#a138f6299f0fd5440673a6008d95487e1">SoGLVBOElement</a>, <a class="el" href="classSoGLVertexAttributeElement.html#a57ecb5ae636cfb4a245f5e4915d4a652">SoGLVertexAttributeElement</a>, <a class="el" href="classSoGLViewingMatrixElement.html#aeb24e0586a429815a22a54e2a03d007b">SoGLViewingMatrixElement</a>, <a class="el" href="classSoGLViewportRegionElement.html#a563a55d20851f1c6eabdda746ebb0895">SoGLViewportRegionElement</a>, <a class="el" href="classSoInt32Element.html#a9579550b5e7d90575764daa722a19fae">SoInt32Element</a>, <a class="el" href="classSoLazyElement.html#a6b69b39892b8124477d9ff3998f9b208">SoLazyElement</a>, <a class="el" href="classSoLightAttenuationElement.html#a8f6cfa08fca3cfab64f789473d397074">SoLightAttenuationElement</a>, <a class="el" href="classSoLightElement.html#ad5a102ad2bbe5bc1e691a4fb33bae042">SoLightElement</a>, <a class="el" href="classSoLightModelElement.html#a0534c8c1a90cd8e4d672e62dfe6d5a3a">SoLightModelElement</a>, <a class="el" href="classSoLinePatternElement.html#a6ce5565dee41598b0ea082f98abe0429">SoLinePatternElement</a>, <a class="el" href="classSoLineWidthElement.html#a8bccd0632c9b76ae4d77db9158ee96a7">SoLineWidthElement</a>, <a class="el" href="classSoListenerDopplerElement.html#af901d33fda3fb65285b46ea0ba0795d6">SoListenerDopplerElement</a>, <a class="el" href="classSoListenerGainElement.html#a211a43c7c816693170f5b0350da040c7">SoListenerGainElement</a>, <a class="el" href="classSoListenerOrientationElement.html#a866a64804a448736f13421dd0a7be5f5">SoListenerOrientationElement</a>, <a class="el" href="classSoListenerPositionElement.html#a5fe22d9f5eecfd993c3a52caeb7995ca">SoListenerPositionElement</a>, <a class="el" href="classSoLocalBBoxMatrixElement.html#a317387c224f273f358e3df872557bf16">SoLocalBBoxMatrixElement</a>, <a class="el" href="classSoMaterialBindingElement.html#a308df1bc04d362ca3b985ab9d3c65338">SoMaterialBindingElement</a>, <a class="el" href="classSoModelMatrixElement.html#aefe9a0692733eba6f4c01737513c3f58">SoModelMatrixElement</a>, <a class="el" href="classSoMultiTextureCoordinateElement.html#a94965d64fd2e07f0f5b80bca8380503b">SoMultiTextureCoordinateElement</a>, <a class="el" href="classSoMultiTextureEnabledElement.html#a15ac9a58d46d44a99c8fab73ff3a1838">SoMultiTextureEnabledElement</a>, <a class="el" href="classSoMultiTextureImageElement.html#ad6978d3f393432535ece4711686d7526">SoMultiTextureImageElement</a>, <a class="el" href="classSoMultiTextureMatrixElement.html#a41e1776b0368fb441e129c5cc6105b13">SoMultiTextureMatrixElement</a>, <a class="el" href="classSoNormalBindingElement.html#ae3c391dd17f26b125c0dd28715ddfa1a">SoNormalBindingElement</a>, <a class="el" href="classSoNormalElement.html#a997262b12ec3ad35ed79742d701df899">SoNormalElement</a>, <a class="el" href="classSoOverrideElement.html#a4d8a516666e54225d0646e1ebf5d0c4e">SoOverrideElement</a>, <a class="el" href="classSoPickRayElement.html#a9e5dd878da58372c06aff6dbd8e89d9d">SoPickRayElement</a>, <a class="el" href="classSoPickStyleElement.html#ad312f6e43238169a081e55f05db054f6">SoPickStyleElement</a>, <a class="el" href="classSoPointSizeElement.html#a1847e6c41077e245329ce46f73360186">SoPointSizeElement</a>, <a class="el" href="classSoPolygonOffsetElement.html#a6014b1048d4377c479b405163792e583">SoPolygonOffsetElement</a>, <a class="el" href="classSoProfileCoordinateElement.html#aa09ddecae4ff986eb8fed74249df3e01">SoProfileCoordinateElement</a>, <a class="el" href="classSoProfileElement.html#a02f546a6ffb063e0db4d1e24d1100004">SoProfileElement</a>, <a class="el" href="classSoProjectionMatrixElement.html#a8bbfc804f27ec14c480455f000abc66d">SoProjectionMatrixElement</a>, <a class="el" href="classSoReplacedElement.html#a888f9d4fdf40c6d915355a771d0b0566">SoReplacedElement</a>, <a class="el" href="classSoShapeHintsElement.html#a1b74312c4f2ceaf3585d074faee3a029">SoShapeHintsElement</a>, <a class="el" href="classSoShapeStyleElement.html#ad32ec12c4ae436ee46410e6d5029a0a4">SoShapeStyleElement</a>, <a class="el" href="classSoShininessElement.html#acc36d847687443bebec22c1240a57b55">SoShininessElement</a>, <a class="el" href="classSoSoundElement.html#a69ba6b416e27a40c89287f4d1a2dee61">SoSoundElement</a>, <a class="el" href="classSoSpecularColorElement.html#a4a973bb537fe87cb96faaf9a765fc779">SoSpecularColorElement</a>, <a class="el" href="classSoSwitchElement.html#a9ead475c84d6a074829f56c638dc7838">SoSwitchElement</a>, <a class="el" href="classSoTextOutlineEnabledElement.html#a0a51fe77911b5e9eb6ec5bc7c81d8df3">SoTextOutlineEnabledElement</a>, <a class="el" href="classSoTextureCombineElement.html#aba2b9e97c3a7fa6c0d4318c9691ca509">SoTextureCombineElement</a>, <a class="el" href="classSoTextureCoordinateBindingElement.html#aa3bca00800a47c718d2fd66e45b5653f">SoTextureCoordinateBindingElement</a>, <a class="el" href="classSoTextureOverrideElement.html#ac7d457e651d68010bd862bab4713ee04">SoTextureOverrideElement</a>, <a class="el" href="classSoTextureQualityElement.html#abc990559e74adb0a3aa3c86ed12608c3">SoTextureQualityElement</a>, <a class="el" href="classSoTextureUnitElement.html#a515b7c9a788f13c93d8e8c1e1d035da0">SoTextureUnitElement</a>, <a class="el" href="classSoTransparencyElement.html#a764fbb587323ad0452e2ef708940eddf">SoTransparencyElement</a>, <a class="el" href="classSoUnitsElement.html#a3d5c7eef6f9926a1d73eddd94f8dc918">SoUnitsElement</a>, <a class="el" href="classSoVertexAttributeBindingElement.html#abab17a8c47db0864951a5d1378f9569d">SoVertexAttributeBindingElement</a>, <a class="el" href="classSoVertexAttributeElement.html#a73058c36e50d3cea2cca27aae3660a56">SoVertexAttributeElement</a>, <a class="el" href="classSoViewingMatrixElement.html#a09d088f4ef14da2dc1a88219f53a1c8b">SoViewingMatrixElement</a>, <a class="el" href="classSoViewportRegionElement.html#aceca7f99fc8711891479079e20963db1">SoViewportRegionElement</a>, <a class="el" href="classSoViewVolumeElement.html#aae86cd21b48653828a4663b31847bf83">SoViewVolumeElement</a>, <a class="el" href="classSoWindowElement.html#a25ab2c5b26be07c5761e86da539f35d1">SoWindowElement</a>, and <a class="el" href="classSoResetMatrixElement.html#aed71eec353b016c370481e04f1eac63f">SoResetMatrixElement</a>.</p>
+
+</div>
+</div>
+<a id="a53244db0aff108029f890d602b904890" name="a53244db0aff108029f890d602b904890"></a>
+<h2 class="memtitle"><span class="permalink"><a href="#a53244db0aff108029f890d602b904890">&#9670;&#160;</a></span>initClass()</h2>
+
+<div class="memitem">
+<div class="memproto">
+<table class="mlabels">
+  <tr>
+  <td class="mlabels-left">
+      <table class="memname">
+        <tr>
+          <td class="memname"><a class="el" href="classSbList.html">void</a> SoElement::initClass </td>
+          <td>(</td>
+          <td class="paramtype"><a class="el" href="classSbList.html">void</a></td>          <td class="paramname"><span class="paramname"></span></td><td>)</td>
+          <td></td>
+        </tr>
+      </table>
+  </td>
+  <td class="mlabels-right">
+<span class="mlabels"><span class="mlabel">static</span></span>  </td>
+  </tr>
+</table>
+</div><div class="memdoc">
+<p>Initialize relevant common data for all instances, like the type system. </p>
+
+</div>
+</div>
+<a id="af00f2621eec54163e7d1eb5ae7e81ad5" name="af00f2621eec54163e7d1eb5ae7e81ad5"></a>
+<h2 class="memtitle"><span class="permalink"><a href="#af00f2621eec54163e7d1eb5ae7e81ad5">&#9670;&#160;</a></span>initElements()</h2>
+
+<div class="memitem">
+<div class="memproto">
+<table class="mlabels">
+  <tr>
+  <td class="mlabels-left">
+      <table class="memname">
+        <tr>
+          <td class="memname"><a class="el" href="classSbList.html">void</a> SoElement::initElements </td>
+          <td>(</td>
+          <td class="paramtype"><a class="el" href="classSbList.html">void</a></td>          <td class="paramname"><span class="paramname"></span></td><td>)</td>
+          <td></td>
+        </tr>
+      </table>
+  </td>
+  <td class="mlabels-right">
+<span class="mlabels"><span class="mlabel">static</span></span>  </td>
+  </tr>
+</table>
+</div><div class="memdoc">
+<p>This function initializes all the built-in Coin element classes. </p>
+
+</div>
+</div>
+<a id="a50b30f50781837a7aedc5cdbd25c5ecb" name="a50b30f50781837a7aedc5cdbd25c5ecb"></a>
+<h2 class="memtitle"><span class="permalink"><a href="#a50b30f50781837a7aedc5cdbd25c5ecb">&#9670;&#160;</a></span>matches()</h2>
+
+<div class="memitem">
+<div class="memproto">
+<table class="mlabels">
+  <tr>
+  <td class="mlabels-left">
+      <table class="memname">
+        <tr>
+          <td class="memname">SbBool SoElement::matches </td>
+          <td>(</td>
+          <td class="paramtype"><a class="el" href="classSbList.html">const</a> <a class="el" href="classSoElement.html">SoElement</a> *</td>          <td class="paramname"><span class="paramname"><em>element</em></span></td><td>)</td>
+          <td> const</td>
+        </tr>
+      </table>
+  </td>
+  <td class="mlabels-right">
+<span class="mlabels"><span class="mlabel">pure virtual</span></span>  </td>
+  </tr>
+</table>
+</div><div class="memdoc">
+<p>This function returns <code>TRUE</code> is the element matches another element (of the same class), with respect to cache validity.</p>
+<p>If the application programmer's extension element has a <a class="el" href="#a50b30f50781837a7aedc5cdbd25c5ecb">matches()</a> function, it should also have a <a class="el" href="#a4a6e2a38cdbbdd1dccbb3e9928e68d55">copyMatchInfo()</a> function. </p>
+
+<p>Implemented in <a class="el" href="classSoLazyElement.html#add58c70f44a8917969b70a48bbc1df98">SoLazyElement</a>, <a class="el" href="classSoMultiTextureCoordinateElement.html#a6a10c259906b12cddae7704cf3929977">SoMultiTextureCoordinateElement</a>, <a class="el" href="classSoMultiTextureEnabledElement.html#aecac8a30b5b69555ab6efe2bcc5f4357">SoMultiTextureEnabledElement</a>, <a class="el" href="classSoMultiTextureImageElement.html#a278dff81d1113247ecb63aa9336b41be">SoMultiTextureImageElement</a>, <a class="el" href="classSoTextureCombineElement.html#ac55e667931d0d9a6eb59569c4e4c1604">SoTextureCombineElement</a>, <a class="el" href="classSoProfilerElement.html#adec4403262713efaa44558cb29a46d33">SoProfilerElement</a>, <a class="el" href="classSoAccumulatedElement.html#aa5e9805823d84bf21ebfb7704bb351a6">SoAccumulatedElement</a>, <a class="el" href="classSoCacheElement.html#af80fc1af60573557e51a9d7f3b9e4379">SoCacheElement</a>, <a class="el" href="classSoCacheHintElement.html#ae70fc1ff254998e750ed923b5b1a79dd">SoCacheHintElement</a>, <a class="el" href="classSoDepthBufferElement.html#a1aad59080c38d30c1cf9192aabb9d20c">SoDepthBufferElement</a>, <a class="el" href="classSoFloatElement.html#ad97cbb603423d8bf0c3033cf0fa95a95">SoFloatElement</a>, <a class="el" href="classSoFontNameElement.html#aad6bd725c50098926a03e7eb7225c2e5">SoFontNameElement</a>, <a class="el" href="classSoGLRenderPassElement.html#a81e923b19923d0bf4a6e9fa669914411">SoGLRenderPassElement</a>, <a class="el" href="classSoGLShaderProgramElement.html#ac8eb14534917adbaf64bce76f7b16743">SoGLShaderProgramElement</a>, <a class="el" href="classSoGLUpdateAreaElement.html#a758b46ec11bb793381e41f1a140b4491">SoGLUpdateAreaElement</a>, <a class="el" href="classSoInt32Element.html#adbb796ef3cdfb387abf337e7d24b10bb">SoInt32Element</a>, <a class="el" href="classSoLightAttenuationElement.html#afb11221a18adf927829a429a566c8b48">SoLightAttenuationElement</a>, <a class="el" href="classSoLocalBBoxMatrixElement.html#a45b512c5b6bace3dba7000c8e4db5d5d">SoLocalBBoxMatrixElement</a>, <a class="el" href="classSoModelMatrixElement.html#ad3032f99e337e2731bd6fb29ab395ec0">SoModelMatrixElement</a>, <a class="el" href="classSoOverrideElement.html#af809ed3472f7d06288a80ad6c30dfb2b">SoOverrideElement</a>, <a class="el" href="classSoPickRayElement.html#a2d04060f18bf8476263571cc275f36de">SoPickRayElement</a>, <a class="el" href="classSoReplacedElement.html#a992de7abb877c451b6911b425cefda09">SoReplacedElement</a>, <a class="el" href="classSoShapeHintsElement.html#aeb282dfae54338215a3195f24095584d">SoShapeHintsElement</a>, <a class="el" href="classSoShapeStyleElement.html#a466293fcf283dc9cdc8f6dbde165876d">SoShapeStyleElement</a>, <a class="el" href="classSoTextureOverrideElement.html#a135b24dbc92a5f96ce4642319915545e">SoTextureOverrideElement</a>, <a class="el" href="classSoViewportRegionElement.html#a79c08e6d5b9da0e7d0384d4addd3c227">SoViewportRegionElement</a>, <a class="el" href="classSoWindowElement.html#aff8dae5f4249ddd92699982ebafcbd88">SoWindowElement</a>, <a class="el" href="classSoResetMatrixElement.html#ab88328d31708ef91a6ae3daadf410f9b">SoResetMatrixElement</a>, <a class="el" href="classSoCullElement.html#ac56cd05f68fa0d55536cfc958e7b829b">SoCullElement</a>, <a class="el" href="classSoGLCacheContextElement.html#ac0ab4bfec753284fe6832e1a4dfa0385">SoGLCacheContextElement</a>, and <a class="el" href="classSoGLVBOElement.html#a0da65f83f8a89c4524beb7a04a89ecdd">SoGLVBOElement</a>.</p>
+
+</div>
+</div>
+<a id="a47fb7cba01227fed02b5d48d7797dddb" name="a47fb7cba01227fed02b5d48d7797dddb"></a>
+<h2 class="memtitle"><span class="permalink"><a href="#a47fb7cba01227fed02b5d48d7797dddb">&#9670;&#160;</a></span>pop()</h2>
+
+<div class="memitem">
+<div class="memproto">
+<table class="mlabels">
+  <tr>
+  <td class="mlabels-left">
+      <table class="memname">
+        <tr>
+          <td class="memname"><a class="el" href="classSbList.html">void</a> SoElement::pop </td>
+          <td>(</td>
+          <td class="paramtype"><a class="el" href="classSoState.html">SoState</a> *</td>          <td class="paramname"><span class="paramname"><em>state</em>, </span></td>
+        </tr>
+        <tr>
+          <td class="paramkey"></td>
+          <td></td>
+          <td class="paramtype"><a class="el" href="classSbList.html">const</a> <a class="el" href="classSoElement.html">SoElement</a> *</td>          <td class="paramname"><span class="paramname"><em>prevTopElement</em></span>&#160;)</td>
+        </tr>
+      </table>
+  </td>
+  <td class="mlabels-right">
+<span class="mlabels"><span class="mlabel">virtual</span></span>  </td>
+  </tr>
+</table>
+</div><div class="memdoc">
+<p>This method is called when the state is popped, and the depth of the element is bigger than the current state depth. <a class="el" href="#a47fb7cba01227fed02b5d48d7797dddb">pop()</a> is called on the new top of stack, and a pointer to the previous top of stack is passed in <em>prevTopElement</em>.</p>
+<p>Override this method if you need to copy some state information from the previous top of stack. </p>
+
+<p>Reimplemented in <a class="el" href="classSoGLShadowCullingElement.html#a5cc2b7d483d705439bfa245f80c728d1">SoGLShadowCullingElement</a>, <a class="el" href="classSoCacheElement.html#a02522ed8caaef79304a252249fa6aec4">SoCacheElement</a>, <a class="el" href="classSoCacheHintElement.html#ad087c395c6d20606d6a31b7f5008c2ca">SoCacheHintElement</a>, <a class="el" href="classSoDepthBufferElement.html#a867c7de71989ef6b009479099cc434c6">SoDepthBufferElement</a>, <a class="el" href="classSoGLClipPlaneElement.html#a29c3a023b8796dbccfc26469d25ee08b">SoGLClipPlaneElement</a>, <a class="el" href="classSoGLDepthBufferElement.html#ab664fb6dfbb75b752c059c4267ae8069">SoGLDepthBufferElement</a>, <a class="el" href="classSoGLDrawStyleElement.html#a47baaf87f017b1014e1c5877e604dd41">SoGLDrawStyleElement</a>, <a class="el" href="classSoGLEnvironmentElement.html#a50b81da1c21d70eebb24214b314f897f">SoGLEnvironmentElement</a>, <a class="el" href="classSoGLLazyElement.html#a18ecff47ee39905f32be1cffe7e75163">SoGLLazyElement</a>, <a class="el" href="classSoGLLightIdElement.html#ac213dd344050bb676afc6fbfa39b5977">SoGLLightIdElement</a>, <a class="el" href="classSoGLLinePatternElement.html#a903ded3cf0ccb629ba05c240e901a377">SoGLLinePatternElement</a>, <a class="el" href="classSoGLLineWidthElement.html#a7abe6ff467425fe6021e4d62b29644f2">SoGLLineWidthElement</a>, <a class="el" href="classSoGLModelMatrixElement.html#aa0f34fe1a7a2ff0a9b1eea4dce278789">SoGLModelMatrixElement</a>, <a class="el" href="classSoGLMultiTextureCoordinateElement.html#af532a4808a3e67c6cd06be8764d08c4c">SoGLMultiTextureCoordinateElement</a>, <a class="el" href="classSoGLMultiTextureEnabledElement.html#aecf440dcb9dba927988e87bcaa2e2324">SoGLMultiTextureEnabledElement</a>, <a class="el" href="classSoGLMultiTextureImageElement.html#af13965f742b40ae637a4a1fabc1009c5">SoGLMultiTextureImageElement</a>, <a class="el" href="classSoGLMultiTextureMatrixElement.html#ac1c21123c655ec52375feabd528e41de">SoGLMultiTextureMatrixElement</a>, <a class="el" href="classSoGLPointSizeElement.html#aadd9f6da68c6727b72760ff14f6490b7">SoGLPointSizeElement</a>, <a class="el" href="classSoGLPolygonOffsetElement.html#a2cf73e138e2544c65c68a89bb2ef763c">SoGLPolygonOffsetElement</a>, <a class="el" href="classSoGLProjectionMatrixElement.html#aa4c39e363f7bce63d80b327b6d4e000c">SoGLProjectionMatrixElement</a>, <a class="el" href="classSoGLShaderProgramElement.html#af0b2bcbae2d31684c891df3fc5c4c967">SoGLShaderProgramElement</a>, <a class="el" href="classSoGLShapeHintsElement.html#a4c3df0f53be14464155e01a2ced31f3a">SoGLShapeHintsElement</a>, <a class="el" href="classSoGLUpdateAreaElement.html#a91b9d72b95d02e7fca862e725fb24b00">SoGLUpdateAreaElement</a>, <a class="el" href="classSoGLVBOElement.html#add933dc2c7d0787d0a5d4b00eab63898">SoGLVBOElement</a>, <a class="el" href="classSoGLViewingMatrixElement.html#a8ad0d55f9a3745a0891f48005f1a0551">SoGLViewingMatrixElement</a>, <a class="el" href="classSoGLViewportRegionElement.html#a5de3c92de69aab82b0fdeb44aa2d439c">SoGLViewportRegionElement</a>, <a class="el" href="classSoShapeHintsElement.html#a7f3ef0564b4efb74b83521b99d70a259">SoShapeHintsElement</a>, <a class="el" href="classSoShapeStyleElement.html#a30c714fccf06a75742e6b62491642262">SoShapeStyleElement</a>, <a class="el" href="classSoSoundElement.html#a919de2db6144947d6cf4a47356415745">SoSoundElement</a>, <a class="el" href="classSoTextOutlineEnabledElement.html#ae78df031583896733eb8e5ec5400efef">SoTextOutlineEnabledElement</a>, and <a class="el" href="classSoWindowElement.html#a7a5cc2a726703e0418049bb2fbc91d62">SoWindowElement</a>.</p>
+
+</div>
+</div>
+<a id="a80417133fe0e879d0a8a23c3d1548a61" name="a80417133fe0e879d0a8a23c3d1548a61"></a>
+<h2 class="memtitle"><span class="permalink"><a href="#a80417133fe0e879d0a8a23c3d1548a61">&#9670;&#160;</a></span>print()</h2>
+
+<div class="memitem">
+<div class="memproto">
+<table class="mlabels">
+  <tr>
+  <td class="mlabels-left">
+      <table class="memname">
+        <tr>
+          <td class="memname"><a class="el" href="classSbList.html">void</a> SoElement::print </td>
+          <td>(</td>
+          <td class="paramtype"><a class="el" href="classSbList.html">FILE</a> *</td>          <td class="paramname"><span class="paramname"><em>file</em><span class="paramdefsep"> = </span><span class="paramdefval"><a class="el" href="classSbList.html">stdout</a></span></span></td><td>)</td>
+          <td> const</td>
+        </tr>
+      </table>
+  </td>
+  <td class="mlabels-right">
+<span class="mlabels"><span class="mlabel">virtual</span></span>  </td>
+  </tr>
+</table>
+</div><div class="memdoc">
+<p>This function is for printing element information, and is used mostly for debugging purposes. </p>
+
+<p>Reimplemented in <a class="el" href="classSoCoordinateElement.html#a302b2cfec316362a004f22bfb6f518aa">SoCoordinateElement</a>, <a class="el" href="classSoEnvironmentElement.html#a8e0645c67a1326f8ffd829712ebbc3f2">SoEnvironmentElement</a>, <a class="el" href="classSoFloatElement.html#a41ccf612b2c30bd6b4c051d414351d39">SoFloatElement</a>, <a class="el" href="classSoFontNameElement.html#aa38c6246141d4669d93f9d20535a6d8a">SoFontNameElement</a>, <a class="el" href="classSoInt32Element.html#a5d6b5866ed49343737a764ab827ddaa9">SoInt32Element</a>, <a class="el" href="classSoLightAttenuationElement.html#af8552b229e59dd7becb27e4f94630b12">SoLightAttenuationElement</a>, <a class="el" href="classSoListenerDopplerElement.html#a5339d5b9841ff42077612c171aaf1784">SoListenerDopplerElement</a>, <a class="el" href="classSoListenerOrientationElement.html#a68c0c5b23938d326aafb6324f7a116d6">SoListenerOrientationElement</a>, <a class="el" href="classSoListenerPositionElement.html#a5854ed8a3a22a79af1ed6a01ccbb6731">SoListenerPositionElement</a>, <a class="el" href="classSoOverrideElement.html#a44f57f63340e2d44aa672921a0a69fb7">SoOverrideElement</a>, <a class="el" href="classSoReplacedElement.html#a4d772b5ad82d5b3df9327a257913df4e">SoReplacedElement</a>, <a class="el" href="classSoShapeHintsElement.html#a0a8d92fc1cf79303912dba0f35a763e0">SoShapeHintsElement</a>, <a class="el" href="classSoSoundElement.html#ad4dec472f2a3920031a20cec545ab992">SoSoundElement</a>, <a class="el" href="classSoViewportRegionElement.html#a71d721ac7053e6073ee24824e85fa6fb">SoViewportRegionElement</a>, and <a class="el" href="classSoTextureOverrideElement.html#a3b21661a86a1160a14a37ee4d61dc965">SoTextureOverrideElement</a>.</p>
+
+</div>
+</div>
+<a id="a69fc44b31adb066ba40bbc555298b107" name="a69fc44b31adb066ba40bbc555298b107"></a>
+<h2 class="memtitle"><span class="permalink"><a href="#a69fc44b31adb066ba40bbc555298b107">&#9670;&#160;</a></span>push()</h2>
+
+<div class="memitem">
+<div class="memproto">
+<table class="mlabels">
+  <tr>
+  <td class="mlabels-left">
+      <table class="memname">
+        <tr>
+          <td class="memname"><a class="el" href="classSbList.html">void</a> SoElement::push </td>
+          <td>(</td>
+          <td class="paramtype"><a class="el" href="classSoState.html">SoState</a> *</td>          <td class="paramname"><span class="paramname"><em>state</em></span></td><td>)</td>
+          <td></td>
+        </tr>
+      </table>
+  </td>
+  <td class="mlabels-right">
+<span class="mlabels"><span class="mlabel">virtual</span></span>  </td>
+  </tr>
+</table>
+</div><div class="memdoc">
+<p>This method is called every time a new element is required in one of the stacks. This happens when a writable element is requested, using SoState::getElement() or indirectly <a class="el" href="#a30c40ecaa79d6b140278fe906273e714">SoElement::getElement()</a>, and the depth of the current element is less than the state depth.</p>
+<p>Override this method if your element needs to copy data from the previous top of stack. The <a class="el" href="#a69fc44b31adb066ba40bbc555298b107">push()</a> method is called on the new element, and the previous element can be found using <a class="el" href="#a56f12d96fc005383d218c2f5a8732ab2">SoElement::getNextInStack()</a>. </p>
+
+<p>Reimplemented in <a class="el" href="classSoGLShaderProgramElement.html#aad90ee0696bc0cac1eef005f0e257fca">SoGLShaderProgramElement</a>, <a class="el" href="classSoGLShadowCullingElement.html#a1dcfa7a8a45e3a5803987276d8ab71d3">SoGLShadowCullingElement</a>, <a class="el" href="classSoAccumulatedElement.html#a08af23cdd447bd9e87b9618db5ad3197">SoAccumulatedElement</a>, <a class="el" href="classSoBBoxModelMatrixElement.html#a49bfd88bada5a82c913d2b8b5ecd7f83">SoBBoxModelMatrixElement</a>, <a class="el" href="classSoBumpMapMatrixElement.html#a2f8be7d80791d5151830fd56762672f1">SoBumpMapMatrixElement</a>, <a class="el" href="classSoCacheElement.html#ac3869257754ff5b5ea21d1c4718c5088">SoCacheElement</a>, <a class="el" href="classSoCacheHintElement.html#a4f9b7749ba74acb28fb32849faba9af8">SoCacheHintElement</a>, <a class="el" href="classSoClipPlaneElement.html#a2a18b17c729ed6c1e279144436db4842">SoClipPlaneElement</a>, <a class="el" href="classSoCullElement.html#ace17893f2c842ed5db70bb4bc0f12a62">SoCullElement</a>, <a class="el" href="classSoDepthBufferElement.html#a2c3a74d8bf65393ff0211c45b7852140">SoDepthBufferElement</a>, <a class="el" href="classSoGLDepthBufferElement.html#ac54359e84e3b94f978ce82e2e145d6b2">SoGLDepthBufferElement</a>, <a class="el" href="classSoGLDrawStyleElement.html#a11f223433b1e3bd190d73cd424bc50dd">SoGLDrawStyleElement</a>, <a class="el" href="classSoGLLazyElement.html#a59e7d9d6f2a3bd17032c6551fa1180f3">SoGLLazyElement</a>, <a class="el" href="classSoGLLightIdElement.html#a6f3f60159f9d6c44089ed29a4511fb1d">SoGLLightIdElement</a>, <a class="el" href="classSoGLLinePatternElement.html#a1398542dfdbecae00d21b97168ba5aab">SoGLLinePatternElement</a>, <a class="el" href="classSoGLLineWidthElement.html#aa4b0134bf9f570296f1259c0869d4bfa">SoGLLineWidthElement</a>, <a class="el" href="classSoGLModelMatrixElement.html#a908f77a858860e914fdf73207b2cc207">SoGLModelMatrixElement</a>, <a class="el" href="classSoGLMultiTextureCoordinateElement.html#a6eef717dfcb5fb7ec702f54c616bf59f">SoGLMultiTextureCoordinateElement</a>, <a class="el" href="classSoGLMultiTextureEnabledElement.html#a601283e85e47e2f1eabcb4e38202ce08">SoGLMultiTextureEnabledElement</a>, <a class="el" href="classSoGLMultiTextureImageElement.html#a1de13c90310a8c450bffafc72f3d7e39">SoGLMultiTextureImageElement</a>, <a class="el" href="classSoGLMultiTextureMatrixElement.html#a9ae16d75360157c326956913133b9c3b">SoGLMultiTextureMatrixElement</a>, <a class="el" href="classSoGLPointSizeElement.html#a839e7b174a6f01e12059559c55a3433f">SoGLPointSizeElement</a>, <a class="el" href="classSoGLPolygonOffsetElement.html#a9e7ed57bc01c0fd7a2b3e278f0569c96">SoGLPolygonOffsetElement</a>, <a class="el" href="classSoGLShapeHintsElement.html#a62a99949228f3388fc69710654123d79">SoGLShapeHintsElement</a>, <a class="el" href="classSoGLUpdateAreaElement.html#a4be2aa06e9f79a0b6eb57ccfcdae7d57">SoGLUpdateAreaElement</a>, <a class="el" href="classSoGLVBOElement.html#a2762b345e92deb630ac4bc4bcacb6b0c">SoGLVBOElement</a>, <a class="el" href="classSoGLViewingMatrixElement.html#ad3ec62361966f799dc9a07e98fa8932a">SoGLViewingMatrixElement</a>, <a class="el" href="classSoGLViewportRegionElement.html#aa31815fbe980edfe9fa48f60f74ec2d7">SoGLViewportRegionElement</a>, <a class="el" href="classSoLazyElement.html#a5ccd6bd19bd80c8608f030bdf8ec0747">SoLazyElement</a>, <a class="el" href="classSoLightElement.html#a3282abdfa7062885576b266e0f8e1730">SoLightElement</a>, <a class="el" href="classSoLocalBBoxMatrixElement.html#af45f464a7a7ba06b21774688f9290e29">SoLocalBBoxMatrixElement</a>, <a class="el" href="classSoModelMatrixElement.html#a34c2b55ca773053d96d018df003b14d8">SoModelMatrixElement</a>, <a class="el" href="classSoMultiTextureCoordinateElement.html#a2326f9bfe153ca985d20fb628a39f6c1">SoMultiTextureCoordinateElement</a>, <a class="el" href="classSoMultiTextureEnabledElement.html#a4d6abf2d05687a7222a57c5967c449ee">SoMultiTextureEnabledElement</a>, <a class="el" href="classSoMultiTextureImageElement.html#a52f6675b23a36c7ba024e5b5f7e69799">SoMultiTextureImageElement</a>, <a class="el" href="classSoMultiTextureMatrixElement.html#a58484296590c6a8324419f2bf5905aa6">SoMultiTextureMatrixElement</a>, <a class="el" href="classSoOverrideElement.html#ad4b607ceb33d2aab371a95b2fc1a0c5f">SoOverrideElement</a>, <a class="el" href="classSoProfileElement.html#a3b9c27c1df0417c4e68945806ed29f6f">SoProfileElement</a>, <a class="el" href="classSoShapeHintsElement.html#a04e3bc45bdffab956b16ca5a7bd5f319">SoShapeHintsElement</a>, <a class="el" href="classSoShapeStyleElement.html#ae916bae4fe33e18d75da48e94dfd78e3">SoShapeStyleElement</a>, <a class="el" href="classSoSoundElement.html#a8e73ec35503607e11cf9251cd870b220">SoSoundElement</a>, <a class="el" href="classSoTextOutlineEnabledElement.html#ab87db4ee3b5627d5930702dbd8f4b787">SoTextOutlineEnabledElement</a>, <a class="el" href="classSoTextureCombineElement.html#a04a77a52b3db2c5ef419b56bd7e566f0">SoTextureCombineElement</a>, <a class="el" href="classSoTextureOverrideElement.html#a3b2fec80377b2425ae1df99e475a2885">SoTextureOverrideElement</a>, <a class="el" href="classSoVertexAttributeElement.html#a21c7d9711e1e697439cc53ca2c3c0262">SoVertexAttributeElement</a>, and <a class="el" href="classSoWindowElement.html#ae2a5f1b822ee5528a00f479f07a1dee4">SoWindowElement</a>.</p>
+
+</div>
+</div>
+<a id="a84b9e1b74e61a4c8383650a33dc7a9c8" name="a84b9e1b74e61a4c8383650a33dc7a9c8"></a>
+<h2 class="memtitle"><span class="permalink"><a href="#a84b9e1b74e61a4c8383650a33dc7a9c8">&#9670;&#160;</a></span>setStackIndex()</h2>
+
+<div class="memitem">
+<div class="memproto">
+<table class="mlabels">
+  <tr>
+  <td class="mlabels-left">
+      <table class="memname">
+        <tr>
+          <td class="memname"><a class="el" href="classSbList.html">void</a> SoElement::setStackIndex </td>
+          <td>(</td>
+          <td class="paramtype"><a class="el" href="classSbList.html">const</a> int</td>          <td class="paramname"><span class="paramname"><em>stackIndex</em></span></td><td>)</td>
+          <td></td>
+        </tr>
+      </table>
+  </td>
+  <td class="mlabels-right">
+<span class="mlabels"><span class="mlabel">protected</span></span>  </td>
+  </tr>
+</table>
+</div><div class="memdoc">
+<p>Sets the stack index in an instance. Used in constructors of derived elements. </p>
+
+</div>
+</div>
+<a id="a48d6dbea777d2eee021a788cf896ecaa" name="a48d6dbea777d2eee021a788cf896ecaa"></a>
+<h2 class="memtitle"><span class="permalink"><a href="#a48d6dbea777d2eee021a788cf896ecaa">&#9670;&#160;</a></span>setTypeId()</h2>
+
+<div class="memitem">
+<div class="memproto">
+<table class="mlabels">
+  <tr>
+  <td class="mlabels-left">
+      <table class="memname">
+        <tr>
+          <td class="memname"><a class="el" href="classSbList.html">void</a> SoElement::setTypeId </td>
+          <td>(</td>
+          <td class="paramtype"><a class="el" href="classSbList.html">const</a> <a class="el" href="classSoType.html">SoType</a></td>          <td class="paramname"><span class="paramname"><em>typeId</em></span></td><td>)</td>
+          <td></td>
+        </tr>
+      </table>
+  </td>
+  <td class="mlabels-right">
+<span class="mlabels"><span class="mlabel">protected</span></span>  </td>
+  </tr>
+</table>
+</div><div class="memdoc">
+<p>Sets the type identifier of an instance.</p>
+<p>Note that this is fundamentally different from the <a class="el" href="classSoNode.html" title="The SoNode class is the base class for nodes used in scene graphs.">SoNode</a> runtime type system. </p>
+
+</div>
+</div>
+<h2 class="groupheader">Member Data Documentation</h2>
+<a id="a3ab188deb13cb1a8c1b40ee365fce944" name="a3ab188deb13cb1a8c1b40ee365fce944"></a>
+<h2 class="memtitle"><span class="permalink"><a href="#a3ab188deb13cb1a8c1b40ee365fce944">&#9670;&#160;</a></span>classStackIndex</h2>
+
+<div class="memitem">
+<div class="memproto">
+<table class="mlabels">
+  <tr>
+  <td class="mlabels-left">
+      <table class="memname">
+        <tr>
+          <td class="memname">int SoElement::classStackIndex</td>
+        </tr>
+      </table>
+  </td>
+  <td class="mlabels-right">
+<span class="mlabels"><span class="mlabel">static</span><span class="mlabel">protected</span></span>  </td>
+  </tr>
+</table>
+</div><div class="memdoc">
+<p>This is the static state stack index for the class. </p>
+
+</div>
+</div>
+<a id="a60e3b7f1344de81f7d6a198e7655235f" name="a60e3b7f1344de81f7d6a198e7655235f"></a>
+<h2 class="memtitle"><span class="permalink"><a href="#a60e3b7f1344de81f7d6a198e7655235f">&#9670;&#160;</a></span>depth</h2>
+
+<div class="memitem">
+<div class="memproto">
+<table class="mlabels">
+  <tr>
+  <td class="mlabels-left">
+      <table class="memname">
+        <tr>
+          <td class="memname">int SoElement::depth</td>
+        </tr>
+      </table>
+  </td>
+  <td class="mlabels-right">
+<span class="mlabels"><span class="mlabel">protected</span></span>  </td>
+  </tr>
+</table>
+</div><div class="memdoc">
+<p>The depth of the element instance in the state stack. </p>
+
+</div>
+</div>
+<a id="a3babbcafa83800192cee2acb1a8edd6f" name="a3babbcafa83800192cee2acb1a8edd6f"></a>
+<h2 class="memtitle"><span class="permalink"><a href="#a3babbcafa83800192cee2acb1a8edd6f">&#9670;&#160;</a></span>stackIndex</h2>
+
+<div class="memitem">
+<div class="memproto">
+<table class="mlabels">
+  <tr>
+  <td class="mlabels-left">
+      <table class="memname">
+        <tr>
+          <td class="memname">int SoElement::stackIndex</td>
+        </tr>
+      </table>
+  </td>
+  <td class="mlabels-right">
+<span class="mlabels"><span class="mlabel">protected</span></span>  </td>
+  </tr>
+</table>
+</div><div class="memdoc">
+<p>The index in the state stack for this particular element instance. </p>
+
+</div>
+</div>
+<a id="a8e7258ccd9bda58158a370fc16455bbc" name="a8e7258ccd9bda58158a370fc16455bbc"></a>
+<h2 class="memtitle"><span class="permalink"><a href="#a8e7258ccd9bda58158a370fc16455bbc">&#9670;&#160;</a></span>stackToType</h2>
+
+<div class="memitem">
+<div class="memproto">
+<table class="mlabels">
+  <tr>
+  <td class="mlabels-left">
+      <table class="memname">
+        <tr>
+          <td class="memname"><a class="el" href="classSoTypeList.html">SoTypeList</a> * SoElement::stackToType</td>
+        </tr>
+      </table>
+  </td>
+  <td class="mlabels-right">
+<span class="mlabels"><span class="mlabel">static</span><span class="mlabel">protected</span></span>  </td>
+  </tr>
+</table>
+</div><div class="memdoc">
+<p>Provides mapping from state stack indices to element types. </p>
+
+</div>
+</div>
+<a id="a3acf0e425bc7ef0a812df905a39fb269" name="a3acf0e425bc7ef0a812df905a39fb269"></a>
+<h2 class="memtitle"><span class="permalink"><a href="#a3acf0e425bc7ef0a812df905a39fb269">&#9670;&#160;</a></span>typeId</h2>
+
+<div class="memitem">
+<div class="memproto">
+<table class="mlabels">
+  <tr>
+  <td class="mlabels-left">
+      <table class="memname">
+        <tr>
+          <td class="memname"><a class="el" href="classSoType.html">SoType</a> SoElement::typeId</td>
+        </tr>
+      </table>
+  </td>
+  <td class="mlabels-right">
+<span class="mlabels"><span class="mlabel">protected</span></span>  </td>
+  </tr>
+</table>
+</div><div class="memdoc">
+<p>The element's unique <a class="el" href="classSoType.html" title="The SoType class is the basis for the runtime type system in Coin.">SoType</a> type identification. </p>
+
+</div>
+</div>
+<hr/>The documentation for this class was generated from the following files:<ul>
+<li><a class="el" href="SoElement_8h_source.html">SoElement.h</a></li>
+<li><b>SoElement.cpp</b></li>
+</ul>
+</div><!-- contents -->
+</div><!-- doc-content -->
+<!-- start footer part -->
+<div id="nav-path" class="navpath"><!-- id is needed for treeview function! -->
+  <ul>
+    <li class="navelem"><a class="el" href="classSoElement.html">SoElement</a></li>
+    <li class="footer">Generated on Fri Sep 11 2026 08:24:50 for Coin by <a href="https://www.doxygen.org/index.html"><img class="footer" src="doxygen.svg" width="104" height="31" alt="doxygen"/></a> 1.10.0 </li>
+  </ul>
+</div>
+</body>
+</html>

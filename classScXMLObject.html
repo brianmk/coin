@@ -1,0 +1,410 @@
+<!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Transitional//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-transitional.dtd">
+<html xmlns="http://www.w3.org/1999/xhtml">
+<head>
+<meta http-equiv="Content-Type" content="text/xhtml;charset=UTF-8"/>
+<meta http-equiv="X-UA-Compatible" content="IE=9"/>
+<meta name="generator" content="Doxygen 1.10.0"/>
+<meta name="viewport" content="width=device-width, initial-scale=1"/>
+<!-- BEGIN opengraph metadata -->
+<meta property="og:title" content="Doxygen Awesome" />
+<meta property="og:image" content="https://repository-images.githubusercontent.com/348492097/4f16df80-88fb-11eb-9d31-4015ff22c452" />
+<meta property="og:description" content="Custom CSS theme for doxygen html-documentation with lots of customization parameters." />
+<meta property="og:url" content="https://jothepro.github.io/doxygen-awesome-css/" />
+<!-- END opengraph metadata -->
+<!-- BEGIN twitter metadata -->
+<meta name="twitter:image:src" content="https://repository-images.githubusercontent.com/348492097/4f16df80-88fb-11eb-9d31-4015ff22c452" />
+<meta name="twitter:title" content="Doxygen Awesome" />
+<meta name="twitter:description" content="Custom CSS theme for doxygen html-documentation with lots of customization parameters." />
+<!-- END twitter metadata -->
+<title>Coin: ScXMLObject Class Reference</title>
+<link href="tabs.css" rel="stylesheet" type="text/css"/>
+<link rel="icon" type="image/svg+xml" href="logo.drawio.svg"/>
+<script type="text/javascript" src="jquery.js"></script>
+<script type="text/javascript" src="dynsections.js"></script>
+<script type="text/javascript" src="doxygen-awesome-darkmode-toggle.js"></script>
+<script type="text/javascript" src="doxygen-awesome-fragment-copy-button.js"></script>
+<script type="text/javascript" src="doxygen-awesome-paragraph-link.js"></script>
+<script type="text/javascript" src="doxygen-awesome-interactive-toc.js"></script>
+<script type="text/javascript" src="doxygen-awesome-tabs.js"></script>
+<script type="text/javascript" src="toggle-alternative-theme.js"></script>
+<script type="text/javascript">
+    DoxygenAwesomeFragmentCopyButton.init()
+    DoxygenAwesomeDarkModeToggle.init()
+    DoxygenAwesomeParagraphLink.init()
+    DoxygenAwesomeInteractiveToc.init()
+    DoxygenAwesomeTabs.init()
+</script>
+<link href="navtree.css" rel="stylesheet" type="text/css"/>
+<script type="text/javascript" src="resize.js"></script>
+<script type="text/javascript" src="navtreedata.js"></script>
+<script type="text/javascript" src="navtree.js"></script>
+<script type="text/javascript" src="cookie.js"></script>
+<link href="search/search.css" rel="stylesheet" type="text/css"/>
+<script type="text/javascript" src="search/searchdata.js"></script>
+<script type="text/javascript" src="search/search.js"></script>
+<link href="doxygen.css" rel="stylesheet" type="text/css" />
+<link href="doxygen-awesome.css" rel="stylesheet" type="text/css"/>
+<link href="custom.css" rel="stylesheet" type="text/css"/>
+<link href="doxygen-awesome-sidebar-only.css" rel="stylesheet" type="text/css"/>
+<link href="doxygen-awesome-sidebar-only-darkmode-toggle.css" rel="stylesheet" type="text/css"/>
+<link href="custom-alternative.css" rel="stylesheet" type="text/css"/>
+</head>
+<body>
+<!-- https://tholman.com/github-corners/ -->
+<a href="https://github.com/coin3d/coin" class="github-corner" title="View source on GitHub" target="_blank" rel="noopener noreferrer">
+    <svg viewBox="0 0 250 250" width="40" height="40" style="position: absolute; top: 0; border: 0; right: 0; z-index: 99;" aria-hidden="true">
+    <path d="M0,0 L115,115 L130,115 L142,142 L250,250 L250,0 Z"></path><path d="M128.3,109.0 C113.8,99.7 119.0,89.6 119.0,89.6 C122.0,82.7 120.5,78.6 120.5,78.6 C119.2,72.0 123.4,76.3 123.4,76.3 C127.3,80.9 125.5,87.3 125.5,87.3 C122.9,97.6 130.6,101.9 134.4,103.2" fill="currentColor" style="transform-origin: 130px 106px;" class="octo-arm"></path><path d="M115.0,115.0 C114.9,115.1 118.7,116.5 119.8,115.4 L133.7,101.6 C136.9,99.2 139.9,98.4 142.2,98.6 C133.8,88.0 127.5,74.4 143.8,58.0 C148.5,53.4 154.0,51.2 159.7,51.0 C160.3,49.4 163.2,43.6 171.4,40.1 C171.4,40.1 176.1,42.5 178.8,56.2 C183.1,58.6 187.2,61.8 190.9,65.4 C194.5,69.0 197.7,73.2 200.1,77.6 C213.8,80.2 216.3,84.9 216.3,84.9 C212.7,93.1 206.9,96.0 205.4,96.6 C205.1,102.4 203.0,107.8 198.3,112.5 C181.9,128.9 168.3,122.5 157.7,114.1 C157.9,116.9 156.7,120.9 152.7,124.9 L141.0,136.5 C139.8,137.7 141.6,141.9 141.8,141.8 Z" fill="currentColor" class="octo-body"></path></svg></a><style>.github-corner:hover .octo-arm{animation:octocat-wave 560ms ease-in-out}@keyframes octocat-wave{0%,100%{transform:rotate(0)}20%,60%{transform:rotate(-25deg)}40%,80%{transform:rotate(10deg)}}@media (max-width:500px){.github-corner:hover .octo-arm{animation:none}.github-corner .octo-arm{animation:octocat-wave 560ms ease-in-out}}</style>
+<div id="top"><!-- do not remove this div, it is closed by doxygen! -->
+<div id="titlearea">
+<table cellspacing="0" cellpadding="0">
+ <tbody>
+ <tr style="height: 56px;">
+  <td id="projectlogo"><img alt="Logo" src="Coin_logo.png"/></td>
+  <td id="projectalign" style="padding-left: 0.5em;">
+   <div id="projectname">Coin
+   &#160;<span id="projectnumber">4.0.10</span>
+   </div>
+   <div id="projectbrief">Coin3D core library</div>
+  </td>
+ </tr>
+ </tbody>
+</table>
+</div>
+<!-- end header part -->
+<!-- Generated by Doxygen 1.10.0 -->
+<script type="text/javascript">
+/* @license magnet:?xt=urn:btih:d3d9a9a6595521f9666a5e94cc830dab83b65699&amp;dn=expat.txt MIT */
+var searchBox = new SearchBox("searchBox", "search/",'.html');
+/* @license-end */
+</script>
+<script type="text/javascript" src="menudata.js"></script>
+<script type="text/javascript" src="menu.js"></script>
+<script type="text/javascript">
+/* @license magnet:?xt=urn:btih:d3d9a9a6595521f9666a5e94cc830dab83b65699&amp;dn=expat.txt MIT */
+$(function() {
+  initMenu('',true,false,'search.php','Search');
+  $(function() { init_search(); });
+});
+/* @license-end */
+</script>
+<div id="main-nav"></div>
+</div><!-- top -->
+<div id="side-nav" class="ui-resizable side-nav-resizable">
+  <div id="nav-tree">
+    <div id="nav-tree-contents">
+      <div id="nav-sync" class="sync"></div>
+    </div>
+  </div>
+  <div id="splitbar" style="-moz-user-select:none;" 
+       class="ui-resizable-handle">
+  </div>
+</div>
+<script type="text/javascript">
+/* @license magnet:?xt=urn:btih:d3d9a9a6595521f9666a5e94cc830dab83b65699&amp;dn=expat.txt MIT */
+$(function(){initNavTree('classScXMLObject.html',''); initResizable(); });
+/* @license-end */
+</script>
+<div id="doc-content">
+<!-- window showing the filter options -->
+<div id="MSearchSelectWindow"
+     onmouseover="return searchBox.OnSearchSelectShow()"
+     onmouseout="return searchBox.OnSearchSelectHide()"
+     onkeydown="return searchBox.OnSearchSelectKey(event)">
+</div>
+
+<!-- iframe showing the search results (closed by default) -->
+<div id="MSearchResultsWindow">
+<div id="MSearchResults">
+<div class="SRPage">
+<div id="SRIndex">
+<div id="SRResults"></div>
+<div class="SRStatus" id="Loading">Loading...</div>
+<div class="SRStatus" id="Searching">Searching...</div>
+<div class="SRStatus" id="NoMatches">No Matches</div>
+</div>
+</div>
+</div>
+</div>
+
+<div class="header">
+  <div class="summary">
+<a href="#pub-methods">Public Member Functions</a> &#124;
+<a href="#pub-static-methods">Static Public Member Functions</a> &#124;
+<a href="#pro-static-methods">Static Protected Member Functions</a> &#124;
+<a href="classScXMLObject-members.html">List of all members</a>  </div>
+  <div class="headertitle"><div class="title">ScXMLObject Class Reference<span class="mlabels"><span class="mlabel">abstract</span></span><div class="ingroups"><a class="el" href="group__coin__scxml.html">State Chart XML Classes</a></div></div></div>
+</div><!--header-->
+<div class="contents">
+
+<p>Base class for all SCXML objects.  
+ <a href="#details">More...</a></p>
+
+<p><code>#include &lt;<a class="el" href="ScXMLObject_8h_source.html">Inventor/scxml/ScXMLObject.h</a>&gt;</code></p>
+<div class="dynheader">
+Inheritance diagram for ScXMLObject:</div>
+<div class="dyncontent">
+ <div class="center">
+  <img src="classScXMLObject.png" usemap="#ScXMLObject_map" alt=""/>
+  <map id="ScXMLObject_map" name="ScXMLObject_map">
+<area href="classScXMLDataObj.html" title="base class for evaluator data objects in the SCXML data module" alt="ScXMLDataObj" shape="rect" coords="0,56,178,80"/>
+<area href="classScXMLDocument.html" alt="ScXMLDocument" shape="rect" coords="188,56,366,80"/>
+<area href="classScXMLElt.html" title="base class for all SCXML elements." alt="ScXMLElt" shape="rect" coords="376,56,554,80"/>
+<area href="classScXMLEvaluator.html" title="defines an interface for profile-dependent evaluators." alt="ScXMLEvaluator" shape="rect" coords="752,56,930,80"/>
+<area href="classScXMLEvent.html" title="Base class for events sent to SCXML state machines." alt="ScXMLEvent" shape="rect" coords="1128,56,1306,80"/>
+<area href="classScXMLEventTarget.html" title="base class for event targets for inter-system event communication" alt="ScXMLEventTarget" shape="rect" coords="1316,56,1494,80"/>
+<area href="classScXMLConstantDataObj.html" title="base class for immediate data values" alt="ScXMLConstantDataObj" shape="rect" coords="188,112,366,136"/>
+<area href="classScXMLExprDataObj.html" alt="ScXMLExprDataObj" shape="rect" coords="188,168,366,192"/>
+<area href="classScXMLXMLDataObj.html" alt="ScXMLXMLDataObj" shape="rect" coords="188,224,366,248"/>
+<area href="classScXMLAbstractStateElt.html" title="abstract base class for the SCXML &#39;state&#39; elements." alt="ScXMLAbstractStateElt" shape="rect" coords="564,112,742,136"/>
+<area href="classScXMLAnchorElt.html" title="implements the &lt;anchor&gt; SCXML element." alt="ScXMLAnchorElt" shape="rect" coords="564,168,742,192"/>
+<area href="classScXMLContentElt.html" title="implements the &lt;content&gt; SCXML element." alt="ScXMLContentElt" shape="rect" coords="564,224,742,248"/>
+<area href="classScXMLDataElt.html" title="the &lt;data&gt; SCXML element." alt="ScXMLDataElt" shape="rect" coords="564,280,742,304"/>
+<area href="classScXMLDataModelElt.html" title="implements the &lt;datamodel&gt; SCXML element." alt="ScXMLDataModelElt" shape="rect" coords="564,336,742,360"/>
+<area href="classScXMLExecutableElt.html" title="base class for all SCXML elements with executable content." alt="ScXMLExecutableElt" shape="rect" coords="564,392,742,416"/>
+<area href="classScXMLFinalizeElt.html" title="implements the &lt;finalize&gt; SCXML element." alt="ScXMLFinalizeElt" shape="rect" coords="564,448,742,472"/>
+<area href="classScXMLHistoryElt.html" title="implements the &lt;history&gt; SCXML element." alt="ScXMLHistoryElt" shape="rect" coords="564,504,742,528"/>
+<area href="classScXMLInitialElt.html" title="implements the &lt;initial&gt; SCXML element." alt="ScXMLInitialElt" shape="rect" coords="564,560,742,584"/>
+<area href="classScXMLOnEntryElt.html" title="implements the &lt;onentry&gt; SCXML element." alt="ScXMLOnEntryElt" shape="rect" coords="564,616,742,640"/>
+<area href="classScXMLOnExitElt.html" title="implements the &lt;onexit&gt; SCXML element." alt="ScXMLOnExitElt" shape="rect" coords="564,672,742,696"/>
+<area href="classScXMLParamElt.html" title="implements the &lt;param&gt; SCXML element." alt="ScXMLParamElt" shape="rect" coords="564,728,742,752"/>
+<area href="classScXMLScxmlElt.html" title="implements the &lt;scxml&gt; SCXML element." alt="ScXMLScxmlElt" shape="rect" coords="564,784,742,808"/>
+<area href="classScXMLTransitionElt.html" title="the &lt;transition&gt; SCXML element." alt="ScXMLTransitionElt" shape="rect" coords="564,840,742,864"/>
+<area href="classScXMLCoinEvaluator.html" title="implements the evaluator for the custom profile named &quot;x-coin&quot;." alt="ScXMLCoinEvaluator" shape="rect" coords="940,112,1118,136"/>
+<area href="classScXMLECMAScriptEvaluator.html" title="evaluator for the ECMAScript profile." alt="ScXMLECMAScriptEvaluator" shape="rect" coords="940,168,1118,192"/>
+<area href="classScXMLMinimumEvaluator.html" title="implements the evaluator for the minimum profile." alt="ScXMLMinimumEvaluator" shape="rect" coords="940,224,1118,248"/>
+<area href="classScXMLXPathEvaluator.html" title="implements the XPath evaluator." alt="ScXMLXPathEvaluator" shape="rect" coords="940,280,1118,304"/>
+<area href="classSoScXMLEvent.html" title="Adds an SoEvent holder to the ScXMLEvent base." alt="SoScXMLEvent" shape="rect" coords="1128,112,1306,136"/>
+<area href="classScXMLStateMachine.html" title="Manager for processing events and setting states in SCXML structures." alt="ScXMLStateMachine" shape="rect" coords="1504,112,1682,136"/>
+<area href="classSoScXMLNavigationTarget.html" title="base class for navigation system SCXML event target services" alt="SoScXMLNavigationTarget" shape="rect" coords="1504,168,1682,192"/>
+  </map>
+</div></div>
+<table class="memberdecls">
+<tr class="heading"><td colspan="2"><h2 class="groupheader"><a id="pub-methods" name="pub-methods"></a>
+Public Member Functions</h2></td></tr>
+<tr class="memitem:a99bfd8003e56ea165441c66a33da44c6" id="r_a99bfd8003e56ea165441c66a33da44c6"><td class="memItemLeft" align="right" valign="top"><a class="el" href="classSbList.html">virtual</a> <a class="el" href="classSoType.html">SoType</a>&#160;</td><td class="memItemRight" valign="bottom"><a class="el" href="#a99bfd8003e56ea165441c66a33da44c6">getTypeId</a> (<a class="el" href="classSbList.html">void</a>) <a class="el" href="classSbList.html">const</a> =0</td></tr>
+<tr class="memdesc:a99bfd8003e56ea165441c66a33da44c6"><td class="mdescLeft">&#160;</td><td class="mdescRight">Returns the type identification of an object derived from a class inheriting <a class="el" href="classSoBase.html" title="The SoBase class is the top-level superclass for a number of class-hierarchies.">SoBase</a>. This is used for runtime type checking and "downward" casting.    <br /></td></tr>
+<tr class="separator:a99bfd8003e56ea165441c66a33da44c6"><td class="memSeparator" colspan="2">&#160;</td></tr>
+<tr class="memitem:aa7076590ebc60151d1c5833e2b800ddc" id="r_aa7076590ebc60151d1c5833e2b800ddc"><td class="memItemLeft" align="right" valign="top">SbBool&#160;</td><td class="memItemRight" valign="bottom"><a class="el" href="#aa7076590ebc60151d1c5833e2b800ddc">isOfType</a> (<a class="el" href="classSoType.html">SoType</a> type) <a class="el" href="classSbList.html">const</a></td></tr>
+<tr class="memdesc:aa7076590ebc60151d1c5833e2b800ddc"><td class="mdescLeft">&#160;</td><td class="mdescRight">Returns <code>TRUE</code> if the type of this object is either of the same type or inherited from <em>type</em>.    <br /></td></tr>
+<tr class="separator:aa7076590ebc60151d1c5833e2b800ddc"><td class="memSeparator" colspan="2">&#160;</td></tr>
+</table><table class="memberdecls">
+<tr class="heading"><td colspan="2"><h2 class="groupheader"><a id="pub-static-methods" name="pub-static-methods"></a>
+Static Public Member Functions</h2></td></tr>
+<tr class="memitem:aae0c5a4a174aca5ba7d7c6f41828b181" id="r_aae0c5a4a174aca5ba7d7c6f41828b181"><td class="memItemLeft" align="right" valign="top"><a id="aae0c5a4a174aca5ba7d7c6f41828b181" name="aae0c5a4a174aca5ba7d7c6f41828b181"></a>
+<a class="el" href="classSbList.html">static</a> <a class="el" href="classSbList.html">void</a>&#160;</td><td class="memItemRight" valign="bottom"><b>cleanClass</b> (<a class="el" href="classSbList.html">void</a>)</td></tr>
+<tr class="memdesc:aae0c5a4a174aca5ba7d7c6f41828b181"><td class="mdescLeft">&#160;</td><td class="mdescRight">Does the opposite of initClass, deallocates any class specific resources and resets the class to an uninitialized state with respect to the Coin type system. <br /></td></tr>
+<tr class="separator:aae0c5a4a174aca5ba7d7c6f41828b181"><td class="memSeparator" colspan="2">&#160;</td></tr>
+<tr class="memitem:aff4dbd61103a1c659b1126bd1342d9f7" id="r_aff4dbd61103a1c659b1126bd1342d9f7"><td class="memItemLeft" align="right" valign="top"><a class="el" href="classSbList.html">static</a> <a class="el" href="classSoType.html">SoType</a>&#160;</td><td class="memItemRight" valign="bottom"><a class="el" href="#aff4dbd61103a1c659b1126bd1342d9f7">getClassTypeId</a> (<a class="el" href="classSbList.html">void</a>)</td></tr>
+<tr class="memdesc:aff4dbd61103a1c659b1126bd1342d9f7"><td class="mdescLeft">&#160;</td><td class="mdescRight">This static method returns the <a class="el" href="classSoType.html" title="The SoType class is the basis for the runtime type system in Coin.">SoType</a> object associated with objects of this class.    <br /></td></tr>
+<tr class="separator:aff4dbd61103a1c659b1126bd1342d9f7"><td class="memSeparator" colspan="2">&#160;</td></tr>
+<tr class="memitem:ad52f3e69104a3527433768dc369539ae" id="r_ad52f3e69104a3527433768dc369539ae"><td class="memItemLeft" align="right" valign="top"><a class="el" href="classSbList.html">static</a> <a class="el" href="classSbList.html">void</a>&#160;</td><td class="memItemRight" valign="bottom"><a class="el" href="#ad52f3e69104a3527433768dc369539ae">initClass</a> (<a class="el" href="classSbList.html">void</a>)</td></tr>
+<tr class="memdesc:ad52f3e69104a3527433768dc369539ae"><td class="mdescLeft">&#160;</td><td class="mdescRight">Sets up initialization for data common to all instances of this class, like submitting necessary information to the Coin type system.    <br /></td></tr>
+<tr class="separator:ad52f3e69104a3527433768dc369539ae"><td class="memSeparator" colspan="2">&#160;</td></tr>
+</table><table class="memberdecls">
+<tr class="heading"><td colspan="2"><h2 class="groupheader"><a id="pro-static-methods" name="pro-static-methods"></a>
+Static Protected Member Functions</h2></td></tr>
+<tr class="memitem:a8146bae33082f60297517988ebda4632" id="r_a8146bae33082f60297517988ebda4632"><td class="memItemLeft" align="right" valign="top"><a class="el" href="classSbList.html">static</a> <a class="el" href="classSbList.html">void</a>&#160;</td><td class="memItemRight" valign="bottom"><a class="el" href="#a8146bae33082f60297517988ebda4632">registerClassType</a> (<a class="el" href="classSbList.html">const</a> char *xmlns, <a class="el" href="classSbList.html">const</a> char *<a class="el" href="classSbList.html">classname</a>, <a class="el" href="classSoType.html">SoType</a> type)</td></tr>
+<tr class="separator:a8146bae33082f60297517988ebda4632"><td class="memSeparator" colspan="2">&#160;</td></tr>
+<tr class="memitem:aa7838602d6dc4f741be2b0984cedf966" id="r_aa7838602d6dc4f741be2b0984cedf966"><td class="memItemLeft" align="right" valign="top"><a class="el" href="classSbList.html">static</a> <a class="el" href="classSbList.html">void</a>&#160;</td><td class="memItemRight" valign="bottom"><a class="el" href="#aa7838602d6dc4f741be2b0984cedf966">registerInvokeClassType</a> (<a class="el" href="classSbList.html">const</a> char *xmlns, <a class="el" href="classSbList.html">const</a> char *targettype, <a class="el" href="classSbList.html">const</a> char *source, <a class="el" href="classSoType.html">SoType</a> type)</td></tr>
+<tr class="separator:aa7838602d6dc4f741be2b0984cedf966"><td class="memSeparator" colspan="2">&#160;</td></tr>
+</table>
+<a name="details" id="details"></a><h2 class="groupheader">Detailed Description</h2>
+<div class="textblock"><p>Base class for all SCXML objects. </p>
+<dl class="section since"><dt>Since</dt><dd>Coin <a class="el" href="classSbList.html#ab18cad4eb2d06030cd564917a8c331f4">3.0</a> </dd></dl>
+</div><h2 class="groupheader">Member Function Documentation</h2>
+<a id="aff4dbd61103a1c659b1126bd1342d9f7" name="aff4dbd61103a1c659b1126bd1342d9f7"></a>
+<h2 class="memtitle"><span class="permalink"><a href="#aff4dbd61103a1c659b1126bd1342d9f7">&#9670;&#160;</a></span>getClassTypeId()</h2>
+
+<div class="memitem">
+<div class="memproto">
+<table class="mlabels">
+  <tr>
+  <td class="mlabels-left">
+      <table class="memname">
+        <tr>
+          <td class="memname"><a class="el" href="classSoType.html">SoType</a> ScXMLObject::getClassTypeId </td>
+          <td>(</td>
+          <td class="paramtype"><a class="el" href="classSbList.html">void</a></td>          <td class="paramname"><span class="paramname"></span></td><td>)</td>
+          <td></td>
+        </tr>
+      </table>
+  </td>
+  <td class="mlabels-right">
+<span class="mlabels"><span class="mlabel">static</span></span>  </td>
+  </tr>
+</table>
+</div><div class="memdoc">
+
+<p>This static method returns the <a class="el" href="classSoType.html" title="The SoType class is the basis for the runtime type system in Coin.">SoType</a> object associated with objects of this class.   </p>
+<dl class="section see"><dt>See also</dt><dd><a class="el" href="classSoBase.html#a73ce238db093db6ba1b4009818cc9f27" title="This static method returns the SoType object associated with objects of this class.">SoBase::getClassTypeId</a> </dd></dl>
+
+</div>
+</div>
+<a id="a99bfd8003e56ea165441c66a33da44c6" name="a99bfd8003e56ea165441c66a33da44c6"></a>
+<h2 class="memtitle"><span class="permalink"><a href="#a99bfd8003e56ea165441c66a33da44c6">&#9670;&#160;</a></span>getTypeId()</h2>
+
+<div class="memitem">
+<div class="memproto">
+<table class="mlabels">
+  <tr>
+  <td class="mlabels-left">
+      <table class="memname">
+        <tr>
+          <td class="memname">ScXMLObject::getTypeId </td>
+          <td>(</td>
+          <td class="paramtype"><a class="el" href="classSbList.html">void</a></td>          <td class="paramname"><span class="paramname"></span></td><td>)</td>
+          <td> const</td>
+        </tr>
+      </table>
+  </td>
+  <td class="mlabels-right">
+<span class="mlabels"><span class="mlabel">pure virtual</span></span>  </td>
+  </tr>
+</table>
+</div><div class="memdoc">
+
+<p>Returns the type identification of an object derived from a class inheriting <a class="el" href="classSoBase.html" title="The SoBase class is the top-level superclass for a number of class-hierarchies.">SoBase</a>. This is used for runtime type checking and "downward" casting.   </p>
+<dl class="section see"><dt>See also</dt><dd><a class="el" href="classSoBase.html#a873b521c1386368d4d63ff893856590a" title="Returns the type identification of an object derived from a class inheriting SoBase....">SoBase::getTypeId() const</a> </dd></dl>
+
+<p>Implemented in <a class="el" href="classSoScXMLDollyTarget.html#a38c9160cb3dbc80af2abdca9d51b3b8c">SoScXMLDollyTarget</a>, <a class="el" href="classSoScXMLFlightControlTarget.html#a22c820aa620b18c7d233bf37073d3c02">SoScXMLFlightControlTarget</a>, <a class="el" href="classSoScXMLMiscTarget.html#a6aa65a64d8d00b3397b609bbb3167023">SoScXMLMiscTarget</a>, <a class="el" href="classSoScXMLMotionTarget.html#a8508a7128a31b8109133952d268f958e">SoScXMLMotionTarget</a>, <a class="el" href="classSoScXMLPanTarget.html#ab78cbf584a50377c9a774d8e070504ef">SoScXMLPanTarget</a>, <a class="el" href="classSoScXMLRotateTarget.html#a740b0cbdea79329225743730589ccfec">SoScXMLRotateTarget</a>, <a class="el" href="classSoScXMLSeekTarget.html#a1948ec432ad62bae0f04cbcb3ae7d798">SoScXMLSeekTarget</a>, <a class="el" href="classSoScXMLSpinTarget.html#a81ff039c74bf99105a129cb95252ac2e">SoScXMLSpinTarget</a>, <a class="el" href="classSoScXMLZoomTarget.html#ac51531574df808565369b21110d73987">SoScXMLZoomTarget</a>, <a class="el" href="classScXMLAnchorElt.html#a8f591a234d9ce14d2d021b26a874686b">ScXMLAnchorElt</a>, <a class="el" href="classScXMLAssignElt.html#a633c20776e9d80fd656f138c1dcfaa7f">ScXMLAssignElt</a>, <a class="el" href="classScXMLCoinEvaluator.html#a2edfdca09c7efc01df41b6742bc2ff45">ScXMLCoinEvaluator</a>, <a class="el" href="classScXMLCoinEqualsOpExprDataObj.html#a49193254ca13bddf17c70ac3f6ea0935">ScXMLCoinEqualsOpExprDataObj</a>, <a class="el" href="classScXMLCoinAddOpExprDataObj.html#a93aac05288e2a59036705f3985a7ff0a">ScXMLCoinAddOpExprDataObj</a>, <a class="el" href="classScXMLCoinSubtractOpExprDataObj.html#aa4a44481cab4dc007ad5069ac5a75f79">ScXMLCoinSubtractOpExprDataObj</a>, <a class="el" href="classScXMLCoinMultiplyOpExprDataObj.html#ab23b4764aa17d354afe1c24600975535">ScXMLCoinMultiplyOpExprDataObj</a>, <a class="el" href="classScXMLCoinDivideOpExprDataObj.html#a16a203299ba06aa499dbde903ed96440">ScXMLCoinDivideOpExprDataObj</a>, <a class="el" href="classScXMLCoinLengthFuncExprDataObj.html#a4079f925315b22aec6980043b2b36d2b">ScXMLCoinLengthFuncExprDataObj</a>, <a class="el" href="classScXMLContentElt.html#ab8c23f63ba2ebdb3cb9b0eb377806ed2">ScXMLContentElt</a>, <a class="el" href="classScXMLDataElt.html#a18c2053d0c428b44fdb1696ae96d72b8">ScXMLDataElt</a>, <a class="el" href="classScXMLDataModelElt.html#ad27e4176cf5e7a64234d34df5914f0fe">ScXMLDataModelElt</a>, <a class="el" href="classScXMLDocument.html#a47e1e548753a8bda676bdb2c493406a0">ScXMLDocument</a>, <a class="el" href="classScXMLECMAScriptEvaluator.html#a61caea357455b3dd9e2e4e26f119a341">ScXMLECMAScriptEvaluator</a>, <a class="el" href="classScXMLElseElt.html#ae5342f3647358d50586cba327d309469">ScXMLElseElt</a>, <a class="el" href="classScXMLElseIfElt.html#aa206098dbe4c663fcc7764d36cbe329d">ScXMLElseIfElt</a>, <a class="el" href="classScXMLStringDataObj.html#ad3192629f395e00d94ec08231501c229">ScXMLStringDataObj</a>, <a class="el" href="classScXMLRealDataObj.html#ac9f811defaab70bc78693b5fff8459d2">ScXMLRealDataObj</a>, <a class="el" href="classScXMLBoolDataObj.html#a35d822983194595b8f2bdf16fea5614d">ScXMLBoolDataObj</a>, <a class="el" href="classScXMLSbDataObj.html#ab83da341c63f327e33197dc463a34457">ScXMLSbDataObj</a>, <a class="el" href="classScXMLXMLDataObj.html#a50fe23b5e43f4f0a88f3761c47ed408a">ScXMLXMLDataObj</a>, <a class="el" href="classScXMLReferenceDataObj.html#a84578671c6978c8205801196ff7c1d01">ScXMLReferenceDataObj</a>, <a class="el" href="classScXMLAndOpExprDataObj.html#acb988a55c9a294c1e3e4807b0fcf425a">ScXMLAndOpExprDataObj</a>, <a class="el" href="classScXMLOrOpExprDataObj.html#ae8f46b94a8d971f19410ce925c46664f">ScXMLOrOpExprDataObj</a>, <a class="el" href="classScXMLNotOpExprDataObj.html#a816c5a2f061ed0fe1d97601f9819f00a">ScXMLNotOpExprDataObj</a>, <a class="el" href="classScXMLEqualsOpExprDataObj.html#a6b6e162d26f30586a56d03d8d1f84838">ScXMLEqualsOpExprDataObj</a>, <a class="el" href="classScXMLAddOpExprDataObj.html#aebfda9778c6b74a5a507a675690140a9">ScXMLAddOpExprDataObj</a>, <a class="el" href="classScXMLSubtractOpExprDataObj.html#adaf3906e4abbed1d9c427e8f9595ce57">ScXMLSubtractOpExprDataObj</a>, <a class="el" href="classScXMLMultiplyOpExprDataObj.html#a7ea604bab094279945965eeb4d1e62f4">ScXMLMultiplyOpExprDataObj</a>, <a class="el" href="classScXMLDivideOpExprDataObj.html#afbdf992eea22477deaca1ece981cd360">ScXMLDivideOpExprDataObj</a>, <a class="el" href="classScXMLNegateOpExprDataObj.html#a62e5a92b222ff3fee0d7d8001309e287">ScXMLNegateOpExprDataObj</a>, <a class="el" href="classScXMLEvent.html#ae2f771d142912215204d0f72d5ec0937">ScXMLEvent</a>, <a class="el" href="classScXMLEventElt.html#a56c2c0b91fa7a7255fa77471d56deefd">ScXMLEventElt</a>, <a class="el" href="classScXMLFinalElt.html#aedacb84d82b6569e7087348bd7b33aa9">ScXMLFinalElt</a>, <a class="el" href="classScXMLFinalizeElt.html#acd730569464bb90dd4b6b70e5c190cbc">ScXMLFinalizeElt</a>, <a class="el" href="classScXMLHistoryElt.html#aaeec79f744eeef4770e89ac972ee2579">ScXMLHistoryElt</a>, <a class="el" href="classScXMLIfElt.html#aa627a16e6ca757e1999ba55fab7170f7">ScXMLIfElt</a>, <a class="el" href="classScXMLInitialElt.html#a1a3234b41e0c7b421967720fb0108598">ScXMLInitialElt</a>, <a class="el" href="classScXMLInvokeElt.html#a3c357d9d6e396b42f9a1c656dfc14d3c">ScXMLInvokeElt</a>, <a class="el" href="classScXMLLogElt.html#a174415945082c5e298501016b68c8f9c">ScXMLLogElt</a>, <a class="el" href="classScXMLMinimumEvaluator.html#aaa0abf1e7254a950aeb7ae4746ec9a64">ScXMLMinimumEvaluator</a>, <a class="el" href="classScXMLInExprDataObj.html#a9039bb626041c0d79487538a435166ab">ScXMLInExprDataObj</a>, <a class="el" href="classScXMLAppendOpExprDataObj.html#a9d6e85599bc7754f5f7778b4a1f4a03b">ScXMLAppendOpExprDataObj</a>, <a class="el" href="classScXMLOnEntryElt.html#ad08213f607ff8d111e1c02c681bf48be">ScXMLOnEntryElt</a>, <a class="el" href="classScXMLOnExitElt.html#a72df9b65bf016f07948f0c4d43cfcfce">ScXMLOnExitElt</a>, <a class="el" href="classScXMLParallelElt.html#a817993afc9b1c447fda9a292095788d7">ScXMLParallelElt</a>, <a class="el" href="classScXMLParamElt.html#a0f20a2dfc0d2ed7f86baa5881e38b264">ScXMLParamElt</a>, <a class="el" href="classScXMLScriptElt.html#a8b7a24654bd3a5c9b3f7f4f2e4ae4b94">ScXMLScriptElt</a>, <a class="el" href="classScXMLScxmlElt.html#a5102da5edcf853be63368d34fc8c9324">ScXMLScxmlElt</a>, <a class="el" href="classScXMLSendElt.html#ae77f88f1590558c530e2bba209f80b4c">ScXMLSendElt</a>, <a class="el" href="classScXMLStateElt.html#a4b51690df441b371262dd2e56a39f1d6">ScXMLStateElt</a>, <a class="el" href="classScXMLStateMachine.html#a1527a6479edcb9c7a3ca9ea3c388ea83">ScXMLStateMachine</a>, <a class="el" href="classScXMLTransitionElt.html#a4ed8cf375d1b1e85f337786e4c910e77">ScXMLTransitionElt</a>, <a class="el" href="classScXMLValidateElt.html#a67d12a82bd7f25bdb77581246e00c4ee">ScXMLValidateElt</a>, <a class="el" href="classScXMLXPathEvaluator.html#ac90ac35934c5c04c00fd490d544e1154">ScXMLXPathEvaluator</a>, <a class="el" href="classSoScXMLEvent.html#a63bd5344b6d6b0b6e03ab38f3610c9c5">SoScXMLEvent</a>, <a class="el" href="classSoScXMLStateMachine.html#a0bd086b837bef943e9183ae23c6195be">SoScXMLStateMachine</a>, <a class="el" href="classSoScXMLNavigationTarget.html#a3be32670607405badda3573ebecb997a">SoScXMLNavigationTarget</a>, <a class="el" href="classScXMLAbstractStateElt.html#add17d3cb5a6ebee22e6ddc08b9fc21cd">ScXMLAbstractStateElt</a>, <a class="el" href="classScXMLElt.html#afd4977a5f999504e51c86e72153cf0f3">ScXMLElt</a>, <a class="el" href="classScXMLEvaluator.html#a3f2a6a5c9ab8cb64cd1689d96126d650">ScXMLEvaluator</a>, <a class="el" href="classScXMLDataObj.html#a3b0ea0d8a5768a1c2ef3e31afd9a4c21">ScXMLDataObj</a>, <a class="el" href="classScXMLConstantDataObj.html#a7afbe71b9c5ae3c7fe48c007a612d4db">ScXMLConstantDataObj</a>, <a class="el" href="classScXMLExprDataObj.html#acbf81820018f30763b18d29db07211ec">ScXMLExprDataObj</a>, <a class="el" href="classScXMLEventTarget.html#a3dfc46fa2c37e438716b43beb142bfc0">ScXMLEventTarget</a>, <a class="el" href="classScXMLExecutableElt.html#ac4ac92ba62a250d5febef63cc3130014">ScXMLExecutableElt</a>, and <a class="el" href="classScXMLMinimumExprDataObj.html#a158ece12c8302b562a7093e4676f9f20">ScXMLMinimumExprDataObj</a>.</p>
+
+</div>
+</div>
+<a id="ad52f3e69104a3527433768dc369539ae" name="ad52f3e69104a3527433768dc369539ae"></a>
+<h2 class="memtitle"><span class="permalink"><a href="#ad52f3e69104a3527433768dc369539ae">&#9670;&#160;</a></span>initClass()</h2>
+
+<div class="memitem">
+<div class="memproto">
+<table class="mlabels">
+  <tr>
+  <td class="mlabels-left">
+      <table class="memname">
+        <tr>
+          <td class="memname"><a class="el" href="classSbList.html">void</a> ScXMLObject::initClass </td>
+          <td>(</td>
+          <td class="paramtype"><a class="el" href="classSbList.html">void</a></td>          <td class="paramname"><span class="paramname"></span></td><td>)</td>
+          <td></td>
+        </tr>
+      </table>
+  </td>
+  <td class="mlabels-right">
+<span class="mlabels"><span class="mlabel">static</span></span>  </td>
+  </tr>
+</table>
+</div><div class="memdoc">
+
+<p>Sets up initialization for data common to all instances of this class, like submitting necessary information to the Coin type system.   </p>
+<dl class="section see"><dt>See also</dt><dd><a class="el" href="classSoBase.html#a8419a92b3ac808c6a789673db06776be" title="Sets up initialization for data common to all instances of this class, like submitting necessary info...">SoBase::initClass()</a> </dd></dl>
+
+</div>
+</div>
+<a id="aa7076590ebc60151d1c5833e2b800ddc" name="aa7076590ebc60151d1c5833e2b800ddc"></a>
+<h2 class="memtitle"><span class="permalink"><a href="#aa7076590ebc60151d1c5833e2b800ddc">&#9670;&#160;</a></span>isOfType()</h2>
+
+<div class="memitem">
+<div class="memproto">
+      <table class="memname">
+        <tr>
+          <td class="memname">SbBool ScXMLObject::isOfType </td>
+          <td>(</td>
+          <td class="paramtype"><a class="el" href="classSoType.html">SoType</a></td>          <td class="paramname"><span class="paramname"><em>type</em></span></td><td>)</td>
+          <td> const</td>
+        </tr>
+      </table>
+</div><div class="memdoc">
+
+<p>Returns <code>TRUE</code> if the type of this object is either of the same type or inherited from <em>type</em>.   </p>
+<dl class="section see"><dt>See also</dt><dd><a class="el" href="classSoBase.html#aa2861cbe3c2f43747bc289c7f55bbec3" title="Returns TRUE if the type of this object is either of the same type or inherited from type.">SoBase::isOfType(SoType type) const</a> </dd></dl>
+
+</div>
+</div>
+<a id="a8146bae33082f60297517988ebda4632" name="a8146bae33082f60297517988ebda4632"></a>
+<h2 class="memtitle"><span class="permalink"><a href="#a8146bae33082f60297517988ebda4632">&#9670;&#160;</a></span>registerClassType()</h2>
+
+<div class="memitem">
+<div class="memproto">
+<table class="mlabels">
+  <tr>
+  <td class="mlabels-left">
+      <table class="memname">
+        <tr>
+          <td class="memname"><a class="el" href="classSbList.html">void</a> ScXMLObject::registerClassType </td>
+          <td>(</td>
+          <td class="paramtype"><a class="el" href="classSbList.html">const</a> char *</td>          <td class="paramname"><span class="paramname"><em>xmlns</em>, </span></td>
+        </tr>
+        <tr>
+          <td class="paramkey"></td>
+          <td></td>
+          <td class="paramtype"><a class="el" href="classSbList.html">const</a> char *</td>          <td class="paramname"><span class="paramname"><em>classname</em>, </span></td>
+        </tr>
+        <tr>
+          <td class="paramkey"></td>
+          <td></td>
+          <td class="paramtype"><a class="el" href="classSoType.html">SoType</a></td>          <td class="paramname"><span class="paramname"><em>type</em></span>&#160;)</td>
+        </tr>
+      </table>
+  </td>
+  <td class="mlabels-right">
+<span class="mlabels"><span class="mlabel">static</span><span class="mlabel">protected</span></span>  </td>
+  </tr>
+</table>
+</div><div class="memdoc">
+<p>Internal method. Friendly forwarding for <a class="el" href="classScXMLObject.html" title="Base class for all SCXML objects.">ScXMLObject</a> subclasses. </p>
+
+</div>
+</div>
+<a id="aa7838602d6dc4f741be2b0984cedf966" name="aa7838602d6dc4f741be2b0984cedf966"></a>
+<h2 class="memtitle"><span class="permalink"><a href="#aa7838602d6dc4f741be2b0984cedf966">&#9670;&#160;</a></span>registerInvokeClassType()</h2>
+
+<div class="memitem">
+<div class="memproto">
+<table class="mlabels">
+  <tr>
+  <td class="mlabels-left">
+      <table class="memname">
+        <tr>
+          <td class="memname"><a class="el" href="classSbList.html">void</a> ScXMLObject::registerInvokeClassType </td>
+          <td>(</td>
+          <td class="paramtype"><a class="el" href="classSbList.html">const</a> char *</td>          <td class="paramname"><span class="paramname"><em>xmlns</em>, </span></td>
+        </tr>
+        <tr>
+          <td class="paramkey"></td>
+          <td></td>
+          <td class="paramtype"><a class="el" href="classSbList.html">const</a> char *</td>          <td class="paramname"><span class="paramname"><em>targettype</em>, </span></td>
+        </tr>
+        <tr>
+          <td class="paramkey"></td>
+          <td></td>
+          <td class="paramtype"><a class="el" href="classSbList.html">const</a> char *</td>          <td class="paramname"><span class="paramname"><em>source</em>, </span></td>
+        </tr>
+        <tr>
+          <td class="paramkey"></td>
+          <td></td>
+          <td class="paramtype"><a class="el" href="classSoType.html">SoType</a></td>          <td class="paramname"><span class="paramname"><em>type</em></span>&#160;)</td>
+        </tr>
+      </table>
+  </td>
+  <td class="mlabels-right">
+<span class="mlabels"><span class="mlabel">static</span><span class="mlabel">protected</span></span>  </td>
+  </tr>
+</table>
+</div><div class="memdoc">
+<p>Internal method. Friendly forwarding for <a class="el" href="classScXMLObject.html" title="Base class for all SCXML objects.">ScXMLObject</a> subclasses. </p>
+
+</div>
+</div>
+<hr/>The documentation for this class was generated from the following files:<ul>
+<li><a class="el" href="ScXMLObject_8h_source.html">ScXMLObject.h</a></li>
+<li><b>ScXMLObject.cpp</b></li>
+</ul>
+</div><!-- contents -->
+</div><!-- doc-content -->
+<!-- start footer part -->
+<div id="nav-path" class="navpath"><!-- id is needed for treeview function! -->
+  <ul>
+    <li class="navelem"><a class="el" href="classScXMLObject.html">ScXMLObject</a></li>
+    <li class="footer">Generated on Fri Sep 11 2026 08:24:49 for Coin by <a href="https://www.doxygen.org/index.html"><img class="footer" src="doxygen.svg" width="104" height="31" alt="doxygen"/></a> 1.10.0 </li>
+  </ul>
+</div>
+</body>
+</html>

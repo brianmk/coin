@@ -1,0 +1,517 @@
+<!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Transitional//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-transitional.dtd">
+<html xmlns="http://www.w3.org/1999/xhtml">
+<head>
+<meta http-equiv="Content-Type" content="text/xhtml;charset=UTF-8"/>
+<meta http-equiv="X-UA-Compatible" content="IE=9"/>
+<meta name="generator" content="Doxygen 1.10.0"/>
+<meta name="viewport" content="width=device-width, initial-scale=1"/>
+<!-- BEGIN opengraph metadata -->
+<meta property="og:title" content="Doxygen Awesome" />
+<meta property="og:image" content="https://repository-images.githubusercontent.com/348492097/4f16df80-88fb-11eb-9d31-4015ff22c452" />
+<meta property="og:description" content="Custom CSS theme for doxygen html-documentation with lots of customization parameters." />
+<meta property="og:url" content="https://jothepro.github.io/doxygen-awesome-css/" />
+<!-- END opengraph metadata -->
+<!-- BEGIN twitter metadata -->
+<meta name="twitter:image:src" content="https://repository-images.githubusercontent.com/348492097/4f16df80-88fb-11eb-9d31-4015ff22c452" />
+<meta name="twitter:title" content="Doxygen Awesome" />
+<meta name="twitter:description" content="Custom CSS theme for doxygen html-documentation with lots of customization parameters." />
+<!-- END twitter metadata -->
+<title>Coin: SoRenderIR.h File Reference</title>
+<link href="tabs.css" rel="stylesheet" type="text/css"/>
+<link rel="icon" type="image/svg+xml" href="logo.drawio.svg"/>
+<script type="text/javascript" src="jquery.js"></script>
+<script type="text/javascript" src="dynsections.js"></script>
+<script type="text/javascript" src="doxygen-awesome-darkmode-toggle.js"></script>
+<script type="text/javascript" src="doxygen-awesome-fragment-copy-button.js"></script>
+<script type="text/javascript" src="doxygen-awesome-paragraph-link.js"></script>
+<script type="text/javascript" src="doxygen-awesome-interactive-toc.js"></script>
+<script type="text/javascript" src="doxygen-awesome-tabs.js"></script>
+<script type="text/javascript" src="toggle-alternative-theme.js"></script>
+<script type="text/javascript">
+    DoxygenAwesomeFragmentCopyButton.init()
+    DoxygenAwesomeDarkModeToggle.init()
+    DoxygenAwesomeParagraphLink.init()
+    DoxygenAwesomeInteractiveToc.init()
+    DoxygenAwesomeTabs.init()
+</script>
+<link href="navtree.css" rel="stylesheet" type="text/css"/>
+<script type="text/javascript" src="resize.js"></script>
+<script type="text/javascript" src="navtreedata.js"></script>
+<script type="text/javascript" src="navtree.js"></script>
+<script type="text/javascript" src="cookie.js"></script>
+<link href="search/search.css" rel="stylesheet" type="text/css"/>
+<script type="text/javascript" src="search/searchdata.js"></script>
+<script type="text/javascript" src="search/search.js"></script>
+<link href="doxygen.css" rel="stylesheet" type="text/css" />
+<link href="doxygen-awesome.css" rel="stylesheet" type="text/css"/>
+<link href="custom.css" rel="stylesheet" type="text/css"/>
+<link href="doxygen-awesome-sidebar-only.css" rel="stylesheet" type="text/css"/>
+<link href="doxygen-awesome-sidebar-only-darkmode-toggle.css" rel="stylesheet" type="text/css"/>
+<link href="custom-alternative.css" rel="stylesheet" type="text/css"/>
+</head>
+<body>
+<!-- https://tholman.com/github-corners/ -->
+<a href="https://github.com/coin3d/coin" class="github-corner" title="View source on GitHub" target="_blank" rel="noopener noreferrer">
+    <svg viewBox="0 0 250 250" width="40" height="40" style="position: absolute; top: 0; border: 0; right: 0; z-index: 99;" aria-hidden="true">
+    <path d="M0,0 L115,115 L130,115 L142,142 L250,250 L250,0 Z"></path><path d="M128.3,109.0 C113.8,99.7 119.0,89.6 119.0,89.6 C122.0,82.7 120.5,78.6 120.5,78.6 C119.2,72.0 123.4,76.3 123.4,76.3 C127.3,80.9 125.5,87.3 125.5,87.3 C122.9,97.6 130.6,101.9 134.4,103.2" fill="currentColor" style="transform-origin: 130px 106px;" class="octo-arm"></path><path d="M115.0,115.0 C114.9,115.1 118.7,116.5 119.8,115.4 L133.7,101.6 C136.9,99.2 139.9,98.4 142.2,98.6 C133.8,88.0 127.5,74.4 143.8,58.0 C148.5,53.4 154.0,51.2 159.7,51.0 C160.3,49.4 163.2,43.6 171.4,40.1 C171.4,40.1 176.1,42.5 178.8,56.2 C183.1,58.6 187.2,61.8 190.9,65.4 C194.5,69.0 197.7,73.2 200.1,77.6 C213.8,80.2 216.3,84.9 216.3,84.9 C212.7,93.1 206.9,96.0 205.4,96.6 C205.1,102.4 203.0,107.8 198.3,112.5 C181.9,128.9 168.3,122.5 157.7,114.1 C157.9,116.9 156.7,120.9 152.7,124.9 L141.0,136.5 C139.8,137.7 141.6,141.9 141.8,141.8 Z" fill="currentColor" class="octo-body"></path></svg></a><style>.github-corner:hover .octo-arm{animation:octocat-wave 560ms ease-in-out}@keyframes octocat-wave{0%,100%{transform:rotate(0)}20%,60%{transform:rotate(-25deg)}40%,80%{transform:rotate(10deg)}}@media (max-width:500px){.github-corner:hover .octo-arm{animation:none}.github-corner .octo-arm{animation:octocat-wave 560ms ease-in-out}}</style>
+<div id="top"><!-- do not remove this div, it is closed by doxygen! -->
+<div id="titlearea">
+<table cellspacing="0" cellpadding="0">
+ <tbody>
+ <tr style="height: 56px;">
+  <td id="projectlogo"><img alt="Logo" src="Coin_logo.png"/></td>
+  <td id="projectalign" style="padding-left: 0.5em;">
+   <div id="projectname">Coin
+   &#160;<span id="projectnumber">4.0.10</span>
+   </div>
+   <div id="projectbrief">Coin3D core library</div>
+  </td>
+ </tr>
+ </tbody>
+</table>
+</div>
+<!-- end header part -->
+<!-- Generated by Doxygen 1.10.0 -->
+<script type="text/javascript">
+/* @license magnet:?xt=urn:btih:d3d9a9a6595521f9666a5e94cc830dab83b65699&amp;dn=expat.txt MIT */
+var searchBox = new SearchBox("searchBox", "search/",'.html');
+/* @license-end */
+</script>
+<script type="text/javascript" src="menudata.js"></script>
+<script type="text/javascript" src="menu.js"></script>
+<script type="text/javascript">
+/* @license magnet:?xt=urn:btih:d3d9a9a6595521f9666a5e94cc830dab83b65699&amp;dn=expat.txt MIT */
+$(function() {
+  initMenu('',true,false,'search.php','Search');
+  $(function() { init_search(); });
+});
+/* @license-end */
+</script>
+<div id="main-nav"></div>
+</div><!-- top -->
+<div id="side-nav" class="ui-resizable side-nav-resizable">
+  <div id="nav-tree">
+    <div id="nav-tree-contents">
+      <div id="nav-sync" class="sync"></div>
+    </div>
+  </div>
+  <div id="splitbar" style="-moz-user-select:none;" 
+       class="ui-resizable-handle">
+  </div>
+</div>
+<script type="text/javascript">
+/* @license magnet:?xt=urn:btih:d3d9a9a6595521f9666a5e94cc830dab83b65699&amp;dn=expat.txt MIT */
+$(function(){initNavTree('SoRenderIR_8h.html',''); initResizable(); });
+/* @license-end */
+</script>
+<div id="doc-content">
+<!-- window showing the filter options -->
+<div id="MSearchSelectWindow"
+     onmouseover="return searchBox.OnSearchSelectShow()"
+     onmouseout="return searchBox.OnSearchSelectHide()"
+     onkeydown="return searchBox.OnSearchSelectKey(event)">
+</div>
+
+<!-- iframe showing the search results (closed by default) -->
+<div id="MSearchResultsWindow">
+<div id="MSearchResults">
+<div class="SRPage">
+<div id="SRIndex">
+<div id="SRResults"></div>
+<div class="SRStatus" id="Loading">Loading...</div>
+<div class="SRStatus" id="Searching">Searching...</div>
+<div class="SRStatus" id="NoMatches">No Matches</div>
+</div>
+</div>
+</div>
+</div>
+
+<div class="header">
+  <div class="summary">
+<a href="#nested-classes">Classes</a> &#124;
+<a href="#typedef-members">Typedefs</a> &#124;
+<a href="#enum-members">Enumerations</a> &#124;
+<a href="#func-members">Functions</a> &#124;
+<a href="#var-members">Variables</a>  </div>
+  <div class="headertitle"><div class="title">SoRenderIR.h File Reference</div></div>
+</div><!--header-->
+<div class="contents">
+
+<p>Backend-neutral intermediate representation for retained rendering.  
+<a href="#details">More...</a></p>
+<div class="textblock"><code>#include &lt;Inventor/SbBasic.h&gt;</code><br />
+<code>#include &lt;Inventor/SbMatrix.h&gt;</code><br />
+<code>#include &lt;Inventor/SbVec2f.h&gt;</code><br />
+<code>#include &lt;Inventor/SbVec3f.h&gt;</code><br />
+<code>#include &lt;Inventor/SbVec4f.h&gt;</code><br />
+<code>#include &lt;cstddef&gt;</code><br />
+<code>#include &lt;cstdint&gt;</code><br />
+<code>#include &lt;memory&gt;</code><br />
+<code>#include &lt;vector&gt;</code><br />
+</div>
+<p><a href="SoRenderIR_8h_source.html">Go to the source code of this file.</a></p>
+<table class="memberdecls">
+<tr class="heading"><td colspan="2"><h2 class="groupheader"><a id="nested-classes" name="nested-classes"></a>
+Classes</h2></td></tr>
+<tr class="memitem:"><td class="memItemLeft" align="right" valign="top">struct &#160;</td><td class="memItemRight" valign="bottom"><a class="el" href="structSoLightingRaw_1_1RawLight.html">SoLightingRaw::RawLight</a></td></tr>
+<tr class="separator:"><td class="memSeparator" colspan="2">&#160;</td></tr>
+<tr class="memitem:"><td class="memItemLeft" align="right" valign="top">struct &#160;</td><td class="memItemRight" valign="bottom"><a class="el" href="structSoAlphaTestState.html">SoAlphaTestState</a></td></tr>
+<tr class="memdesc:"><td class="mdescLeft">&#160;</td><td class="mdescRight">Explicit fragment alpha policy for a render command.  <a href="structSoAlphaTestState.html#details">More...</a><br /></td></tr>
+<tr class="separator:"><td class="memSeparator" colspan="2">&#160;</td></tr>
+<tr class="memitem:"><td class="memItemLeft" align="right" valign="top">struct &#160;</td><td class="memItemRight" valign="bottom"><a class="el" href="structSoBlendState.html">SoBlendState</a></td></tr>
+<tr class="memdesc:"><td class="mdescLeft">&#160;</td><td class="mdescRight">Backend-neutral blending configuration.  <a href="structSoBlendState.html#details">More...</a><br /></td></tr>
+<tr class="separator:"><td class="memSeparator" colspan="2">&#160;</td></tr>
+<tr class="memitem:"><td class="memItemLeft" align="right" valign="top">struct &#160;</td><td class="memItemRight" valign="bottom"><a class="el" href="structSoDepthState.html">SoDepthState</a></td></tr>
+<tr class="memdesc:"><td class="mdescLeft">&#160;</td><td class="mdescRight">Depth-test configuration for a draw call.  <a href="structSoDepthState.html#details">More...</a><br /></td></tr>
+<tr class="separator:"><td class="memSeparator" colspan="2">&#160;</td></tr>
+<tr class="memitem:"><td class="memItemLeft" align="right" valign="top">class &#160;</td><td class="memItemRight" valign="bottom"><a class="el" href="classSoDrawList.html">SoDrawList</a></td></tr>
+<tr class="memdesc:"><td class="mdescLeft">&#160;</td><td class="mdescRight">Container holding the commands and auxiliary tables for one frame.  <a href="classSoDrawList.html#details">More...</a><br /></td></tr>
+<tr class="separator:"><td class="memSeparator" colspan="2">&#160;</td></tr>
+<tr class="memitem:"><td class="memItemLeft" align="right" valign="top">struct &#160;</td><td class="memItemRight" valign="bottom"><a class="el" href="structSoGeometryDesc.html">SoGeometryDesc</a></td></tr>
+<tr class="memdesc:"><td class="mdescLeft">&#160;</td><td class="mdescRight">Describes vertex/index data for a single draw call.  <a href="structSoGeometryDesc.html#details">More...</a><br /></td></tr>
+<tr class="separator:"><td class="memSeparator" colspan="2">&#160;</td></tr>
+<tr class="memitem:"><td class="memItemLeft" align="right" valign="top">struct &#160;</td><td class="memItemRight" valign="bottom"><a class="el" href="structSoLightData.html">SoLightData</a></td></tr>
+<tr class="memdesc:"><td class="mdescLeft">&#160;</td><td class="mdescRight">Scene-space (world) light description used by the render backends.  <a href="structSoLightData.html#details">More...</a><br /></td></tr>
+<tr class="separator:"><td class="memSeparator" colspan="2">&#160;</td></tr>
+<tr class="memitem:"><td class="memItemLeft" align="right" valign="top">struct &#160;</td><td class="memItemRight" valign="bottom"><a class="el" href="structSoLightingBlock.html">SoLightingBlock</a></td></tr>
+<tr class="memdesc:"><td class="mdescLeft">&#160;</td><td class="mdescRight">Standardized fixed-capacity GPU mirror of one world-space lighting setup, shared by every retained backend's lighting uniform/staging buffer.  <a href="structSoLightingBlock.html#details">More...</a><br /></td></tr>
+<tr class="separator:"><td class="memSeparator" colspan="2">&#160;</td></tr>
+<tr class="memitem:"><td class="memItemLeft" align="right" valign="top">struct &#160;</td><td class="memItemRight" valign="bottom"><a class="el" href="structSoLightingData.html">SoLightingData</a></td></tr>
+<tr class="memdesc:"><td class="mdescLeft">&#160;</td><td class="mdescRight">Shared (world-space) lighting setup referenced by render commands.  <a href="structSoLightingData.html#details">More...</a><br /></td></tr>
+<tr class="separator:"><td class="memSeparator" colspan="2">&#160;</td></tr>
+<tr class="memitem:"><td class="memItemLeft" align="right" valign="top">struct &#160;</td><td class="memItemRight" valign="bottom"><a class="el" href="structSoLightingRaw.html">SoLightingRaw</a></td></tr>
+<tr class="memdesc:"><td class="mdescLeft">&#160;</td><td class="mdescRight">Scene-space inputs behind one <a class="el" href="structSoLightingData.html" title="Shared (world-space) lighting setup referenced by render commands.">SoLightingData</a> entry (provenance).  <a href="structSoLightingRaw.html#details">More...</a><br /></td></tr>
+<tr class="separator:"><td class="memSeparator" colspan="2">&#160;</td></tr>
+<tr class="memitem:"><td class="memItemLeft" align="right" valign="top">struct &#160;</td><td class="memItemRight" valign="bottom"><a class="el" href="structSoMaterialData.html">SoMaterialData</a></td></tr>
+<tr class="memdesc:"><td class="mdescLeft">&#160;</td><td class="mdescRight">Snapshot of the logical Inventor material state for one draw call.  <a href="structSoMaterialData.html#details">More...</a><br /></td></tr>
+<tr class="separator:"><td class="memSeparator" colspan="2">&#160;</td></tr>
+<tr class="memitem:"><td class="memItemLeft" align="right" valign="top">struct &#160;</td><td class="memItemRight" valign="bottom"><a class="el" href="structSoPixelTextData.html">SoPixelTextData</a></td></tr>
+<tr class="separator:"><td class="memSeparator" colspan="2">&#160;</td></tr>
+<tr class="memitem:"><td class="memItemLeft" align="right" valign="top">struct &#160;</td><td class="memItemRight" valign="bottom"><a class="el" href="structSoRasterState.html">SoRasterState</a></td></tr>
+<tr class="memdesc:"><td class="mdescLeft">&#160;</td><td class="mdescRight">Rasterizer properties (fill mode, culling, polygon offset).  <a href="structSoRasterState.html#details">More...</a><br /></td></tr>
+<tr class="separator:"><td class="memSeparator" colspan="2">&#160;</td></tr>
+<tr class="memitem:"><td class="memItemLeft" align="right" valign="top">struct &#160;</td><td class="memItemRight" valign="bottom"><a class="el" href="structSoRenderCommand.html">SoRenderCommand</a></td></tr>
+<tr class="memdesc:"><td class="mdescLeft">&#160;</td><td class="mdescRight">Complete description of a single draw call in the IR.  <a href="structSoRenderCommand.html#details">More...</a><br /></td></tr>
+<tr class="separator:"><td class="memSeparator" colspan="2">&#160;</td></tr>
+<tr class="memitem:"><td class="memItemLeft" align="right" valign="top">struct &#160;</td><td class="memItemRight" valign="bottom"><a class="el" href="structSoRenderState.html">SoRenderState</a></td></tr>
+<tr class="memdesc:"><td class="mdescLeft">&#160;</td><td class="mdescRight">Aggregates depth/blend/raster states plus precomputed sort keys.  <a href="structSoRenderState.html#details">More...</a><br /></td></tr>
+<tr class="separator:"><td class="memSeparator" colspan="2">&#160;</td></tr>
+<tr class="memitem:"><td class="memItemLeft" align="right" valign="top">struct &#160;</td><td class="memItemRight" valign="bottom"><a class="el" href="structSoStencilState.html">SoStencilState</a></td></tr>
+<tr class="memdesc:"><td class="mdescLeft">&#160;</td><td class="mdescRight">Backend-neutral stencil test/operation configuration.  <a href="structSoStencilState.html#details">More...</a><br /></td></tr>
+<tr class="separator:"><td class="memSeparator" colspan="2">&#160;</td></tr>
+<tr class="memitem:"><td class="memItemLeft" align="right" valign="top">struct &#160;</td><td class="memItemRight" valign="bottom"><a class="el" href="structSoTextureData.html">SoTextureData</a></td></tr>
+<tr class="memdesc:"><td class="mdescLeft">&#160;</td><td class="mdescRight">Embedded texture payload carried directly by a render command.  <a href="structSoTextureData.html#details">More...</a><br /></td></tr>
+<tr class="separator:"><td class="memSeparator" colspan="2">&#160;</td></tr>
+</table><table class="memberdecls">
+<tr class="heading"><td colspan="2"><h2 class="groupheader"><a id="typedef-members" name="typedef-members"></a>
+Typedefs</h2></td></tr>
+<tr class="memitem:a012c25d9ac404cd878fd6e59c84e3877" id="r_a012c25d9ac404cd878fd6e59c84e3877"><td class="memItemLeft" align="right" valign="top"><a id="a012c25d9ac404cd878fd6e59c84e3877" name="a012c25d9ac404cd878fd6e59c84e3877"></a>
+<a class="el" href="classSbList.html">typedef</a> uint32_t&#160;</td><td class="memItemRight" valign="bottom"><b>SoLightingHandle</b></td></tr>
+<tr class="memdesc:a012c25d9ac404cd878fd6e59c84e3877"><td class="mdescLeft">&#160;</td><td class="mdescRight">Stable 1-based handle into the draw list's deduplicated lighting table. <br /></td></tr>
+<tr class="separator:a012c25d9ac404cd878fd6e59c84e3877"><td class="memSeparator" colspan="2">&#160;</td></tr>
+</table><table class="memberdecls">
+<tr class="heading"><td colspan="2"><h2 class="groupheader"><a id="enum-members" name="enum-members"></a>
+Enumerations</h2></td></tr>
+<tr class="memitem:a08e9a9b55d95f5a596c4cb7d9becb199" id="r_a08e9a9b55d95f5a596c4cb7d9becb199"><td class="memItemLeft" align="right" valign="top"><a id="a08e9a9b55d95f5a596c4cb7d9becb199" name="a08e9a9b55d95f5a596c4cb7d9becb199"></a>enum &#160;</td><td class="memItemRight" valign="bottom"><b>SoAlphaTestFunction</b> : uint8_t { <br />
+&#160;&#160;<b>SO_ALPHA_TEST_NONE</b> = 0
+, <b>SO_ALPHA_TEST_NEVER</b>
+, <b>SO_ALPHA_TEST_ALWAYS</b>
+, <b>SO_ALPHA_TEST_LESS</b>
+, <br />
+&#160;&#160;<b>SO_ALPHA_TEST_LEQUAL</b>
+, <b>SO_ALPHA_TEST_EQUAL</b>
+, <b>SO_ALPHA_TEST_GEQUAL</b>
+, <b>SO_ALPHA_TEST_GREATER</b>
+, <br />
+&#160;&#160;<b>SO_ALPHA_TEST_NOTEQUAL</b>
+<br />
+ }</td></tr>
+<tr class="separator:a08e9a9b55d95f5a596c4cb7d9becb199"><td class="memSeparator" colspan="2">&#160;</td></tr>
+<tr class="memitem:ac39400c586aad4ca9f3ab63a4fadfa09" id="r_ac39400c586aad4ca9f3ab63a4fadfa09"><td class="memItemLeft" align="right" valign="top"><a id="ac39400c586aad4ca9f3ab63a4fadfa09" name="ac39400c586aad4ca9f3ab63a4fadfa09"></a>enum &#160;</td><td class="memItemRight" valign="bottom"><b>SoAlphaTestPolicy</b> : uint8_t { <b>SO_ALPHA_TEST_POLICY_NONE</b> = 0
+, <b>SO_ALPHA_TEST_POLICY_EXPLICIT</b>
+, <b>SO_ALPHA_TEST_POLICY_LEGACY_THRESHOLD</b>
+, <b>SO_ALPHA_TEST_POLICY_PRESERVE_EDGES</b>
+ }</td></tr>
+<tr class="separator:ac39400c586aad4ca9f3ab63a4fadfa09"><td class="memSeparator" colspan="2">&#160;</td></tr>
+<tr class="memitem:ad61f35483c57f947e17799c8d87f292c" id="r_ad61f35483c57f947e17799c8d87f292c"><td class="memItemLeft" align="right" valign="top"><a id="ad61f35483c57f947e17799c8d87f292c" name="ad61f35483c57f947e17799c8d87f292c"></a>enum &#160;</td><td class="memItemRight" valign="bottom"><b>SoBlendEquation</b> : uint8_t { <br />
+&#160;&#160;<b>SO_BLEND_EQUATION_ADD</b> = 0
+, <b>SO_BLEND_EQUATION_SUBTRACT</b>
+, <b>SO_BLEND_EQUATION_REVERSE_SUBTRACT</b>
+, <b>SO_BLEND_EQUATION_MIN</b>
+, <br />
+&#160;&#160;<b>SO_BLEND_EQUATION_MAX</b>
+<br />
+ }</td></tr>
+<tr class="separator:ad61f35483c57f947e17799c8d87f292c"><td class="memSeparator" colspan="2">&#160;</td></tr>
+<tr class="memitem:a7033e927282b5d17b6e36ee41a0657be" id="r_a7033e927282b5d17b6e36ee41a0657be"><td class="memItemLeft" align="right" valign="top"><a id="a7033e927282b5d17b6e36ee41a0657be" name="a7033e927282b5d17b6e36ee41a0657be"></a>enum &#160;</td><td class="memItemRight" valign="bottom"><b>SoBlendFactor</b> : uint8_t { <br />
+&#160;&#160;<b>SO_BLEND_FACTOR_ZERO</b> = 0
+, <b>SO_BLEND_FACTOR_ONE</b>
+, <b>SO_BLEND_FACTOR_SRC_COLOR</b>
+, <b>SO_BLEND_FACTOR_ONE_MINUS_SRC_COLOR</b>
+, <br />
+&#160;&#160;<b>SO_BLEND_FACTOR_DST_COLOR</b>
+, <b>SO_BLEND_FACTOR_ONE_MINUS_DST_COLOR</b>
+, <b>SO_BLEND_FACTOR_SRC_ALPHA</b>
+, <b>SO_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA</b>
+, <br />
+&#160;&#160;<b>SO_BLEND_FACTOR_DST_ALPHA</b>
+, <b>SO_BLEND_FACTOR_ONE_MINUS_DST_ALPHA</b>
+, <b>SO_BLEND_FACTOR_CONSTANT_COLOR</b>
+, <b>SO_BLEND_FACTOR_ONE_MINUS_CONSTANT_COLOR</b>
+, <br />
+&#160;&#160;<b>SO_BLEND_FACTOR_CONSTANT_ALPHA</b>
+, <b>SO_BLEND_FACTOR_ONE_MINUS_CONSTANT_ALPHA</b>
+, <b>SO_BLEND_FACTOR_SRC_ALPHA_SATURATE</b>
+, <b>SO_BLEND_FACTOR_SRC1_COLOR</b>
+, <br />
+&#160;&#160;<b>SO_BLEND_FACTOR_ONE_MINUS_SRC1_COLOR</b>
+, <b>SO_BLEND_FACTOR_SRC1_ALPHA</b>
+, <b>SO_BLEND_FACTOR_ONE_MINUS_SRC1_ALPHA</b>
+<br />
+ }</td></tr>
+<tr class="separator:a7033e927282b5d17b6e36ee41a0657be"><td class="memSeparator" colspan="2">&#160;</td></tr>
+<tr class="memitem:a0a73db366196b003853633d1c6af222d" id="r_a0a73db366196b003853633d1c6af222d"><td class="memItemLeft" align="right" valign="top"><a id="a0a73db366196b003853633d1c6af222d" name="a0a73db366196b003853633d1c6af222d"></a>enum &#160;</td><td class="memItemRight" valign="bottom"><b>SoDepthFunction</b> : uint8_t { <br />
+&#160;&#160;<b>SO_DEPTH_NEVER</b> = 0
+, <b>SO_DEPTH_ALWAYS</b>
+, <b>SO_DEPTH_LESS</b>
+, <b>SO_DEPTH_LEQUAL</b>
+, <br />
+&#160;&#160;<b>SO_DEPTH_EQUAL</b>
+, <b>SO_DEPTH_GEQUAL</b>
+, <b>SO_DEPTH_GREATER</b>
+, <b>SO_DEPTH_NOTEQUAL</b>
+<br />
+ }</td></tr>
+<tr class="separator:a0a73db366196b003853633d1c6af222d"><td class="memSeparator" colspan="2">&#160;</td></tr>
+<tr class="memitem:ae6ccee1e7a3aec3b18320293b5896425" id="r_ae6ccee1e7a3aec3b18320293b5896425"><td class="memItemLeft" align="right" valign="top"><a id="ae6ccee1e7a3aec3b18320293b5896425" name="ae6ccee1e7a3aec3b18320293b5896425"></a>enum &#160;</td><td class="memItemRight" valign="bottom"><a class="el" href="#ae6ccee1e7a3aec3b18320293b5896425">SoLightType</a> : uint8_t { <b>SO_LIGHT_DIRECTIONAL</b> = 0
+, <b>SO_LIGHT_POINT</b>
+, <b>SO_LIGHT_SPOT</b>
+ }</td></tr>
+<tr class="memdesc:ae6ccee1e7a3aec3b18320293b5896425"><td class="mdescLeft">&#160;</td><td class="mdescRight">Light kinds captured in render-backend lighting setups. <br /></td></tr>
+<tr class="separator:ae6ccee1e7a3aec3b18320293b5896425"><td class="memSeparator" colspan="2">&#160;</td></tr>
+<tr class="memitem:a0b248f66f3a82f4cdc31bf828d3baabb" id="r_a0b248f66f3a82f4cdc31bf828d3baabb"><td class="memItemLeft" align="right" valign="top"><a id="a0b248f66f3a82f4cdc31bf828d3baabb" name="a0b248f66f3a82f4cdc31bf828d3baabb"></a>enum &#160;</td><td class="memItemRight" valign="bottom"><b>SoPointShape</b> : uint8_t { <b>SO_POINT_SHAPE_SQUARE</b> = 0
+, <b>SO_POINT_SHAPE_ROUND</b>
+ }</td></tr>
+<tr class="separator:a0b248f66f3a82f4cdc31bf828d3baabb"><td class="memSeparator" colspan="2">&#160;</td></tr>
+<tr class="memitem:a30435d45ada53b45f9df9f21833fe019" id="r_a30435d45ada53b45f9df9f21833fe019"><td class="memItemLeft" align="right" valign="top"><a id="a30435d45ada53b45f9df9f21833fe019" name="a30435d45ada53b45f9df9f21833fe019"></a>enum &#160;</td><td class="memItemRight" valign="bottom"><a class="el" href="#a30435d45ada53b45f9df9f21833fe019">SoPrimitiveTopology</a> : uint8_t { <br />
+&#160;&#160;<b>SO_TOPOLOGY_TRIANGLES</b> = 0
+, <b>SO_TOPOLOGY_LINES</b>
+, <b>SO_TOPOLOGY_POINTS</b>
+, <b>SO_TOPOLOGY_TRIANGLE_STRIP</b>
+, <br />
+&#160;&#160;<b>SO_TOPOLOGY_LINE_STRIP</b>
+, <b>SO_TOPOLOGY_COUNT</b>
+<br />
+ }</td></tr>
+<tr class="memdesc:a30435d45ada53b45f9df9f21833fe019"><td class="mdescLeft">&#160;</td><td class="mdescRight">Enumerates how primitives referenced by a geometry buffer should be interpreted. <br /></td></tr>
+<tr class="separator:a30435d45ada53b45f9df9f21833fe019"><td class="memSeparator" colspan="2">&#160;</td></tr>
+<tr class="memitem:acddfab061472f7415bacaa229b588cda" id="r_acddfab061472f7415bacaa229b588cda"><td class="memItemLeft" align="right" valign="top">enum &#160;</td><td class="memItemRight" valign="bottom"><a class="el" href="#acddfab061472f7415bacaa229b588cda">SoRenderPassType</a> : uint8_t { <b>SO_RENDERPASS_OPAQUE</b> = 0
+, <b>SO_RENDERPASS_TRANSPARENT</b>
+, <a class="el" href="#acddfab061472f7415bacaa229b588cdaac676a57dcfac97f021af04403b54c828">SO_RENDERPASS_OVERLAY</a>
+, <b>SO_RENDERPASS_COUNT</b>
+ }</td></tr>
+<tr class="memdesc:acddfab061472f7415bacaa229b588cda"><td class="mdescLeft">&#160;</td><td class="mdescRight">Logical pass identifier used for coarse sorting within a stage.  <a href="#acddfab061472f7415bacaa229b588cda">More...</a><br /></td></tr>
+<tr class="separator:acddfab061472f7415bacaa229b588cda"><td class="memSeparator" colspan="2">&#160;</td></tr>
+<tr class="memitem:a6e09cbae86369db3c3962898de02ea3f" id="r_a6e09cbae86369db3c3962898de02ea3f"><td class="memItemLeft" align="right" valign="top">enum &#160;</td><td class="memItemRight" valign="bottom"><a class="el" href="#a6e09cbae86369db3c3962898de02ea3f">SoShadingModel</a> : uint8_t { <b>SO_SHADING_UNLIT</b> = 0
+, <b>SO_SHADING_LEGACY_GOURAUD</b>
+ }</td></tr>
+<tr class="memdesc:a6e09cbae86369db3c3962898de02ea3f"><td class="mdescLeft">&#160;</td><td class="mdescRight">Effective shading contract carried by a render command.  <a href="#a6e09cbae86369db3c3962898de02ea3f">More...</a><br /></td></tr>
+<tr class="separator:a6e09cbae86369db3c3962898de02ea3f"><td class="memSeparator" colspan="2">&#160;</td></tr>
+<tr class="memitem:afccc1e32daa4a15ade09865c467f3ac1" id="r_afccc1e32daa4a15ade09865c467f3ac1"><td class="memItemLeft" align="right" valign="top"><a id="afccc1e32daa4a15ade09865c467f3ac1" name="afccc1e32daa4a15ade09865c467f3ac1"></a>enum &#160;</td><td class="memItemRight" valign="bottom"><b>SoStencilFunction</b> : uint8_t { <br />
+&#160;&#160;<b>SO_STENCIL_FUNC_NEVER</b> = 0
+, <b>SO_STENCIL_FUNC_ALWAYS</b>
+, <b>SO_STENCIL_FUNC_LESS</b>
+, <b>SO_STENCIL_FUNC_LEQUAL</b>
+, <br />
+&#160;&#160;<b>SO_STENCIL_FUNC_EQUAL</b>
+, <b>SO_STENCIL_FUNC_GEQUAL</b>
+, <b>SO_STENCIL_FUNC_GREATER</b>
+, <b>SO_STENCIL_FUNC_NOTEQUAL</b>
+<br />
+ }</td></tr>
+<tr class="separator:afccc1e32daa4a15ade09865c467f3ac1"><td class="memSeparator" colspan="2">&#160;</td></tr>
+<tr class="memitem:a7fbf252040651f36cc324a640a2987c8" id="r_a7fbf252040651f36cc324a640a2987c8"><td class="memItemLeft" align="right" valign="top"><a id="a7fbf252040651f36cc324a640a2987c8" name="a7fbf252040651f36cc324a640a2987c8"></a>enum &#160;</td><td class="memItemRight" valign="bottom"><b>SoStencilOp</b> : uint8_t { <br />
+&#160;&#160;<b>SO_STENCIL_OP_KEEP</b> = 0
+, <b>SO_STENCIL_OP_ZERO</b>
+, <b>SO_STENCIL_OP_REPLACE</b>
+, <b>SO_STENCIL_OP_INCREMENT</b>
+, <br />
+&#160;&#160;<b>SO_STENCIL_OP_DECREMENT</b>
+, <b>SO_STENCIL_OP_INVERT</b>
+, <b>SO_STENCIL_OP_INCREMENT_WRAP</b>
+, <b>SO_STENCIL_OP_DECREMENT_WRAP</b>
+<br />
+ }</td></tr>
+<tr class="separator:a7fbf252040651f36cc324a640a2987c8"><td class="memSeparator" colspan="2">&#160;</td></tr>
+<tr class="memitem:a8d6d55fcb77eac880adaeaeb0fa03391" id="r_a8d6d55fcb77eac880adaeaeb0fa03391"><td class="memItemLeft" align="right" valign="top"><a id="a8d6d55fcb77eac880adaeaeb0fa03391" name="a8d6d55fcb77eac880adaeaeb0fa03391"></a>enum &#160;</td><td class="memItemRight" valign="bottom"><b>SoTextureFilter</b> : uint8_t { <br />
+&#160;&#160;<b>SO_TEXTURE_FILTER_NEAREST</b> = 0
+, <b>SO_TEXTURE_FILTER_LINEAR</b>
+, <b>SO_TEXTURE_FILTER_NEAREST_MIPMAP_NEAREST</b>
+, <b>SO_TEXTURE_FILTER_LINEAR_MIPMAP_NEAREST</b>
+, <br />
+&#160;&#160;<b>SO_TEXTURE_FILTER_NEAREST_MIPMAP_LINEAR</b>
+, <b>SO_TEXTURE_FILTER_LINEAR_MIPMAP_LINEAR</b>
+<br />
+ }</td></tr>
+<tr class="separator:a8d6d55fcb77eac880adaeaeb0fa03391"><td class="memSeparator" colspan="2">&#160;</td></tr>
+<tr class="memitem:aceed839fb0c9e6a34edd4a42e9f58e08" id="r_aceed839fb0c9e6a34edd4a42e9f58e08"><td class="memItemLeft" align="right" valign="top"><a id="aceed839fb0c9e6a34edd4a42e9f58e08" name="aceed839fb0c9e6a34edd4a42e9f58e08"></a>enum &#160;</td><td class="memItemRight" valign="bottom"><b>SoTextureModel</b> : uint8_t { <b>SO_TEXTURE_MODEL_MODULATE</b> = 0
+, <b>SO_TEXTURE_MODEL_DECAL</b>
+, <b>SO_TEXTURE_MODEL_BLEND</b>
+, <b>SO_TEXTURE_MODEL_REPLACE</b>
+ }</td></tr>
+<tr class="separator:aceed839fb0c9e6a34edd4a42e9f58e08"><td class="memSeparator" colspan="2">&#160;</td></tr>
+<tr class="memitem:a96880e3e218ed4041217128d829ed9bf" id="r_a96880e3e218ed4041217128d829ed9bf"><td class="memItemLeft" align="right" valign="top"><a id="a96880e3e218ed4041217128d829ed9bf" name="a96880e3e218ed4041217128d829ed9bf"></a>enum &#160;</td><td class="memItemRight" valign="bottom"><b>SoTextureWrap</b> : uint8_t { <b>SO_TEXTURE_WRAP_CLAMP_TO_EDGE</b> = 0
+, <b>SO_TEXTURE_WRAP_REPEAT</b>
+, <b>SO_TEXTURE_WRAP_CLAMP_TO_BORDER</b>
+ }</td></tr>
+<tr class="separator:a96880e3e218ed4041217128d829ed9bf"><td class="memSeparator" colspan="2">&#160;</td></tr>
+</table><table class="memberdecls">
+<tr class="heading"><td colspan="2"><h2 class="groupheader"><a id="func-members" name="func-members"></a>
+Functions</h2></td></tr>
+<tr class="memitem:ab9df0806d810c7e7bc63b8558c181b51" id="r_ab9df0806d810c7e7bc63b8558c181b51"><td class="memItemLeft" align="right" valign="top">int&#160;</td><td class="memItemRight" valign="bottom"><a class="el" href="#ab9df0806d810c7e7bc63b8558c181b51">SoRenderIR::fillLightingBlock</a> (<a class="el" href="structSoLightingBlock.html">SoLightingBlock</a> &amp;block, <a class="el" href="classSbList.html">const</a> <a class="el" href="structSoLightingData.html">SoLightingData</a> &amp;<a class="el" href="classSbList.html">world</a>, <a class="el" href="classSbList.html">const</a> <a class="el" href="classSbMatrix.html">SbMatrix</a> *<a class="el" href="classSbList.html">toEye</a>)</td></tr>
+<tr class="memdesc:ab9df0806d810c7e7bc63b8558c181b51"><td class="mdescLeft">&#160;</td><td class="mdescRight">Fill a <a class="el" href="structSoLightingBlock.html" title="Standardized fixed-capacity GPU mirror of one world-space lighting setup, shared by every retained ba...">SoLightingBlock</a> from a world-space <a class="el" href="structSoLightingData.html" title="Shared (world-space) lighting setup referenced by render commands.">SoLightingData</a>.  <br /></td></tr>
+<tr class="separator:ab9df0806d810c7e7bc63b8558c181b51"><td class="memSeparator" colspan="2">&#160;</td></tr>
+<tr class="memitem:a6227991ec2ae3968f1716cd40cc822a8" id="r_a6227991ec2ae3968f1716cd40cc822a8"><td class="memItemLeft" align="right" valign="top"><a class="el" href="structSoLightData.html">SoLightData</a>&#160;</td><td class="memItemRight" valign="bottom"><a class="el" href="#a6227991ec2ae3968f1716cd40cc822a8">SoRenderIR::lightToEye</a> (<a class="el" href="classSbList.html">const</a> <a class="el" href="structSoLightData.html">SoLightData</a> &amp;<a class="el" href="classSbList.html">world</a>, <a class="el" href="classSbList.html">const</a> <a class="el" href="classSbMatrix.html">SbMatrix</a> &amp;<a class="el" href="classSbList.html">view</a>)</td></tr>
+<tr class="memdesc:a6227991ec2ae3968f1716cd40cc822a8"><td class="mdescLeft">&#160;</td><td class="mdescRight">Transform one world-space light into eye space for <em>view</em>.  <br /></td></tr>
+<tr class="separator:a6227991ec2ae3968f1716cd40cc822a8"><td class="memSeparator" colspan="2">&#160;</td></tr>
+</table><table class="memberdecls">
+<tr class="heading"><td colspan="2"><h2 class="groupheader"><a id="var-members" name="var-members"></a>
+Variables</h2></td></tr>
+<tr class="memitem:ab95fd8abdf7585db4c36f7d5429e0d64" id="r_ab95fd8abdf7585db4c36f7d5429e0d64"><td class="memItemLeft" align="right" valign="top"><a class="el" href="classSbList.html">constexpr</a> int&#160;</td><td class="memItemRight" valign="bottom"><a class="el" href="#ab95fd8abdf7585db4c36f7d5429e0d64">SO_MAX_SHADER_LIGHTS</a> = 8</td></tr>
+<tr class="memdesc:ab95fd8abdf7585db4c36f7d5429e0d64"><td class="mdescLeft">&#160;</td><td class="mdescRight">Maximum number of lights a retained render-backend shader evaluates.  <br /></td></tr>
+<tr class="separator:ab95fd8abdf7585db4c36f7d5429e0d64"><td class="memSeparator" colspan="2">&#160;</td></tr>
+</table>
+<a name="details" id="details"></a><h2 class="groupheader">Detailed Description</h2>
+<div class="textblock"><p>Backend-neutral intermediate representation for retained rendering. </p>
+<p><a class="el" href="classSoIRRenderAction.html" title="Render action that traverses a scene graph into a backend-neutral draw list.">SoIRRenderAction</a> produces a <a class="el" href="classSoDrawList.html" title="Container holding the commands and auxiliary tables for one frame.">SoDrawList</a> while traversing a scene graph. A renderer backend consumes that list to produce pixels or another backend-specific result. The types in this file deliberately use semantic values instead of OpenGL enums so the intermediate representation does not require a particular graphics API.</p>
+<p>Geometry and embedded texture pointers are borrowed from the producer. They normally refer to storage owned by the current <a class="el" href="classSoIRRenderAction.html" title="Render action that traverses a scene graph into a backend-neutral draw list.">SoIRRenderAction</a> frame and must not be retained after that frame is cleared, rewound, or replaced. Device objects, caches, and other implementation resources belong to the consumer, not to the intermediate representation. </p>
+</div><h2 class="groupheader">Enumeration Type Documentation</h2>
+<a id="acddfab061472f7415bacaa229b588cda" name="acddfab061472f7415bacaa229b588cda"></a>
+<h2 class="memtitle"><span class="permalink"><a href="#acddfab061472f7415bacaa229b588cda">&#9670;&#160;</a></span>SoRenderPassType</h2>
+
+<div class="memitem">
+<div class="memproto">
+      <table class="memname">
+        <tr>
+          <td class="memname"><a class="el" href="classSbList.html">enum</a> <a class="el" href="#acddfab061472f7415bacaa229b588cda">SoRenderPassType</a> : uint8_t</td>
+        </tr>
+      </table>
+</div><div class="memdoc">
+
+<p>Logical pass identifier used for coarse sorting within a stage. </p>
+<table class="fieldtable">
+<tr><th colspan="2">Enumerator</th></tr><tr><td class="fieldname"><a id="acddfab061472f7415bacaa229b588cdaac676a57dcfac97f021af04403b54c828" name="acddfab061472f7415bacaa229b588cdaac676a57dcfac97f021af04403b54c828"></a>SO_RENDERPASS_OVERLAY&#160;</td><td class="fielddoc"><p>Screen-space overlay geometry drawn after both previous passes with a per-rect viewport and its own depth clear (e.g. </p>
+<p>the navigation cube). Overlay commands carry their own view/projection matrices. </p>
+</td></tr>
+</table>
+
+</div>
+</div>
+<a id="a6e09cbae86369db3c3962898de02ea3f" name="a6e09cbae86369db3c3962898de02ea3f"></a>
+<h2 class="memtitle"><span class="permalink"><a href="#a6e09cbae86369db3c3962898de02ea3f">&#9670;&#160;</a></span>SoShadingModel</h2>
+
+<div class="memitem">
+<div class="memproto">
+      <table class="memname">
+        <tr>
+          <td class="memname"><a class="el" href="classSbList.html">enum</a> <a class="el" href="#a6e09cbae86369db3c3962898de02ea3f">SoShadingModel</a> : uint8_t</td>
+        </tr>
+      </table>
+</div><div class="memdoc">
+
+<p>Effective shading contract carried by a render command. </p>
+<p>The legacy-compatible model is the current default. It preserves the fixed-function Coin/GL behavior while the DrawList backend is migrated to an explicit shading model. </p>
+
+</div>
+</div>
+<h2 class="groupheader">Function Documentation</h2>
+<a id="ab9df0806d810c7e7bc63b8558c181b51" name="ab9df0806d810c7e7bc63b8558c181b51"></a>
+<h2 class="memtitle"><span class="permalink"><a href="#ab9df0806d810c7e7bc63b8558c181b51">&#9670;&#160;</a></span>fillLightingBlock()</h2>
+
+<div class="memitem">
+<div class="memproto">
+      <table class="memname">
+        <tr>
+          <td class="memname">int SoRenderIR::fillLightingBlock </td>
+          <td>(</td>
+          <td class="paramtype"><a class="el" href="structSoLightingBlock.html">SoLightingBlock</a> &amp;</td>          <td class="paramname"><span class="paramname"><em>block</em>, </span></td>
+        </tr>
+        <tr>
+          <td class="paramkey"></td>
+          <td></td>
+          <td class="paramtype"><a class="el" href="classSbList.html">const</a> <a class="el" href="structSoLightingData.html">SoLightingData</a> &amp;</td>          <td class="paramname"><span class="paramname"><em>world</em>, </span></td>
+        </tr>
+        <tr>
+          <td class="paramkey"></td>
+          <td></td>
+          <td class="paramtype"><a class="el" href="classSbList.html">const</a> <a class="el" href="classSbMatrix.html">SbMatrix</a> *</td>          <td class="paramname"><span class="paramname"><em>toEye</em></span>&#160;)</td>
+        </tr>
+      </table>
+</div><div class="memdoc">
+
+<p>Fill a <a class="el" href="structSoLightingBlock.html" title="Standardized fixed-capacity GPU mirror of one world-space lighting setup, shared by every retained ba...">SoLightingBlock</a> from a world-space <a class="el" href="structSoLightingData.html" title="Shared (world-space) lighting setup referenced by render commands.">SoLightingData</a>. </p>
+<p>When <em>toEye</em> is non-NULL every light is transformed into eye space with it (raster/preview consumers); when NULL the world-space fields are copied verbatim (path-tracing consumers). Ambient passes through unchanged. Returns the number of lights actually written (&lt;= SO_MAX_SHADER_LIGHTS). </p>
+
+</div>
+</div>
+<a id="a6227991ec2ae3968f1716cd40cc822a8" name="a6227991ec2ae3968f1716cd40cc822a8"></a>
+<h2 class="memtitle"><span class="permalink"><a href="#a6227991ec2ae3968f1716cd40cc822a8">&#9670;&#160;</a></span>lightToEye()</h2>
+
+<div class="memitem">
+<div class="memproto">
+      <table class="memname">
+        <tr>
+          <td class="memname"><a class="el" href="structSoLightData.html">SoLightData</a> SoRenderIR::lightToEye </td>
+          <td>(</td>
+          <td class="paramtype"><a class="el" href="classSbList.html">const</a> <a class="el" href="structSoLightData.html">SoLightData</a> &amp;</td>          <td class="paramname"><span class="paramname"><em>world</em>, </span></td>
+        </tr>
+        <tr>
+          <td class="paramkey"></td>
+          <td></td>
+          <td class="paramtype"><a class="el" href="classSbList.html">const</a> <a class="el" href="classSbMatrix.html">SbMatrix</a> &amp;</td>          <td class="paramname"><span class="paramname"><em>view</em></span>&#160;)</td>
+        </tr>
+      </table>
+</div><div class="memdoc">
+
+<p>Transform one world-space light into eye space for <em>view</em>. </p>
+<p>Directions are rotated by the view matrix; positions are transformed fully. Spot cone parameters are carried unchanged. </p>
+
+</div>
+</div>
+<h2 class="groupheader">Variable Documentation</h2>
+<a id="ab95fd8abdf7585db4c36f7d5429e0d64" name="ab95fd8abdf7585db4c36f7d5429e0d64"></a>
+<h2 class="memtitle"><span class="permalink"><a href="#ab95fd8abdf7585db4c36f7d5429e0d64">&#9670;&#160;</a></span>SO_MAX_SHADER_LIGHTS</h2>
+
+<div class="memitem">
+<div class="memproto">
+<table class="mlabels">
+  <tr>
+  <td class="mlabels-left">
+      <table class="memname">
+        <tr>
+          <td class="memname"><a class="el" href="classSbList.html">constexpr</a> int SO_MAX_SHADER_LIGHTS = 8</td>
+        </tr>
+      </table>
+  </td>
+  <td class="mlabels-right">
+<span class="mlabels"><span class="mlabel">constexpr</span></span>  </td>
+  </tr>
+</table>
+</div><div class="memdoc">
+
+<p>Maximum number of lights a retained render-backend shader evaluates. </p>
+<p>All backends (GL visual program, Vulkan LightingBlock, RTX RTMaterial) evaluate at most this many lights; setups carrying more are truncated with a one-time warning by the consumer. </p>
+
+</div>
+</div>
+</div><!-- contents -->
+</div><!-- doc-content -->
+<!-- start footer part -->
+<div id="nav-path" class="navpath"><!-- id is needed for treeview function! -->
+  <ul>
+    <li class="navelem"><a class="el" href="dir_d44c64559bbebec7f509842c48db8b23.html">include</a></li><li class="navelem"><a class="el" href="dir_469ed70aca823fd8322768ad54869f94.html">Inventor</a></li><li class="navelem"><a class="el" href="dir_5d343cc747bd41482eefe196ea3ce274.html">rendering</a></li><li class="navelem"><a class="el" href="SoRenderIR_8h.html">SoRenderIR.h</a></li>
+    <li class="footer">Generated on Fri Sep 11 2026 08:24:49 for Coin by <a href="https://www.doxygen.org/index.html"><img class="footer" src="doxygen.svg" width="104" height="31" alt="doxygen"/></a> 1.10.0 </li>
+  </ul>
+</div>
+</body>
+</html>
