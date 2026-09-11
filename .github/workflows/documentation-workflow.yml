@@ -5,6 +5,11 @@ on:
   push:
     branches: [ master, freecad-master ]
 
+# peaceiris/actions-gh-pages pushes the generated site to the gh-pages
+# branch; the default GITHUB_TOKEN is read-only, so grant contents: write.
+permissions:
+  contents: write
+
 jobs:
   ubuntu-build:
     name: Ubuntu Build

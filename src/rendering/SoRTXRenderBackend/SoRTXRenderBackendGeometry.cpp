@@ -37,8 +37,9 @@ SoRTXRenderBackend::ensureNormalPoolCapacity(VkDeviceSize bytes)
   // is only referenced by acceleration-structure-phase submissions, which
   // complete before the next pool resize can run (per-frame queue drain),
   // so releasing it here is safe.
-  VkDeviceSize newCapacity = std::max<VkDeviceSize>(64 * 1024, bytes);
-  while (newCapacity < this->normalPoolCapacity + bytes) {
+  VkDeviceSize newCapacity =
+    std::max<VkDeviceSize>(64 * 1024, this->normalPoolCapacity);
+  while (newCapacity < bytes) {
     newCapacity *= 2;
   }
   VkBuffer newBuffer = VK_NULL_HANDLE;
@@ -56,6 +57,16 @@ SoRTXRenderBackend::ensureNormalPoolCapacity(VkDeviceSize bytes)
     return false;
   }
   if (this->normalPoolBuffer != VK_NULL_HANDLE) {
+    // Preserve the records already appended at lower offsets.  Material
+    // records carry those offsets and the pool is grow-only, so the new
+    // buffer must keep the old contents; resetting normalPoolUsed here would
+    // make the next append reuse offset 0, and every material would then read
+    // the last geometry's normals (the cylinder cap picking up the sphere's
+    // radial normals and shading as a per-triangle fan).
+    if (this->normalPoolMapped != nullptr && this->normalPoolUsed > 0) {
+      std::memcpy(newMapped, this->normalPoolMapped,
+                  static_cast<size_t>(this->normalPoolUsed));
+    }
     vkDestroyBuffer(this->device, this->normalPoolBuffer, this->allocator);
     this->normalPoolBuffer = VK_NULL_HANDLE;
     vkFreeMemory(this->device, this->normalPoolMemory, this->allocator);
@@ -66,7 +77,8 @@ SoRTXRenderBackend::ensureNormalPoolCapacity(VkDeviceSize bytes)
   this->normalPoolBuffer = newBuffer;
   this->normalPoolMemory = newMemory;
   this->normalPoolMapped = newMapped;
-  this->normalPoolUsed = 0;
+  // normalPoolUsed is deliberately NOT reset: the copied records keep every
+  // previously recorded offset valid.
   // The pool identity changed: refresh the descriptor sets.
   return this->updateDescriptors();
 }
@@ -83,7 +95,7 @@ SoRTXRenderBackend::appendTriangleNormals(const SoRenderCommand & command,
   if (triangleCount == 0) return 0;
 
   const VkDeviceSize bytes =
-    static_cast<VkDeviceSize>(triangleCount) * 4 * sizeof(float);
+    static_cast<VkDeviceSize>(triangleCount) * 3 * 4 * sizeof(float);
 
   // Reuse the entry's existing pool slot when the triangle count is
   // unchanged; otherwise append (the pool grows over the session).
@@ -103,11 +115,23 @@ SoRTXRenderBackend::appendTriangleNormals(const SoRenderCommand & command,
   }
   entry.normalCount = triangleCount;
 
-  // Object-space per-triangle geometric normals (flat shading).
+  // Three object-space normals per triangle (the triangle's vertex normals),
+  // so the tracer can barycentric-interpolate smooth shading.  The mesh's
+  // per-vertex normals are indexed by the same vertex index and stride as the
+  // positions (matching the raster vertex packing); when a mesh carries no
+  // normals, or a vertex index is out of range, fall back to the geometric
+  // face normal for that vertex.
   float * out = static_cast<float *>(this->normalPoolMapped) +
     static_cast<size_t>(entry.normalPoolOffset) * 4;
   const auto vertex = [&geometry, posStrideFloats](uint32_t i) {
     return geometry.positions + static_cast<size_t>(i) * posStrideFloats;
+  };
+  const auto vertexNormal = [&geometry, posStrideFloats](uint32_t i)
+    -> const float * {
+    if (geometry.normals && i < geometry.normalCount) {
+      return geometry.normals + static_cast<size_t>(i) * posStrideFloats;
+    }
+    return nullptr;
   };
   for (uint32_t t = 0; t < triangleCount; ++t) {
     const uint32_t i0 = indexed ? geometry.indices[static_cast<size_t>(t) * 3 + 0] : t * 3 + 0;
@@ -128,10 +152,18 @@ SoRTXRenderBackend::appendTriangleNormals(const SoRenderCommand & command,
     else {
       nx = 0.0f; ny = 0.0f; nz = 1.0f;
     }
-    out[static_cast<size_t>(t) * 4 + 0] = nx;
-    out[static_cast<size_t>(t) * 4 + 1] = ny;
-    out[static_cast<size_t>(t) * 4 + 2] = nz;
-    out[static_cast<size_t>(t) * 4 + 3] = 0.0f;
+    const uint32_t idx[3] = {i0, i1, i2};
+    for (uint32_t k = 0; k < 3; ++k) {
+      const float * vn = vertexNormal(idx[k]);
+      float * dst = out + (static_cast<size_t>(t) * 3 + k) * 4;
+      if (vn) {
+        dst[0] = vn[0]; dst[1] = vn[1]; dst[2] = vn[2];
+      }
+      else {
+        dst[0] = nx; dst[1] = ny; dst[2] = nz;
+      }
+      dst[3] = 0.0f;
+    }
   }
   return bytes;
 }
@@ -655,16 +687,33 @@ SoRTXRenderBackend::updateGeometryCache(const SoDrawList & drawlist)
       // translucent geometry and composites it as thin glass.
       const uint64_t signal = hashGeometrySignal(geometry, vertexStride, indexed);
       const auto found = this->commandToCache.find(&command);
+      bool matched = false;
       if (found != this->commandToCache.end()) {
         RTXCachedGeometry & e = this->geometryCache[found->second];
-        e.cacheGeneration = frame;
-        e.commandKey = &command;
-        if (e.blas != VK_NULL_HANDLE && e.changeSignal != signal) {
-          e.changeSignal = signal;
-          e.contentHash = hashGeometry(geometry, vertexStride, indexed);
+        // The pointer map is only an optimization: the draw-list is a
+        // per-frame arena whose slots are reused, so a slot that held this
+        // traced command last frame can hold an unrelated OVERLAY command
+        // (a highlight/selection overlay) this frame.  Re-key the entry only
+        // when the geometry actually matches; otherwise the stale mapping
+        // would overwrite the traced entry's content hash with the overlay's
+        // and make the next traced frame look like a scene change, restarting
+        // the path-tracing accumulation on every hover.
+        const bool sameGeometry =
+          e.vertexCount == geometry.vertexCount &&
+          e.indexCount == geometry.indexCount &&
+          e.vertexStride == vertexStride &&
+          ((e.idxKey != nullptr) == indexed) &&
+          e.changeSignal == signal;
+        if (sameGeometry) {
+          e.cacheGeneration = frame;
+          e.commandKey = &command;
+          matched = true;
+        }
+        else {
+          this->commandToCache.erase(found);
         }
       }
-      else {
+      if (!matched) {
         for (RTXCachedGeometry & e : this->geometryCache) {
           if (e.blas != VK_NULL_HANDLE && e.changeSignal == signal &&
               e.vertexCount == geometry.vertexCount &&
