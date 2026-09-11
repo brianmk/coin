@@ -44,8 +44,9 @@ layout(set = 0, binding = 3, std430) buffer Materials {
     RTMaterial materials[];
 } matBuffer;
 
-// Object-space per-triangle geometric normals (one vec4 per triangle of the
-// whole scene, indexed per command via RTMaterial::triangleData).
+// Object-space per-vertex normals, three vec4 per triangle of the whole scene
+// (indexed per command via RTMaterial::triangleData), barycentric-interpolated
+// in the shader for smooth shading.
 layout(set = 0, binding = 7, std430) readonly buffer NormalPool {
     vec4 triangleNormals[];
 } normalPoolBuffer;
@@ -118,8 +119,16 @@ void main()
     const uint materialIndex = gl_InstanceCustomIndexEXT;
     RTMaterial mat = matBuffer.materials[materialIndex];
     const uint prim = gl_PrimitiveID;
-    const uint normalIndex = uint(mat.triangleData.x) + prim;
-    const vec3 objN = normalPoolBuffer.triangleNormals[normalIndex].xyz;
+    // The pool stores each triangle's three vertex normals.  This SBT
+    // closest-hit shader has no barycentric built-in (GL_EXT_ray_tracing does
+    // not expose one), so use the averaged vertex normal as a per-triangle
+    // normal.  The default ray-query compute path (RTRayTrace.glsl)
+    // barycentric-interpolates for true smooth shading.
+    const uint base = uint(mat.triangleData.x) + prim * 3u;
+    const vec3 n0 = normalPoolBuffer.triangleNormals[base + 0u].xyz;
+    const vec3 n1 = normalPoolBuffer.triangleNormals[base + 1u].xyz;
+    const vec3 n2 = normalPoolBuffer.triangleNormals[base + 2u].xyz;
+    vec3 objN = n0 + n1 + n2;
     if (dot(objN, objN) < 1e-12) {
         // Degenerate triangle: treat the ray as unhit.  The miss shader did
         // not run, so every payload field the raygen may read afterwards

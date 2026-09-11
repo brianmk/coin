@@ -37,18 +37,22 @@ HitInfo traceClosest(vec3 origin, vec3 dir, float tMax)
     h.materialIndex = rayQueryGetIntersectionInstanceCustomIndexEXT(q, true);
     h.primitiveId = rayQueryGetIntersectionPrimitiveIndexEXT(q, true);
 
-    // Flat shading: the object-space face normal comes from the triangle-
-    // normal pool (computed on the CPU at BLAS build time) and is
-    // transformed to world space via the instance's object-to-world
-    // transform.
+    // Smooth shading: the pool stores each triangle's three vertex normals;
+    // interpolate them with the hit's barycentric coordinates so curved
+    // surfaces (cylinders, spheres) shade smoothly instead of per-triangle.
     RTMaterial mat = matBuffer.materials[h.materialIndex];
     uint prim = rayQueryGetIntersectionPrimitiveIndexEXT(q, true);
-    uint normalIndex = uint(mat.triangleData.x) + prim;
-    vec3 objN = normalPoolBuffer.triangleNormals[normalIndex].xyz;
+    uint base = uint(mat.triangleData.x) + prim * 3u;
+    vec3 n0 = normalPoolBuffer.triangleNormals[base + 0u].xyz;
+    vec3 n1 = normalPoolBuffer.triangleNormals[base + 1u].xyz;
+    vec3 n2 = normalPoolBuffer.triangleNormals[base + 2u].xyz;
+    vec2 bc = rayQueryGetIntersectionBarycentricsEXT(q, true);
+    vec3 objN = n0 * (1.0 - bc.x - bc.y) + n1 * bc.x + n2 * bc.y;
     if (dot(objN, objN) < 1e-12) {
         h.hit = false;
         return h;
     }
+    objN = normalize(objN);
     mat4x3 objToWorld = rayQueryGetIntersectionObjectToWorldEXT(q, true);
     h.normal = normalize(mat3(transpose(inverse(mat3(objToWorld)))) * objN);
     // The pool normals follow the producer's triangle winding, whose

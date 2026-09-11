@@ -1389,6 +1389,7 @@ SoVulkanRenderBackend::recordOverlayBlock(const SoDrawList & drawlist,
   // overlay geometry and would shuffle the navigation cube's panels
   // relative to each other and to other overlays.
   int lastClearX = -1, lastClearY = -1, lastClearW = -1, lastClearH = -1;
+  const SbVec2s frameSize = params.viewport.getViewportSizePixels();
   for (int i = 0; i < drawlist.getNumCommands(); ++i) {
     const SoRenderCommand & command = drawlist.getCommand(i);
     if (command.pass != SO_RENDERPASS_OVERLAY) continue;
@@ -1397,10 +1398,20 @@ SoVulkanRenderBackend::recordOverlayBlock(const SoDrawList & drawlist,
         raster.scissorHeight <= 0) {
       continue;
     }
+    // The selection/preselection highlight is a full-frame overlay: it must
+    // depth-test against the scene depth (so a selected face behind other
+    // geometry stays hidden), NOT be forced on top.  Clearing the depth over
+    // the whole viewport would let it composite over everything.  Only the
+    // sub-viewport widgets (navigation cube, axis cross) clear depth so they
+    // remain visible over the scene.
+    const bool fullFrameOverlay =
+      raster.scissorWidth == frameSize[0] && raster.scissorHeight == frameSize[1];
     if (raster.scissorX != lastClearX || raster.scissorY != lastClearY ||
         raster.scissorWidth != lastClearW ||
         raster.scissorHeight != lastClearH) {
-      this->recordOverlayDepthClear(command, target, ctx);
+      if (!fullFrameOverlay) {
+        this->recordOverlayDepthClear(command, target, ctx);
+      }
       lastClearX = raster.scissorX;
       lastClearY = raster.scissorY;
       lastClearW = raster.scissorWidth;

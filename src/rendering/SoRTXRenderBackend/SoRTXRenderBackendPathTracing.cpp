@@ -86,13 +86,25 @@ SoRTXRenderBackend::updatePathTracingState(const SoDrawList & /*drawlist*/,
     curBgBottom[1] = this->envSkyBottom[1];
     curBgBottom[2] = this->envSkyBottom[2];
   }
-  else {
+  else if (params.backgroundGradient) {
     curBgTop[0] = params.backgroundTopColor[0];
     curBgTop[1] = params.backgroundTopColor[1];
     curBgTop[2] = params.backgroundTopColor[2];
     curBgBottom[0] = params.backgroundBottomColor[0];
     curBgBottom[1] = params.backgroundBottomColor[1];
     curBgBottom[2] = params.backgroundBottomColor[2];
+  }
+  else {
+    // Flat background: mirror the raster backend, which clears to
+    // params.clearColor when no gradient is active.  The sky must use that
+    // solid colour rather than the (black) gradient endpoints, or path tracing
+    // renders a black background where raster shows the configured colour.
+    curBgTop[0] = params.clearColor[0];
+    curBgTop[1] = params.clearColor[1];
+    curBgTop[2] = params.clearColor[2];
+    curBgBottom[0] = params.clearColor[0];
+    curBgBottom[1] = params.clearColor[1];
+    curBgBottom[2] = params.clearColor[2];
   }
   curBgTop[3] = 1.0f;
   curBgBottom[3] = 1.0f;
@@ -708,13 +720,24 @@ SoRTXRenderBackend::recordAccelerationStructures(
       frame.bgBottom[1] = this->envSkyBottom[1];
       frame.bgBottom[2] = this->envSkyBottom[2];
     }
-    else {
+    else if (params.backgroundGradient) {
       frame.bgTop[0] = params.backgroundTopColor[0];
       frame.bgTop[1] = params.backgroundTopColor[1];
       frame.bgTop[2] = params.backgroundTopColor[2];
       frame.bgBottom[0] = params.backgroundBottomColor[0];
       frame.bgBottom[1] = params.backgroundBottomColor[1];
       frame.bgBottom[2] = params.backgroundBottomColor[2];
+    }
+    else {
+      // Flat background (see updatePathTracingState): use the solid clear
+      // colour, matching the raster backend instead of the black gradient
+      // endpoints.
+      frame.bgTop[0] = params.clearColor[0];
+      frame.bgTop[1] = params.clearColor[1];
+      frame.bgTop[2] = params.clearColor[2];
+      frame.bgBottom[0] = params.clearColor[0];
+      frame.bgBottom[1] = params.clearColor[1];
+      frame.bgBottom[2] = params.clearColor[2];
     }
     frame.bgTop[3] = 1.0f;
     frame.bgBottom[3] = 1.0f;
