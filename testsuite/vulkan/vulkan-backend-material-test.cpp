@@ -2,47 +2,15 @@
 //
 // Exercises the retained material model beyond the base headlight case:
 // emissive color with no lights, two-sided lighting flip, multiple light
-// accumulation, and vertex-color Gouraud shading.
+// accumulation, and per-vertex colors overriding the uniform diffuse for
+// both the unlit and Gouraud paths.  (Merged from the former material and
+// vertex-color tests.)
 
 #include "VulkanTestHarness.h"
 
 using namespace vulkan_test;
 
 namespace {
-
-const float quad[] = {
-  -1.0f, -1.0f, 0.0f,
-   1.0f, -1.0f, 0.0f,
-   1.0f,  1.0f, 0.0f,
-  -1.0f,  1.0f, 0.0f
-};
-const float normalsUp[] = {
-  0.0f, 0.0f, 1.0f,
-  0.0f, 0.0f, 1.0f,
-  0.0f, 0.0f, 1.0f,
-  0.0f, 0.0f, 1.0f
-};
-const uint32_t indices[] = {0, 1, 2, 0, 2, 3};
-
-SoRenderCommand gouraudQuad()
-{
-  SoRenderCommand command;
-  command.modelMatrix.makeIdentity();
-  command.geometry.topology = SO_TOPOLOGY_TRIANGLES;
-  command.geometry.vertexCount = 4;
-  command.geometry.indexCount = 6;
-  command.geometry.positions = quad;
-  command.geometry.normals = normalsUp;
-  command.geometry.indices = indices;
-  command.geometry.vertexStride = sizeof(float) * 3;
-  command.material.diffuse = SbVec4f(1.0f, 0.0f, 0.0f, 1.0f);
-  command.material.ambient = SbVec4f(0.0f, 0.0f, 0.0f, 1.0f);
-  command.material.specular = SbVec4f(0.0f, 0.0f, 0.0f, 1.0f);
-  command.material.emissive = SbVec4f(0.0f, 0.0f, 0.0f, 1.0f);
-  command.material.shininess = 0.0f;
-  command.material.shadingModel = SO_SHADING_LEGACY_GOURAUD;
-  return command;
-}
 
 SoLightData directional(SbVec3f direction, SbVec3f color)
 {
@@ -51,6 +19,34 @@ SoLightData directional(SbVec3f direction, SbVec3f color)
   light.direction = direction;
   light.color = color;
   return light;
+}
+
+static const float greenVertexColors[] = {
+  0.0f, 1.0f, 0.0f, 1.0f,
+  0.0f, 1.0f, 0.0f, 1.0f,
+  0.0f, 1.0f, 0.0f, 1.0f,
+  0.0f, 1.0f, 0.0f, 1.0f
+};
+
+// Normals pointing away from the orthographic viewer direction (+Z) used by
+// the shader when the projection has no perspective term.
+static const float normalsDown[] = {
+  0.0f, 0.0f, -1.0f,
+  0.0f, 0.0f, -1.0f,
+  0.0f, 0.0f, -1.0f,
+  0.0f, 0.0f, -1.0f
+};
+
+// Full-viewport Gouraud quad with green per-vertex colors over a red
+// diffuse: the vertex colors must win.
+SoRenderCommand vertexColorQuad(SoShadingModel shading)
+{
+  SoRenderCommand command = makeLitQuad(SbVec4f(1.0f, 0.0f, 0.0f, 1.0f),
+                                       shading);
+  command.geometry.colors = greenVertexColors;
+  command.state.depth.enabled = FALSE;
+  command.state.depth.writeEnabled = FALSE;
+  return command;
 }
 
 } // namespace
@@ -62,133 +58,117 @@ main()
   const int initResult = harness.init();
   if (initResult != 0) return initResult;
 
-  int failures = 0;
-  const SoRenderParams params = harness.renderParams();
+  CaseRunner cases;
 
-  // --- Emissive with no lights: emissive color wins -----------------------
-  {
+  cases.add("emissive with no lights", [&harness] {
     SoDrawList drawlist;
     SoLightingData lighting;
     lighting.ambient = SbVec3f(0.0f, 0.0f, 0.0f);
-    SoRenderCommand command = gouraudQuad();
+    SoRenderCommand command = makeLitQuad(SbVec4f(1.0f, 0.0f, 0.0f, 1.0f),
+                                          SO_SHADING_LEGACY_GOURAUD);
     command.material.emissive = SbVec4f(1.0f, 0.0f, 0.0f, 1.0f);
     command.lightingHandle = drawlist.addLightingSetup(lighting);
     drawlist.addCommand(command);
 
-    if (!harness.backend.render(drawlist, params)) {
-      std::cerr << "FAIL: emissive render failed" << std::endl;
-      ++failures;
-    }
+    VK_CHECK(harness.backend.render(drawlist, harness.renderParams()),
+             "render failed");
     const uint8_t * center = pixelAt(harness.readback(), 16, 16);
-    if (!nearColor(center, 255, 0, 0)) {
-      std::cerr << "FAIL: emissive material did not render red" << std::endl;
-      ++failures;
-    }
-  }
+    VK_CHECK(nearColor(center, 255, 0, 0), "emissive material did not "
+             "render red: "
+             << describePixel(center));
+  });
 
-  // --- Two-sided lighting flips the back-facing normal --------------------
-  {
+  cases.add("two-sided lighting flips the back-facing normal", [&harness] {
+    // The shader's orthographic branch fixes the viewer direction at
+    // V=(0,0,1), so give the quad -Z normals: they face away from the viewer
+    // (dot(N,V) < 0) and are flipped to +Z.  The light travels along +Z, so
+    // the flipped normal is lit while the unflipped one is not.
+    SoLightingData lighting;
+    lighting.ambient = SbVec3f(0.0f, 0.0f, 0.0f);
+    lighting.lights.push_back(
+      directional(SbVec3f(0.0f, 0.0f, 1.0f), SbVec3f(1.0f, 1.0f, 1.0f)));
+
+    SoDrawList oneSided;
+    SoRenderCommand plain = makeLitQuad(SbVec4f(1.0f, 0.0f, 0.0f, 1.0f),
+                                        SO_SHADING_LEGACY_GOURAUD);
+    plain.geometry.normals = normalsDown;
+    plain.lightingHandle = oneSided.addLightingSetup(lighting);
+    oneSided.addCommand(plain);
+    VK_CHECK(harness.backend.render(oneSided, harness.renderParams()),
+             "render failed");
+    const uint8_t * oneSidedPixel = pixelAt(harness.readback(), 16, 16);
+    VK_CHECK(nearColor(oneSidedPixel, 0, 0, 0),
+             "back-facing normal was lit without two-sided lighting: "
+             << describePixel(oneSidedPixel));
+
+    SoDrawList twoSided;
+    SoRenderCommand flipped = makeLitQuad(SbVec4f(1.0f, 0.0f, 0.0f, 1.0f),
+                                          SO_SHADING_LEGACY_GOURAUD);
+    flipped.geometry.normals = normalsDown;
+    flipped.material.twoSidedLighting = true;
+    flipped.lightingHandle = twoSided.addLightingSetup(lighting);
+    twoSided.addCommand(flipped);
+    VK_CHECK(harness.backend.render(twoSided, harness.renderParams()),
+             "render failed");
+    const uint8_t * center = pixelAt(harness.readback(), 16, 16);
+    VK_CHECK(nearColor(center, 255, 0, 0), "two-sided lighting did not flip "
+             "the normal: "
+             << describePixel(center));
+  });
+
+  cases.add("multiple lights accumulate", [&harness] {
     SoDrawList drawlist;
     SoLightingData lighting;
     lighting.ambient = SbVec3f(0.0f, 0.0f, 0.0f);
-    lighting.lights.push_back(directional(SbVec3f(0.0f, 0.0f, -1.0f),
-                                          SbVec3f(1.0f, 1.0f, 1.0f)));
-    SoRenderCommand command = gouraudQuad();
-    // Position the quad at +Z so the view vector V=(0,0,-1) points away from
-    // the +Z normal, exercising the two-sided flip.
-    command.modelMatrix.setTranslate(SbVec3f(0.0f, 0.0f, 1.0f));
-    command.material.twoSidedLighting = true;
+    lighting.lights.push_back(
+      directional(SbVec3f(0.0f, 0.0f, 1.0f), SbVec3f(0.5f, 0.5f, 0.5f)));
+    lighting.lights.push_back(
+      directional(SbVec3f(0.0f, 0.0f, 1.0f), SbVec3f(0.5f, 0.5f, 0.5f)));
+    SoRenderCommand command = makeLitQuad(SbVec4f(1.0f, 0.0f, 0.0f, 1.0f),
+                                          SO_SHADING_LEGACY_GOURAUD);
     command.lightingHandle = drawlist.addLightingSetup(lighting);
     drawlist.addCommand(command);
 
-    if (!harness.backend.render(drawlist, params)) {
-      std::cerr << "FAIL: two-sided render failed" << std::endl;
-      ++failures;
-    }
-    const uint8_t * center = pixelAt(harness.readback(), 16, 16);
-    if (!nearColor(center, 255, 0, 0)) {
-      std::cerr << "FAIL: two-sided lighting did not flip the normal" << std::endl;
-      ++failures;
-    }
-  }
-
-  // --- Multiple lights accumulate -----------------------------------------
-  {
-    SoDrawList drawlist;
-    SoLightingData lighting;
-    lighting.ambient = SbVec3f(0.0f, 0.0f, 0.0f);
-    lighting.lights.push_back(directional(SbVec3f(0.0f, 0.0f, 1.0f),
-                                          SbVec3f(0.5f, 0.5f, 0.5f)));
-    lighting.lights.push_back(directional(SbVec3f(0.0f, 0.0f, 1.0f),
-                                          SbVec3f(0.5f, 0.5f, 0.5f)));
-    SoRenderCommand command = gouraudQuad();
-    command.lightingHandle = drawlist.addLightingSetup(lighting);
-    drawlist.addCommand(command);
-
-    if (!harness.backend.render(drawlist, params)) {
-      std::cerr << "FAIL: multi-light render failed" << std::endl;
-      ++failures;
-    }
+    VK_CHECK(harness.backend.render(drawlist, harness.renderParams()),
+             "render failed");
     const uint8_t * center = pixelAt(harness.readback(), 16, 16);
     // Two 0.5-intensity lights sum to full intensity.
-    if (!nearColor(center, 255, 0, 0)) {
-      std::cerr << "FAIL: two lights did not accumulate to full brightness"
-                << std::endl;
-      ++failures;
-    }
-  }
+    VK_CHECK(nearColor(center, 255, 0, 0), "two lights did not accumulate "
+             "to full brightness: "
+             << describePixel(center));
+  });
 
-  // --- Vertex color with Gouraud shading ----------------------------------
-  {
-    const float triangle[] = {
-      -0.9f, -0.9f, 0.0f,
-       0.9f, -0.9f, 0.0f,
-       0.0f,  0.9f, 0.0f
-    };
-    const float normals[] = {
-      0.0f, 0.0f, 1.0f,
-      0.0f, 0.0f, 1.0f,
-      0.0f, 0.0f, 1.0f
-    };
-    const float colors[] = {
-      0.0f, 1.0f, 0.0f, 1.0f,
-      0.0f, 1.0f, 0.0f, 1.0f,
-      0.0f, 1.0f, 0.0f, 1.0f
-    };
-
+  cases.add("Gouraud: vertex color overrides the diffuse", [&harness] {
     SoDrawList drawlist;
     SoLightingData lighting;
     lighting.ambient = SbVec3f(0.0f, 0.0f, 0.0f);
-    lighting.lights.push_back(directional(SbVec3f(0.0f, 0.0f, 1.0f),
-                                          SbVec3f(1.0f, 1.0f, 1.0f)));
-    SoRenderCommand command;
-    command.modelMatrix.makeIdentity();
-    command.geometry.topology = SO_TOPOLOGY_TRIANGLES;
-    command.geometry.vertexCount = 3;
-    command.geometry.positions = triangle;
-    command.geometry.normals = normals;
-    command.geometry.colors = colors;
-    command.geometry.vertexStride = sizeof(float) * 3;
-    command.material.diffuse = SbVec4f(1.0f, 0.0f, 0.0f, 1.0f);
-    command.material.ambient = SbVec4f(0.0f, 0.0f, 0.0f, 1.0f);
-    command.material.specular = SbVec4f(0.0f, 0.0f, 0.0f, 1.0f);
-    command.material.emissive = SbVec4f(0.0f, 0.0f, 0.0f, 1.0f);
-    command.material.shininess = 0.0f;
-    command.material.shadingModel = SO_SHADING_LEGACY_GOURAUD;
+    lighting.lights.push_back(
+      directional(SbVec3f(0.0f, 0.0f, 1.0f), SbVec3f(1.0f, 1.0f, 1.0f)));
+    SoRenderCommand command =
+      vertexColorQuad(SO_SHADING_LEGACY_GOURAUD);
     command.lightingHandle = drawlist.addLightingSetup(lighting);
     drawlist.addCommand(command);
 
-    if (!harness.backend.render(drawlist, params)) {
-      std::cerr << "FAIL: vertex-color Gouraud render failed" << std::endl;
-      ++failures;
-    }
+    VK_CHECK(harness.backend.render(drawlist, harness.renderParams()),
+             "render failed");
     const uint8_t * center = pixelAt(harness.readback(), 16, 16);
-    if (!nearColor(center, 0, 255, 0)) {
-      std::cerr << "FAIL: vertex color was not used for Gouraud shading" << std::endl;
-      ++failures;
-    }
-  }
+    VK_CHECK(nearColor(center, 0, 255, 0), "vertex color was not used for "
+             "Gouraud shading: "
+             << describePixel(center));
+  });
 
+  cases.add("unlit: vertex color overrides the diffuse", [&harness] {
+    SoDrawList drawlist;
+    drawlist.addCommand(vertexColorQuad(SO_SHADING_UNLIT));
+    VK_CHECK(harness.backend.render(drawlist, harness.renderParams()),
+             "render failed");
+    const uint8_t * center = pixelAt(harness.readback(), 16, 16);
+    VK_CHECK(nearColor(center, 0, 255, 0), "unlit vertex color did not "
+             "override diffuse: "
+             << describePixel(center));
+  });
+
+  const int failures = cases.run();
   harness.shutdown();
   SoDB::finish();
   return failures == 0 ? 0 : 1;

@@ -652,8 +652,15 @@ SoVulkanRenderBackend::renderInternal(const SoDrawList & drawlist,
   rpbi.clearValueCount = clearValueCount;
   rpbi.pClearValues = clearValueCount ? clearValues : nullptr;
 
+  // INLINE_AND_SECONDARY: the opaque pass replays a secondary command buffer
+  // (M1c/M1d) inside this pass, so plain INLINE contents would be a spec
+  // violation (VUID-vkCmdExecuteCommands-contents-09680) and would also stop
+  // the primary's dynamic state (viewport/scissor) from being inherited by the
+  // secondary.  The inline+secondary contents enum comes from
+  // VK_EXT_nested_command_buffer; devices without it would need the fully
+  // inline fallback (canUseSecondary == false) instead.
   vkCmdBeginRenderPass(this->currentCommandBuffer(), &rpbi,
-                       VK_SUBPASS_CONTENTS_INLINE);
+                       VK_SUBPASS_CONTENTS_INLINE_AND_SECONDARY_COMMAND_BUFFERS_EXT);
 
   this->recordContext.buffer = this->currentCommandBuffer();
   bool recorded = true;
@@ -909,9 +916,23 @@ SoVulkanRenderBackend::buildWorkItems(const SoDrawList & drawlist,
         if (command.pass == SO_RENDERPASS_OVERLAY) continue;
         if (command.pass == SO_RENDERPASS_TRANSPARENT) continue;
         if (!command.state.depth.enabled) continue; // on-top annotation (later)
-        if (isWideLine(command, -1)) continue;      // CPU-expanded per command
-        if (!this->findCachedDrawable(command)) continue;
-        buckets[vkBatchKey(command, contentHashOf(command))].push_back(&command);
+        if (isWideLine(command, -1)) {
+          // CPU-expanded per command: never batched, and recorded inline so
+          // the per-command quad-buffer allocation never races a parallel
+          // recorder -- but it must still be drawn (previously it was dropped
+          // from the worklist entirely).
+          if (!this->findCachedDrawable(command)) continue;
+          VulkanWorkItem item;
+          item.single = &command;
+          item.count = 1;
+          item.recordToSecondary = false;
+          item.slotBase = nextSlot++;
+          out.push_back(item);
+          continue;
+        }
+        const VulkanCachedCommand * cached = this->findCachedDrawable(command);
+        if (!cached) continue;
+        buckets[vkBatchKey(command, cached->contentHash)].push_back(&command);
       }
       for (auto & kv : buckets) {
         std::vector<const SoRenderCommand*> & v = kv.second;
