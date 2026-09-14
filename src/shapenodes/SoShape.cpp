@@ -243,6 +243,18 @@ public:
     this->flushRun();
   }
 
+  // Local-space bounding box of every primitive passed through append(), so
+  // the IR walk doubles as the bbox computation for getBBox().
+  const SbBox3f & getBBox() const { return this->bbox; }
+  // Centroid of the appended vertices, matching SoIndexedShape::computeBBox's
+  // center output (it averages the referenced coordinates, it does not use the
+  // box center).
+  SbVec3f getBBoxCenter() const
+  {
+    return this->bboxCount ? this->bboxSum / float(this->bboxCount)
+                           : SbVec3f(0.0f, 0.0f, 0.0f);
+  }
+
 private:
   void flushRun()
   {
@@ -264,13 +276,21 @@ private:
 
     run.positions = std::make_shared<std::vector<float>>(count * 3);
     run.normals = std::make_shared<std::vector<float>>(count * 3);
-    run.texcoords = std::make_shared<std::vector<float>>(count * 4);
+    // Texture coordinates are only materialized when some primitive actually
+    // carries them.  A BRep tessellation (the overwhelmingly common case for a
+    // large assembly) has none, and a full count*4 float stream is hundreds of
+    // MB at millions of vertices -- pure waste, both in the retained geometry
+    // and in the copy below.
+    if (this->anyTexcoord) {
+      run.texcoords = std::make_shared<std::vector<float>>(count * 4);
+    }
     run.matIndices = std::make_shared<std::vector<int>>(count);
 
     std::vector<float> & positions = *run.positions;
     std::vector<float> & normals = *run.normals;
-    std::vector<float> & texcoords = *run.texcoords;
     std::vector<int> & matIndices = *run.matIndices;
+    const bool haveTex = static_cast<bool>(run.texcoords);
+    std::vector<float> * texcoordsPtr = run.texcoords.get();
     for (size_t i = 0; i < count; ++i) {
       const SoIRVertex & vertex = this->vertices[i];
       positions[i * 3 + 0] = vertex.position[0];
@@ -279,15 +299,19 @@ private:
       normals[i * 3 + 0] = vertex.normal[0];
       normals[i * 3 + 1] = vertex.normal[1];
       normals[i * 3 + 2] = vertex.normal[2];
-      texcoords[i * 4 + 0] = vertex.texcoord[0];
-      texcoords[i * 4 + 1] = vertex.texcoord[1];
-      texcoords[i * 4 + 2] = vertex.texcoord[2];
-      texcoords[i * 4 + 3] = vertex.texcoord[3];
+      if (haveTex) {
+        std::vector<float> & texcoords = *texcoordsPtr;
+        texcoords[i * 4 + 0] = vertex.texcoord[0];
+        texcoords[i * 4 + 1] = vertex.texcoord[1];
+        texcoords[i * 4 + 2] = vertex.texcoord[2];
+        texcoords[i * 4 + 3] = vertex.texcoord[3];
+      }
       matIndices[i] = vertex.materialIndex;
     }
 
     this->runs->push_back(std::move(run));
     this->vertices.clear();
+    this->anyTexcoord = false;
   }
 
   bool ensureTopology(SoPrimitiveTopology candidate)
@@ -310,6 +334,15 @@ private:
     copy.normal = vertex->getNormal();
     copy.texcoord = vertex->getTextureCoords();
     copy.materialIndex = materialIndex;
+    if (!this->anyTexcoord) {
+      const SbVec4f & tc = copy.texcoord;
+      if (tc[0] != 0.0f || tc[1] != 0.0f || tc[2] != 0.0f || tc[3] != 1.0f) {
+        this->anyTexcoord = true;
+      }
+    }
+    this->bbox.extendBy(copy.position);
+    this->bboxSum += copy.position;
+    this->bboxCount++;
     this->vertices.push_back(copy);
   }
 
@@ -318,6 +351,13 @@ private:
   std::vector<SoIRRetainedGeometry> * runs;
   SoPrimitiveTopology topology;
   std::vector<SoIRVertex> vertices;
+  // Set as soon as any primitive carries a non-default texture coordinate, so
+  // flushRun() only materializes the (large) texcoord stream when it is used.
+  bool anyTexcoord = false;
+  // Accumulated local-space bounds of every appended vertex.
+  SbBox3f bbox;
+  SbVec3f bboxSum;
+  int bboxCount = 0;
 };
 
 // True when two resolved material snapshots produce an identical draw.
@@ -381,7 +421,9 @@ soshape_emit_ir_commands(SoIRRenderAction * action, SoShape * shape,
 {
   const std::vector<float> & positions = *geom.positions;
   const std::vector<float> & normals = *geom.normals;
-  const std::vector<float> & texcoords = *geom.texcoords;
+  // Null when the shape carried no texture coordinates (the assembler skips
+  // materializing the stream); the command then simply has no texcoords.
+  const std::vector<float> * texcoords = geom.texcoords.get();
   const bool hasMatIndices = geom.matIndices != nullptr;
   static const std::vector<int> emptyMatIndices;
   const std::vector<int> & matIndices =
@@ -500,7 +542,8 @@ soshape_emit_ir_commands(SoIRRenderAction * action, SoShape * shape,
     command.geometry.texcoordStride = sizeof(float) * 4;
     command.geometry.positions = positions.data() + batch.first * 3;
     command.geometry.normals = normals.data() + batch.first * 3;
-    command.geometry.texcoords = texcoords.data() + batch.first * 4;
+    command.geometry.texcoords = texcoords
+      ? texcoords->data() + batch.first * 4 : nullptr;
     command.geometry.colors = colors ? colors + batch.first * 4 : nullptr;
     // Co-own the shape-retained stream buffers: SoShape::notify() may drop
     // the shape's own reference (and free the chunk) on any field change, on
@@ -650,6 +693,14 @@ public:
   static void calibrateBBoxCache(void);
   static double bboxcachetimelimit;
   SoBoundingBoxCache * bboxcache;
+  // Local bounding box of the retained IR geometry, recorded during the IR
+  // walk (which already visits every vertex) and used by getBBox() to answer
+  // the auto-clipping query without a second full traversal of a
+  // multi-million-vertex tessellation.  Cleared by notify() alongside the
+  // other caches; the IR walk refills it whenever the shape is re-recorded.
+  SbBox3f irBBox;
+  SbVec3f irBBoxCenter;
+  bool irBBoxValid = false;
 #if COIN_BUILD_LEGACY_GL_RENDERER
   SoPrimitiveVertexCache * pvcache;
 #endif
@@ -1054,6 +1105,13 @@ SoShape::IRRender(SoIRRenderAction * action)
     PRIVATE(this)->irRuns.swap(built);
     PRIVATE(this)->irCacheValid = !PRIVATE(this)->irRuns.empty();
     PRIVATE(this)->irCacheComplexity = complexity;
+    // The walk just touched every vertex, so record its local bbox for the
+    // auto-clipping query (getBBox) instead of re-traversing the tessellation.
+    if (!assembler.getBBox().isEmpty()) {
+      PRIVATE(this)->irBBox = assembler.getBBox();
+      PRIVATE(this)->irBBoxCenter = assembler.getBBoxCenter();
+      PRIVATE(this)->irBBoxValid = true;
+    }
     emitRuns = PRIVATE(this)->irRuns;
     PRIVATE(this)->unlock();
   }
@@ -2118,6 +2176,7 @@ SoShape::notify(SoNotList * nl)
   PRIVATE(this)->rendercnt = 0;
   PRIVATE(this)->irCacheValid = false;
   PRIVATE(this)->irRuns.clear();
+  PRIVATE(this)->irBBoxValid = false;
   PRIVATE(this)->unlock();
 }
 
@@ -2176,7 +2235,32 @@ SoShape::getBBox(SoAction * action, SbBox3f & box, SbVec3f & center)
     SoCacheElement::set(state, PRIVATE(this)->bboxcache);
   }
   SbTime begin = SbTime::getTimeOfDay();
-  this->computeBBox(action, box, center);
+  // The IR walk already recorded the local bounds of the rendered geometry,
+  // so reuse it instead of walking the (potentially tens of millions of)
+  // indexed coordinates a second time just to answer the clip query.
+  // FC_NO_IR_BBOX disables the shortcut (debug/parity comparison).
+  static const bool noIrBBox = (getenv("FC_NO_IR_BBOX") != NULL);
+  // FC_IR_BBOX_CHECK recomputes the reference bbox and logs the delta, to
+  // prove the IR-derived box is bit-for-bit equivalent (debug only).
+  static const bool checkIrBBox = (getenv("FC_IR_BBOX_CHECK") != NULL);
+  if (PRIVATE(this)->irBBoxValid && !noIrBBox && !checkIrBBox) {
+    box = PRIVATE(this)->irBBox;
+    center = PRIVATE(this)->irBBoxCenter;
+  }
+  else {
+    this->computeBBox(action, box, center);
+    if (checkIrBBox && PRIVATE(this)->irBBoxValid) {
+      const SbVec3f dmin = box.getMin() - PRIVATE(this)->irBBox.getMin();
+      const SbVec3f dmax = box.getMax() - PRIVATE(this)->irBBox.getMax();
+      const SbVec3f dc = center - PRIVATE(this)->irBBoxCenter;
+      fprintf(stderr,
+              "[IRBBOXCHK] dmin=(%.5f %.5f %.5f) dmax=(%.5f %.5f %.5f) "
+              "dc=(%.5f %.5f %.5f)\n",
+              dmin[0], dmin[1], dmin[2], dmax[0], dmax[1], dmax[2],
+              dc[0], dc[1], dc[2]);
+      fflush(stderr);
+    }
+  }
   SbTime end = SbTime::getTimeOfDay();
   if (shouldcache) {
     PRIVATE(this)->bboxcache->set(box, TRUE, center);
