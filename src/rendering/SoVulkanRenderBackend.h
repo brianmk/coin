@@ -21,6 +21,7 @@
 #include <mutex>
 #include <thread>
 #include <unordered_map>
+#include <utility>
 #include <vector>
 
 // Shared combine step for the hand-rolled hash functors below.  Keeping one
@@ -372,7 +373,8 @@ private:
                            VkPipeline & pipeline,
                            bool transparent,
                            int fillModeOverride = -1,
-                           bool overlayPass = false);
+                           bool overlayPass = false,
+                           VulkanCachedCommand * cacheEntry = nullptr);
 
   // --- Per-draw lighting ------------------------------------------------
   // Write each distinct SoLightingHandle's constant block once into the
@@ -610,6 +612,33 @@ private:
                        const SoRenderParams & params,
                        const SbMat & proj,
                        float lineWidth);
+  // Ensure the per-command wide-line quad buffers exist and are large enough
+  // for the worst case, on the calling (recording) thread, before any parallel
+  // record worker fills them.  Device-memory allocation and the deferred
+  // destroy ring are not thread-safe, so expandWideLines() must never grow a
+  // buffer inside a worker.
+  void prepareWideLineBuffers(const SoDrawList & drawlist);
+  // Resolve the projection a command's wide-line quads must use (its own for a
+  // self-camera overlay, else the frame projection), matching
+  // recordDrawCommand()'s push-constant path exactly so the expansion cache
+  // key is identical whether the expansion runs in the pre-pass or inline.
+  void resolveCommandProj(const SoRenderCommand & command,
+                          const SoRenderParams & params,
+                          bool overlayPass,
+                          SbMat & out) const;
+  // Expand one command's wide lines with the same projection/width the record
+  // path uses.  Safe to call from a worker thread (thread-local scratch, and
+  // prepareWideLineBuffers() has already sized the target buffer).
+  bool expandWideLinesFor(VulkanCachedCommand & entry,
+                          const SoRenderCommand & command,
+                          const SoRenderParams & params,
+                          bool overlayPass);
+  // Expand every wide-line command of the frame across the worker pool before
+  // the (serial) record pass, so recordDrawCommand() only binds the cached
+  // quads.  This is the CPU-heavy part of line rendering and is embarrassingly
+  // parallel; the command-buffer recording itself stays single-threaded.
+  void expandWideLinesParallel(const SoDrawList & drawlist,
+                               const SoRenderParams & params);
   bool endAndSubmit();
   void applyViewport(const SoRenderParams & params,
                      const SoVulkanRenderTarget & target,
@@ -834,6 +863,12 @@ private:
     VkCommandBuffer secondary = VK_NULL_HANDLE;
     VulkanRecordContext * ctx = nullptr;
     bool ok = false;
+    // Wide-line expansion dispatch: when true the worker expands
+    // `wideLineCommands` instead of recording a secondary chunk.  Reuses the
+    // same pool/wakeup machinery; the two dispatches never overlap (the
+    // expansion pre-pass is joined before recording starts).
+    bool expandWideLines = false;
+    std::vector<const SoRenderCommand *> wideLineCommands;
   };
   std::vector<ParallelRecordJob> recordJobs;
   std::mutex recordMutex;
@@ -1082,14 +1117,19 @@ private:
   std::unordered_map<BackgroundPipelineKey, VkPipeline,
                      BackgroundPipelineKeyHash> backgroundPipelineCache;
 
-  // Reusable CPU scratch for the wide-line quad expansion.  expandWideLines()
-  // previously allocated clipCache/distances/quads as fresh std::vector per
-  // line per frame -- for line-heavy scenes that is thousands of heap
-  // alloc/free per frame.  These are reused via assign() (no realloc when
-  // capacity is sufficient), so only the fill cost remains.
-  std::vector<float> wlineClipScratch;
-  std::vector<float> wlineDistScratch;
-  std::vector<float> wlineQuadScratch;
+  // The wide-line quad-expansion scratch (clip cache, per-vertex distance,
+  // quad vertices) lives in thread_local vectors inside expandWideLines(): the
+  // expansion runs on the parallel record workers, so a single shared scratch
+  // would race.  See SoVulkanRenderBackendWideLine.cpp.
+  //
+  // Commands collected for the parallel expansion dispatch (main thread only;
+  // cleared and reused, never reallocated in steady state).
+  std::vector<const SoRenderCommand *> wlineExpandScratch;
+  // Thread that drives the expansion pre-pass (the recording/GUI thread).
+  // Used to keep the wide-line diagnostics on that one thread: interleaved
+  // worker-thread debug writes are pure noise (and the diagnostics are the
+  // only place the expansion touches shared I/O).
+  std::thread::id wlineOwnerThread;
 
   std::vector<VulkanCachedCommand> gpuCache;
   std::unordered_map<const SoRenderCommand *, size_t> commandToCache;
@@ -1105,6 +1145,14 @@ private:
   // Cleared per frame and refilled so an ordinary frame does not heap-allocate
   // the item vector.
   std::vector<VulkanWorkItem> workItemsScratch;
+
+  // Reusable scratch for recordFrame()'s secondary/parallel record paths so an
+  // ordinary frame does not heap-allocate them (recording is single-threaded
+  // per backend; the parallel workers only read the items these hold).
+  std::vector<const VulkanWorkItem *> opaqueItemsScratch;
+  std::vector<std::pair<uint64_t, const VulkanWorkItem *>> heaviestScratch;
+  std::vector<uint64_t> loadScratch;
+  std::vector<VkCommandBuffer> executeScratch;
 
   // Packed sampler-state key: minFilter | magFilter << 2 | wrapS << 4 | wrapT << 6.
   typedef uint8_t SamplerKey;
