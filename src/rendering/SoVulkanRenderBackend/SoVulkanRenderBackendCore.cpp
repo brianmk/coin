@@ -120,6 +120,12 @@ SoVulkanRenderBackend::setPointsOverlay(SbBool enabled)
 }
 
 void
+SoVulkanRenderBackend::setTessellationOverlay(SbBool enabled)
+{
+  this->tessellationOverlay = enabled;
+}
+
+void
 SoVulkanRenderBackend::setEdgeColor(const SbColor4f & color)
 {
   this->edgeColor = color;
@@ -155,6 +161,15 @@ SoVulkanRenderBackend::initialize(const SoRenderBackendInitParams & params)
   this->queueFamilyIndex = deviceContext->graphicsQueueFamilyIndex;
   this->allocator = deviceContext->allocator;
   this->memProps.setDevice(this->physicalDevice);
+
+  // Bind the render-pass/framebuffer cache to this device and hook its
+  // deferred resource release into the frame ring: an old framebuffer is
+  // destroyed a few frames after the submission that referenced it completes,
+  // rather than synchronously (which would race a still-executing frame).
+  this->renderPasses.setDevice(this->device, this->allocator);
+  this->renderPasses.setDeferredDestroy([this](std::function<void()> && fn) {
+    this->deferDestroy(std::move(fn));
+  });
 
   // Opt-in device-memory sub-allocator (FC_VULKAN_MEM_POOL).  Default off so
   // the behaviour is byte-for-byte the legacy path unless explicitly enabled.

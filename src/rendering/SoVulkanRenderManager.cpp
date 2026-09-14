@@ -301,6 +301,7 @@ public:
   SbColor4f backgroundBottomColor = SbColor4f(0.0f, 0.0f, 0.0f, 1.0f);
   SbBool wireframeOverlay = FALSE;
   SbBool pointsOverlay = FALSE;
+  SbBool tessellationOverlay = FALSE;
   SbColor4f edgeColor = SbColor4f(0.05f, 0.05f, 0.05f, 1.0f);
   //! Last settings blob applied through setViewSettings(), and whether one has
   //! been applied yet (so the first call always applies).
@@ -689,6 +690,13 @@ SoVulkanRenderManager::setPointsOverlay(SbBool enabled)
 }
 
 void
+SoVulkanRenderManager::setTessellationOverlay(SbBool enabled)
+{
+  this->pimpl->tessellationOverlay = enabled;
+  this->pimpl->backend.setTessellationOverlay(enabled);
+}
+
+void
 SoVulkanRenderManager::setEdgeColor(const SbColor4f & color)
 {
   this->pimpl->edgeColor = color;
@@ -754,6 +762,12 @@ SbBool
 SoVulkanRenderManager::getPointsOverlay(void) const
 {
   return this->pimpl->pointsOverlay;
+}
+
+SbBool
+SoVulkanRenderManager::getTessellationOverlay(void) const
+{
+  return this->pimpl->tessellationOverlay;
 }
 
 const SbColor4f &
