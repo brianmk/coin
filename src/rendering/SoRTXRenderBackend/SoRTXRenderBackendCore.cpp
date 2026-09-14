@@ -372,6 +372,7 @@ SoRTXRenderBackend::setDenoiserFilter(const char * denoiser)
   else if (std::strcmp(denoiser, "oidn") == 0) this->denoiseKindPref = DenoiseOidn;
   else if (std::strcmp(denoiser, "fsr") == 0) this->denoiseKindPref = DenoiseFsr;
   else if (std::strcmp(denoiser, "none") == 0) this->denoiseKindPref = DenoiseNone;
+  else if (std::strcmp(denoiser, "dlssrr") == 0) this->denoiseKindPref = DenoiseDlssRr;
   else return;
   this->denoiseKind = this->denoiseKindPref;
   this->denoiseKindDirty = true;

@@ -14,6 +14,7 @@
 #include <cstdint>
 #include <functional>
 #include <mutex>
+#include <string>
 #include <thread>
 #include <unordered_map>
 #include <vector>
@@ -29,6 +30,14 @@
 #include <optix_stubs.h>
 // optix_function_table_definition.h is included in exactly one .cpp (the
 // denoiser TU) because it defines the optixFunctionTable symbol.
+#endif
+
+#if COIN_BUILD_DLSS_RR_DENOISER
+// Interop-only NGX ABI declarations (self-authored, MIT).  These pull in the
+// opaque NgxHandle / NgxParameter types used by the DLSS-RR backend section
+// below.  The closed-source NVIDIA runtime is dlopen'd at runtime; nothing
+// here links against it.
+#include "rendering/SoRTXRenderBackend/ngx_abi.h"
 #endif
 
 /*!
@@ -935,7 +944,8 @@ private:
   // the external denoiser: the backend selector, staging buffers to move
   // the G-buffers to/from the denoiser, and the denoised output bound at
   // present binding 5.
-  enum DenoiseKind { DenoiseNone = 0, DenoiseOidn, DenoiseRtx, DenoiseFsr };
+  enum DenoiseKind { DenoiseNone = 0, DenoiseOidn, DenoiseRtx, DenoiseFsr,
+                     DenoiseDlssRr };
 
   //! Backing store for getViewMode()/setViewMode() (see RtxViewMode).
   RtxViewMode rtxViewMode = RtxViewMode::RtxModeOff;
@@ -1161,6 +1171,43 @@ private:
   bool rtxVkToCudaSignalPending = false;
   bool rtxCudaSignalPending = false;
   PFN_vkGetSemaphoreFdKHR vkGetSemaphoreFdKHR = nullptr;
+#endif
+
+  // --- DLSS-RR (NVIDIA NGX) denoiser backend -------------------------------
+  // Runs Ray Reconstruction (DLSS-RR, feature 13) as an on-GPU Vulkan denoiser
+  // via the runtime-loaded NVIDIA NGX runtime.  Unlike OIDN (host CPU) and the
+  // opt-in RTX/OptiX+interop path, this is a pure Vulkan denoiser: it reads and
+  // writes device-local VkBuffers directly.  Gated at runtime on both the NGX
+  // library being present and a registered DLSS App ID
+  // (FC_RTX_DLSS_APPID); when either is missing the backend reports
+  // unavailable and the denoiser list falls through to OIDN.
+#if COIN_BUILD_DLSS_RR_DENOISER
+  //! Opaque NGX feature handle for the RR denoiser (owned until teardown).
+  NgxHandle * ngxFeature = nullptr;
+  //! NGX parameter object used at CreateFeature/Evaluate time.
+  NgxParameter * ngxParams = nullptr;
+  //! Scratch buffer required by the RR feature (VkBuffer + memory).
+  VkBuffer ngxScratch = VK_NULL_HANDLE;
+  VkDeviceMemory ngxScratchMem = VK_NULL_HANDLE;
+  VkDeviceSize ngxScratchBytes = 0;
+  //! Raw RGBA output from the denoiser, copied into denoisedBuffer on publish.
+  VkBuffer ngxOutputBuf = VK_NULL_HANDLE;
+  VkDeviceMemory ngxOutputMem = VK_NULL_HANDLE;
+  //! The GBuffer/present resources bound to binding 14 as the albedo guide and
+  //! binding 5 as the normal guide.  We reference existing backend buffers.
+  //! True once the RR feature was created and is ready to evaluate.
+  bool ngxReady = false;
+  //! Resolved app identifier string (from FC_RTX_DLSS_APPID); empty = gate off.
+  std::string ngxAppId;
+  //! Retry-once bookkeeping for the nondeterministic FAIL_OutOfDate Init.
+  bool ngxRetriedInit = false;
+
+  //! Initialize the NGX runtime and create the RR denoiser feature.
+  bool createDlssRrBackend();
+  //! Record the device-local G-buffer references and evaluate the denoiser.
+  void evaluateDlssRr(VkCommandBuffer cmd);
+  //! Release the RR feature / params / scratch and shut NGX down.
+  void teardownDlssRrBackend();
 #endif
 
   //! Create the per-backend denoiser resources (called by createPathTracingBuffers).

@@ -29,6 +29,12 @@ if(COIN_BUILD_VULKAN_RENDERER)
 		SoRTXRenderBackend/SoRTXRenderBackendPathTracing.cpp
 		SoRTXRenderBackend/SoRTXRenderBackendDenoise.cpp
 	)
+	if(COIN_BUILD_DLSS_RR_DENOISER)
+		list(APPEND COIN_RENDERING_FILES
+			SoRTXRenderBackend/SoRTXRenderBackendDlssRR.cpp
+			SoRTXRenderBackend/ngx_loader.cpp
+		)
+	endif()
 endif()
 
 if(COIN_BUILD_LEGACY_GL_RENDERER)
