@@ -398,6 +398,9 @@ private:
                  VkCommandBuffer cmd);
   bool refitBlas(RTXCachedGeometry & entry, const SoRenderCommand & command,
                  VkCommandBuffer cmd);
+  bool blasBuildOrRefit(RTXCachedGeometry & entry,
+                        const SoRenderCommand & command, VkCommandBuffer cmd,
+                        bool refit);
   void destroyCacheEntry(RTXCachedGeometry & entry);
   bool buildTlas(const SoDrawList & drawlist, const SoRenderParams & params,
                  VkCommandBuffer cmd);
@@ -850,6 +853,14 @@ private:
   uint32_t neePoolCount = 0;
   bool ensureNeePoolCapacity(VkDeviceSize bytes);
   void buildNeePool(const SoDrawList & drawlist);
+
+  // Shared grow-only pool (re)allocation used by ensureNormalPoolCapacity()
+  // and ensureNeePoolCapacity(): double the host-visible pool until the
+  // requested size fits, preserving the existing contents and used count.
+  bool ensurePoolCapacity(VkDeviceSize bytes, VkBuffer & poolBuffer,
+                          VkDeviceMemory & poolMemory, void *& poolMapped,
+                          VkDeviceSize & poolCapacity, VkDeviceSize & poolUsed,
+                          bool refreshDescriptors);
 
   // --- Cache bookkeeping ---------------------------------------------------
   std::vector<RTXCachedGeometry> geometryCache;
