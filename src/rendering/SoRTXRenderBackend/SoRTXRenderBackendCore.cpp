@@ -1467,10 +1467,19 @@ SoRTXRenderBackend::dumpStorageImageIfRequested()
       if (f) {
         fprintf(f, "P6\n%u %u\n255\n", w, h);
         const size_t rowbytes = static_cast<size_t>(w) * 4;
+        // Source rows are packed RGBA (4 bytes/px); the PPM is RGB, so copy
+        // 3 bytes per pixel (drop the alpha) instead of writing the raw row,
+        // which would interleave alpha into the color channels.
+        std::vector<unsigned char> row(static_cast<size_t>(w) * 3);
         for (uint32_t y = 0; y < h; ++y) {
           const unsigned char * r =
             src + (static_cast<size_t>(y) * rowbytes);
-          fwrite(r, 1, static_cast<size_t>(w) * 3, f);
+          for (uint32_t x = 0; x < w; ++x) {
+            row[3u * x + 0u] = r[4u * x + 0u];
+            row[3u * x + 1u] = r[4u * x + 1u];
+            row[3u * x + 2u] = r[4u * x + 2u];
+          }
+          fwrite(row.data(), 1, row.size(), f);
         }
         fclose(f);
         fprintf(stderr, "[RTDBG] dumpStorageImage: wrote %s %ux%u\n", fullpath,
