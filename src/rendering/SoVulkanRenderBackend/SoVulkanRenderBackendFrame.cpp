@@ -917,15 +917,18 @@ SoVulkanRenderBackend::buildWorkItems(const SoDrawList & drawlist,
         if (command.pass == SO_RENDERPASS_TRANSPARENT) continue;
         if (!command.state.depth.enabled) continue; // on-top annotation (later)
         if (isWideLine(command, -1)) {
-          // CPU-expanded per command: never batched, and recorded inline so
-          // the per-command quad-buffer allocation never races a parallel
-          // recorder -- but it must still be drawn (previously it was dropped
-          // from the worklist entirely).
+          // CPU-expanded per command, so never batched.  It still goes into a
+          // secondary: prepareWideLineBuffers() has already grown the
+          // per-command quad buffer on the recording thread, so the parallel
+          // workers only fill the existing host-visible mapping and bind it.
+          // The expansion is the dominant per-frame CPU cost on edge-heavy
+          // scenes, and routing it through the workers is what parallelizes
+          // it (previously it ran inline on the recording thread).
           if (!this->findCachedDrawable(command)) continue;
           VulkanWorkItem item;
           item.single = &command;
           item.count = 1;
-          item.recordToSecondary = false;
+          item.recordToSecondary = true;
           item.slotBase = nextSlot++;
           out.push_back(item);
           continue;
@@ -1127,6 +1130,13 @@ SoVulkanRenderBackend::recordFrame(const SoDrawList & drawlist,
 {
   vkBackendTrace(this->uboFrameIndex, "recordFrame.enter",
                  "cmds=%d", drawlist.getNumCommands());
+  // Wide-line CPU expansion: grow the per-command quad buffers (device-memory
+  // allocation is not thread-safe) and compute the quads across the worker
+  // pool before recording, which then only binds the cached buffers.  The
+  // expansion is the CPU-heavy part of edge rendering and is embarrassingly
+  // parallel; the command-buffer recording itself stays single-threaded.
+  this->prepareWideLineBuffers(drawlist);
+  this->expandWideLinesParallel(drawlist, params);
   if (COIN_VULKAN_ENV_FLAG("FC_VULKAN_MATRIX_DUMP")) {
     s_debugFrame++;
     s_dumpCmdCount = 0;
@@ -1250,7 +1260,8 @@ SoVulkanRenderBackend::recordFrame(const SoDrawList & drawlist,
     // M1c serial: one secondary holds the whole opaque pass, replayed in place.
     VkCommandBuffer secondary = this->currentSecondaryCommandBuffer();
     VkCommandBuffer primary = this->currentCommandBuffer();
-    std::vector<const VulkanWorkItem *> opaqueItems;
+    std::vector<const VulkanWorkItem *> & opaqueItems = this->opaqueItemsScratch;
+    opaqueItems.clear();
     opaqueItems.reserve(static_cast<size_t>(secondaryItemCount));
     for (const VulkanWorkItem & item : workItems) {
       if (item.recordToSecondary) opaqueItems.push_back(&item);
@@ -1294,6 +1305,8 @@ SoVulkanRenderBackend::recordFrame(const SoDrawList & drawlist,
     }
     const uint32_t W = this->maxRecordWorkers;
     for (uint32_t w = 0; w < W; ++w) {
+      this->recordJobs[w].expandWideLines = false;
+      this->recordJobs[w].wideLineCommands.clear();
       this->recordJobs[w].items.clear();
       this->recordJobs[w].drawlist = &drawlist;
       this->recordJobs[w].params = &params;
@@ -1305,7 +1318,9 @@ SoVulkanRenderBackend::recordFrame(const SoDrawList & drawlist,
       this->recordJobs[w].ok = false;
     }
     // Greedy longest-first: costs = first command's vertex count * item.count.
-    std::vector<std::pair<uint64_t, const VulkanWorkItem *>> heaviest;
+    std::vector<std::pair<uint64_t, const VulkanWorkItem *>> & heaviest =
+      this->heaviestScratch;
+    heaviest.clear();
     heaviest.reserve(static_cast<size_t>(secondaryItemCount));
     for (const VulkanWorkItem & item : workItems) {
       if (!item.recordToSecondary) continue;
@@ -1321,7 +1336,8 @@ SoVulkanRenderBackend::recordFrame(const SoDrawList & drawlist,
                  const std::pair<uint64_t, const VulkanWorkItem *> & b) {
                 return a.first > b.first;
               });
-    std::vector<uint64_t> load(W, 0);
+    std::vector<uint64_t> & load = this->loadScratch;
+    load.assign(W, 0);
     for (const auto & h : heaviest) {
       uint32_t dst = 0;
       for (uint32_t w = 1; w < W; ++w) { if (load[w] < load[dst]) dst = w; }
@@ -1330,12 +1346,13 @@ SoVulkanRenderBackend::recordFrame(const SoDrawList & drawlist,
     }
     // Dispatch: main records worker 0, spawned threads record workers 1..W-1.
     this->recordDoneCount = 0;
+    uint32_t generation = 0;
     {
       std::lock_guard<std::mutex> lk(this->recordMutex);
-      ++this->recordJobGeneration;
+      generation = ++this->recordJobGeneration;
     }
     vkBackendTrace(this->uboFrameIndex, "recordFrame.dispatch",
-                   "gen=%u W=%u items=%u", this->recordJobGeneration, W,
+                   "gen=%u W=%u items=%u", generation, W,
                    static_cast<unsigned>(secondaryItemCount));
     this->recordCvSpawn.notify_all();
     this->recordJobs[0].ok = this->recordSecondaryChunk(
@@ -1357,7 +1374,8 @@ SoVulkanRenderBackend::recordFrame(const SoDrawList & drawlist,
     VkCommandBuffer primary = this->currentCommandBuffer();
     ctx.buffer = primary;
     ctx.reset();
-    std::vector<VkCommandBuffer> execute;
+    std::vector<VkCommandBuffer> & execute = this->executeScratch;
+    execute.clear();
     execute.reserve(W);
     for (uint32_t w = 0; w < W; ++w) {
       if (this->recordJobs[w].items.empty()) continue;
@@ -1450,6 +1468,12 @@ SoVulkanRenderBackend::recordTracedComposite(const SoDrawList & drawlist,
                                              VkRenderPass renderPass,
                                              VulkanRecordContext & ctx)
 {
+  // Same parallel wide-line expansion as recordFrame(): the RT composite
+  // draws the line/point residue here, so it needs the same pre-expanded
+  // buffers.
+  this->prepareWideLineBuffers(drawlist);
+  this->expandWideLinesParallel(drawlist, params);
+
   // Ray-tracing compositing residue: the RT backend traces only triangles, so
   // the OPAQUE/TRANSPARENT LINES / POINTS / LINE_STRIP commands (BRep edge
   // lines, point markers, polylines) are drawn here as a raster layer on top

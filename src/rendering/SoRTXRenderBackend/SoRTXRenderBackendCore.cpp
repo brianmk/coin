@@ -40,12 +40,8 @@ SoRTXRenderBackend::getName() const
 }
 
 void
-SoRTXRenderBackend::setPathTracingEnabled(SbBool enabled)
+SoRTXRenderBackend::resetProgressiveState()
 {
-  if (this->ptEnabled == enabled) return;
-  this->ptEnabled = enabled;
-  // Switching modes invalidates the accumulated image and any in-flight
-  // progressive run.
   this->ptAccumulating = FALSE;
   this->ptStartLatch = FALSE;
   this->ptFrameIndex = 0;
@@ -57,6 +53,16 @@ SoRTXRenderBackend::setPathTracingEnabled(SbBool enabled)
   this->haveLastView = FALSE;
   this->haveLastCameraVersion = FALSE;
   this->lastCameraVersion = 0;
+}
+
+void
+SoRTXRenderBackend::setPathTracingEnabled(SbBool enabled)
+{
+  if (this->ptEnabled == enabled) return;
+  this->ptEnabled = enabled;
+  // Switching modes invalidates the accumulated image and any in-flight
+  // progressive run.
+  this->resetProgressiveState();
 }
 
 SbBool
@@ -71,17 +77,7 @@ SoRTXRenderBackend::setViewMode(RtxViewMode mode)
   if (this->rtxViewMode == mode) return;
   this->rtxViewMode = mode;
   // A view-mode change invalidates any in-flight progressive run.
-  this->ptAccumulating = FALSE;
-  this->ptStartLatch = FALSE;
-  this->ptFrameIndex = 0;
-  this->ptIdleFrames = 0;
-  this->ptWasMoving = FALSE;
-  this->ptDenoisePending = FALSE;
-  this->ptConverged = FALSE;
-  this->denoiseResultReady = FALSE;
-  this->haveLastView = FALSE;
-  this->haveLastCameraVersion = FALSE;
-  this->lastCameraVersion = 0;
+  this->resetProgressiveState();
 }
 
 SoRTXRenderBackend::RtxViewMode

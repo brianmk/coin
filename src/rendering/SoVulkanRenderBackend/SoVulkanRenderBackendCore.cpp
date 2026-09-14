@@ -163,10 +163,12 @@ SoVulkanRenderBackend::initialize(const SoRenderBackendInitParams & params)
       this->device, this->allocator);
   }
 
-  // Opt-in parallel recording (M1d).  Default off so output is identical to
-  // the serial path unless enabled.  Worker count = hardware threads (capped
-  // to a sane bound); worker 0 is the recording thread, the rest are spawned.
-  if (SoVulkanShared::envFlagEnabled("FC_VULKAN_PARALLEL_RECORD")) {
+  // Worker count for the persistent record pool.  The pool is also used by the
+  // parallel wide-line expansion pre-pass, so it is sized whenever the machine
+  // has cores; parallel *recording* (M1d) stays opt-in so command-buffer
+  // output is identical to the serial path unless enabled.  Worker 0 is the
+  // recording thread, workers 1..N-1 are spawned.
+  {
     unsigned int hw = std::thread::hardware_concurrency();
     this->maxRecordWorkers = hw == 0 ? 1 : hw;
     if (this->maxRecordWorkers > 8) this->maxRecordWorkers = 8;
@@ -175,11 +177,9 @@ SoVulkanRenderBackend::initialize(const SoRenderBackendInitParams & params)
       const unsigned int v = static_cast<unsigned int>(std::atoi(cap));
       if (v >= 1 && v < this->maxRecordWorkers) this->maxRecordWorkers = v;
     }
-    this->parallelRecordEnabled = this->maxRecordWorkers > 1;
-  }
-  else {
-    this->maxRecordWorkers = 1;
-    this->parallelRecordEnabled = false;
+    this->parallelRecordEnabled =
+      this->maxRecordWorkers > 1 &&
+      SoVulkanShared::envFlagEnabled("FC_VULKAN_PARALLEL_RECORD");
   }
   vkBackendTrace(0, "init.parallelConfig", "parallel=%d W=%u",
                  this->parallelRecordEnabled ? 1 : 0, this->maxRecordWorkers);
@@ -329,11 +329,17 @@ bool
 SoVulkanRenderBackend::buildRecordPool()
 {
   if (this->maxRecordWorkers <= 1) return true;
-  if (this->recordWorkers.size() == this->maxRecordWorkers - 1) return true;
-  this->recordPoolStopped = false;
+  if (this->recordWorkers.size() >= this->maxRecordWorkers - 1) return true;
+  {
+    std::lock_guard<std::mutex> lk(this->recordMutex);
+    this->recordPoolStopped = false;
+  }
   vkBackendTrace(0, "buildRecordPool.enter", "W=%u",
                  this->maxRecordWorkers);
-  for (uint32_t w = 1; w < this->maxRecordWorkers; ++w) {
+  // Resume from the current pool size so a partially-built pool (spawn failed
+  // midway) tops up rather than spawning duplicate worker indices.
+  for (uint32_t w = static_cast<uint32_t>(this->recordWorkers.size()) + 1;
+       w < this->maxRecordWorkers; ++w) {
     try {
       this->recordWorkers.emplace_back(
         &SoVulkanRenderBackend::recordJobWorker, this, static_cast<size_t>(w));
@@ -387,7 +393,25 @@ SoVulkanRenderBackend::recordJobWorker(const size_t workerIndex)
                    "w=%zu secondary=%p items=%zu", workerIndex,
                    reinterpret_cast<const void *>(job.secondary),
                    job.items.size());
-    if (!job.ctx || !job.drawlist || !job.params || !job.target) {
+    if (job.expandWideLines) {
+      // Wide-line CPU expansion: no command buffer, just the per-command quad
+      // computation.  Each command's cache entry is touched by exactly one
+      // worker, and the scratch is thread-local, so this is race-free.
+      if (!job.params) {
+        job.ok = false;
+      }
+      else {
+        for (const SoRenderCommand * command : job.wideLineCommands) {
+          const auto found = this->commandToCache.find(command);
+          if (found == this->commandToCache.end()) continue;
+          VulkanCachedCommand & entry = this->gpuCache[found->second];
+          this->expandWideLinesFor(entry, *command, *job.params,
+                                   command->pass == SO_RENDERPASS_OVERLAY);
+        }
+        job.ok = true;
+      }
+    }
+    else if (!job.ctx || !job.drawlist || !job.params || !job.target) {
       job.ok = false;
     }
     else {
@@ -458,7 +482,9 @@ SoVulkanRenderBackend::allocateFrameResources()
   // Per-worker record contexts + job slots, sized by maxRecordWorkers.
   this->workerRecordContexts.assign(this->maxRecordWorkers, VulkanRecordContext{});
   this->recordJobs.assign(this->maxRecordWorkers, ParallelRecordJob{});
-  if (this->parallelRecordEnabled) {
+  // The pool serves both parallel recording and the wide-line expansion
+  // pre-pass, so build it whenever there is more than one worker.
+  if (this->maxRecordWorkers > 1) {
     if (!this->buildRecordPool()) return false;
   }
 

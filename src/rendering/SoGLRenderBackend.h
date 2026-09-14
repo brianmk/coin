@@ -63,14 +63,11 @@ private:
   void beginFrame(const SoRenderParams & params);
   void invalidateCache();
   void updateGeometryCache(const SoDrawList & drawlist);
-  void renderOpaquePass(const SoDrawList & drawlist,
-                        const SbMat & viewMat,
-                        const SbMat & projMat,
-                        const SoRenderParams & params);
-  void renderTransparentPass(const SoDrawList & drawlist,
-                             const SbMat & viewMat,
-                             const SbMat & projMat,
-                             const SoRenderParams & params);
+  void renderPass(const SoDrawList & drawlist,
+                  SoRenderPassType pass,
+                  const SbMat & viewMat,
+                  const SbMat & projMat,
+                  const SoRenderParams & params);
   void drawCommand(const SoDrawList & drawlist,
                    const SoRenderCommand & command,
                    const SbMat & viewMat,

@@ -40,6 +40,7 @@ static void vulkanSceneGraphChangedCallback(void * data, SoSensor * sensor);
 #include <cstring>
 #include <limits>
 #include <memory>
+#include <unordered_map>
 
 namespace {
 
@@ -204,30 +205,8 @@ void mixHash(uint64_t & h, uint64_t v)
 //      /shape/selection nodes, which still fold their ids, so an in-place
 //      edit, a move, an add/remove or a material/texture swap still
 //      invalidates the draw list and forces a re-record.
-void graphFingerprintWalk(SoNode * node, const SoNode * skip, uint64_t & h)
-{
-  if (!node || node == skip) return;
-  mixHash(h, reinterpret_cast<uintptr_t>(node));
-  const bool skipId =
-    node->isOfType(SoCamera::getClassTypeId()) ||
-    node->isOfType(SoLight::getClassTypeId()) ||
-    node->isOfType(SoEnvironment::getClassTypeId()) ||
-    node->isOfType(SoRotation::getClassTypeId()) ||
-    node->isOfType(SoTransformSeparator::getClassTypeId()) ||
-    node->getTypeId() == SoGroup::getClassTypeId() ||
-    node->getTypeId() == SoSeparator::getClassTypeId();
-  if (!skipId) {
-    mixHash(h, static_cast<uint64_t>(node->getNodeId()));
-  }
-  if (node->isOfType(SoGroup::getClassTypeId())) {
-    const SoGroup * group = static_cast<const SoGroup *>(node);
-    const int num = group->getNumChildren();
-    mixHash(h, static_cast<uint64_t>(num));
-    for (int i = 0; i < num; ++i) {
-      graphFingerprintWalk(group->getChild(i), skip, h);
-    }
-  }
-}
+// This same id-propagation property is what lets graphSubtreeHash() memoize:
+// an unchanged node id proves its whole subtree is unchanged.
 
 } // namespace
 
@@ -374,6 +353,22 @@ public:
 
   //! Current render-affecting graph fingerprint (see graphFingerprintWalk).
   uint64_t computeGraphFingerprint() const;
+
+  //! Subtree hash of \a node (excluding \a skip), memoized per node on its
+  //! SoNode::getNodeId().  notify() propagates up the parent chain, so a node
+  //! whose id is unchanged cannot have a changed descendant: its cached subtree
+  //! hash is still exact and the recursion can be skipped.  This turns the
+  //! per-frame graph walk (O(all nodes)) into O(changed nodes) on camera-only
+  //! frames, where only the camera's ancestor path is re-bumped.
+  uint64_t graphSubtreeHash(SoNode * node, const SoNode * skip) const;
+
+  //! Memoized subtree hashes (node -> (last node id, subtree hash)) and the
+  //! scene they belong to.  Entries for a node whose id changed (or whose
+  //! address was reused by a node with a fresh id) miss and are recomputed, so
+  //! a stale entry can never be dereferenced.  Cleared when the scene changes.
+  mutable std::unordered_map<const SoNode *, std::pair<uint64_t, uint64_t>>
+    graphHashCache;
+  mutable SoNode * graphHashCacheScene = nullptr;
 
   //! Resolve the camera that will render this frame.  The scene graph is the
   //! single camera authority (FreeCAD's navigation mutates the camera node
@@ -1220,20 +1215,63 @@ SoVulkanRenderManager::renderExternal(SbBool clearwindow,
 }
 
 uint64_t
+SoVulkanRenderManagerP::graphSubtreeHash(SoNode * node, const SoNode * skip) const
+{
+  if (!node || node == skip) {
+    return 0;
+  }
+  const uint64_t id = node->getNodeId();
+  const auto found = this->graphHashCache.find(node);
+  if (found != this->graphHashCache.end() && found->second.first == id) {
+    return found->second.second;
+  }
+
+  uint64_t h = 0xcbf29ce484222325ULL;
+  mixHash(h, reinterpret_cast<uintptr_t>(node));
+  const bool skipId =
+    node->isOfType(SoCamera::getClassTypeId()) ||
+    node->isOfType(SoLight::getClassTypeId()) ||
+    node->isOfType(SoEnvironment::getClassTypeId()) ||
+    node->isOfType(SoRotation::getClassTypeId()) ||
+    node->isOfType(SoTransformSeparator::getClassTypeId()) ||
+    node->getTypeId() == SoGroup::getClassTypeId() ||
+    node->getTypeId() == SoSeparator::getClassTypeId();
+  if (!skipId) {
+    mixHash(h, id);
+  }
+  if (node->isOfType(SoGroup::getClassTypeId())) {
+    const SoGroup * group = static_cast<const SoGroup *>(node);
+    const int num = group->getNumChildren();
+    mixHash(h, static_cast<uint64_t>(num));
+    for (int i = 0; i < num; ++i) {
+      mixHash(h, this->graphSubtreeHash(group->getChild(i), skip));
+    }
+  }
+  this->graphHashCache[node] = std::make_pair(id, h);
+  return h;
+}
+
+uint64_t
 SoVulkanRenderManagerP::computeGraphFingerprint() const
 {
+  // Node pointers are reused across scene rebuilds; key the memo cache on the
+  // scene so a new scene starts clean and the map cannot grow without bound.
+  if (this->graphHashCacheScene != this->scene) {
+    this->graphHashCache.clear();
+    this->graphHashCacheScene = this->scene;
+  }
+
   uint64_t h = 0xcbf29ce484222325ULL;
   mixHash(h, reinterpret_cast<uintptr_t>(this->camera));
   mixHash(h, reinterpret_cast<uintptr_t>(this->scene));
   mixHash(h, reinterpret_cast<uintptr_t>(this->overlayScene));
   mixHash(h, reinterpret_cast<uintptr_t>(this->decorationScene));
   if (SoVulkanShared::envString("FC_VULKAN_LIGHTREPLAY_DBG")) {
-    uint64_t hScene = 0xcbf29ce484222325ULL;
-    uint64_t hOverlay = 0xcbf29ce484222325ULL;
-    uint64_t hDecor = 0xcbf29ce484222325ULL;
-    graphFingerprintWalk(this->scene, this->camera, hScene);
-    graphFingerprintWalk(this->overlayScene, this->camera, hOverlay);
-    graphFingerprintWalk(this->decorationScene, this->camera, hDecor);
+    const uint64_t hScene = this->graphSubtreeHash(this->scene, this->camera);
+    const uint64_t hOverlay =
+      this->graphSubtreeHash(this->overlayScene, this->camera);
+    const uint64_t hDecor =
+      this->graphSubtreeHash(this->decorationScene, this->camera);
     if (vkLightFpDbgBudget-- > 0) {
       fprintf(stderr,
               "[FP] scene=%016lx overlay=%016lx decor=%016lx extRev=%llu"
@@ -1255,7 +1293,7 @@ SoVulkanRenderManagerP::computeGraphFingerprint() const
   // separately every frame (cheap) and the main scene is replayed when THIS
   // fingerprint is stable; their pointer mixes below stay constant so an
   // overlay-scene swap still invalidates.
-  graphFingerprintWalk(this->scene, this->camera, h);
+  mixHash(h, this->graphSubtreeHash(this->scene, this->camera));
   const SbVec2s size = this->viewportRegion.getViewportSizePixels();
   mixHash(h, static_cast<uint32_t>(size[0]));
   mixHash(h, static_cast<uint32_t>(size[1]));
@@ -1467,15 +1505,16 @@ SoVulkanRenderManagerP::setClippingPlanes(void)
     return;
   }
 
-  // If the whole scene is behind the camera, keep the current near/far planes
-  // (they were computed on the previous frame when the scene was in front).
-  // Collapsing them to a tiny range here is what makes the view appear
-  // "locked": the scene only becomes visible again once it rotates within the
-  // collapsed volume.  The shared core already returns early for perspective
-  // cameras; an orthographic camera must handle it here instead.
-  if (farval <= 0.0f) {
-    return;
-  }
+  // Do NOT bail out when farval <= 0 here.  For an orthographic camera a
+  // negative near/far pair is meaningful: the ortho view volume is symmetric
+  // and may extend behind the projection point, so a scene that is wholly
+  // behind the camera still renders (the legacy GL manager writes exactly
+  // these signed values in SoRenderManagerP::setClippingPlanes).  Returning
+  // early instead keeps whatever planes were last stored -- on a freshly
+  // opened document that is the pimpl default near=1/far=10 -- so the Vulkan
+  // viewport culls the whole scene and goes blank while the Coin renderer,
+  // which has no such guard, keeps drawing it.  Perspective cameras are
+  // already rejected inside coinComputeClippingPlanes().
 
   if (clipDebugEnabled()) {
     static float lastNear = -1.0f, lastFar = -1.0f;
@@ -1528,16 +1567,22 @@ SoVulkanRenderManagerP::setClippingPlanes(void)
       }
     }
   }
-  else {
-    // The camera is inside or behind the scene bounds, so the bbox-derived
-    // nearval is negative.  A negative near plane inverts the projection and
-    // clips everything (nothing renders / object "cut away"), which is what
-    // FreeCAD's GL renderer avoids by keeping a small positive near plane.
-    // Fall back to a small positive plane anchored on the clipping offset.
+  else if (zmin < 0.0f) {
+    // The camera is inside the scene bounds (zmin < 0 < zmax), so the
+    // bbox-derived nearval is negative.  A negative near plane inverts the
+    // projection and clips everything (nothing renders / object "cut away"),
+    // which is what FreeCAD's GL renderer avoids by keeping a small positive
+    // near plane.  Fall back to a small positive plane anchored on the
+    // clipping offset.
     if (nearval < clippingOffset) {
       nearval = clippingOffset;
     }
   }
+  // else: the whole scene is behind the camera (zmin >= 0).  Keep the signed
+  // negative near/far planes computed above -- this is the orthographic case
+  // the legacy GL manager renders as-is (SoRenderManagerP::setClippingPlanes
+  // has no positive-near fallback), and the ortho view volume extends behind
+  // the projection point to cover it.
 
   // The far plane can also land behind the camera (whole scene behind it) or
   // invert relative to near; keep the view volume well-formed.

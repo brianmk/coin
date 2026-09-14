@@ -47,6 +47,7 @@ SoVulkanMemPool::alloc(uint32_t memoryTypeIndex, VkDeviceSize size,
                        VkDeviceSize alignment, VkDeviceMemory & block,
                        VkDeviceSize & offset)
 {
+  assert(m_owner == std::this_thread::get_id());
   block = VK_NULL_HANDLE;
   offset = 0;
   if (size == 0 || memoryTypeIndex >= 32) return false;
@@ -153,6 +154,7 @@ void
 SoVulkanMemPool::free(VkDeviceMemory block, VkDeviceSize offset,
                       VkDeviceSize size)
 {
+  assert(m_owner == std::this_thread::get_id());
   if (block == VK_NULL_HANDLE || size == 0) return;
 
   // Find the pool/block that owns `block`.
@@ -194,6 +196,7 @@ SoVulkanMemPool::free(VkDeviceMemory block, VkDeviceSize offset,
 void
 SoVulkanMemPool::destroyAll()
 {
+  assert(m_owner == std::this_thread::get_id());
   for (auto & kv : m_pools) {
     for (Block & b : kv.second.blocks) {
       if (b.memory != VK_NULL_HANDLE) {

@@ -1147,32 +1147,17 @@ SoGLRenderBackend::drawCommand(const SoDrawList & drawlist,
 }
 
 void
-SoGLRenderBackend::renderOpaquePass(const SoDrawList & drawlist,
-                                    const SbMat & viewMat,
-                                    const SbMat & projMat,
-                                    const SoRenderParams & params)
+SoGLRenderBackend::renderPass(const SoDrawList & drawlist,
+                              SoRenderPassType pass,
+                              const SbMat & viewMat,
+                              const SbMat & projMat,
+                              const SoRenderParams & params)
 {
   const std::vector<int> & order = drawlist.getSortedOrder();
   for (int i = 0; i < drawlist.getNumCommands(); ++i) {
     const int index = i < static_cast<int>(order.size()) ? order[i] : i;
     const SoRenderCommand & command = drawlist.getCommand(index);
-    if (command.pass == SO_RENDERPASS_OPAQUE) {
-      this->drawCommand(drawlist, command, viewMat, projMat, params);
-    }
-  }
-}
-
-void
-SoGLRenderBackend::renderTransparentPass(const SoDrawList & drawlist,
-                                         const SbMat & viewMat,
-                                         const SbMat & projMat,
-                                         const SoRenderParams & params)
-{
-  const std::vector<int> & order = drawlist.getSortedOrder();
-  for (int i = 0; i < drawlist.getNumCommands(); ++i) {
-    const int index = i < static_cast<int>(order.size()) ? order[i] : i;
-    const SoRenderCommand & command = drawlist.getCommand(index);
-    if (command.pass == SO_RENDERPASS_TRANSPARENT) {
+    if (command.pass == pass) {
       this->drawCommand(drawlist, command, viewMat, projMat, params);
     }
   }
@@ -1330,8 +1315,8 @@ SoGLRenderBackend::render(const SoDrawList & drawlist,
   params.viewMatrix.getValue(view);
   params.projMatrix.getValue(projection);
 
-  this->renderOpaquePass(drawlist, view, projection, params);
-  this->renderTransparentPass(drawlist, view, projection, params);
+  this->renderPass(drawlist, SO_RENDERPASS_OPAQUE, view, projection, params);
+  this->renderPass(drawlist, SO_RENDERPASS_TRANSPARENT, view, projection, params);
   cc_glglue_glUseProgram(this->glue, 0);
   return TRUE;
 }

@@ -320,6 +320,50 @@ private:
   std::vector<SoIRVertex> vertices;
 };
 
+// True when two resolved material snapshots produce an identical draw.
+//
+// Used to coalesce adjacent IR batches whose producer assigned distinct
+// material indices that nevertheless resolve to the same material.  FreeCAD's
+// SoBrepFaceSet/SoBrepEdgeSet do exactly this: they hand out one material index
+// per face/edge even when the per-face colour array repeats, so a model with a
+// per-face colour array otherwise emits one draw command per face.  Comparing
+// the *resolved* material (not the raw index) lets those runs collapse back to
+// a single draw while preserving the exact shading.
+static bool
+soshape_material_equal(const SoMaterialData & a, const SoMaterialData & b)
+{
+  if (a.diffuse != b.diffuse || a.ambient != b.ambient ||
+      a.specular != b.specular || a.emissive != b.emissive) {
+    return false;
+  }
+  if (a.shadingModel != b.shadingModel || a.shininess != b.shininess ||
+      a.opacity != b.opacity || a.metalness != b.metalness ||
+      a.roughness != b.roughness) {
+    return false;
+  }
+  if (a.textureAlphaIncludesOpacity != b.textureAlphaIncludesOpacity ||
+      a.vertexColorAlphaIncludesOpacity != b.vertexColorAlphaIncludesOpacity ||
+      a.twoSidedLighting != b.twoSidedLighting ||
+      a.flags != b.flags || a.featureFlags != b.featureFlags) {
+    return false;
+  }
+  if (a.diffuseTexture != b.diffuseTexture ||
+      a.normalTexture != b.normalTexture ||
+      a.emissiveTexture != b.emissiveTexture) {
+    return false;
+  }
+  const SoTextureData & ta = a.texture;
+  const SoTextureData & tb = b.texture;
+  if (ta.pixels != tb.pixels || ta.width != tb.width ||
+      ta.height != tb.height || ta.numComponents != tb.numComponents ||
+      ta.minFilter != tb.minFilter || ta.magFilter != tb.magFilter ||
+      ta.wrapS != tb.wrapS || ta.wrapT != tb.wrapT ||
+      ta.model != tb.model || ta.blendColor != tb.blendColor) {
+    return false;
+  }
+  return true;
+}
+
 // Build and append the SoRenderCommands for one shape's tessellated geometry.
 // The positions/normals/texcoords are the shape-retained streams (stable
 // pointers); the per-vertex material indices, when present, allow the
@@ -410,12 +454,44 @@ soshape_emit_ir_commands(SoIRRenderAction * action, SoShape * shape,
     }
   }
 
+  // Coalesce adjacent batches that resolve to the same material.  Producers
+  // such as FreeCAD's SoBrepFaceSet/SoBrepEdgeSet assign a distinct material
+  // index per face/edge even when the per-face colour array repeats, so a
+  // naive one-command-per-index emission turns a per-face colour array into
+  // one draw per face -- thousands of tiny draws on a heavy model.  The
+  // batches partition the vertex stream contiguously, so equal-material
+  // neighbours merge by simply extending the count.
+  //
+  // Only uniform-material batches (no per-vertex colour buffer) are merged:
+  // with a colour buffer the per-vertex alpha also drives the opaque/transparent
+  // pass split, so folding two batches together could pull opaque primitives
+  // into the transparent pass.
+  std::vector<SoIRBatch> mergedBatches;
+  std::vector<SoMaterialData> mergedMaterials;
+  mergedBatches.reserve(batches.size());
+  mergedMaterials.reserve(batches.size());
+  for (const SoIRBatch & batch : batches) {
+    SoMaterialData material;
+    SoRenderIR::fillMaterialFromState(state, material,
+                                      std::max(batch.materialIndex, 0));
+    material.vertexColorAlphaIncludesOpacity = (colors != nullptr);
+    if (colors == nullptr && !mergedBatches.empty()
+        && soshape_material_equal(mergedMaterials.back(), material)) {
+      mergedBatches.back().count += batch.count;
+    }
+    else {
+      mergedBatches.push_back(batch);
+      mergedMaterials.push_back(material);
+    }
+  }
+
   // Validate the clip-debug flag once: it is process-lifetime and this runs on
   // the per-command path, so a getenv() (environ scan) per command is pure
   // overhead.  Mirrors SoVulkanRenderManager's clipDebugEnabled().
   static const bool clipDebug = std::getenv("FC_VULKAN_CLIP_DEBUG") != nullptr;
 
-  for (const SoIRBatch & batch : batches) {
+  for (size_t batchIndex = 0; batchIndex < mergedBatches.size(); ++batchIndex) {
+    const SoIRBatch & batch = mergedBatches[batchIndex];
     SoRenderCommand command = {};
     command.geometry.topology = geom.topology;
     command.geometry.vertexCount = static_cast<uint32_t>(batch.count);
@@ -459,10 +535,7 @@ soshape_emit_ir_commands(SoIRRenderAction * action, SoShape * shape,
                 isId ? 1 : 0, el[0][0], el[3][0], el[3][1], el[3][2]);
       }
     }
-    SoRenderIR::fillMaterialFromState(
-      state, command.material, std::max(batch.materialIndex, 0));
-    command.material.vertexColorAlphaIncludesOpacity =
-      command.geometry.colors != nullptr;
+    command.material = mergedMaterials[batchIndex];
     SoRenderIR::fillTextureFromState(state, action, command.material);
     SoRenderIR::fillRenderStateFromState(state, command.state);
     SoRenderIR::ensureMaterialBlendState(command.state, command.material);

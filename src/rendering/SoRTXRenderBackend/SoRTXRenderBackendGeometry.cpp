@@ -175,10 +175,15 @@ SoRTXRenderBackend::ensureNeePoolCapacity(VkDeviceSize bytes)
       this->neePoolCapacity >= bytes) {
     return true;
   }
-  // Grow-only pool (see ensureNormalPoolCapacity for the lifetime
-  // argument; the pool is only read by per-frame drained submissions).
-  VkDeviceSize newCapacity = std::max<VkDeviceSize>(64 * 1024, bytes);
-  while (newCapacity < this->neePoolCapacity + bytes) {
+  // Grow-only buffer (see ensureNormalPoolCapacity for the lifetime
+  // argument; the pool is only read by per-frame drained submissions).  The
+  // per-frame neePoolUsed cursor is owned by buildNeePool(); growing the
+  // buffer must NOT reset it or copy over the entries already appended this
+  // frame, or the command that triggers the grow is assigned offset 0 and its
+  // NEE triangles collide with the first emissive command's.
+  VkDeviceSize newCapacity =
+    std::max<VkDeviceSize>(64 * 1024, this->neePoolCapacity);
+  while (newCapacity < bytes) {
     newCapacity *= 2;
   }
   VkBuffer newBuffer = VK_NULL_HANDLE;
@@ -196,6 +201,12 @@ SoRTXRenderBackend::ensureNeePoolCapacity(VkDeviceSize bytes)
     return false;
   }
   if (this->neePoolBuffer != VK_NULL_HANDLE) {
+    // Preserve the entries appended so far this frame: their neePoolOffset
+    // values are already recorded in the material records.
+    if (this->neePoolMapped != nullptr && this->neePoolUsed > 0) {
+      std::memcpy(newMapped, this->neePoolMapped,
+                  static_cast<size_t>(this->neePoolUsed));
+    }
     vkDestroyBuffer(this->device, this->neePoolBuffer, this->allocator);
     this->neePoolBuffer = VK_NULL_HANDLE;
     vkFreeMemory(this->device, this->neePoolMemory, this->allocator);
@@ -206,7 +217,8 @@ SoRTXRenderBackend::ensureNeePoolCapacity(VkDeviceSize bytes)
   this->neePoolBuffer = newBuffer;
   this->neePoolMemory = newMemory;
   this->neePoolMapped = newMapped;
-  this->neePoolUsed = 0;
+  // neePoolUsed is deliberately NOT reset here: buildNeePool() owns the
+  // per-frame cursor and the copied records keep the recorded offsets valid.
   return true;
 }
 
@@ -705,8 +717,20 @@ SoRTXRenderBackend::updateGeometryCache(const SoDrawList & drawlist)
           ((e.idxKey != nullptr) == indexed) &&
           e.changeSignal == signal;
         if (sameGeometry) {
-          e.cacheGeneration = frame;
-          e.commandKey = &command;
+          if (e.cacheGeneration == frame) {
+            // The entry is already owned by another command this frame
+            // (normally the traced base command, since the overlay pass runs
+            // after the traced commands).  Keep it alive, but do NOT re-point
+            // it: commandKey/commandToCache must keep naming the traced owner,
+            // or the eviction rebuild below drops that owner's mapping and a
+            // later frame skips its TLAS instance (the object disappears)
+            // while the stale overlay key feeds a phantom instance.
+            this->commandToCache.erase(found);
+          }
+          else {
+            e.cacheGeneration = frame;
+            e.commandKey = &command;
+          }
           matched = true;
         }
         else {
@@ -715,6 +739,11 @@ SoRTXRenderBackend::updateGeometryCache(const SoDrawList & drawlist)
       }
       if (!matched) {
         for (RTXCachedGeometry & e : this->geometryCache) {
+          // Never steal an entry already claimed this frame (mirror the
+          // traced-path guard below): otherwise an overlay command whose
+          // geometry signal happens to match a traced entry would re-point it
+          // and the traced command's mapping would be lost.
+          if (e.cacheGeneration == frame) continue;
           if (e.blas != VK_NULL_HANDLE && e.changeSignal == signal &&
               e.vertexCount == geometry.vertexCount &&
               e.indexCount == geometry.indexCount &&
@@ -1037,9 +1066,18 @@ SoRTXRenderBackend::updateGeometryCache(const SoDrawList & drawlist)
       }
     }
     this->geometryCache.resize(write);
+    // Rebuild the pointer map from the surviving entries' commandKey.  This
+    // is only sound because commandKey always names the entry's owning
+    // (traced) command: the overlay keep-alive path no longer re-points an
+    // entry already claimed this frame, so an entry can never carry an
+    // overlay command's key here.  Skip a null key rather than inserting a
+    // nullptr -> index entry that would shadow a real command pointer.
     this->commandToCache.clear();
     for (size_t idx = 0; idx < this->geometryCache.size(); ++idx) {
-      this->commandToCache[this->geometryCache[idx].commandKey] = idx;
+      const SoRenderCommand * key = this->geometryCache[idx].commandKey;
+      if (key != nullptr) {
+        this->commandToCache[key] = idx;
+      }
     }
   }
 

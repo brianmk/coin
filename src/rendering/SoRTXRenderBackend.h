@@ -357,6 +357,11 @@ public:
                         VkRenderPass renderPass);
 
 private:
+  //! Clear the progressive path-tracer accumulation state.  Shared by the mode
+  //! toggles (path-tracing enable and view mode), each of which invalidates any
+  //! in-flight progressive run.
+  void resetProgressiveState();
+
   // --- Initialization helpers -------------------------------------------
   bool createDescriptorSetLayout();
   bool createDescriptorPool();
@@ -1092,7 +1097,9 @@ private:
   //! True when the denoise GPU-downsample pass already wrote the normalized
   //! (and, at scale>1, downsampled) working set into the staging block, so the
   //! worker skips its own CPU normalize/downsample and only runs OIDN/FSR.
-  bool oidnGpuPrepared = false;
+  //! Atomic because the async OIDN worker reads it while the render thread
+  //! (which sets it when recording the readback) may still be running.
+  std::atomic<bool> oidnGpuPrepared {false};
 
 
   // --- RTX (OptiX + CUDA) backend -----------------------------------------

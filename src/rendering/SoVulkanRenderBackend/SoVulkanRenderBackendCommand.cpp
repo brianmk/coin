@@ -681,7 +681,7 @@ SoVulkanRenderBackend::recordDrawCommand(const SoDrawList & drawlist,
 
   VkPipeline pipeline = VK_NULL_HANDLE;
   if (!this->getOrCreatePipeline(command, target, pass, pipeline, transparent,
-                                 fillModeOverride, overlayPass) ||
+                                 fillModeOverride, overlayPass, &entry) ||
       pipeline == VK_NULL_HANDLE) {
     if (COIN_VULKAN_ENV_FLAG("FC_VULKAN_BACKEND_DEBUG")) {
       fprintf(stderr, "[VKBE] cmd %p pass=%d skip: pipeline creation failed "
@@ -1006,7 +1006,7 @@ SoVulkanRenderBackend::recordCommandBatch(const SoDrawList & drawlist,
   // Fragile: only guaranteed-correct side paths (pipeline + descriptor + push +
   // non-instanced vertex geometry) batch.  Wide-line expands per command on the
   // CPU, so it is not batchable here.
-  const VulkanCachedCommand & entryRef = this->gpuCache[found->second];
+  VulkanCachedCommand & entryRef = this->gpuCache[found->second];
   if (entryRef.vertexBuffer == VK_NULL_HANDLE) return false;
 
   if (isWideLine(command, fillModeOverride)) {
@@ -1016,7 +1016,7 @@ SoVulkanRenderBackend::recordCommandBatch(const SoDrawList & drawlist,
 
   VkPipeline pipeline = VK_NULL_HANDLE;
   if (!this->getOrCreatePipeline(command, target, pass, pipeline, transparent,
-                                 fillModeOverride, false) ||
+                                 fillModeOverride, false, &entryRef) ||
       pipeline == VK_NULL_HANDLE) {
     return false;
   }
