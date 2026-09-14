@@ -18,6 +18,7 @@
 #include <functional>
 #include <vector>
 
+#include <Inventor/rendering/SoVulkanImageCopy.h>
 #include <vulkan/vulkan.h>
 
 namespace SoVulkanShared {
@@ -493,22 +494,11 @@ dumpImageToHost(VkDevice device, VkQueue queue, VkCommandPool pool,
 
   const bool ok = withOneShotSubmit(
     device, queue, pool, allocator, [&](VkCommandBuffer cmd) {
-      imageTransition(cmd, image, oldLayout,
-                      VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
-                      VK_ACCESS_SHADER_WRITE_BIT, VK_ACCESS_TRANSFER_READ_BIT,
-                      VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,
-                      VK_PIPELINE_STAGE_TRANSFER_BIT);
-      VkBufferImageCopy region {};
-      region.imageSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
-      region.imageSubresource.layerCount = 1;
-      region.imageExtent = {width, height, 1};
-      vkCmdCopyImageToBuffer(cmd, image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
-                             staging, 1, &region);
-      imageTransition(cmd, image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
-                      restoreLayout, VK_ACCESS_TRANSFER_WRITE_BIT,
-                      VK_ACCESS_SHADER_WRITE_BIT,
-                      VK_PIPELINE_STAGE_TRANSFER_BIT,
-                      VK_PIPELINE_STAGE_ALL_COMMANDS_BIT);
+      SoVulkanImageCopy::recordToBuffer(
+        cmd, image, staging, oldLayout, VK_ACCESS_SHADER_WRITE_BIT,
+        VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, restoreLayout,
+        VK_ACCESS_TRANSFER_WRITE_BIT, VK_ACCESS_SHADER_WRITE_BIT,
+        VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, width, height);
     });
 
   if (ok) {
