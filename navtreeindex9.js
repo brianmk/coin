@@ -1,5 +1,10 @@
 var NAVTREEINDEX9 =
 {
+"classSbVec3s.html#af11345b4ad1e0e22df232888f20f175c":[3,1,43,4],
+"classSbVec3s.html#af2766b6b57f0a6e0d828c645c3034880":[3,1,43,29],
+"classSbVec3s.html#af7f0f60434502a96320805da1129e2ca":[3,1,43,6],
+"classSbVec3ub.html":[5,0,81],
+"classSbVec3ui32.html":[5,0,82],
 "classSbVec3us.html":[5,0,83],
 "classSbVec4b.html":[5,0,84],
 "classSbVec4d.html":[3,1,44],
@@ -148,14 +153,14 @@ var NAVTREEINDEX9 =
 "classSbViewportRegion.html#a2977b42c205177a6e89b3860fd823951":[3,1,46,19],
 "classSbViewportRegion.html#a3707ffb4733c62969c7d2dabb48b4315":[3,1,46,4],
 "classSbViewportRegion.html#a4bb4240ca032f59004c6169d2eaeec21":[3,1,46,8],
-"classSbViewportRegion.html#a759c633952740a45c23994bec51fb830":[3,1,46,24],
 "classSbViewportRegion.html#a759c633952740a45c23994bec51fb830":[3,1,46,25],
+"classSbViewportRegion.html#a759c633952740a45c23994bec51fb830":[3,1,46,24],
 "classSbViewportRegion.html#a8772016f85c60dd7737eabca3483f0da":[3,1,46,20],
 "classSbViewportRegion.html#a8b9832f4a55148a0553529c1c6cc0966":[3,1,46,3],
 "classSbViewportRegion.html#a9573bcfcce0b7e9ffa774d82f0fc09ad":[3,1,46,2],
 "classSbViewportRegion.html#a98cd719e0afc2b942f0cd99110b8aff0":[3,1,46,18],
-"classSbViewportRegion.html#aa4ea8adbc5071d1d32e113fbeaeb1597":[3,1,46,23],
 "classSbViewportRegion.html#aa4ea8adbc5071d1d32e113fbeaeb1597":[3,1,46,22],
+"classSbViewportRegion.html#aa4ea8adbc5071d1d32e113fbeaeb1597":[3,1,46,23],
 "classSbViewportRegion.html#aa535cf3a9b7a91c08abad5e6026908c0":[3,1,46,10],
 "classSbViewportRegion.html#ab21864aeedaadd249ad0b044e08fcdc2":[3,1,46,5],
 "classSbViewportRegion.html#ab2a189d0f49034a9c011940b6de6287c":[3,1,46,6],
@@ -244,10 +249,5 @@ var NAVTREEINDEX9 =
 "classScXMLCoinSubtractOpExprDataObj.html":[5,0,110],
 "classScXMLCoinSubtractOpExprDataObj.html#aa4a44481cab4dc007ad5069ac5a75f79":[5,0,110,0],
 "classScXMLConstantDataObj.html":[3,21,5],
-"classScXMLConstantDataObj.html#a7afbe71b9c5ae3c7fe48c007a612d4db":[3,21,5,0],
-"classScXMLContentElt.html":[3,21,6],
-"classScXMLContentElt.html#ab8c23f63ba2ebdb3cb9b0eb377806ed2":[3,21,6,0],
-"classScXMLDataElt.html":[3,21,7],
-"classScXMLDataElt.html#a18c2053d0c428b44fdb1696ae96d72b8":[3,21,7,0],
-"classScXMLDataElt.html#a9e61f40decc91c37c435bca7578090ce":[3,21,7,2]
+"classScXMLConstantDataObj.html#a7afbe71b9c5ae3c7fe48c007a612d4db":[3,21,5,0]
 };

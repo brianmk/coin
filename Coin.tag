@@ -75,6 +75,18 @@
     <path>/home/runner/work/coin/coin/include/Inventor/rendering/</path>
     <filename>SoVulkanRenderTarget_8h.html</filename>
   </compound>
+  <compound kind="file">
+    <name>SoVulkanViewMode.h</name>
+    <path>/home/runner/work/coin/coin/include/Inventor/rendering/</path>
+    <filename>SoVulkanViewMode_8h.html</filename>
+  </compound>
+  <compound kind="file">
+    <name>SoVulkanViewSettings.h</name>
+    <path>/home/runner/work/coin/coin/include/Inventor/rendering/</path>
+    <filename>SoVulkanViewSettings_8h.html</filename>
+    <includes id="SoVulkanViewMode_8h" name="SoVulkanViewMode.h" local="no" import="no" module="no" objc="no">Inventor/rendering/SoVulkanViewMode.h</includes>
+    <class kind="struct">SoVulkanViewSettings</class>
+  </compound>
   <compound kind="struct">
     <name>cc_debugerror</name>
     <filename>structcc__debugerror.html</filename>
@@ -40084,6 +40096,13 @@
   <compound kind="struct">
     <name>SoLightingData</name>
     <filename>structSoLightingData.html</filename>
+    <member kind="function">
+      <type>int</type>
+      <name>lightCount</name>
+      <anchorfile>structSoLightingData.html</anchorfile>
+      <anchor>a02f13765cf377a1957208a54806bbaee</anchor>
+      <arglist>() const</arglist>
+    </member>
   </compound>
   <compound kind="struct">
     <name>SoLightingRaw</name>
@@ -87409,6 +87428,45 @@
       <anchorfile>classSoVRMLWorldInfo.html</anchorfile>
       <anchor>a80151349a2ac8b663b8160dfd89e4fef</anchor>
       <arglist>(void)</arglist>
+    </member>
+  </compound>
+  <compound kind="struct">
+    <name>SoVulkanViewSettings</name>
+    <filename>structSoVulkanViewSettings.html</filename>
+    <member kind="variable">
+      <type>SbColor4f</type>
+      <name>backgroundColor</name>
+      <anchorfile>structSoVulkanViewSettings.html</anchorfile>
+      <anchor>ad2e8f37e0abeb4b58f84e5acf5aedf57</anchor>
+      <arglist></arglist>
+    </member>
+    <member kind="variable">
+      <type>int</type>
+      <name>envMap</name>
+      <anchorfile>structSoVulkanViewSettings.html</anchorfile>
+      <anchor>a804b9fbf7e93cd1c2c00baaf5ee5861f</anchor>
+      <arglist></arglist>
+    </member>
+    <member kind="variable">
+      <type>bool</type>
+      <name>pathTracingDenoise</name>
+      <anchorfile>structSoVulkanViewSettings.html</anchorfile>
+      <anchor>a539f657200fe2b05677fd404ea913076</anchor>
+      <arglist></arglist>
+    </member>
+    <member kind="variable">
+      <type>SoVulkanViewMode</type>
+      <name>viewMode</name>
+      <anchorfile>structSoVulkanViewSettings.html</anchorfile>
+      <anchor>ab5e68fecfbe881839270f574ecd2ea67</anchor>
+      <arglist></arglist>
+    </member>
+    <member kind="variable">
+      <type>bool</type>
+      <name>wireframeOverlay</name>
+      <anchorfile>structSoVulkanViewSettings.html</anchorfile>
+      <anchor>a0b1112d3b0d6485ac491f4a7413db4da</anchor>
+      <arglist></arglist>
     </member>
   </compound>
   <compound kind="class">

@@ -1,5 +1,10 @@
 var NAVTREEINDEX30 =
 {
+"classSoProfileCoordinate3.html#aadbbb7b6f8b63191c10f67f1c0f3951e":[3,15,79,4],
+"classSoProfileCoordinate3.html#ad030c5306abf8c05ec3e6ef05f5dc435":[3,15,79,5],
+"classSoProfileCoordinate3.html#ad5db88423316c9e7aa5efd2cc5b43cee":[3,15,79,2],
+"classSoProfileCoordinate3.html#ae1f2958d22ff9e3965d7a83efd485c84":[3,15,79,9],
+"classSoProfileCoordinate3.html#ae49c9dd83d84902b6fc4378c3339b846":[3,15,79,6],
 "classSoProfileCoordinate3.html#af6cc65c5d7ad20c9aebf1074e391c704":[3,15,79,3],
 "classSoProfileCoordinateElement.html":[3,6,85],
 "classSoProfileCoordinateElement.html#a06b2a26b913d349800a6d1c9fc1f4061":[3,6,85,8],
@@ -244,10 +249,5 @@ var NAVTREEINDEX30 =
 "classSoReplacedElement.html#a992de7abb877c451b6911b425cefda09":[3,6,89,4],
 "classSoReplacedElement.html#aa616fc07d9945d27c12302aeafe73144":[3,6,89,0],
 "classSoResetMatrixElement.html":[5,0,557],
-"classSoResetMatrixElement.html#a0ff9af31b58f18c8a5db03167e52d9c3":[5,0,557,1],
-"classSoResetMatrixElement.html#ab88328d31708ef91a6ae3daadf410f9b":[5,0,557,3],
-"classSoResetMatrixElement.html#adef739b9d8bb5c0150e84b1fa2786eaf":[5,0,557,0],
-"classSoResetMatrixElement.html#aed71eec353b016c370481e04f1eac63f":[5,0,557,2],
-"classSoResetTransform.html":[3,15,81],
-"classSoResetTransform.html#a09a786de56a1ff704e27902ec2d9bf4a":[3,15,81,5]
+"classSoResetMatrixElement.html#a0ff9af31b58f18c8a5db03167e52d9c3":[5,0,557,1]
 };

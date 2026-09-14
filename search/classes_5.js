@@ -991,10 +991,11 @@ var searchData=
   ['sovrmlviewpoint_988',['SoVRMLViewpoint',['../classSoVRMLViewpoint.html',1,'']]],
   ['sovrmlvisibilitysensor_989',['SoVRMLVisibilitySensor',['../classSoVRMLVisibilitySensor.html',1,'']]],
   ['sovrmlworldinfo_990',['SoVRMLWorldInfo',['../classSoVRMLWorldInfo.html',1,'']]],
-  ['sowindowelement_991',['SoWindowElement',['../classSoWindowElement.html',1,'']]],
-  ['sowrapperkit_992',['SoWrapperKit',['../classSoWrapperKit.html',1,'']]],
-  ['sowriteaction_993',['SoWriteAction',['../classSoWriteAction.html',1,'']]],
-  ['sowwwanchor_994',['SoWWWAnchor',['../classSoWWWAnchor.html',1,'']]],
-  ['sowwwinline_995',['SoWWWInline',['../classSoWWWInline.html',1,'']]],
-  ['superimposition_996',['Superimposition',['../classSoRenderManager_1_1Superimposition.html',1,'SoRenderManager']]]
+  ['sovulkanviewsettings_991',['SoVulkanViewSettings',['../structSoVulkanViewSettings.html',1,'']]],
+  ['sowindowelement_992',['SoWindowElement',['../classSoWindowElement.html',1,'']]],
+  ['sowrapperkit_993',['SoWrapperKit',['../classSoWrapperKit.html',1,'']]],
+  ['sowriteaction_994',['SoWriteAction',['../classSoWriteAction.html',1,'']]],
+  ['sowwwanchor_995',['SoWWWAnchor',['../classSoWWWAnchor.html',1,'']]],
+  ['sowwwinline_996',['SoWWWInline',['../classSoWWWInline.html',1,'']]],
+  ['superimposition_997',['Superimposition',['../classSoRenderManager_1_1Superimposition.html',1,'SoRenderManager']]]
 ];

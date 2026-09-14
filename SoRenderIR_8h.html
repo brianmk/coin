@@ -374,6 +374,9 @@ Functions</h2></td></tr>
 <tr class="memitem:a6227991ec2ae3968f1716cd40cc822a8" id="r_a6227991ec2ae3968f1716cd40cc822a8"><td class="memItemLeft" align="right" valign="top"><a class="el" href="structSoLightData.html">SoLightData</a>&#160;</td><td class="memItemRight" valign="bottom"><a class="el" href="#a6227991ec2ae3968f1716cd40cc822a8">SoRenderIR::lightToEye</a> (<a class="el" href="classSbList.html">const</a> <a class="el" href="structSoLightData.html">SoLightData</a> &amp;<a class="el" href="classSbList.html">world</a>, <a class="el" href="classSbList.html">const</a> <a class="el" href="classSbMatrix.html">SbMatrix</a> &amp;<a class="el" href="classSbList.html">view</a>)</td></tr>
 <tr class="memdesc:a6227991ec2ae3968f1716cd40cc822a8"><td class="mdescLeft">&#160;</td><td class="mdescRight">Transform one world-space light into eye space for <em>view</em>.  <br /></td></tr>
 <tr class="separator:a6227991ec2ae3968f1716cd40cc822a8"><td class="memSeparator" colspan="2">&#160;</td></tr>
+<tr class="memitem:a3a83e7afc69a0f41b21aea9cf77fc5bb" id="r_a3a83e7afc69a0f41b21aea9cf77fc5bb"><td class="memItemLeft" align="right" valign="top"><a class="el" href="structSoLightData.html">SoLightData</a>&#160;</td><td class="memItemRight" valign="bottom"><a class="el" href="#a3a83e7afc69a0f41b21aea9cf77fc5bb">SoRenderIR::lightToWorld</a> (<a class="el" href="classSbList.html">const</a> <a class="el" href="structSoLightData.html">SoLightData</a> &amp;<a class="el" href="classSbList.html">eye</a>, <a class="el" href="classSbList.html">const</a> <a class="el" href="classSbMatrix.html">SbMatrix</a> &amp;<a class="el" href="classSbList.html">inverseView</a>)</td></tr>
+<tr class="memdesc:a3a83e7afc69a0f41b21aea9cf77fc5bb"><td class="mdescLeft">&#160;</td><td class="mdescRight">Transform one eye-space light into world space for <em>inverseView</em>.  <br /></td></tr>
+<tr class="separator:a3a83e7afc69a0f41b21aea9cf77fc5bb"><td class="memSeparator" colspan="2">&#160;</td></tr>
 </table><table class="memberdecls">
 <tr class="heading"><td colspan="2"><h2 class="groupheader"><a id="var-members" name="var-members"></a>
 Variables</h2></td></tr>
@@ -478,6 +481,30 @@ Variables</h2></td></tr>
 
 </div>
 </div>
+<a id="a3a83e7afc69a0f41b21aea9cf77fc5bb" name="a3a83e7afc69a0f41b21aea9cf77fc5bb"></a>
+<h2 class="memtitle"><span class="permalink"><a href="#a3a83e7afc69a0f41b21aea9cf77fc5bb">&#9670;&#160;</a></span>lightToWorld()</h2>
+
+<div class="memitem">
+<div class="memproto">
+      <table class="memname">
+        <tr>
+          <td class="memname"><a class="el" href="structSoLightData.html">SoLightData</a> SoRenderIR::lightToWorld </td>
+          <td>(</td>
+          <td class="paramtype"><a class="el" href="classSbList.html">const</a> <a class="el" href="structSoLightData.html">SoLightData</a> &amp;</td>          <td class="paramname"><span class="paramname"><em>eye</em>, </span></td>
+        </tr>
+        <tr>
+          <td class="paramkey"></td>
+          <td></td>
+          <td class="paramtype"><a class="el" href="classSbList.html">const</a> <a class="el" href="classSbMatrix.html">SbMatrix</a> &amp;</td>          <td class="paramname"><span class="paramname"><em>inverseView</em></span>&#160;)</td>
+        </tr>
+      </table>
+</div><div class="memdoc">
+
+<p>Transform one eye-space light into world space for <em>inverseView</em>. </p>
+<p>The exact inverse of lightToEye(): pass the inverse of the world-to-eye view matrix. Applications use this when they derive a camera-anchored light set (Coin GL's view-relative three-point lighting) and must hand the renderer world-space lights, so the eye&lt;-&gt;world convention lives here rather than being re-derived at each call site. Directions are rotated; positions are transformed fully; spot cone parameters are carried unchanged. </p>
+
+</div>
+</div>
 <h2 class="groupheader">Variable Documentation</h2>
 <a id="ab95fd8abdf7585db4c36f7d5429e0d64" name="ab95fd8abdf7585db4c36f7d5429e0d64"></a>
 <h2 class="memtitle"><span class="permalink"><a href="#ab95fd8abdf7585db4c36f7d5429e0d64">&#9670;&#160;</a></span>SO_MAX_SHADER_LIGHTS</h2>
@@ -510,7 +537,7 @@ Variables</h2></td></tr>
 <div id="nav-path" class="navpath"><!-- id is needed for treeview function! -->
   <ul>
     <li class="navelem"><a class="el" href="dir_d44c64559bbebec7f509842c48db8b23.html">include</a></li><li class="navelem"><a class="el" href="dir_469ed70aca823fd8322768ad54869f94.html">Inventor</a></li><li class="navelem"><a class="el" href="dir_5d343cc747bd41482eefe196ea3ce274.html">rendering</a></li><li class="navelem"><a class="el" href="SoRenderIR_8h.html">SoRenderIR.h</a></li>
-    <li class="footer">Generated on Fri Sep 11 2026 08:24:49 for Coin by <a href="https://www.doxygen.org/index.html"><img class="footer" src="doxygen.svg" width="104" height="31" alt="doxygen"/></a> 1.10.0 </li>
+    <li class="footer">Generated on Mon Sep 14 2026 10:51:46 for Coin by <a href="https://www.doxygen.org/index.html"><img class="footer" src="doxygen.svg" width="104" height="31" alt="doxygen"/></a> 1.10.0 </li>
   </ul>
 </div>
 </body>

@@ -1146,6 +1146,7 @@ var hierarchy =
     [ "SoVectorOutput", "classSoVectorOutput.html", [
       [ "SoPSVectorOutput", "classSoPSVectorOutput.html", null ]
     ] ],
+    [ "SoVulkanViewSettings", "structSoVulkanViewSettings.html", null ],
     [ "SoRenderManager::Superimposition", "classSoRenderManager_1_1Superimposition.html", null ],
     [ "SoMultiTextureCoordinateElement::UnitData", "classSoMultiTextureCoordinateElement_1_1UnitData.html", null ],
     [ "SoMultiTextureImageElement::UnitData", "classSoMultiTextureImageElement_1_1UnitData.html", null ],

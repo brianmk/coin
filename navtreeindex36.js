@@ -1,5 +1,10 @@
 var NAVTREEINDEX36 =
 {
+"classSoSpotLightManip.html#acb11e77bdbc81ad898edfdc85691b887":[3,12,6,2],
+"classSoSpotLightManip.html#ad57a98fb688142b569c105e4df95c79b":[3,12,6,6],
+"classSoSpotLightManip.html#ada5f4432cc5b08b16e27c3d697ac2943":[3,12,6,14],
+"classSoSpotLightManip.html#ade7f23e2bc4cce0ac8be73cdbffed1da":[3,12,6,16],
+"classSoSpotLightManip.html#aef820224564c15c5ae1179244a7b9100":[3,12,6,15],
 "classSoSpotLightManip.html#affee0dc543cc867059f26ea4491e6151":[3,12,6,4],
 "classSoState.html":[3,11,26],
 "classSoState.html#a1fb4bc206cdb03f2f4f8b41349ca36d5":[3,11,26,2],
@@ -244,10 +249,5 @@ var NAVTREEINDEX36 =
 "classSoTextureCombine.html#a1c478a93f2d16aa0bd36904113cacb0b":[3,15,108,0],
 "classSoTextureCombine.html#a1c478a93f2d16aa0bd36904113cacb0ba4644d9bcfd9bbfb18b68052598d8ab11":[3,15,108,0,0],
 "classSoTextureCombine.html#a1c478a93f2d16aa0bd36904113cacb0bab56e4e55a20e3d682a81c37d77706b99":[3,15,108,0,2],
-"classSoTextureCombine.html#a1c478a93f2d16aa0bd36904113cacb0bade5433e9182f760b6f693a55f0358c53":[3,15,108,0,3],
-"classSoTextureCombine.html#a1c478a93f2d16aa0bd36904113cacb0bae22544b5c6b14b069c35068b8b54e0da":[3,15,108,0,1],
-"classSoTextureCombine.html#a3794b6806a5a1a8f9aff631bafa19823":[3,15,108,1],
-"classSoTextureCombine.html#a3794b6806a5a1a8f9aff631bafa19823a1dbd5c215b61b27412ea245898721ae0":[3,15,108,1,6],
-"classSoTextureCombine.html#a3794b6806a5a1a8f9aff631bafa19823a3b86dcfb5f4f79bea8cb28b3deb7a65b":[3,15,108,1,7],
-"classSoTextureCombine.html#a3794b6806a5a1a8f9aff631bafa19823a564b64d61191b80687aba92e4b762261":[3,15,108,1,2]
+"classSoTextureCombine.html#a1c478a93f2d16aa0bd36904113cacb0bade5433e9182f760b6f693a55f0358c53":[3,15,108,0,3]
 };

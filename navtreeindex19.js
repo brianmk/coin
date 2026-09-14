@@ -1,5 +1,10 @@
 var NAVTREEINDEX19 =
 {
+"classSoGLMultiTextureImageElement.html#a84b7895faf625e4613a85dee9214a8da":[3,6,45,1],
+"classSoGLMultiTextureImageElement.html#af13965f742b40ae637a4a1fabc1009c5":[3,6,45,5],
+"classSoGLMultiTextureImageElement_1_1GLUnitData.html":[3,6,45,0],
+"classSoGLMultiTextureMatrixElement.html":[3,6,46],
+"classSoGLMultiTextureMatrixElement.html#a43e4f31343892e4712ad9a2a68d39b73":[3,6,46,2],
 "classSoGLMultiTextureMatrixElement.html#a9ae16d75360157c326956913133b9c3b":[3,6,46,4],
 "classSoGLMultiTextureMatrixElement.html#ac1c21123c655ec52375feabd528e41de":[3,6,46,3],
 "classSoGLMultiTextureMatrixElement.html#ac415a6a2b44397dc24e0f53810d2376b":[3,6,46,1],
@@ -244,10 +249,5 @@ var NAVTREEINDEX19 =
 "classSoGeometryShader.html#a2470879057ac0847a35f563cb8282734":[3,18,1,8],
 "classSoGeometryShader.html#a2cacfd81750e6b11efc899afb0befc20":[3,18,1,2],
 "classSoGeometryShader.html#a39733a3084786036d1e29a815d32f5d7":[3,18,1,0],
-"classSoGeometryShader.html#a39733a3084786036d1e29a815d32f5d7a0320302c338c2f4d148feb2f9337457c":[3,18,1,0,2],
-"classSoGeometryShader.html#a39733a3084786036d1e29a815d32f5d7ad48c4b6cdcab716867c6964bfaa0fe4f":[3,18,1,0,1],
-"classSoGeometryShader.html#a39733a3084786036d1e29a815d32f5d7ada549a2a5712d8be3d543f723017973f":[3,18,1,0,0],
-"classSoGeometryShader.html#a66a209161b06cc2ff88828a485c152ca":[3,18,1,4],
-"classSoGeometryShader.html#a8cf30eab5a88847b0bf7762db8bf54ad":[3,18,1,5],
-"classSoGeometryShader.html#a8e155b73190430685427af5bbb7d75ff":[3,18,1,6]
+"classSoGeometryShader.html#a39733a3084786036d1e29a815d32f5d7a0320302c338c2f4d148feb2f9337457c":[3,18,1,0,2]
 };

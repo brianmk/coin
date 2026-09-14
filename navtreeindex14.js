@@ -1,5 +1,10 @@
 var NAVTREEINDEX14 =
 {
+"classSoComposeMatrix.html#a4979bd73e735eba2b4b54f83e6d3de3a":[3,7,2,4],
+"classSoComposeMatrix.html#a4eb4b89be7dcf4b4929602e79c7dd1c3":[3,7,2,7],
+"classSoComposeMatrix.html#a6241cd91c130e3e1484b5589d265fec2":[3,7,2,6],
+"classSoComposeMatrix.html#a67c1b08794ce59ac89f390fcf236d3c7":[3,7,2,3],
+"classSoComposeMatrix.html#aa6f2a9a411ad75950ac42450296afa2d":[3,7,2,5],
 "classSoComposeMatrix.html#ac3d314353c7658248d0d3e13e88085ad":[3,7,2,0],
 "classSoComposeMatrix.html#acb0ad994d512f108799fe0c0bb843097":[3,7,2,1],
 "classSoComposeMatrix.html#acd4debbac4b084fa2e639bd95e8149c9":[3,7,2,8],
@@ -244,10 +249,5 @@ var NAVTREEINDEX14 =
 "classSoDebugError.html#a7aa553264cfd7e76d6a44795fc05c5a5":[3,8,0,3],
 "classSoDebugError.html#aa204b331242f8c9078355d6b2154bea2":[3,8,0,1],
 "classSoDebugError.html#ac615e564326854aa2c057fa681401b2f":[3,8,0,2],
-"classSoDecimationPercentageElement.html":[3,6,17],
-"classSoDecimationPercentageElement.html#a2109642492da93042b50edf7df5a5a2f":[3,6,17,0],
-"classSoDecimationPercentageElement.html#a6940d02b0c454626859677cddfd2477e":[3,6,17,1],
-"classSoDecimationTypeElement.html":[3,6,18],
-"classSoDecimationTypeElement.html#a3585548ae8f914535b1527f35728cdd3":[3,6,18,2],
-"classSoDecimationTypeElement.html#a51b7e15b0322b7d97b932365c7bbbdf2":[3,6,18,1]
+"classSoDecimationPercentageElement.html":[3,6,17]
 };

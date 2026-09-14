@@ -1,5 +1,10 @@
 var NAVTREEINDEX16 =
 {
+"classSoDragger.html#afaaececc9dc22bc61f0e9d2008f516c3":[3,5,2,48],
+"classSoDragger.html#afdfe9d11fcbde8e42fff713907f6c7a1":[3,5,2,0],
+"classSoDragger.html#afdfe9d11fcbde8e42fff713907f6c7a1a147e0fac0b67cf918a1b3ed8a77f07c0":[3,5,2,0,2],
+"classSoDragger.html#afdfe9d11fcbde8e42fff713907f6c7a1a1740183c2afc21c9650e8c0ab7647750":[3,5,2,0,1],
+"classSoDragger.html#afdfe9d11fcbde8e42fff713907f6c7a1a9afe09d041b239cbfda699703db89f2a":[3,5,2,0,0],
 "classSoDragger.html#afe9b767e1f69079a97b5b476a557c563":[3,5,2,40],
 "classSoDragger.html#affafdec3cf9f8d347549db728343a4fb":[3,5,2,41],
 "classSoDrawList.html":[5,0,267],
@@ -244,10 +249,5 @@ var NAVTREEINDEX16 =
 "classSoEventManager.html#a501e0b834b64f588e247036ec05af20caacb5238d0e45632cda2adcaaf89b1f36":[5,0,284,0,2],
 "classSoEventManager.html#a5f802538969b88ed9f587f1d8a78aeb3":[5,0,284,11],
 "classSoEventManager.html#a7346e116540f961b4d9c6746179d78c5":[5,0,284,15],
-"classSoEventManager.html#a8af3b026665a97687c1859178895bcbe":[5,0,284,18],
-"classSoEventManager.html#a9d22ddfa59f5af2647862325ee04b87c":[5,0,284,19],
-"classSoEventManager.html#aadacd3617f01bbe1c5483322fa47570b":[5,0,284,5],
-"classSoEventManager.html#ac9fb8a7a8347ea4e8359c64561638430":[5,0,284,7],
-"classSoEventManager.html#adc6a454ba52fcca4bbfaba0ade235ac7":[5,0,284,4],
-"classSoEventManager.html#adf1e2d0f2a83f5434bfe83af636221d1":[5,0,284,1]
+"classSoEventManager.html#a8af3b026665a97687c1859178895bcbe":[5,0,284,18]
 };

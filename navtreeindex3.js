@@ -1,5 +1,6 @@
 var NAVTREEINDEX3 =
 {
+"SoTransformBoxDragger_8h_source.html":[6,0,1,0,7,18],
 "SoTransformBoxManip_8h_source.html":[6,0,1,0,15,9],
 "SoTransformManip_8h_source.html":[6,0,1,0,15,11],
 "SoTransformSeparator_8h_source.html":[6,0,1,0,19,133],
@@ -106,6 +107,10 @@ var NAVTREEINDEX3 =
 "SoVulkanRenderManager_8h_source.html":[6,0,1,0,21,1],
 "SoVulkanRenderTarget_8h.html":[6,0,1,0,21,2],
 "SoVulkanRenderTarget_8h_source.html":[6,0,1,0,21,2],
+"SoVulkanViewMode_8h.html":[6,0,1,0,21,3],
+"SoVulkanViewMode_8h_source.html":[6,0,1,0,21,3],
+"SoVulkanViewSettings_8h.html":[6,0,1,0,21,4],
+"SoVulkanViewSettings_8h_source.html":[6,0,1,0,21,4],
 "SoWWWAnchor_8h_source.html":[6,0,1,0,19,143],
 "SoWWWInline_8h_source.html":[6,0,1,0,19,144],
 "SoWindowElement_8h_source.html":[6,0,1,0,8,124],
@@ -244,10 +249,5 @@ var NAVTREEINDEX3 =
 "classSbBox2s.html#a2127e685bab4548cac5ba22ec7605e42":[3,1,4,26],
 "classSbBox2s.html#a227f0b4e5a51420cb23140a73785b070":[3,1,4,19],
 "classSbBox2s.html#a22d4c407102514013fcb8e506a9b5b85":[3,1,4,24],
-"classSbBox2s.html#a27f90d70ca0561491b7f4e30389c1c6c":[3,1,4,3],
-"classSbBox2s.html#a2c9e7eb05466d27f21c8f71913aeb8dc":[3,1,4,4],
-"classSbBox2s.html#a45e3b9b59d7e4d62e4a38d54743aff2b":[3,1,4,28],
-"classSbBox2s.html#a4c12214c607fde751a12a852ea91d959":[3,1,4,15],
-"classSbBox2s.html#a56b6a6b0eb776ef2ad99e78bc27993d7":[3,1,4,29],
-"classSbBox2s.html#a5eb267852306c85361e1f69d74555215":[3,1,4,8]
+"classSbBox2s.html#a27f90d70ca0561491b7f4e30389c1c6c":[3,1,4,3]
 };

@@ -128,6 +128,7 @@ $(function(){initNavTree('structSoLightingData.html',''); initResizable(); });
 
 <div class="header">
   <div class="summary">
+<a href="#pub-methods">Public Member Functions</a> &#124;
 <a href="#pub-attribs">Public Attributes</a> &#124;
 <a href="structSoLightingData-members.html">List of all members</a>  </div>
   <div class="headertitle"><div class="title">SoLightingData Struct Reference</div></div>
@@ -139,6 +140,12 @@ $(function(){initNavTree('structSoLightingData.html',''); initResizable(); });
 
 <p><code>#include &lt;<a class="el" href="SoRenderIR_8h_source.html">SoRenderIR.h</a>&gt;</code></p>
 <table class="memberdecls">
+<tr class="heading"><td colspan="2"><h2 class="groupheader"><a id="pub-methods" name="pub-methods"></a>
+Public Member Functions</h2></td></tr>
+<tr class="memitem:a02f13765cf377a1957208a54806bbaee" id="r_a02f13765cf377a1957208a54806bbaee"><td class="memItemLeft" align="right" valign="top">int&#160;</td><td class="memItemRight" valign="bottom"><a class="el" href="#a02f13765cf377a1957208a54806bbaee">lightCount</a> () <a class="el" href="classSbList.html">const</a></td></tr>
+<tr class="memdesc:a02f13765cf377a1957208a54806bbaee"><td class="mdescLeft">&#160;</td><td class="mdescRight">Number of lights a shader evaluates for this setup: the stored lights clamped to the fixed shader capacity.  <br /></td></tr>
+<tr class="separator:a02f13765cf377a1957208a54806bbaee"><td class="memSeparator" colspan="2">&#160;</td></tr>
+</table><table class="memberdecls">
 <tr class="heading"><td colspan="2"><h2 class="groupheader"><a id="pub-attribs" name="pub-attribs"></a>
 Public Attributes</h2></td></tr>
 <tr class="memitem:a3f619758ecb8f9d9c73df873970f2c12" id="r_a3f619758ecb8f9d9c73df873970f2c12"><td class="memItemLeft" align="right" valign="top"><a id="a3f619758ecb8f9d9c73df873970f2c12" name="a3f619758ecb8f9d9c73df873970f2c12"></a>
@@ -150,7 +157,36 @@ std::vector&lt; <a class="el" href="structSoLightData.html">SoLightData</a> &gt;
 </table>
 <a name="details" id="details"></a><h2 class="groupheader">Detailed Description</h2>
 <div class="textblock"><p>Shared (world-space) lighting setup referenced by render commands. </p>
-</div><hr/>The documentation for this struct was generated from the following file:<ul>
+</div><h2 class="groupheader">Member Function Documentation</h2>
+<a id="a02f13765cf377a1957208a54806bbaee" name="a02f13765cf377a1957208a54806bbaee"></a>
+<h2 class="memtitle"><span class="permalink"><a href="#a02f13765cf377a1957208a54806bbaee">&#9670;&#160;</a></span>lightCount()</h2>
+
+<div class="memitem">
+<div class="memproto">
+<table class="mlabels">
+  <tr>
+  <td class="mlabels-left">
+      <table class="memname">
+        <tr>
+          <td class="memname">int SoLightingData::lightCount </td>
+          <td>(</td>
+          <td class="paramname"><span class="paramname"></span></td><td>)</td>
+          <td> const</td>
+        </tr>
+      </table>
+  </td>
+  <td class="mlabels-right">
+<span class="mlabels"><span class="mlabel">inline</span></span>  </td>
+  </tr>
+</table>
+</div><div class="memdoc">
+
+<p>Number of lights a shader evaluates for this setup: the stored lights clamped to the fixed shader capacity. </p>
+<p>The block packer and every backend that carries the count in a per-draw uniform share this one definition. </p>
+
+</div>
+</div>
+<hr/>The documentation for this struct was generated from the following file:<ul>
 <li><a class="el" href="SoRenderIR_8h_source.html">SoRenderIR.h</a></li>
 </ul>
 </div><!-- contents -->
@@ -159,7 +195,7 @@ std::vector&lt; <a class="el" href="structSoLightData.html">SoLightData</a> &gt;
 <div id="nav-path" class="navpath"><!-- id is needed for treeview function! -->
   <ul>
     <li class="navelem"><a class="el" href="structSoLightingData.html">SoLightingData</a></li>
-    <li class="footer">Generated on Fri Sep 11 2026 08:24:51 for Coin by <a href="https://www.doxygen.org/index.html"><img class="footer" src="doxygen.svg" width="104" height="31" alt="doxygen"/></a> 1.10.0 </li>
+    <li class="footer">Generated on Mon Sep 14 2026 10:51:47 for Coin by <a href="https://www.doxygen.org/index.html"><img class="footer" src="doxygen.svg" width="104" height="31" alt="doxygen"/></a> 1.10.0 </li>
   </ul>
 </div>
 </body>

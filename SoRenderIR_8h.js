@@ -8,7 +8,7 @@ var SoRenderIR_8h =
     [ "SoGeometryDesc", "structSoGeometryDesc.html", "structSoGeometryDesc" ],
     [ "SoLightData", "structSoLightData.html", null ],
     [ "SoLightingBlock", "structSoLightingBlock.html", null ],
-    [ "SoLightingData", "structSoLightingData.html", null ],
+    [ "SoLightingData", "structSoLightingData.html", "structSoLightingData" ],
     [ "SoLightingRaw", "structSoLightingRaw.html", "structSoLightingRaw" ],
     [ "SoMaterialData", "structSoMaterialData.html", "structSoMaterialData" ],
     [ "SoPixelTextData", "structSoPixelTextData.html", null ],
@@ -43,5 +43,6 @@ var SoRenderIR_8h =
     ] ],
     [ "fillLightingBlock", "SoRenderIR_8h.html#ab9df0806d810c7e7bc63b8558c181b51", null ],
     [ "lightToEye", "SoRenderIR_8h.html#a6227991ec2ae3968f1716cd40cc822a8", null ],
+    [ "lightToWorld", "SoRenderIR_8h.html#a3a83e7afc69a0f41b21aea9cf77fc5bb", null ],
     [ "SO_MAX_SHADER_LIGHTS", "SoRenderIR_8h.html#ab95fd8abdf7585db4c36f7d5429e0d64", null ]
 ];

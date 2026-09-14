@@ -44,11 +44,12 @@ var NAVTREEINDEX2 =
 "SoRenderIR_8h.html#a30435d45ada53b45f9df9f21833fe019a557ff2682ec85e6c4da13f1e082a8aff":[6,0,1,0,21,0,19,3],
 "SoRenderIR_8h.html#a30435d45ada53b45f9df9f21833fe019a85b0a9bae0df16d7a33bbc3ada21481e":[6,0,1,0,21,0,19,0],
 "SoRenderIR_8h.html#a30435d45ada53b45f9df9f21833fe019acf06ffbdd9d5b3e19a43b562a1152453":[6,0,1,0,21,0,19,1],
+"SoRenderIR_8h.html#a3a83e7afc69a0f41b21aea9cf77fc5bb":[6,0,1,0,21,0,24],
 "SoRenderIR_8h.html#a6227991ec2ae3968f1716cd40cc822a8":[6,0,1,0,21,0,23],
 "SoRenderIR_8h.html#a6e09cbae86369db3c3962898de02ea3f":[6,0,1,0,21,0,21],
 "SoRenderIR_8h.html#a6e09cbae86369db3c3962898de02ea3fa7cf2a7487e74b48467174fc82ca36f42":[6,0,1,0,21,0,21,0],
 "SoRenderIR_8h.html#a6e09cbae86369db3c3962898de02ea3faa1506bf7938cbb7d828ee14db3243943":[6,0,1,0,21,0,21,1],
-"SoRenderIR_8h.html#ab95fd8abdf7585db4c36f7d5429e0d64":[6,0,1,0,21,0,24],
+"SoRenderIR_8h.html#ab95fd8abdf7585db4c36f7d5429e0d64":[6,0,1,0,21,0,25],
 "SoRenderIR_8h.html#ab9df0806d810c7e7bc63b8558c181b51":[6,0,1,0,21,0,22],
 "SoRenderIR_8h.html#acddfab061472f7415bacaa229b588cda":[6,0,1,0,21,0,20],
 "SoRenderIR_8h.html#acddfab061472f7415bacaa229b588cdaa3266c35f83b55ff2f57991b3e0dd1f27":[6,0,1,0,21,0,20,1],
@@ -248,6 +249,5 @@ var NAVTREEINDEX2 =
 "SoTrackballManip_8h_source.html":[6,0,1,0,15,8],
 "SoTranReceiver_8h_source.html":[6,0,1,0,16,26],
 "SoTranSender_8h_source.html":[6,0,1,0,16,28],
-"SoTranscribe_8h_source.html":[6,0,1,0,16,27],
-"SoTransformBoxDragger_8h_source.html":[6,0,1,0,7,18]
+"SoTranscribe_8h_source.html":[6,0,1,0,16,27]
 };
