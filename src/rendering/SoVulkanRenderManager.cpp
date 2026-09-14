@@ -1467,15 +1467,16 @@ SoVulkanRenderManagerP::setClippingPlanes(void)
     return;
   }
 
-  // If the whole scene is behind the camera, keep the current near/far planes
-  // (they were computed on the previous frame when the scene was in front).
-  // Collapsing them to a tiny range here is what makes the view appear
-  // "locked": the scene only becomes visible again once it rotates within the
-  // collapsed volume.  The shared core already returns early for perspective
-  // cameras; an orthographic camera must handle it here instead.
-  if (farval <= 0.0f) {
-    return;
-  }
+  // Do NOT bail out when farval <= 0 here.  For an orthographic camera a
+  // negative near/far pair is meaningful: the ortho view volume is symmetric
+  // and may extend behind the projection point, so a scene that is wholly
+  // behind the camera still renders (the legacy GL manager writes exactly
+  // these signed values in SoRenderManagerP::setClippingPlanes).  Returning
+  // early instead keeps whatever planes were last stored -- on a freshly
+  // opened document that is the pimpl default near=1/far=10 -- so the Vulkan
+  // viewport culls the whole scene and goes blank while the Coin renderer,
+  // which has no such guard, keeps drawing it.  Perspective cameras are
+  // already rejected inside coinComputeClippingPlanes().
 
   if (clipDebugEnabled()) {
     static float lastNear = -1.0f, lastFar = -1.0f;
@@ -1528,16 +1529,22 @@ SoVulkanRenderManagerP::setClippingPlanes(void)
       }
     }
   }
-  else {
-    // The camera is inside or behind the scene bounds, so the bbox-derived
-    // nearval is negative.  A negative near plane inverts the projection and
-    // clips everything (nothing renders / object "cut away"), which is what
-    // FreeCAD's GL renderer avoids by keeping a small positive near plane.
-    // Fall back to a small positive plane anchored on the clipping offset.
+  else if (zmin < 0.0f) {
+    // The camera is inside the scene bounds (zmin < 0 < zmax), so the
+    // bbox-derived nearval is negative.  A negative near plane inverts the
+    // projection and clips everything (nothing renders / object "cut away"),
+    // which is what FreeCAD's GL renderer avoids by keeping a small positive
+    // near plane.  Fall back to a small positive plane anchored on the
+    // clipping offset.
     if (nearval < clippingOffset) {
       nearval = clippingOffset;
     }
   }
+  // else: the whole scene is behind the camera (zmin >= 0).  Keep the signed
+  // negative near/far planes computed above -- this is the orthographic case
+  // the legacy GL manager renders as-is (SoRenderManagerP::setClippingPlanes
+  // has no positive-near fallback), and the ortho view volume extends behind
+  // the projection point to cover it.
 
   // The far plane can also land behind the camera (whole scene behind it) or
   // invert relative to near; keep the view volume well-formed.
