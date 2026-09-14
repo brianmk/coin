@@ -17,6 +17,7 @@
 #include <Inventor/errors/SoDebugError.h>
 
 #include <algorithm>
+#include <condition_variable>
 #include <cstddef>
 #include <cstdint>
 #include <cstdio>
@@ -91,9 +92,14 @@ SoVulkanRenderBackend::expandWideLines(VulkanCachedCommand & entry,
     strip ? (count > 1 ? count - 1 : 0) : count / 2;
   if (!segmentCount) return false;
 
-  static int wlineDiag = 0;
+  // Diagnostics only on the recording thread: worker-thread prints interleave
+  // with it for no benefit and are the only shared I/O on this path.
+  const bool onOwnerThread =
+    std::this_thread::get_id() == this->wlineOwnerThread;
+  static thread_local int wlineDiag = 0;
   const bool isSketchCmd = vertexCount >= 900;
-  const bool wdiag = COIN_VULKAN_ENV_FLAG("FC_VULKAN_BACKEND_DEBUG")
+  const bool wdiag = onOwnerThread &&
+    COIN_VULKAN_ENV_FLAG("FC_VULKAN_BACKEND_DEBUG")
     && (isSketchCmd || wlineDiag < 40) && wlineDiag < 200;
   if (wdiag) {
     ++wlineDiag;
@@ -206,8 +212,8 @@ SoVulkanRenderBackend::expandWideLines(VulkanCachedCommand & entry,
   if (slot.buffer != VK_NULL_HANDLE && slot.size > 0 &&
       slot.expandFingerprint == wfp) {
     entry.wideLineVertexCount = slot.expandVertexCount;
-    if (COIN_VULKAN_ENV_FLAG("FC_VULKAN_BACKEND_DEBUG")) {
-      static uint64_t wlineHits = 0;
+    if (onOwnerThread && COIN_VULKAN_ENV_FLAG("FC_VULKAN_BACKEND_DEBUG")) {
+      static thread_local uint64_t wlineHits = 0;
       if (++wlineHits % 200 == 0) {
         fprintf(stderr, "[WLINE-cache] hits=%llu cmd=%p\n",
                 (unsigned long long)wlineHits, (const void*)&command);
@@ -242,10 +248,16 @@ SoVulkanRenderBackend::expandWideLines(VulkanCachedCommand & entry,
   // (glLineStipple: each bit covers linePatternScaleFactor pixels), so the
   // fragment discard below must operate on pixel distances, not object
   // units -- an object-unit period changes size when zooming.
-  this->wlineClipScratch.assign(static_cast<size_t>(vertexCount) * 4, 0.0f);
-  this->wlineDistScratch.assign(vertexCount, 0.0f);
-  float * const clipCache = this->wlineClipScratch.data();
-  float * const distances = this->wlineDistScratch.data();
+  // Per-thread scratch: the expansion runs on the parallel record workers, so
+  // a shared member would race.  thread_local vectors keep the reuse (no
+  // realloc once grown) while giving each worker its own storage.
+  static thread_local std::vector<float> clipScratch;
+  static thread_local std::vector<float> distScratch;
+  static thread_local std::vector<float> quadScratch;
+  clipScratch.assign(static_cast<size_t>(vertexCount) * 4, 0.0f);
+  distScratch.assign(vertexCount, 0.0f);
+  float * const clipCache = clipScratch.data();
+  float * const distances = distScratch.data();
   for (uint32_t i = 0; i < count; ++i) {
     const uint32_t actual = geometry.indices ? geometry.indices[i] : i;
     float * clip = clipCache + static_cast<size_t>(actual) * 4;
@@ -291,8 +303,8 @@ SoVulkanRenderBackend::expandWideLines(VulkanCachedCommand & entry,
   // 6 vertices per segment (two triangles), 9 floats each:
   // clip position (4) + color (4) + distance in pixels (1).
   const size_t quadFloats = static_cast<size_t>(segmentCount) * 6 * 9;
-  this->wlineQuadScratch.assign(quadFloats, 0.0f);
-  float * const quads = this->wlineQuadScratch.data();
+  quadScratch.assign(quadFloats, 0.0f);
+  float * const quads = quadScratch.data();
   size_t outIndex = 0;
   size_t diagSkippedW = 0;
   size_t diagSkippedDeg = 0;
@@ -469,8 +481,8 @@ SoVulkanRenderBackend::expandWideLines(VulkanCachedCommand & entry,
             static_cast<double>(command.viewMatrix[3][2]));
   }
 
-  if (COIN_VULKAN_ENV_FLAG("FC_VULKAN_BACKEND_DEBUG")) {
-    static int distLog = 0;
+  if (onOwnerThread && COIN_VULKAN_ENV_FLAG("FC_VULKAN_BACKEND_DEBUG")) {
+    static thread_local int distLog = 0;
     if (distLog++ < 3) {
       fprintf(stderr, "[WLINE] verts=%u segs=%u quads=%zu dists:",
               vertexCount, segmentCount, outIndex / 9);
@@ -518,4 +530,165 @@ SoVulkanRenderBackend::expandWideLines(VulkanCachedCommand & entry,
   slot.expandVertexCount = static_cast<uint32_t>(outIndex / 9);
   entry.wideLineVertexCount = static_cast<uint32_t>(outIndex / 9);
   return true;
+}
+
+void
+SoVulkanRenderBackend::prepareWideLineBuffers(const SoDrawList & drawlist)
+{
+  for (int i = 0; i < drawlist.getNumCommands(); ++i) {
+    const SoRenderCommand & command = drawlist.getCommand(i);
+    if (!isWideLine(command, -1)) continue;
+    const SoGeometryDesc & geometry = command.geometry;
+    if (!geometry.positions || geometry.vertexCount == 0) continue;
+    const auto found = this->commandToCache.find(&command);
+    if (found == this->commandToCache.end()) continue;
+    VulkanCachedCommand & entry = this->gpuCache[found->second];
+    if (entry.vertexBuffer == VK_NULL_HANDLE) continue;
+
+    const uint32_t count = geometry.indexCount && geometry.indices
+      ? geometry.indexCount : geometry.vertexCount;
+    const bool strip = geometry.topology == SO_TOPOLOGY_LINE_STRIP;
+    const uint32_t segmentCount =
+      strip ? (count > 1 ? count - 1 : 0) : count / 2;
+    if (!segmentCount) continue;
+
+    if (entry.wideLineBuffers.size() < this->maxFramesInFlight) {
+      entry.wideLineBuffers.resize(this->maxFramesInFlight);
+    }
+    VulkanCachedCommand::VulkanWideLineBuffer & slot =
+      entry.wideLineBuffers[this->uboFrameIndex % this->maxFramesInFlight];
+    // Worst case: every segment visible, 6 vertices, 9 floats per vertex.
+    // expandWideLines() then only ever fills a buffer this size or smaller.
+    const VkDeviceSize needed =
+      static_cast<VkDeviceSize>(segmentCount) * 6u * 9u * sizeof(float);
+    if (slot.buffer != VK_NULL_HANDLE && slot.size >= needed) continue;
+
+    if (slot.buffer != VK_NULL_HANDLE || slot.memory != VK_NULL_HANDLE) {
+      const VkBuffer oldBuffer = slot.buffer;
+      const VkDeviceMemory oldMemory = slot.memory;
+      slot.buffer = VK_NULL_HANDLE;
+      slot.memory = VK_NULL_HANDLE;
+      slot.mapped = nullptr;
+      slot.size = 0;
+      this->deferDestroyBufferMemory(oldBuffer, oldMemory);
+    }
+    if (!this->createMappedBuffer(needed, VK_BUFFER_USAGE_VERTEX_BUFFER_BIT,
+                                  slot.buffer, slot.memory, &slot.mapped)) {
+      this->emitError("prepareWideLineBuffers: quad buffer create/map failed");
+      slot.size = 0;
+      continue;
+    }
+    slot.size = needed;
+    // A (re)allocated buffer holds no valid expansion.
+    slot.expandFingerprint = 0;
+    slot.expandVertexCount = 0;
+  }
+}
+
+void
+SoVulkanRenderBackend::resolveCommandProj(const SoRenderCommand & command,
+                                          const SoRenderParams & params,
+                                          bool overlayPass,
+                                          SbMat & out) const
+{
+  // Must stay identical to recordDrawCommand()'s projection resolution: the
+  // expansion cache key includes the projection, so a divergence would either
+  // force a pointless re-expansion or reuse quads projected with the wrong
+  // matrix.
+  const bool frameCameraOverlay = isFrameCameraOverlay(command, params);
+  if (overlayPass && !frameCameraOverlay) {
+    command.projMatrix.getValue(out);
+  }
+  else {
+    std::memcpy(out, this->frameProjFloats, sizeof(float) * 16);
+  }
+}
+
+bool
+SoVulkanRenderBackend::expandWideLinesFor(VulkanCachedCommand & entry,
+                                          const SoRenderCommand & command,
+                                          const SoRenderParams & params,
+                                          bool overlayPass)
+{
+  SbMat projValue;
+  this->resolveCommandProj(command, params, overlayPass, projValue);
+  return this->expandWideLines(entry, command, params, projValue,
+      std::max(1.0f, command.state.raster.lineWidth) * this->frameDpr);
+}
+
+void
+SoVulkanRenderBackend::expandWideLinesParallel(const SoDrawList & drawlist,
+                                               const SoRenderParams & params)
+{
+  // This is always the recording thread; the workers it dispatches compare
+  // against it to keep the diagnostics single-threaded.
+  this->wlineOwnerThread = std::this_thread::get_id();
+  // Gather the drawable wide-line commands.  This mirrors the guards the
+  // record path applies (findCachedDrawable) so the pre-pass only touches
+  // entries that will actually be drawn.
+  std::vector<const SoRenderCommand *> & wideLines = this->wlineExpandScratch;
+  wideLines.clear();
+  for (int i = 0; i < drawlist.getNumCommands(); ++i) {
+    const SoRenderCommand & command = drawlist.getCommand(i);
+    if (!isWideLine(command, -1)) continue;
+    if (!command.geometry.positions || command.geometry.vertexCount == 0) {
+      continue;
+    }
+    const auto found = this->commandToCache.find(&command);
+    if (found == this->commandToCache.end()) continue;
+    if (this->gpuCache[found->second].vertexBuffer == VK_NULL_HANDLE) continue;
+    wideLines.push_back(&command);
+  }
+  if (wideLines.empty()) return;
+
+  const uint32_t W = this->maxRecordWorkers;
+  if (W <= 1 || this->recordWorkers.empty()) {
+    // Serial fallback (single core, or the pool failed to build).
+    for (const SoRenderCommand * command : wideLines) {
+      const auto found = this->commandToCache.find(command);
+      VulkanCachedCommand & entry = this->gpuCache[found->second];
+      this->expandWideLinesFor(entry, *command, params,
+                               command->pass == SO_RENDERPASS_OVERLAY);
+    }
+    return;
+  }
+
+  vkBackendTrace(this->uboFrameIndex, "expandWideLines.dispatch",
+                 "cmds=%zu workers=%u", wideLines.size(), W);
+  // Round-robin partition: the commands are of similar size, so this balances
+  // well without the sort the record path needs for its batched items.
+  for (uint32_t w = 0; w < W; ++w) {
+    ParallelRecordJob & job = this->recordJobs[w];
+    job.expandWideLines = true;
+    job.params = &params;
+    job.wideLineCommands.clear();
+  }
+  for (size_t i = 0; i < wideLines.size(); ++i) {
+    this->recordJobs[i % W].wideLineCommands.push_back(wideLines[i]);
+  }
+
+  this->recordDoneCount.store(0);
+  {
+    std::lock_guard<std::mutex> lk(this->recordMutex);
+    ++this->recordJobGeneration;
+  }
+  this->recordCvSpawn.notify_all();
+  // Worker 0 is this (recording) thread.
+  {
+    const ParallelRecordJob & job = this->recordJobs[0];
+    for (const SoRenderCommand * command : job.wideLineCommands) {
+      const auto found = this->commandToCache.find(command);
+      if (found == this->commandToCache.end()) continue;
+      VulkanCachedCommand & entry = this->gpuCache[found->second];
+      this->expandWideLinesFor(entry, *command, params,
+                               command->pass == SO_RENDERPASS_OVERLAY);
+    }
+    this->recordJobs[0].ok = true;
+  }
+  {
+    std::unique_lock<std::mutex> lk(this->recordMutex);
+    this->recordCvDone.wait(lk, [this] {
+      return this->recordDoneCount.load() >= this->maxRecordWorkers - 1;
+    });
+  }
 }

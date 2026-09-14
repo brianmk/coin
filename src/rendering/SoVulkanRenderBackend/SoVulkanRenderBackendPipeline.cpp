@@ -329,7 +329,8 @@ SoVulkanRenderBackend::getOrCreatePipeline(const SoRenderCommand & command,
                                            VkPipeline & pipeline,
                                            const bool transparent,
                                            const int fillModeOverride,
-                                           const bool overlayPass)
+                                           const bool overlayPass,
+                                           VulkanCachedCommand * cacheEntry)
 {
   if (vkBackendTraceEnabled()) {
     static std::atomic<int> n(0);
@@ -428,24 +429,26 @@ SoVulkanRenderBackend::getOrCreatePipeline(const SoRenderCommand & command,
   // geometry-cache entry, and the (cheap field-by-field, hash-free) equality
   // below decides the hit.  The backing entry is destroyed together with the
   // pipeline cache in invalidateCache(), so the cached handle can never
-  // dangle.
-  VulkanCachedCommand * cacheEntry = nullptr;
-  const auto cmdEntry = this->commandToCache.find(&command);
-  if (cmdEntry != this->commandToCache.end()) {
-    cacheEntry = &this->gpuCache[cmdEntry->second];
-    if (cacheEntry->hasResolvedPipeline &&
-        cacheEntry->resolvedKey == key) {
-      pipeline = cacheEntry->resolvedPipeline;
-      return pipeline != VK_NULL_HANDLE;
+  // dangle.  Callers that already resolved the entry (recordDrawCommand /
+  // recordCommandBatch) pass it in to skip the commandToCache lookup here.
+  VulkanCachedCommand * entry = cacheEntry;
+  if (entry == nullptr) {
+    const auto cmdEntry = this->commandToCache.find(&command);
+    if (cmdEntry != this->commandToCache.end()) {
+      entry = &this->gpuCache[cmdEntry->second];
     }
+  }
+  if (entry && entry->hasResolvedPipeline && entry->resolvedKey == key) {
+    pipeline = entry->resolvedPipeline;
+    return pipeline != VK_NULL_HANDLE;
   }
 
   const auto found = this->pipelineCache.find(key);
   if (found != this->pipelineCache.end()) {
-    if (cacheEntry) {
-      cacheEntry->resolvedKey = key;
-      cacheEntry->resolvedPipeline = found->second;
-      cacheEntry->hasResolvedPipeline = true;
+    if (entry) {
+      entry->resolvedKey = key;
+      entry->resolvedPipeline = found->second;
+      entry->hasResolvedPipeline = true;
     }
     pipeline = found->second;
     return pipeline != VK_NULL_HANDLE;
@@ -467,10 +470,10 @@ SoVulkanRenderBackend::getOrCreatePipeline(const SoRenderCommand & command,
       "Vulkan backend: the device does not support the fillModeNonSolid "
       "feature; wireframe and point fill modes cannot be rendered");
     this->pipelineCache[key] = VK_NULL_HANDLE;
-    if (cacheEntry) {
-      cacheEntry->resolvedKey = key;
-      cacheEntry->resolvedPipeline = VK_NULL_HANDLE;
-      cacheEntry->hasResolvedPipeline = true;
+    if (entry) {
+      entry->resolvedKey = key;
+      entry->resolvedPipeline = VK_NULL_HANDLE;
+      entry->hasResolvedPipeline = true;
     }
     pipeline = VK_NULL_HANDLE;
     return false;
@@ -678,19 +681,19 @@ SoVulkanRenderBackend::getOrCreatePipeline(const SoRenderCommand & command,
   if (created == VK_NULL_HANDLE) {
     this->emitError("failed to create Vulkan graphics pipeline");
     this->pipelineCache[key] = VK_NULL_HANDLE;
-    if (cacheEntry) {
-      cacheEntry->resolvedKey = key;
-      cacheEntry->resolvedPipeline = VK_NULL_HANDLE;
-      cacheEntry->hasResolvedPipeline = true;
+    if (entry) {
+      entry->resolvedKey = key;
+      entry->resolvedPipeline = VK_NULL_HANDLE;
+      entry->hasResolvedPipeline = true;
     }
     pipeline = VK_NULL_HANDLE;
     return false;
   }
   this->pipelineCache[key] = created;
-  if (cacheEntry) {
-    cacheEntry->resolvedKey = key;
-    cacheEntry->resolvedPipeline = created;
-    cacheEntry->hasResolvedPipeline = true;
+  if (entry) {
+    entry->resolvedKey = key;
+    entry->resolvedPipeline = created;
+    entry->hasResolvedPipeline = true;
   }
   pipeline = created;
   return true;

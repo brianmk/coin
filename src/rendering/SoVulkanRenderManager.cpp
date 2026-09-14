@@ -40,6 +40,7 @@ static void vulkanSceneGraphChangedCallback(void * data, SoSensor * sensor);
 #include <cstring>
 #include <limits>
 #include <memory>
+#include <unordered_map>
 
 namespace {
 
@@ -204,30 +205,8 @@ void mixHash(uint64_t & h, uint64_t v)
 //      /shape/selection nodes, which still fold their ids, so an in-place
 //      edit, a move, an add/remove or a material/texture swap still
 //      invalidates the draw list and forces a re-record.
-void graphFingerprintWalk(SoNode * node, const SoNode * skip, uint64_t & h)
-{
-  if (!node || node == skip) return;
-  mixHash(h, reinterpret_cast<uintptr_t>(node));
-  const bool skipId =
-    node->isOfType(SoCamera::getClassTypeId()) ||
-    node->isOfType(SoLight::getClassTypeId()) ||
-    node->isOfType(SoEnvironment::getClassTypeId()) ||
-    node->isOfType(SoRotation::getClassTypeId()) ||
-    node->isOfType(SoTransformSeparator::getClassTypeId()) ||
-    node->getTypeId() == SoGroup::getClassTypeId() ||
-    node->getTypeId() == SoSeparator::getClassTypeId();
-  if (!skipId) {
-    mixHash(h, static_cast<uint64_t>(node->getNodeId()));
-  }
-  if (node->isOfType(SoGroup::getClassTypeId())) {
-    const SoGroup * group = static_cast<const SoGroup *>(node);
-    const int num = group->getNumChildren();
-    mixHash(h, static_cast<uint64_t>(num));
-    for (int i = 0; i < num; ++i) {
-      graphFingerprintWalk(group->getChild(i), skip, h);
-    }
-  }
-}
+// This same id-propagation property is what lets graphSubtreeHash() memoize:
+// an unchanged node id proves its whole subtree is unchanged.
 
 } // namespace
 
@@ -374,6 +353,22 @@ public:
 
   //! Current render-affecting graph fingerprint (see graphFingerprintWalk).
   uint64_t computeGraphFingerprint() const;
+
+  //! Subtree hash of \a node (excluding \a skip), memoized per node on its
+  //! SoNode::getNodeId().  notify() propagates up the parent chain, so a node
+  //! whose id is unchanged cannot have a changed descendant: its cached subtree
+  //! hash is still exact and the recursion can be skipped.  This turns the
+  //! per-frame graph walk (O(all nodes)) into O(changed nodes) on camera-only
+  //! frames, where only the camera's ancestor path is re-bumped.
+  uint64_t graphSubtreeHash(SoNode * node, const SoNode * skip) const;
+
+  //! Memoized subtree hashes (node -> (last node id, subtree hash)) and the
+  //! scene they belong to.  Entries for a node whose id changed (or whose
+  //! address was reused by a node with a fresh id) miss and are recomputed, so
+  //! a stale entry can never be dereferenced.  Cleared when the scene changes.
+  mutable std::unordered_map<const SoNode *, std::pair<uint64_t, uint64_t>>
+    graphHashCache;
+  mutable SoNode * graphHashCacheScene = nullptr;
 
   //! Resolve the camera that will render this frame.  The scene graph is the
   //! single camera authority (FreeCAD's navigation mutates the camera node
@@ -1220,20 +1215,63 @@ SoVulkanRenderManager::renderExternal(SbBool clearwindow,
 }
 
 uint64_t
+SoVulkanRenderManagerP::graphSubtreeHash(SoNode * node, const SoNode * skip) const
+{
+  if (!node || node == skip) {
+    return 0;
+  }
+  const uint64_t id = node->getNodeId();
+  const auto found = this->graphHashCache.find(node);
+  if (found != this->graphHashCache.end() && found->second.first == id) {
+    return found->second.second;
+  }
+
+  uint64_t h = 0xcbf29ce484222325ULL;
+  mixHash(h, reinterpret_cast<uintptr_t>(node));
+  const bool skipId =
+    node->isOfType(SoCamera::getClassTypeId()) ||
+    node->isOfType(SoLight::getClassTypeId()) ||
+    node->isOfType(SoEnvironment::getClassTypeId()) ||
+    node->isOfType(SoRotation::getClassTypeId()) ||
+    node->isOfType(SoTransformSeparator::getClassTypeId()) ||
+    node->getTypeId() == SoGroup::getClassTypeId() ||
+    node->getTypeId() == SoSeparator::getClassTypeId();
+  if (!skipId) {
+    mixHash(h, id);
+  }
+  if (node->isOfType(SoGroup::getClassTypeId())) {
+    const SoGroup * group = static_cast<const SoGroup *>(node);
+    const int num = group->getNumChildren();
+    mixHash(h, static_cast<uint64_t>(num));
+    for (int i = 0; i < num; ++i) {
+      mixHash(h, this->graphSubtreeHash(group->getChild(i), skip));
+    }
+  }
+  this->graphHashCache[node] = std::make_pair(id, h);
+  return h;
+}
+
+uint64_t
 SoVulkanRenderManagerP::computeGraphFingerprint() const
 {
+  // Node pointers are reused across scene rebuilds; key the memo cache on the
+  // scene so a new scene starts clean and the map cannot grow without bound.
+  if (this->graphHashCacheScene != this->scene) {
+    this->graphHashCache.clear();
+    this->graphHashCacheScene = this->scene;
+  }
+
   uint64_t h = 0xcbf29ce484222325ULL;
   mixHash(h, reinterpret_cast<uintptr_t>(this->camera));
   mixHash(h, reinterpret_cast<uintptr_t>(this->scene));
   mixHash(h, reinterpret_cast<uintptr_t>(this->overlayScene));
   mixHash(h, reinterpret_cast<uintptr_t>(this->decorationScene));
   if (SoVulkanShared::envString("FC_VULKAN_LIGHTREPLAY_DBG")) {
-    uint64_t hScene = 0xcbf29ce484222325ULL;
-    uint64_t hOverlay = 0xcbf29ce484222325ULL;
-    uint64_t hDecor = 0xcbf29ce484222325ULL;
-    graphFingerprintWalk(this->scene, this->camera, hScene);
-    graphFingerprintWalk(this->overlayScene, this->camera, hOverlay);
-    graphFingerprintWalk(this->decorationScene, this->camera, hDecor);
+    const uint64_t hScene = this->graphSubtreeHash(this->scene, this->camera);
+    const uint64_t hOverlay =
+      this->graphSubtreeHash(this->overlayScene, this->camera);
+    const uint64_t hDecor =
+      this->graphSubtreeHash(this->decorationScene, this->camera);
     if (vkLightFpDbgBudget-- > 0) {
       fprintf(stderr,
               "[FP] scene=%016lx overlay=%016lx decor=%016lx extRev=%llu"
@@ -1255,7 +1293,7 @@ SoVulkanRenderManagerP::computeGraphFingerprint() const
   // separately every frame (cheap) and the main scene is replayed when THIS
   // fingerprint is stable; their pointer mixes below stay constant so an
   // overlay-scene swap still invalidates.
-  graphFingerprintWalk(this->scene, this->camera, h);
+  mixHash(h, this->graphSubtreeHash(this->scene, this->camera));
   const SbVec2s size = this->viewportRegion.getViewportSizePixels();
   mixHash(h, static_cast<uint32_t>(size[0]));
   mixHash(h, static_cast<uint32_t>(size[1]));

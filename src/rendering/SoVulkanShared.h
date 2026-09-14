@@ -10,14 +10,17 @@
 #ifndef COIN_SOVULKANSHARED_H
 #define COIN_SOVULKANSHARED_H
 
+#include <cassert>
 #include <chrono>
 #include <cstdio>
 #include <cstdlib>
 #include <cstdint>
 #include <cstring>
 #include <functional>
+#include <thread>
 #include <vector>
 
+#include <Inventor/rendering/SoVulkanImageCopy.h>
 #include <vulkan/vulkan.h>
 
 namespace SoVulkanShared {
@@ -156,12 +159,12 @@ public:
     return m_props;
   }
 
-  // Pick the first memory type matching `desired`, falling back to any type
-  // the device offers for this resource.  Returns false only when no type is
-  // usable (or no device is bound).
-  bool pick(const VkMemoryRequirements & requirements,
-            VkMemoryPropertyFlags desired,
-            uint32_t & memoryTypeIndex) const
+  // Pick the first memory type matching `desired` exactly.  Returns false when
+  // no type satisfies both the resource's memoryTypeBits and the requested
+  // property flags (or no device is bound).
+  bool pickExact(const VkMemoryRequirements & requirements,
+                 VkMemoryPropertyFlags desired,
+                 uint32_t & memoryTypeIndex) const
   {
     this->ensure();
     if (!m_valid) return false;
@@ -172,6 +175,19 @@ public:
         return true;
       }
     }
+    return false;
+  }
+
+  // Pick the first memory type matching `desired`, falling back to any type
+  // the device offers for this resource.  Returns false only when no type is
+  // usable (or no device is bound).
+  bool pick(const VkMemoryRequirements & requirements,
+            VkMemoryPropertyFlags desired,
+            uint32_t & memoryTypeIndex) const
+  {
+    if (this->pickExact(requirements, desired, memoryTypeIndex)) return true;
+    this->ensure();
+    if (!m_valid) return false;
     for (uint32_t i = 0; i < m_props.memoryTypeCount; ++i) {
       if (requirements.memoryTypeBits & (1u << i)) {
         memoryTypeIndex = i;
@@ -209,6 +225,11 @@ private:
 //     deferAt/flushAt mask by batchCount (the batch that is N frames old).
 //   - current-slot (RT backend): defer() fills the current batch and the caller
 //     toggles the index and flushes the batch it just vacated.
+//
+// Not internally synchronized: every defer/flush/batch call must come from the
+// thread that constructed the instance (the render thread).  The parallel
+// record workers must never defer a destroy.  The asserts below catch that
+// misuse in debug builds.
 class PendingDestroys {
 public:
   explicit PendingDestroys(uint32_t batchCount = 3)
@@ -221,10 +242,12 @@ public:
   // Ring-slot style: caller supplies an absolute frame slot.
   void deferAt(uint32_t slot, std::function<void()> && fn)
   {
+    assert(m_owner == std::this_thread::get_id());
     m_batches[slot % m_batches.size()].push_back(std::move(fn));
   }
   void flushAt(uint32_t slot)
   {
+    assert(m_owner == std::this_thread::get_id());
     auto & b = m_batches[slot % m_batches.size()];
     for (auto & fn : b) { if (fn) fn(); }
     b.clear();
@@ -233,6 +256,7 @@ public:
   // Current-slot style (RT backend double-buffer).
   void defer(std::function<void()> && fn)
   {
+    assert(m_owner == std::this_thread::get_id());
     m_batches[m_index].push_back(std::move(fn));
   }
   std::vector<std::function<void()>> & batch(uint32_t i)
@@ -250,6 +274,7 @@ public:
   // flight.  Used when the caller's in-flight count changes.
   void setBatchCount(uint32_t count)
   {
+    assert(m_owner == std::this_thread::get_id());
     if (count == 0) count = 1;
     const uint32_t cur = this->batchCount();
     if (count == cur) return;
@@ -272,6 +297,7 @@ public:
 
   void flushAll()
   {
+    assert(m_owner == std::this_thread::get_id());
     for (auto & b : m_batches) {
       for (auto & fn : b) { if (fn) fn(); }
       b.clear();
@@ -281,6 +307,7 @@ public:
 private:
   std::vector<std::vector<std::function<void()>>> m_batches;
   uint32_t m_index = 0;
+  std::thread::id m_owner = std::this_thread::get_id();
 };
 
 // Memory-type picker for buffer allocation.  Given a resource's memory
@@ -493,22 +520,11 @@ dumpImageToHost(VkDevice device, VkQueue queue, VkCommandPool pool,
 
   const bool ok = withOneShotSubmit(
     device, queue, pool, allocator, [&](VkCommandBuffer cmd) {
-      imageTransition(cmd, image, oldLayout,
-                      VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
-                      VK_ACCESS_SHADER_WRITE_BIT, VK_ACCESS_TRANSFER_READ_BIT,
-                      VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,
-                      VK_PIPELINE_STAGE_TRANSFER_BIT);
-      VkBufferImageCopy region {};
-      region.imageSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
-      region.imageSubresource.layerCount = 1;
-      region.imageExtent = {width, height, 1};
-      vkCmdCopyImageToBuffer(cmd, image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
-                             staging, 1, &region);
-      imageTransition(cmd, image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
-                      restoreLayout, VK_ACCESS_TRANSFER_WRITE_BIT,
-                      VK_ACCESS_SHADER_WRITE_BIT,
-                      VK_PIPELINE_STAGE_TRANSFER_BIT,
-                      VK_PIPELINE_STAGE_ALL_COMMANDS_BIT);
+      SoVulkanImageCopy::recordToBuffer(
+        cmd, image, staging, oldLayout, VK_ACCESS_SHADER_WRITE_BIT,
+        VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, restoreLayout,
+        VK_ACCESS_TRANSFER_WRITE_BIT, VK_ACCESS_SHADER_WRITE_BIT,
+        VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, width, height);
     });
 
   if (ok) {

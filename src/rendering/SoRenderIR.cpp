@@ -338,15 +338,7 @@ bool rawEqual(const SoLightingRaw & a, const SoLightingRaw & b)
 SoLightingHandle
 SoDrawList::addLightingSetup(const SoLightingData & lighting)
 {
-  for (size_t i = 0; i < this->lightingSetups.size(); ++i) {
-    if (lightingEqual(this->lightingSetups[i], lighting) &&
-        rawEqual(this->lightingRaws[i], SoLightingRaw())) {
-      return static_cast<SoLightingHandle>(i + 1);
-    }
-  }
-  this->lightingSetups.push_back(lighting);
-  this->lightingRaws.emplace_back();
-  return static_cast<SoLightingHandle>(this->lightingSetups.size());
+  return this->addLightingSetup(lighting, SoLightingRaw());
 }
 
 SoLightingHandle

@@ -32,8 +32,10 @@
 #ifndef COIN_SOVULKANMEMPOOL_H
 #define COIN_SOVULKANMEMPOOL_H
 
+#include <cassert>
 #include <cstddef>
 #include <cstdint>
+#include <thread>
 #include <unordered_map>
 #include <utility>
 #include <vector>
@@ -90,6 +92,11 @@ private:
   const VkAllocationCallbacks * m_allocator = nullptr;
   VkDeviceSize m_blockSizeHint = 0;
   std::unordered_map<uint32_t, BlockPool> m_pools;
+  // The pool is not internally synchronized: alloc()/free()/destroyAll() must
+  // all be called from the thread that created it (the render thread).  The
+  // asserts catch a future deferred-destroy or upload path that moves a call
+  // onto a worker thread, where the unordered_map/free-list mutation would race.
+  std::thread::id m_owner = std::this_thread::get_id();
 };
 
 #endif // COIN_SOVULKANMEMPOOL_H

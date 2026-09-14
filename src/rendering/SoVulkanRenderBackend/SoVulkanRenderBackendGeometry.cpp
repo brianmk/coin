@@ -214,16 +214,7 @@ SoVulkanRenderBackend::selectMemoryType(const VkMemoryRequirements & requirement
                                         const VkMemoryPropertyFlags desired,
                                         uint32_t & memoryTypeIndex)
 {
-  const VkPhysicalDeviceMemoryProperties & props = this->memProps.properties();
-  for (uint32_t i = 0; i < props.memoryTypeCount; ++i) {
-    if ((requirements.memoryTypeBits & (1u << i)) &&
-        (props.memoryTypes[i].propertyFlags & desired) == desired) {
-      memoryTypeIndex = i;
-      return true;
-    }
-  }
-  memoryTypeIndex = 0;
-  return false;
+  return this->memProps.pickExact(requirements, desired, memoryTypeIndex);
 }
 
 bool
@@ -967,7 +958,10 @@ SoVulkanRenderBackend::updateGeometryCache(const SoDrawList & drawlist,
       cache.resize(write);
       indexMap.clear();
       for (size_t idx = 0; idx < cache.size(); ++idx) {
-        indexMap[cache[idx].commandKey] = idx;
+        const SoRenderCommand * key = cache[idx].commandKey;
+        if (key != nullptr) {
+          indexMap[key] = idx;
+        }
       }
     };
     evictStale(this->gpuCache,
