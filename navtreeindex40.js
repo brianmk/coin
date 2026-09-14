@@ -1,5 +1,8 @@
 var NAVTREEINDEX40 =
 {
+"classSoVRMLBackground.html#ae1abd9823edee6f73bea946f0486039f":[3,23,3,3],
+"classSoVRMLBillboard.html":[3,23,4],
+"classSoVRMLBillboard.html#a0067a78be925a2142830e5389c672721":[3,23,4,14],
 "classSoVRMLBillboard.html#a08dab472f7bdae384281d2ee7ce2e1ce":[3,23,4,0],
 "classSoVRMLBillboard.html#a191de045ded37e55b5a0d2e2ef414a5e":[3,23,4,4],
 "classSoVRMLBillboard.html#a1e208a486970bbf452d08a21e931815d":[3,23,4,5],
@@ -246,8 +249,5 @@ var NAVTREEINDEX40 =
 "classSoVRMLIndexedLineSet.html#a87e971b082e5a08c9a52451055840b88":[3,23,23,4],
 "classSoVRMLIndexedLineSet.html#ab202d7e50834dd3eb643e94c0959810b":[3,23,23,0],
 "classSoVRMLIndexedShape.html":[5,0,807],
-"classSoVRMLIndexedShape.html#a0331d241e6c82565df050aa722552ad1":[5,0,807,3],
-"classSoVRMLIndexedShape.html#a05bf8640e603924c1791e2c5d0ed1551":[5,0,807,9],
-"classSoVRMLIndexedShape.html#a13ea8cfaa4d4d1a6b53744481dcc8018":[5,0,807,8],
-"classSoVRMLIndexedShape.html#a262f8271f54e2f0b00dcdb7ae1ade139":[5,0,807,1]
+"classSoVRMLIndexedShape.html#a0331d241e6c82565df050aa722552ad1":[5,0,807,3]
 };

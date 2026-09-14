@@ -71,6 +71,11 @@
     </member>
   </compound>
   <compound kind="file">
+    <name>SoVulkanImageCopy.h</name>
+    <path>/home/runner/work/coin/coin/include/Inventor/rendering/</path>
+    <filename>SoVulkanImageCopy_8h.html</filename>
+  </compound>
+  <compound kind="file">
     <name>SoVulkanRenderTarget.h</name>
     <path>/home/runner/work/coin/coin/include/Inventor/rendering/</path>
     <filename>SoVulkanRenderTarget_8h.html</filename>

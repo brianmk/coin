@@ -1,5 +1,8 @@
 var NAVTREEINDEX35 =
 {
+"classSoShadowDirectionalLight.html#abcd2d523a39688547a80a29c0ad1ce7e":[5,0,670,6],
+"classSoShadowDirectionalLight.html#abe32ba27952afde217a46f87f7bc77fb":[5,0,670,7],
+"classSoShadowDirectionalLight.html#ad41cfd9ee63b6aa8f8997a326e9bb7f2":[5,0,670,2],
 "classSoShadowDirectionalLight.html#af563a2663a02ba6e6c402b491691aa14":[5,0,670,3],
 "classSoShadowGroup.html":[5,0,671],
 "classSoShadowGroup.html#a0024548d9379e28dfd3f500fc89d02ca":[5,0,671,16],
@@ -246,8 +249,5 @@ var NAVTREEINDEX35 =
 "classSoSpotLightManip.html#a5b74b34c726321fecf29081cea7249db":[3,12,6,19],
 "classSoSpotLightManip.html#a790e759444fe7341bb7b562d91ef2c86":[3,12,6,20],
 "classSoSpotLightManip.html#a7c1071f375830748dd29930e83715cfb":[3,12,6,13],
-"classSoSpotLightManip.html#a8c1de3fe32f01010314a0e5f1a410be9":[3,12,6,0],
-"classSoSpotLightManip.html#a96e8a8d3b6935f55cb88f6904f602b97":[3,12,6,9],
-"classSoSpotLightManip.html#abcf4f5e0bc4c9270e18fb01280b1d387":[3,12,6,1],
-"classSoSpotLightManip.html#ac4b3854eea8a5c70cedd80539b7778dc":[3,12,6,8]
+"classSoSpotLightManip.html#a8c1de3fe32f01010314a0e5f1a410be9":[3,12,6,0]
 };

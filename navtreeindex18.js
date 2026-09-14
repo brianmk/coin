@@ -1,5 +1,8 @@
 var NAVTREEINDEX18 =
 {
+"classSoFloatElement.html#ad97cbb603423d8bf0c3033cf0fa95a95":[3,6,25,3],
+"classSoFloatElement.html#aea85430c5b25969d59ae865198da783d":[3,6,25,1],
+"classSoFocalDistanceElement.html":[3,6,26],
 "classSoFocalDistanceElement.html#a4bc5f3a0bc64f5d5747327f41290f7f2":[3,6,26,1],
 "classSoFocalDistanceElement.html#a5d2ccc5e646da0da269ec2e13a84b17b":[3,6,26,0],
 "classSoFont.html":[3,15,29],
@@ -246,8 +249,5 @@ var NAVTREEINDEX18 =
 "classSoGLMultiTextureEnabledElement.html#aaec50851eaa939e3b50f8e0a36b9a7d2":[3,6,44,4],
 "classSoGLMultiTextureEnabledElement.html#aecf440dcb9dba927988e87bcaa2e2324":[3,6,44,2],
 "classSoGLMultiTextureImageElement.html":[3,6,45],
-"classSoGLMultiTextureImageElement.html#a0b938ba6086b4832541a0f2b8908c7bb":[3,6,45,2],
-"classSoGLMultiTextureImageElement.html#a1de13c90310a8c450bffafc72f3d7e39":[3,6,45,6],
-"classSoGLMultiTextureImageElement.html#a4bc423fc1d90e1cdb4b5335948161277":[3,6,45,4],
-"classSoGLMultiTextureImageElement.html#a676cb154cf49dda70e6b9504cdd5154b":[3,6,45,3]
+"classSoGLMultiTextureImageElement.html#a0b938ba6086b4832541a0f2b8908c7bb":[3,6,45,2]
 };

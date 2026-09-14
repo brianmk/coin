@@ -1,5 +1,8 @@
 var NAVTREEINDEX36 =
 {
+"classSoSpotLightManip.html#a96e8a8d3b6935f55cb88f6904f602b97":[3,12,6,9],
+"classSoSpotLightManip.html#abcf4f5e0bc4c9270e18fb01280b1d387":[3,12,6,1],
+"classSoSpotLightManip.html#ac4b3854eea8a5c70cedd80539b7778dc":[3,12,6,8],
 "classSoSpotLightManip.html#acb11e77bdbc81ad898edfdc85691b887":[3,12,6,2],
 "classSoSpotLightManip.html#ad57a98fb688142b569c105e4df95c79b":[3,12,6,6],
 "classSoSpotLightManip.html#ada5f4432cc5b08b16e27c3d697ac2943":[3,12,6,14],
@@ -246,8 +249,5 @@ var NAVTREEINDEX36 =
 "classSoTexture3Transform.html#af68203b1334d69c56bb4afb3bb802f39":[3,15,107,5],
 "classSoTextureCombine.html":[3,15,108],
 "classSoTextureCombine.html#a11e5359ce5cbc5c04922e1ac20f7b895":[3,15,108,7],
-"classSoTextureCombine.html#a1c478a93f2d16aa0bd36904113cacb0b":[3,15,108,0],
-"classSoTextureCombine.html#a1c478a93f2d16aa0bd36904113cacb0ba4644d9bcfd9bbfb18b68052598d8ab11":[3,15,108,0,0],
-"classSoTextureCombine.html#a1c478a93f2d16aa0bd36904113cacb0bab56e4e55a20e3d682a81c37d77706b99":[3,15,108,0,2],
-"classSoTextureCombine.html#a1c478a93f2d16aa0bd36904113cacb0bade5433e9182f760b6f693a55f0358c53":[3,15,108,0,3]
+"classSoTextureCombine.html#a1c478a93f2d16aa0bd36904113cacb0b":[3,15,108,0]
 };

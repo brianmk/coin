@@ -1,5 +1,8 @@
 var NAVTREEINDEX38 =
 {
+"classSoTextureUnitElement.html#ac2c9b7bba52d1c3b4e1cd14fd9fc9373":[3,6,102,0],
+"classSoTimeCounter.html":[3,7,36],
+"classSoTimeCounter.html#a0111c6cc9052c8f0f4c66a02dd256a40":[3,7,36,12],
 "classSoTimeCounter.html#a0a80975674943a3e2c323ba2b2965d46":[3,7,36,9],
 "classSoTimeCounter.html#a1129afb45787f7b3ef141814e0af3815":[3,7,36,15],
 "classSoTimeCounter.html#a17fc2c2480ce237e7d68089df9036790":[3,7,36,8],
@@ -246,8 +249,5 @@ var NAVTREEINDEX38 =
 "classSoTransformerDragger.html#ad89ddd11ae3c378cdb3bc7a586b2756c":[3,5,19,4],
 "classSoTransformerDragger.html#adafae81d62e863072b0fd9a7de56950c":[3,5,19,6],
 "classSoTransformerDragger.html#adfe16ceaef5c2067953d5b654d3ca066":[3,5,19,7],
-"classSoTransformerDragger.html#adfeba0008fc32a6ea12430726c370611":[3,5,19,20],
-"classSoTransformerDragger.html#afb207ca702619e298f3d765ae1671317":[3,5,19,18],
-"classSoTransformerManip.html":[3,12,10],
-"classSoTransformerManip.html#a13b73b449dc33e5e03e318ecfc603739":[3,12,10,3]
+"classSoTransformerDragger.html#adfeba0008fc32a6ea12430726c370611":[3,5,19,20]
 };

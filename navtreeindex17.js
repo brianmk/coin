@@ -1,5 +1,8 @@
 var NAVTREEINDEX17 =
 {
+"classSoEventManager.html#a5f802538969b88ed9f587f1d8a78aeb3":[5,0,284,11],
+"classSoEventManager.html#a7346e116540f961b4d9c6746179d78c5":[5,0,284,15],
+"classSoEventManager.html#a8af3b026665a97687c1859178895bcbe":[5,0,284,18],
 "classSoEventManager.html#a9d22ddfa59f5af2647862325ee04b87c":[5,0,284,19],
 "classSoEventManager.html#aadacd3617f01bbe1c5483322fa47570b":[5,0,284,5],
 "classSoEventManager.html#ac9fb8a7a8347ea4e8359c64561638430":[5,0,284,7],
@@ -246,8 +249,5 @@ var NAVTREEINDEX17 =
 "classSoFloatElement.html#a16b947ef6a885245ef4d44ca46a017be":[3,6,25,5],
 "classSoFloatElement.html#a34b62e52236b3b2201039af2b1e7fbc2":[3,6,25,0],
 "classSoFloatElement.html#a41ccf612b2c30bd6b4c051d414351d39":[3,6,25,4],
-"classSoFloatElement.html#a99e4dbb7cb48a8eab24eeaabc44f47f5":[3,6,25,6],
-"classSoFloatElement.html#ad97cbb603423d8bf0c3033cf0fa95a95":[3,6,25,3],
-"classSoFloatElement.html#aea85430c5b25969d59ae865198da783d":[3,6,25,1],
-"classSoFocalDistanceElement.html":[3,6,26]
+"classSoFloatElement.html#a99e4dbb7cb48a8eab24eeaabc44f47f5":[3,6,25,6]
 };

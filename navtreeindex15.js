@@ -1,5 +1,8 @@
 var NAVTREEINDEX15 =
 {
+"classSoDebugError.html#aa204b331242f8c9078355d6b2154bea2":[3,8,0,1],
+"classSoDebugError.html#ac615e564326854aa2c057fa681401b2f":[3,8,0,2],
+"classSoDecimationPercentageElement.html":[3,6,17],
 "classSoDecimationPercentageElement.html#a2109642492da93042b50edf7df5a5a2f":[3,6,17,0],
 "classSoDecimationPercentageElement.html#a6940d02b0c454626859677cddfd2477e":[3,6,17,1],
 "classSoDecimationTypeElement.html":[3,6,18],
@@ -246,8 +249,5 @@ var NAVTREEINDEX15 =
 "classSoDragger.html#ae59c9f2f54b51627e3e973f61112620e":[3,5,2,55],
 "classSoDragger.html#ae67d944d4b6b8406292f5d8ee50c49f5":[3,5,2,43],
 "classSoDragger.html#aee9a570b37a492dc399c4821a59fb031":[3,5,2,16],
-"classSoDragger.html#af1993d0c1a669736e2f2235a2b666f70":[3,5,2,28],
-"classSoDragger.html#af6417fd1cf52a391ee8469f86d9ffd57":[3,5,2,2],
-"classSoDragger.html#af6863eacde8a13c38d50cd48bb59867c":[3,5,2,38],
-"classSoDragger.html#af77d8db5168d3179539d4203f4e81de9":[3,5,2,13]
+"classSoDragger.html#af1993d0c1a669736e2f2235a2b666f70":[3,5,2,28]
 };

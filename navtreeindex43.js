@@ -1,5 +1,8 @@
 var NAVTREEINDEX43 =
 {
+"classSoVRMLTransform.html#a684806244953ca61a598b4629a827ff1":[3,23,51,10],
+"classSoVRMLTransform.html#a6a7119beb992780396ba5deb636c2442":[3,23,51,12],
+"classSoVRMLTransform.html#a6bcd4143e1f5dc4a2b2e1d987dac0440":[3,23,51,27],
 "classSoVRMLTransform.html#a727b2b8c7d1563a561cb1af010b3418a":[3,23,51,17],
 "classSoVRMLTransform.html#a7623e8e39e44e28e1d403e7ea38d4a8d":[3,23,51,14],
 "classSoVRMLTransform.html#a799cc28ccac7ac2fe08a8cc0a41bcfad":[3,23,51,9],
@@ -246,8 +249,5 @@ var NAVTREEINDEX43 =
 "classSoVertexProperty.html#a4d9eeb2dad9b83dc16a9b55012e67582":[3,15,133,3],
 "classSoVertexProperty.html#a4fce32d967811013ad67e108af02e471":[3,15,133,5],
 "classSoVertexProperty.html#a60cf16c8607fe5cd120e1edb6286501f":[3,15,133,13],
-"classSoVertexProperty.html#a769dd6656d90e3cb6626791772cbd06c":[3,15,133,8],
-"classSoVertexProperty.html#a863e26ab8c979e8e7f99a124add086cc":[3,15,133,14],
-"classSoVertexProperty.html#a9209e60fb34b7cf6bfbce35aa6329846":[3,15,133,1],
-"classSoVertexProperty.html#ab41630937a56e39988550112cf23b046":[3,15,133,16]
+"classSoVertexProperty.html#a769dd6656d90e3cb6626791772cbd06c":[3,15,133,8]
 };

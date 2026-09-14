@@ -1,5 +1,8 @@
 var NAVTREEINDEX41 =
 {
+"classSoVRMLIndexedShape.html#a05bf8640e603924c1791e2c5d0ed1551":[5,0,807,9],
+"classSoVRMLIndexedShape.html#a13ea8cfaa4d4d1a6b53744481dcc8018":[5,0,807,8],
+"classSoVRMLIndexedShape.html#a262f8271f54e2f0b00dcdb7ae1ade139":[5,0,807,1],
 "classSoVRMLIndexedShape.html#a4366e0b58045463f0d01925ff7cce089":[5,0,807,5],
 "classSoVRMLIndexedShape.html#a5dff52fd55bf7dfa0547cb454c09332d":[5,0,807,4],
 "classSoVRMLIndexedShape.html#a8a66351a7213163a491b71968e42f9d1":[5,0,807,6],
@@ -246,8 +249,5 @@ var NAVTREEINDEX41 =
 "classSoVRMLProximitySensor.html#ad99f9545f49c4a09a6c50cf6140efa03":[3,23,37,5],
 "classSoVRMLProximitySensor.html#ae12b76f00d5d5c742c912a8528823cb1":[3,23,37,7],
 "classSoVRMLProximitySensor.html#aea108fd2d564ee087e154a8485b74107":[3,23,37,11],
-"classSoVRMLScalarInterpolator.html":[3,23,38],
-"classSoVRMLScalarInterpolator.html#a0e07a45c36e74a2bcddc59831f9d5255":[3,23,38,0],
-"classSoVRMLScalarInterpolator.html#a6c542ff407ed3e0c6080d0fddf26a31d":[3,23,38,5],
-"classSoVRMLScalarInterpolator.html#ab173b9a90723efb65824128506940ac5":[3,23,38,6]
+"classSoVRMLScalarInterpolator.html":[3,23,38]
 };

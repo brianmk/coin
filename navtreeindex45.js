@@ -1,5 +1,8 @@
 var NAVTREEINDEX45 =
 {
+"functions.html":[5,3,0],
+"functions.html":[5,3,0,0],
+"functions_b.html":[5,3,0,1],
 "functions_c.html":[5,3,0,2],
 "functions_d.html":[5,3,0,3],
 "functions_e.html":[5,3,0,4],
@@ -31,8 +34,8 @@ var NAVTREEINDEX45 =
 "functions_eval_y.html":[5,3,5,23],
 "functions_eval_z.html":[5,3,5,24],
 "functions_f.html":[5,3,0,5],
-"functions_func.html":[5,3,1],
 "functions_func.html":[5,3,1,0],
+"functions_func.html":[5,3,1],
 "functions_func_b.html":[5,3,1,1],
 "functions_func_c.html":[5,3,1,2],
 "functions_func_d.html":[5,3,1,3],
@@ -76,8 +79,8 @@ var NAVTREEINDEX45 =
 "functions_type.html":[5,3,3],
 "functions_u.html":[5,3,0,20],
 "functions_v.html":[5,3,0,21],
-"functions_vars.html":[5,3,2,0],
 "functions_vars.html":[5,3,2],
+"functions_vars.html":[5,3,2,0],
 "functions_vars_b.html":[5,3,2,1],
 "functions_vars_c.html":[5,3,2,2],
 "functions_vars_d.html":[5,3,2,3],
@@ -246,8 +249,5 @@ var NAVTREEINDEX45 =
 "tidbits_8h_source.html":[6,0,1,0,3,5],
 "time_8h_source.html":[6,0,1,0,3,0,6],
 "topics.html":[3],
-"types_8h_source.html":[6,0,1,0,3,4,6],
-"worker_8h_source.html":[6,0,1,0,3,3,11],
-"world_8h_source.html":[6,0,1,0,3,4,7],
-"wpool_8h_source.html":[6,0,1,0,3,3,12]
+"types_8h_source.html":[6,0,1,0,3,4,6]
 };
