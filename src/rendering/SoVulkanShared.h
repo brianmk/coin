@@ -157,12 +157,14 @@ public:
     return m_props;
   }
 
-  // Pick the first memory type matching `desired`, falling back to any type
-  // the device offers for this resource.  Returns false only when no type is
-  // usable (or no device is bound).
-  bool pick(const VkMemoryRequirements & requirements,
-            VkMemoryPropertyFlags desired,
-            uint32_t & memoryTypeIndex) const
+  // Pick the first memory type that exactly satisfies `desired`, with no
+  // fallback to a merely-compatible type.  On failure leaves memoryTypeIndex
+  // untouched and returns false.  This is the raster backend's policy: a
+  // buffer/image that cannot be placed in the requested property class is a
+  // hard error rather than a silent host-visible degradation.
+  bool pickExact(const VkMemoryRequirements & requirements,
+                 VkMemoryPropertyFlags desired,
+                 uint32_t & memoryTypeIndex) const
   {
     this->ensure();
     if (!m_valid) return false;
@@ -173,6 +175,21 @@ public:
         return true;
       }
     }
+    return false;
+  }
+
+  // Pick the first memory type matching `desired`, falling back to any type
+  // the device offers for this resource.  Returns false only when no type is
+  // usable (or no device is bound).  This is the RT backend's policy: the
+  // best-effort fallback keeps a renderer allocation on memory it can use
+  // rather than failing outright.
+  bool pick(const VkMemoryRequirements & requirements,
+            VkMemoryPropertyFlags desired,
+            uint32_t & memoryTypeIndex) const
+  {
+    if (this->pickExact(requirements, desired, memoryTypeIndex)) return true;
+    this->ensure();
+    if (!m_valid) return false;
     for (uint32_t i = 0; i < m_props.memoryTypeCount; ++i) {
       if (requirements.memoryTypeBits & (1u << i)) {
         memoryTypeIndex = i;

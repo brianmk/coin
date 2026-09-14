@@ -93,13 +93,14 @@ namespace CoinVulkanDetail {
   inline int s_lightLog = 0;
 
 // Number of per-draw lighting UBO slots a frame will consume.  A command is
-// recorded once in its own pass, again when the wireframe/point overlay
-// redraw is active (opaque commands only), and overlay commands are recorded
-// a second time in the overlay block.  recordDrawCommand() bails out before
-// claiming a slot for skipped commands, so this worst case is a safe upper
-// bound.
+// recorded once in its own pass, again when the wireframe/point/tessellation
+// overlay redraw is active (opaque commands only), and overlay commands are
+// recorded a second time in the overlay block.  recordDrawCommand() bails
+// out before claiming a slot for skipped commands, so this worst case is a
+// safe upper bound.
   inline uint32_t
-countDrawCommands(const SoDrawList & drawlist, const int wireframeFillMode)
+countDrawCommands(const SoDrawList & drawlist, const int wireframeFillMode,
+                  const bool tessellationOverlay)
 {
   uint32_t draws = 0;
   const int num = drawlist.getNumCommands();
@@ -107,7 +108,7 @@ countDrawCommands(const SoDrawList & drawlist, const int wireframeFillMode)
     const SoRenderCommand & command = drawlist.getCommand(i);
     if (command.pass == SO_RENDERPASS_OVERLAY) continue;
     ++draws;
-    if (wireframeFillMode >= 0 &&
+    if ((wireframeFillMode >= 0 || tessellationOverlay) &&
         command.pass != SO_RENDERPASS_TRANSPARENT) {
       ++draws;
     }

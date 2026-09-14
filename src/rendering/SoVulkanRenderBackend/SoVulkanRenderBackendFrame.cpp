@@ -240,18 +240,9 @@ SoVulkanRenderBackend::shutdown()
   }
   this->backgroundPipelineCache.clear();
 
-  if (this->renderPassFramebuffer != VK_NULL_HANDLE) {
-    vkDestroyFramebuffer(this->device, this->renderPassFramebuffer,
-                         this->allocator);
-    this->renderPassFramebuffer = VK_NULL_HANDLE;
-  }
-  for (auto & entry : this->renderPassCache) {
-    if (entry.second != VK_NULL_HANDLE) {
-      vkDestroyRenderPass(this->device, entry.second, this->allocator);
-    }
-  }
-  this->renderPassCache.clear();
-  this->renderPass = VK_NULL_HANDLE;
+  // The render-pass/framebuffer cache owns the current pass + framebuffer;
+  // releasing it after the deferred destroys flush above (queue is idle).
+  this->renderPasses.destroyAll();
   if (this->fragmentModule != VK_NULL_HANDLE) {
     vkDestroyShaderModule(this->device, this->fragmentModule, this->allocator);
     this->fragmentModule = VK_NULL_HANDLE;
@@ -458,8 +449,7 @@ SoVulkanRenderBackend::prepareExternalFrame(
 
   // External passes are caller-supplied LOAD render passes, so no attachment
   // is cleared by a loadOp here: recordClear() must emit vkCmdClearAttachments.
-  this->renderPassColorCleared = false;
-  this->renderPassDepthCleared = false;
+  this->renderPasses.setClearedByLoad(false, false);
 
   this->cacheFrameMatrices(params);
   const bool wantCpuTiming = timing != nullptr;
@@ -570,14 +560,15 @@ SoVulkanRenderBackend::renderInternal(const SoDrawList & drawlist,
     (fullTargetClear && hasDepth && clearDepth)
       ? VK_ATTACHMENT_LOAD_OP_CLEAR
       : VK_ATTACHMENT_LOAD_OP_LOAD;
-  this->renderPass = this->getOrCreateRenderPass(*target, colorLoadOp,
-                                                 depthLoadOp);
+  this->renderPasses.getOrCreateRenderPass(*target, colorLoadOp,
+                                           depthLoadOp);
   // Stash whether the pass cleared each attachment so recordClear() can skip
   // the redundant vkCmdClearAttachments, and (below) so the begin info carries
   // the matching clear values.
-  this->renderPassColorCleared = (colorLoadOp == VK_ATTACHMENT_LOAD_OP_CLEAR);
-  this->renderPassDepthCleared = (depthLoadOp == VK_ATTACHMENT_LOAD_OP_CLEAR);
-  if (this->renderPass == VK_NULL_HANDLE) {
+  this->renderPasses.setClearedByLoad(
+    colorLoadOp == VK_ATTACHMENT_LOAD_OP_CLEAR,
+    depthLoadOp == VK_ATTACHMENT_LOAD_OP_CLEAR);
+  if (this->renderPasses.currentRenderPass() == VK_NULL_HANDLE) {
     this->emitError("failed to create Vulkan render pass");
     return FALSE;
   }
@@ -604,7 +595,8 @@ SoVulkanRenderBackend::renderInternal(const SoDrawList & drawlist,
   // old framebuffer is released through the deferred ring: an older in-flight
   // submission may still reference it (the per-frame vkQueueWaitIdle is gone,
   // so only the current slot's fence has been waited by beginFrame()).
-  if (!this->ensureFramebuffer(target, this->renderPass)) {
+  if (!this->renderPasses.ensureFramebuffer(
+        target, this->renderPasses.currentRenderPass())) {
     this->emitError("failed to create Vulkan framebuffer");
     // The one-shot command buffer was begun above and never submitted; an
     // implicit reset only happens on submission, so reset it explicitly or
@@ -613,7 +605,7 @@ SoVulkanRenderBackend::renderInternal(const SoDrawList & drawlist,
     vkResetCommandBuffer(this->currentCommandBuffer(), 0);
     return FALSE;
   }
-  const VkFramebuffer framebuffer = this->renderPassFramebuffer;
+  const VkFramebuffer framebuffer = this->renderPasses.framebuffer();
 
   // Record the pending texture copies into the frame command buffer (one
   // submit for the whole frame instead of a separate transfer submit) and
@@ -628,7 +620,7 @@ SoVulkanRenderBackend::renderInternal(const SoDrawList & drawlist,
 
   VkRenderPassBeginInfo rpbi {};
   rpbi.sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO;
-  rpbi.renderPass = this->renderPass;
+  rpbi.renderPass = this->renderPasses.currentRenderPass();
   rpbi.framebuffer = framebuffer;
   rpbi.renderArea.offset = {0, 0};
   rpbi.renderArea.extent = target->extent;
@@ -637,14 +629,14 @@ SoVulkanRenderBackend::renderInternal(const SoDrawList & drawlist,
   // maps one-to-one to the attachment indices (0 = color, 1 = depth).
   VkClearValue clearValues[2];
   uint32_t clearValueCount = 0;
-  if (this->renderPassColorCleared) {
+  if (this->renderPasses.colorClearedByLoad()) {
     clearValues[0].color.float32[0] = params.clearColor[0];
     clearValues[0].color.float32[1] = params.clearColor[1];
     clearValues[0].color.float32[2] = params.clearColor[2];
     clearValues[0].color.float32[3] = params.clearColor[3];
     clearValueCount = 1;
   }
-  if (this->renderPassDepthCleared) {
+  if (this->renderPasses.depthClearedByLoad()) {
     clearValues[clearValueCount].depthStencil.depth = params.clearDepth;
     clearValues[clearValueCount].depthStencil.stencil = 0;
     ++clearValueCount;
@@ -665,15 +657,18 @@ SoVulkanRenderBackend::renderInternal(const SoDrawList & drawlist,
   this->recordContext.buffer = this->currentCommandBuffer();
   bool recorded = true;
   if (overlaysOnly) {
-    this->recordTracedComposite(drawlist, params, *target, this->renderPass,
+    this->recordTracedComposite(drawlist, params, *target,
+                                this->renderPasses.currentRenderPass(),
                                 this->recordContext);
-    this->recordOverlayBlock(drawlist, params, *target, this->renderPass,
+    this->recordOverlayBlock(drawlist, params, *target,
+                             this->renderPasses.currentRenderPass(),
                              this->recordContext);
   }
   else {
-    recorded = this->recordFrame(drawlist, params, *target, this->renderPass,
+    recorded = this->recordFrame(drawlist, params, *target,
+                                 this->renderPasses.currentRenderPass(),
                                  this->recordContext,
-                                 this->renderPassFramebuffer);
+                                 this->renderPasses.framebuffer());
   }
   this->recordContext.buffer = VK_NULL_HANDLE;
 
@@ -706,59 +701,6 @@ SoVulkanRenderBackend::renderOverlaysOnly(const SoDrawList & drawlist,
                                           const SoRenderParams & params)
 {
   return this->renderInternal(drawlist, params, true);
-}
-
-bool
-SoVulkanRenderBackend::ensureFramebuffer(const SoVulkanRenderTarget * target,
-                                         VkRenderPass renderPass)
-{
-  if (this->renderPassFramebuffer != VK_NULL_HANDLE &&
-      this->renderPassFramebufferPass == renderPass &&
-      this->renderPassFramebufferColorImage == target->colorImage &&
-      this->renderPassFramebufferColorView == target->colorImageView &&
-      this->renderPassFramebufferDepthImage == target->depthImage &&
-      this->renderPassFramebufferDepthView == target->depthImageView &&
-      this->renderPassFramebufferExtent.width == target->extent.width &&
-      this->renderPassFramebufferExtent.height == target->extent.height) {
-    return true;
-  }
-  if (this->renderPassFramebuffer != VK_NULL_HANDLE) {
-    const VkDevice device = this->device;
-    const VkAllocationCallbacks * allocator = this->allocator;
-    const VkFramebuffer oldFramebuffer = this->renderPassFramebuffer;
-    this->deferDestroy([device, allocator, oldFramebuffer]() {
-      if (oldFramebuffer != VK_NULL_HANDLE) {
-        vkDestroyFramebuffer(device, oldFramebuffer, allocator);
-      }
-    });
-    this->renderPassFramebuffer = VK_NULL_HANDLE;
-  }
-  VkFramebufferCreateInfo fci {};
-  fci.sType = VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO;
-  fci.renderPass = renderPass;
-  fci.attachmentCount =
-    (target->depthImageView != VK_NULL_HANDLE &&
-     target->depthFormat != VK_FORMAT_UNDEFINED)
-      ? 2u : 1u;
-  const VkImageView attachments[] = {
-    target->colorImageView,
-    target->depthImageView,
-  };
-  fci.pAttachments = attachments;
-  fci.width = target->extent.width;
-  fci.height = target->extent.height;
-  fci.layers = 1;
-  if (vkCreateFramebuffer(this->device, &fci, this->allocator,
-                          &this->renderPassFramebuffer) != VK_SUCCESS) {
-    return false;
-  }
-  this->renderPassFramebufferPass = renderPass;
-  this->renderPassFramebufferColorImage = target->colorImage;
-  this->renderPassFramebufferColorView = target->colorImageView;
-  this->renderPassFramebufferDepthImage = target->depthImage;
-  this->renderPassFramebufferDepthView = target->depthImageView;
-  this->renderPassFramebufferExtent = target->extent;
-  return true;
 }
 
 SbBool
@@ -860,6 +802,7 @@ bool
 SoVulkanRenderBackend::buildWorkItems(const SoDrawList & drawlist,
                                       const SoRenderParams & params,
                                       bool wireframeOverlay, bool pointsOverlay,
+                                      bool tessellationOverlay,
                                       const float * overlayColor,
                                       VkRenderPass renderPass,
                                       std::vector<VulkanWorkItem> & out)
@@ -965,18 +908,53 @@ SoVulkanRenderBackend::buildWorkItems(const SoDrawList & drawlist,
 
     // Wireframe/point overlay: re-draw opaque geometry in the requested fill
     // mode using a uniform edge color.
-    if (!transparent && wireframeFillMode >= 0) {
+    //
+    // When the request is a LINES (edge) overlay, re-draw only the actual
+    // B-Rep feature-edge commands (SoBrepEdgeSet emits SO_TOPOLOGY_LINES /
+    // LINE_STRIP).  Re-drawing every triangle command in polygon-LINES would
+    // paint the raw tessellation -- the straight seam meridian on a sphere and
+    // the radial fan spokes on a cylinder cap -- instead of the true feature
+    // edges (rims, creases, seams).  A CAD edge overlay must show only feature
+    // edges; smooth curved surfaces carry no feature edges and read as clean.
+    //
+    // The debug tessellation overlay is the opposite request: re-draw the
+    // TRIANGLE commands in polygon-LINES so the raw triangulation edges are
+    // visible on top of the shaded geometry, and skip the line commands so
+    // the feature edges are not double-painted.
+    if (!transparent && (wireframeFillMode >= 0 || tessellationOverlay)) {
+      const bool isEdgeOverlay = (wireframeFillMode == SoDrawStyleElement::LINES);
+      const int redrawFillMode = tessellationOverlay
+        ? SoDrawStyleElement::LINES
+        : wireframeFillMode;
       for (int i = 0; i < drawlist.getNumCommands(); ++i) {
         const int index =
           i < static_cast<int>(order.size()) ? order[i] : i;
         const SoRenderCommand & command = drawlist.getCommand(index);
         if (command.pass == SO_RENDERPASS_OVERLAY) continue;
         if (command.pass == SO_RENDERPASS_TRANSPARENT) continue;
+        if (!command.geometry.positions || command.geometry.vertexCount == 0)
+          continue;
+        const SoPrimitiveTopology topo = command.geometry.topology;
+        // For the edge overlay, restrict to commands that are themselves line
+        // primitives; skip triangles so tessellation edges never render.
+        if (isEdgeOverlay) {
+          if (topo != SO_TOPOLOGY_LINES &&
+              topo != SO_TOPOLOGY_LINE_STRIP) {
+            continue;
+          }
+        }
+        // For the debug tessellation overlay, restrict to triangle commands.
+        if (tessellationOverlay) {
+          if (topo != SO_TOPOLOGY_TRIANGLES &&
+              topo != SO_TOPOLOGY_TRIANGLE_STRIP) {
+            continue;
+          }
+        }
         if (!this->findCachedDrawable(command)) continue;
         VulkanWorkItem item;
         item.single = &command;
         item.count = 1;
-        item.fillModeOverride = wireframeFillMode;
+        item.fillModeOverride = redrawFillMode;
         item.uniformColorOverride = overlayColor;
         item.slotBase = nextSlot++;
         out.push_back(item);
@@ -1136,8 +1114,8 @@ SoVulkanRenderBackend::recordFrame(const SoDrawList & drawlist,
     logBlackFrameStats(drawlist, params, blackFrame++, -1);
   }
   this->applyViewport(params, target, ctx);
-  this->recordClear(params, target, this->renderPassColorCleared,
-                    this->renderPassDepthCleared, ctx);
+  this->recordClear(params, target, this->renderPasses.colorClearedByLoad(),
+                    this->renderPasses.depthClearedByLoad(), ctx);
   this->recordBackground(params, target, renderPass, ctx);
   // The background pass overrides the viewport/scissor for its own draw;
   // restore the viewport from params before recording geometry so draws
@@ -1151,6 +1129,8 @@ SoVulkanRenderBackend::recordFrame(const SoDrawList & drawlist,
     this->wireframeOverlay || COIN_VULKAN_ENV_FLAG("FC_VULKAN_WIREFRAME");
   const bool pointsOverlay =
     this->pointsOverlay || COIN_VULKAN_ENV_FLAG("FC_VULKAN_POINTS");
+  const bool tessellationOverlay =
+    this->tessellationOverlay || COIN_VULKAN_ENV_FLAG("FC_VULKAN_TESS");
   float overlayColor[4] = {
     this->edgeColor[0], this->edgeColor[1], this->edgeColor[2],
     this->edgeColor[3]
@@ -1189,8 +1169,9 @@ SoVulkanRenderBackend::recordFrame(const SoDrawList & drawlist,
     static int overlayLog = 0;
     if (overlayLog++ < 3) {
       fprintf(stderr,
-              "[OVL] wireframe=%d points=%d fillMode=%d edgeColor=(%.2f,%.2f,%.2f,%.2f)\n",
-              wireframeOverlay ? 1 : 0, pointsOverlay ? 1 : 0, wireframeFillMode,
+              "[OVL] wireframe=%d points=%d tess=%d fillMode=%d edgeColor=(%.2f,%.2f,%.2f,%.2f)\n",
+              wireframeOverlay ? 1 : 0, pointsOverlay ? 1 : 0,
+              tessellationOverlay ? 1 : 0, wireframeFillMode,
               overlayColor[0], overlayColor[1], overlayColor[2], overlayColor[3]);
     }
   }
@@ -1199,7 +1180,8 @@ SoVulkanRenderBackend::recordFrame(const SoDrawList & drawlist,
   // overlay redraws) before recording, so slotIndex can never overflow the
   // ring allocation (VUID-vkCmdBindDescriptorSets-pDynamicOffsets-01972).
   if (!this->prepareLightingSlots(countDrawCommands(drawlist,
-                                                    wireframeFillMode))) {
+                                                    wireframeFillMode,
+                                                    tessellationOverlay))) {
     return FALSE;
   }
 
@@ -1210,20 +1192,21 @@ SoVulkanRenderBackend::recordFrame(const SoDrawList & drawlist,
   // per-draw uboCmdIndex++ sequence produced, so recording is identical.
   std::vector<VulkanWorkItem> & workItems = this->workItemsScratch;
   this->buildWorkItems(drawlist, params, wireframeOverlay, pointsOverlay,
-                       overlayColor, renderPass, workItems);
+                       tessellationOverlay, overlayColor, renderPass,
+                       workItems);
   vkBackendTrace(this->uboFrameIndex, "recordFrame.workItemsBuilt",
                  "items=%zu", workItems.size());
 
   // Secondaries are recorded with RENDER_PASS_CONTINUE inheritance into the
   // pass the frame is in.  On the INTERNAL path that pass is backend-owned
-  // (renderPass == this->renderPass) and the combination is exercised by the
-  // testsuite.  The EXTERNAL path (FreeCAD's QuarterVulkanWidget) hands us a
+  // (renderPass == this->renderPasses.currentRenderPass()) and the combination
+  // is exercised by the testsuite.  The EXTERNAL path (FreeCAD's QuarterVulkanWidget) hands us a
   // caller-owned pass/framebuffer/command-buffer triplet (QVulkanWindow's,
   // possibly MSAA); recording secondaries against it has proven to corrupt
   // NVIDIA driver state (crash inside the driver at the first render-pass
   // command after the replay) so it stays OFF unless explicitly opted in
   // while that interaction is investigated.
-  const bool externalPass = renderPass != this->renderPass;
+  const bool externalPass = renderPass != this->renderPasses.currentRenderPass();
   const bool canUseSecondary =
     !this->secondaryCommandBuffers.empty() &&
     inheritFramebuffer != VK_NULL_HANDLE &&
