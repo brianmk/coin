@@ -36,6 +36,33 @@
 #include <vulkan/vulkan.h>
 
 /*!
+  struct SoVulkanDeviceCaps
+  \brief Physical-device capabilities probed once by the embedding application.
+
+  The renderer needs to know which optional extensions/features the device
+  advertises to select its best technique.  The application already probes the
+  device to decide which extensions/features to request at vkCreateDevice, so
+  it hands the result through SoVulkanDeviceContext::caps instead of the
+  renderer re-enumerating the device extension list (the extension-name list
+  then lives in exactly one place).
+*/
+struct SoVulkanDeviceCaps {
+  bool rayTracing = false;             //!< AS + ray_tracing_pipeline + ray_query.
+  bool positionFetch = false;          //!< VK_KHR_ray_tracing_position_fetch.
+  bool opacityMicromap = false;        //!< VK_EXT_opacity_micromap.
+  bool nvCluster = false;              //!< VK_NV_cluster_acceleration_structure.
+  bool nvPartitioned = false;          //!< VK_NV_partitioned_acceleration_structure.
+  bool nvLinearSweptSpheres = false;   //!< VK_NV_ray_tracing_linear_swept_spheres.
+  bool externalSemaphoreFd = false;    //!< VK_KHR_external_semaphore_fd.
+  bool externalMemoryFd = false;       //!< VK_KHR_external_memory_fd.
+  bool fillModeNonSolid = false;       //!< VK_POLYGON_MODE_LINE/POINT.
+  bool fullDrawIndexUint32 = false;    //!< 32-bit vertex indices.
+  bool dualSrcBlend = false;           //!< SRC1_* blend factors.
+  bool timelineSemaphore = false;      //!< Vulkan 1.2 timeline semaphores.
+  bool synchronization2 = false;       //!< VK_KHR_synchronization2.
+};
+
+/*!
   struct SoVulkanDeviceContext
   \brief Application-owned Vulkan device state required by the backend.
 
@@ -57,6 +84,10 @@ struct SoVulkanDeviceContext {
   uint32_t computeQueueIndex = 0;                     //!< Queue index (default 0).
   uint32_t apiVersion = VK_API_VERSION_1_0;           //!< Negotiated API version.
   const VkAllocationCallbacks * allocator = nullptr;  //!< Optional host allocator.
+  //! Probed capabilities (see SoVulkanDeviceCaps).  When capsValid is false
+  //! (e.g. an offscreen/test context) the renderer probes the device itself.
+  SoVulkanDeviceCaps caps {};
+  bool capsValid = false;
 };
 
 /*!

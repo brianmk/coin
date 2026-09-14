@@ -73,9 +73,9 @@ layout(set = 0, binding = 3, std430) buffer Materials {
     RTMaterial materials[];
 } matBuffer;
 
-// Object-space per-triangle geometric normals (one vec4 per triangle of the
-// whole scene, indexed per command via RTMaterial::triangleData).  Computed
-// on the CPU when the acceleration structures are built.
+// Object-space per-vertex normals, three vec4 per triangle of the whole scene
+// (indexed per command via RTMaterial::triangleData), barycentric-interpolated
+// by RTRayTrace.glsl for smooth shading.
 layout(set = 0, binding = 7, std430) readonly buffer NormalPool {
     vec4 triangleNormals[];
 } normalPoolBuffer;

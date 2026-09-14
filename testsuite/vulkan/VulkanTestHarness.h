@@ -15,10 +15,13 @@
 #include <Inventor/rendering/SoVulkanRenderTarget.h>
 
 #include <cstdint>
+#include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <functional>
 #include <iostream>
+#include <sstream>
+#include <string>
 #include <vector>
 
 #include <vulkan/vulkan.h>
@@ -34,6 +37,74 @@ inline int skip(const char * reason)
   std::cout << "SKIP: " << reason << std::endl;
   return 77;
 }
+
+// Thrown by VK_CHECK when an assertion fails.  Carries a human-readable
+// message so a failing case reports exactly which check tripped without
+// stopping the remaining cases in the same test.
+class CheckFailed
+{
+public:
+  explicit CheckFailed(std::string message)
+    : mMessage(std::move(message))
+  {
+  }
+  const std::string & message() const { return this->mMessage; }
+
+private:
+  std::string mMessage;
+};
+
+// A single named sub-case.  Tests register several of these (each a
+// self-contained render+assert) and let CaseRunner execute them all, so one
+// binary exercises many related states and reports per-case results.
+struct TestCase
+{
+  std::string name;
+  std::function<void()> body;
+};
+
+// Collects and runs the named sub-cases of a test.
+class CaseRunner
+{
+public:
+  void add(const std::string & name, std::function<void()> body)
+  {
+    this->mCases.push_back(TestCase { name, std::move(body) });
+  }
+
+  // Runs every case in order.  A case that throws CheckFailed is counted as
+  // a failure but the rest still run.  Returns the number of failed cases.
+  int run()
+  {
+    int failures = 0;
+    for (const TestCase & tc : this->mCases) {
+      try {
+        tc.body();
+        std::cout << "[  ok  ] " << tc.name << std::endl;
+      }
+      catch (const CheckFailed & e) {
+        ++failures;
+        std::cerr << "[ FAIL ] " << tc.name << ": " << e.message() << std::endl;
+      }
+    }
+    return failures;
+  }
+
+private:
+  std::vector<TestCase> mCases;
+};
+
+// Assertion helper: on failure throws CheckFailed with a streamed message,
+// aborting the current case (not the whole test).  Usage:
+//   VK_CHECK(nearColor(p, 255, 0, 0), "REPLACE produced " << describePixel(p));
+#define VK_CHECK(cond, msg)                                                     \
+  do {                                                                          \
+    if (!(cond)) {                                                              \
+      std::ostringstream vkCheckOs;                                             \
+      vkCheckOs << msg;                                                         \
+      throw vulkan_test::CheckFailed(vkCheckOs.str());                          \
+    }                                                                           \
+  } while (0)
 
 inline uint32_t findMemoryType(VkPhysicalDevice physicalDevice,
                                uint32_t typeBits,
@@ -502,6 +573,16 @@ inline int countNear(const std::vector<uint8_t> & pixels,
   return count;
 }
 
+// "B,G,R,A=..." string for a BGRA pixel, for use in VK_CHECK messages.
+inline std::string describePixel(const uint8_t * pixel)
+{
+  char buf[48];
+  std::snprintf(buf, sizeof(buf), "B,G,R,A=(%d,%d,%d,%d)",
+                static_cast<int>(pixel[0]), static_cast<int>(pixel[1]),
+                static_cast<int>(pixel[2]), static_cast<int>(pixel[3]));
+  return std::string(buf);
+}
+
 inline SoRenderCommand makeTriangle(const float * positions,
                                     SoPrimitiveTopology topology =
                                       SO_TOPOLOGY_TRIANGLES,
@@ -513,6 +594,116 @@ inline SoRenderCommand makeTriangle(const float * positions,
   command.geometry.vertexCount = vertexCount;
   command.geometry.positions = positions;
   command.geometry.vertexStride = sizeof(float) * 3;
+  return command;
+}
+
+// ---------------------------------------------------------------------------
+// Shared geometry and command builders.  Most pixel-state tests render the
+// same full-viewport quad; keeping the geometry here stops every test file
+// re-defining it (and keeps the merged tests' sub-cases terse).
+// ---------------------------------------------------------------------------
+
+inline const float * quadPositions()
+{
+  static const float p[] = {
+    -1.0f, -1.0f, 0.0f,
+     1.0f, -1.0f, 0.0f,
+     1.0f,  1.0f, 0.0f,
+    -1.0f,  1.0f, 0.0f
+  };
+  return p;
+}
+
+inline const float * quadTexcoords()
+{
+  static const float t[] = {0.0f, 0.0f, 1.0f, 0.0f, 1.0f, 1.0f, 0.0f, 1.0f};
+  return t;
+}
+
+inline const uint32_t * quadIndices()
+{
+  static const uint32_t i[] = {0, 1, 2, 0, 2, 3};
+  return i;
+}
+
+inline const float * quadNormalsUp()
+{
+  static const float n[] = {
+    0.0f, 0.0f, 1.0f,
+    0.0f, 0.0f, 1.0f,
+    0.0f, 0.0f, 1.0f,
+    0.0f, 0.0f, 1.0f
+  };
+  return n;
+}
+
+// Full-viewport quad with the given unlit diffuse color.
+inline SoRenderCommand makeQuad(SbVec4f diffuse)
+{
+  SoRenderCommand command;
+  command.modelMatrix.makeIdentity();
+  command.geometry.topology = SO_TOPOLOGY_TRIANGLES;
+  command.geometry.vertexCount = 4;
+  command.geometry.indexCount = 6;
+  command.geometry.positions = quadPositions();
+  command.geometry.indices = quadIndices();
+  command.geometry.vertexStride = sizeof(float) * 3;
+  command.material.diffuse = diffuse;
+  return command;
+}
+
+// Full-viewport quad with +Z normals and a fully specified (otherwise zeroed)
+// material, for the material/lighting tests.
+inline SoRenderCommand makeLitQuad(SbVec4f diffuse,
+                                   SoShadingModel shading)
+{
+  SoRenderCommand command;
+  command.modelMatrix.makeIdentity();
+  command.geometry.topology = SO_TOPOLOGY_TRIANGLES;
+  command.geometry.vertexCount = 4;
+  command.geometry.indexCount = 6;
+  command.geometry.positions = quadPositions();
+  command.geometry.normals = quadNormalsUp();
+  command.geometry.normalCount = 4;
+  command.geometry.indices = quadIndices();
+  command.geometry.vertexStride = sizeof(float) * 3;
+  command.material.diffuse = diffuse;
+  command.material.ambient = SbVec4f(0.0f, 0.0f, 0.0f, 1.0f);
+  command.material.specular = SbVec4f(0.0f, 0.0f, 0.0f, 1.0f);
+  command.material.emissive = SbVec4f(0.0f, 0.0f, 0.0f, 1.0f);
+  command.material.shininess = 0.0f;
+  command.material.shadingModel = shading;
+  return command;
+}
+
+// Full-viewport textured quad: \a texel is an RGBA byte array of
+// \a texWidth x \a texHeight.
+inline SoRenderCommand makeTexturedQuad(const unsigned char * texel,
+                                        uint32_t texWidth,
+                                        uint32_t texHeight,
+                                        SoTextureModel model,
+                                        SbVec4f diffuse,
+                                        SbVec4f blendColor = SbVec4f(0.0f,
+                                                                     0.0f, 0.0f,
+                                                                     1.0f))
+{
+  SoRenderCommand command;
+  command.modelMatrix.makeIdentity();
+  command.geometry.topology = SO_TOPOLOGY_TRIANGLES;
+  command.geometry.vertexCount = 4;
+  command.geometry.indexCount = 6;
+  command.geometry.positions = quadPositions();
+  command.geometry.texcoords = quadTexcoords();
+  command.geometry.texcoordStride = sizeof(float) * 2;
+  command.geometry.indices = quadIndices();
+  command.geometry.vertexStride = sizeof(float) * 3;
+  command.material.diffuse = diffuse;
+  command.material.texture.pixels = texel;
+  command.material.texture.width = texWidth;
+  command.material.texture.height = texHeight;
+  command.material.texture.numComponents = 4;
+  command.material.texture.model = model;
+  command.material.texture.blendColor = blendColor;
   return command;
 }
 

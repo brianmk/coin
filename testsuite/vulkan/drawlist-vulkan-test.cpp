@@ -418,16 +418,19 @@ runTest()
 
   // --- Build draw list -----------------------------------------------------
   const uint32_t indices[] = {0, 1, 2, 0, 2, 3};
+  // Distinct depths: opaque commands are depth-bucketed (draw order is not
+  // insertion order), so the full-viewport quad sits behind the triangle and
+  // the nearer triangle deterministically wins at the center.
   const float quad[] = {
-    -1.0f, -1.0f, 0.0f,
-     1.0f, -1.0f, 0.0f,
-     1.0f,  1.0f, 0.0f,
-    -1.0f,  1.0f, 0.0f
+    -1.0f, -1.0f, 0.8f,
+     1.0f, -1.0f, 0.8f,
+     1.0f,  1.0f, 0.8f,
+    -1.0f,  1.0f, 0.8f
   };
   const float triangle[] = {
-    -0.8f, -0.8f, 0.0f,
-     0.8f, -0.8f, 0.0f,
-     0.0f,  0.8f, 0.0f
+    -0.8f, -0.8f, 0.2f,
+     0.8f, -0.8f, 0.2f,
+     0.0f,  0.8f, 0.2f
   };
   const float triangleColors[] = {
     0.0f, 1.0f, 0.0f, 1.0f,

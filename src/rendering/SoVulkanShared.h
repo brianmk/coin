@@ -10,6 +10,8 @@
 #ifndef COIN_SOVULKANSHARED_H
 #define COIN_SOVULKANSHARED_H
 
+#include <chrono>
+#include <cstdio>
 #include <cstdlib>
 #include <cstdint>
 #include <cstring>
@@ -20,15 +22,104 @@
 
 namespace SoVulkanShared {
 
-// Environment flags are enabled by presence, but honor the conventional
-// "VAR=0"/"false"/"off" opt-out values.
+// --- Environment access --------------------------------------------------
+// Single choke point for every FC_VULKAN_* / FC_GUI_* environment lookup in
+// Coin's Vulkan renderer.  Routing all reads through here keeps the opt-out
+// policy in one place and makes the flags auditable; previously the same
+// policy was re-implemented (and in one case inverted) at each getenv() site.
+
+// Raw value (or nullptr).  Presence semantics: a variable set to any value,
+// including "0", counts as set.  Use envFlagEnabled() when the conventional
+// "VAR=0"/"false"/"off" opt-out must be honored.
+inline const char *
+envString(const char * name)
+{
+  return std::getenv(name);
+}
+
+// Presence-only test (any value, including "0"/"false"/"off").
+inline bool
+envSet(const char * name)
+{
+  return std::getenv(name) != nullptr;
+}
+
+// Integer / float value with a default when the variable is unset or empty.
+inline int
+envInt(const char * name, int defaultValue = 0)
+{
+  const char * value = std::getenv(name);
+  return value ? std::atoi(value) : defaultValue;
+}
+
+inline float
+envFloat(const char * name, float defaultValue = 0.0f)
+{
+  const char * value = std::getenv(name);
+  return value ? static_cast<float>(std::atof(value)) : defaultValue;
+}
+
+// Environment flags honor the conventional "VAR=0"/"false"/"off" opt-out
+// values.  A null value yields \a defaultValue, so a flag can be on unless
+// explicitly disabled (e.g. the retained-IR replay).
+inline bool
+envFlagEnabled(const char * name, bool defaultValue)
+{
+  const char * value = std::getenv(name);
+  if (value == nullptr) return defaultValue;
+  return std::strcmp(value, "0") != 0 && std::strcmp(value, "false") != 0 &&
+         std::strcmp(value, "off") != 0;
+}
+
+// Present-and-not-disabled, defaulting to off.
 inline bool
 envFlagEnabled(const char * name)
 {
-  const char * value = std::getenv(name);
-  if (value == nullptr) return false;
-  return std::strcmp(value, "0") != 0 && std::strcmp(value, "false") != 0 &&
-         std::strcmp(value, "off") != 0;
+  return envFlagEnabled(name, false);
+}
+
+// --- Breadcrumb / phase timing -------------------------------------------
+// The fcprobe profile harness keys on the monotonic microsecond clock and the
+// FC_GUI_OPEN_BREADCRUMB gate.  Both backends and the manager used to carry
+// their own copies of these primitives (three steady_clock->us converters and
+// two near-identical "since" printers); they live here so the time base and
+// the gating policy are singular.
+
+inline long
+steadyNowUs()
+{
+  return (long)std::chrono::duration_cast<std::chrono::microseconds>(
+    std::chrono::steady_clock::now().time_since_epoch()).count();
+}
+
+inline double
+steadyNowMs()
+{
+  return steadyNowUs() * 0.001;
+}
+
+inline bool
+breadcrumbsEnabled()
+{
+  static const bool enabled = envFlagEnabled("FC_GUI_OPEN_BREADCRUMB");
+  return enabled;
+}
+
+// Emit "PREFIX <startUs> <phase> dur_us=<elapsed>" once a phase has exceeded
+// `thresholdUs`, up to `logged` (a caller-owned counter, so each translation
+// unit keeps its own log budget exactly as the per-file statics did).
+inline void
+breadcrumbSince(int & logged, const char * prefix, long startUs,
+                long thresholdUs, const char * phase)
+{
+  if (!breadcrumbsEnabled()) return;
+  const long now = steadyNowUs();
+  if (logged < 30 && now - startUs >= thresholdUs) {
+    ++logged;
+    std::fprintf(stderr, "%s %ld %s dur_us=%ld\n", prefix, startUs, phase,
+                 now - startUs);
+    std::fflush(stderr);
+  }
 }
 
 // Literal-name fast path: the per-call-site static resolves the flag once, so
@@ -369,6 +460,68 @@ withOneShotSubmit(VkDevice device, VkQueue queue, VkCommandPool pool,
   // submission are safe to destroy synchronously on return.
   vkQueueWaitIdle(queue);
   vkFreeCommandBuffers(device, pool, 1, &cmd);
+  return ok;
+}
+
+// Copy a whole RGBA VkImage (currently in `oldLayout`) into a host-visible
+// staging buffer with a one-shot submit, then hand the mapped pixels to
+// `consume`.  The image is transitioned to TRANSFER_SRC_OPTIMAL for the copy
+// and restored to `restoreLayout` before the submit.  `pick` selects the
+// staging memory type (the backend's policy).  Returns false on any Vulkan
+// failure, leaving nothing allocated.  This is the single image-to-host
+// primitive behind the debug frame dumps.
+inline bool
+dumpImageToHost(VkDevice device, VkQueue queue, VkCommandPool pool,
+                const VkAllocationCallbacks * allocator, VkImage image,
+                VkImageLayout oldLayout, VkImageLayout restoreLayout,
+                uint32_t width, uint32_t height, const MemoryTypePicker & pick,
+                const std::function<void(const void *)> & consume)
+{
+  if (width == 0 || height == 0) return false;
+  const VkDeviceSize size =
+    static_cast<VkDeviceSize>(width) * static_cast<VkDeviceSize>(height) * 4;
+
+  VkBuffer staging = VK_NULL_HANDLE;
+  VkDeviceMemory stagingMem = VK_NULL_HANDLE;
+  if (!createBufferAllocated(device, allocator, size,
+                             VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+                             VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT |
+                               VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+                             false, pick, staging, stagingMem)) {
+    return false;
+  }
+
+  const bool ok = withOneShotSubmit(
+    device, queue, pool, allocator, [&](VkCommandBuffer cmd) {
+      imageTransition(cmd, image, oldLayout,
+                      VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                      VK_ACCESS_SHADER_WRITE_BIT, VK_ACCESS_TRANSFER_READ_BIT,
+                      VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,
+                      VK_PIPELINE_STAGE_TRANSFER_BIT);
+      VkBufferImageCopy region {};
+      region.imageSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+      region.imageSubresource.layerCount = 1;
+      region.imageExtent = {width, height, 1};
+      vkCmdCopyImageToBuffer(cmd, image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                             staging, 1, &region);
+      imageTransition(cmd, image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                      restoreLayout, VK_ACCESS_TRANSFER_WRITE_BIT,
+                      VK_ACCESS_SHADER_WRITE_BIT,
+                      VK_PIPELINE_STAGE_TRANSFER_BIT,
+                      VK_PIPELINE_STAGE_ALL_COMMANDS_BIT);
+    });
+
+  if (ok) {
+    void * mapped = nullptr;
+    if (vkMapMemory(device, stagingMem, 0, size, 0, &mapped) == VK_SUCCESS &&
+        mapped != nullptr) {
+      if (consume) consume(mapped);
+      vkUnmapMemory(device, stagingMem);
+    }
+  }
+
+  vkDestroyBuffer(device, staging, allocator);
+  vkFreeMemory(device, stagingMem, allocator);
   return ok;
 }
 

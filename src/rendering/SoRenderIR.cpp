@@ -453,6 +453,20 @@ SoRenderIR::lightToEye(const SoLightData & world, const SbMatrix & view)
   return eye;
 }
 
+SoLightData
+SoRenderIR::lightToWorld(const SoLightData & eye, const SbMatrix & inverseView)
+{
+  SoLightData world = eye;
+  inverseView.multDirMatrix(eye.direction, world.direction);
+  if (world.direction.normalize() == 0.0f) {
+    world.direction = eye.direction;
+  }
+  if (eye.type != SO_LIGHT_DIRECTIONAL) {
+    inverseView.multVecMatrix(eye.position, world.position);
+  }
+  return world;
+}
+
 int
 SoRenderIR::fillLightingBlock(SoLightingBlock & block,
                               const SoLightingData & world,
@@ -464,8 +478,7 @@ SoRenderIR::fillLightingBlock(SoLightingBlock & block,
   block.ambientLight[2] = world.ambient[2];
   block.ambientLight[3] = 1.0f;
 
-  const int count = std::min<int>(
-    static_cast<int>(world.lights.size()), SO_MAX_SHADER_LIGHTS);
+  const int count = world.lightCount();
   for (int i = 0; i < count; ++i) {
     const SoLightData & light = world.lights[static_cast<size_t>(i)];
     if (toEye != nullptr) {

@@ -134,7 +134,6 @@ static_assert(SO_MAX_SHADER_LIGHTS == 8,
               "SO_MAX_SHADER_LIGHTS change requires regenerating the "
               "hardcoded [8] light arrays in the GLSL/Visual shaders");
 
-constexpr int MAX_SHADER_LIGHTS = SO_MAX_SHADER_LIGHTS;
 constexpr int MAX_VERTEX_COUNT = 10000000;
 
 // FNV-1a content hash of a command's geometry, sampled so full-scene

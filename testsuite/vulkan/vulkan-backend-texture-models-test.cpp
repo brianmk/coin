@@ -1,7 +1,10 @@
 // testsuite/vulkan-backend-texture-models-test.cpp
 //
-// Exercises the DECAL and BLEND texture models alongside REPLACE to verify the
-// texture-model switch in the fragment shader.
+// Exercises every SoTextureModel fragment combination: REPLACE shows the
+// texel color directly, MODULATE multiplies the base color by the texel
+// color, DECAL leaves transparent texels showing the base color, and BLEND
+// mixes the blend color by the texel's red channel.  (Merged from the former
+// separate texture and texture-models tests.)
 
 #include "VulkanTestHarness.h"
 
@@ -9,46 +12,19 @@ using namespace vulkan_test;
 
 namespace {
 
-const float quad[] = {
-  -1.0f, -1.0f, 0.0f,
-   1.0f, -1.0f, 0.0f,
-   1.0f,  1.0f, 0.0f,
-  -1.0f,  1.0f, 0.0f
+// 2x2 solid-red RGBA texture.
+const unsigned char redTexel[16] = {
+  255, 0, 0, 255,  255, 0, 0, 255,
+  255, 0, 0, 255,  255, 0, 0, 255
 };
-const float texcoords[] = {
-  0.0f, 0.0f,  1.0f, 0.0f,  1.0f, 1.0f,  0.0f, 1.0f
+// 2x2 solid-green RGBA texture.
+const unsigned char greenTexel[16] = {
+  0, 255, 0, 255,  0, 255, 0, 255,
+  0, 255, 0, 255,  0, 255, 0, 255
 };
-const uint32_t indices[] = {0, 1, 2, 0, 2, 3};
-
-// 1x1 red RGBA texel, alpha 0.
+// 1x1 red RGBA texels.
 const unsigned char transparentRed[4] = {255, 0, 0, 0};
-// 1x1 red RGBA texel, alpha 255.
 const unsigned char opaqueRed[4] = {255, 0, 0, 255};
-
-SoRenderCommand texturedQuad(const unsigned char * texel,
-                             SoTextureModel model,
-                             SbVec4f diffuse,
-                             SbVec4f blendColor)
-{
-  SoRenderCommand command;
-  command.modelMatrix.makeIdentity();
-  command.geometry.topology = SO_TOPOLOGY_TRIANGLES;
-  command.geometry.vertexCount = 4;
-  command.geometry.indexCount = 6;
-  command.geometry.positions = quad;
-  command.geometry.texcoords = texcoords;
-  command.geometry.texcoordStride = sizeof(float) * 2;
-  command.geometry.indices = indices;
-  command.geometry.vertexStride = sizeof(float) * 3;
-  command.material.diffuse = diffuse;
-  command.material.texture.pixels = texel;
-  command.material.texture.width = 1;
-  command.material.texture.height = 1;
-  command.material.texture.numComponents = 4;
-  command.material.texture.model = model;
-  command.material.texture.blendColor = blendColor;
-  return command;
-}
 
 } // namespace
 
@@ -59,62 +35,69 @@ main()
   const int initResult = harness.init();
   if (initResult != 0) return initResult;
 
-  int failures = 0;
-  const SoRenderParams params = harness.renderParams();
+  CaseRunner cases;
 
-  // DECAL with a fully transparent texel leaves the base color unchanged.
-  {
+  cases.add("REPLACE: texel replaces the base color", [&harness] {
     SoDrawList drawlist;
-    drawlist.addCommand(texturedQuad(transparentRed, SO_TEXTURE_MODEL_DECAL,
-                                     SbVec4f(1.0f, 1.0f, 1.0f, 1.0f),
-                                     SbVec4f(0.0f, 0.0f, 0.0f, 1.0f)));
-    if (!harness.backend.render(drawlist, params)) {
-      std::cerr << "FAIL: DECAL texture render failed" << std::endl;
-      ++failures;
-    }
+    drawlist.addCommand(makeTexturedQuad(redTexel, 2, 2,
+                                         SO_TEXTURE_MODEL_REPLACE,
+                                         SbVec4f(1.0f, 1.0f, 1.0f, 1.0f)));
+    VK_CHECK(harness.backend.render(drawlist, harness.renderParams()),
+             "render failed");
     const uint8_t * center = pixelAt(harness.readback(), 16, 16);
-    if (!nearColor(center, 255, 255, 255)) {
-      std::cerr << "FAIL: DECAL did not preserve the base color for "
-                   "transparent texels" << std::endl;
-      ++failures;
-    }
-  }
+    VK_CHECK(nearColor(center, 255, 0, 0), "REPLACE produced "
+                                           << describePixel(center));
+  });
 
-  // REPLACE with an opaque red texel replaces the base color.
-  {
+  cases.add("MODULATE: white base x green texel = green", [&harness] {
     SoDrawList drawlist;
-    drawlist.addCommand(texturedQuad(opaqueRed, SO_TEXTURE_MODEL_REPLACE,
-                                     SbVec4f(1.0f, 1.0f, 1.0f, 1.0f),
-                                     SbVec4f(0.0f, 0.0f, 0.0f, 1.0f)));
-    if (!harness.backend.render(drawlist, params)) {
-      std::cerr << "FAIL: REPLACE texture render failed" << std::endl;
-      ++failures;
-    }
+    drawlist.addCommand(makeTexturedQuad(greenTexel, 2, 2,
+                                         SO_TEXTURE_MODEL_MODULATE,
+                                         SbVec4f(1.0f, 1.0f, 1.0f, 1.0f)));
+    VK_CHECK(harness.backend.render(drawlist, harness.renderParams()),
+             "render failed");
     const uint8_t * center = pixelAt(harness.readback(), 16, 16);
-    if (!nearColor(center, 255, 0, 0)) {
-      std::cerr << "FAIL: REPLACE did not replace the base color" << std::endl;
-      ++failures;
-    }
-  }
+    VK_CHECK(nearColor(center, 0, 255, 0), "MODULATE produced "
+                                           << describePixel(center));
+  });
 
-  // BLEND with a red texel and green blend color mixes to cyan.
-  {
+  cases.add("MODULATE: red base x green texel = black", [&harness] {
     SoDrawList drawlist;
-    drawlist.addCommand(texturedQuad(opaqueRed, SO_TEXTURE_MODEL_BLEND,
-                                     SbVec4f(1.0f, 1.0f, 1.0f, 1.0f),
-                                     SbVec4f(0.0f, 1.0f, 0.0f, 1.0f)));
-    if (!harness.backend.render(drawlist, params)) {
-      std::cerr << "FAIL: BLEND texture render failed" << std::endl;
-      ++failures;
-    }
+    drawlist.addCommand(makeTexturedQuad(greenTexel, 2, 2,
+                                         SO_TEXTURE_MODEL_MODULATE,
+                                         SbVec4f(1.0f, 0.0f, 0.0f, 1.0f)));
+    VK_CHECK(harness.backend.render(drawlist, harness.renderParams()),
+             "render failed");
     const uint8_t * center = pixelAt(harness.readback(), 16, 16);
-    if (!nearColor(center, 0, 255, 255)) {
-      std::cerr << "FAIL: BLEND did not mix the blend color by texel red"
-                << std::endl;
-      ++failures;
-    }
-  }
+    VK_CHECK(nearColor(center, 0, 0, 0), "MODULATE produced "
+                                         << describePixel(center));
+  });
 
+  cases.add("DECAL: transparent texel preserves the base color", [&harness] {
+    SoDrawList drawlist;
+    drawlist.addCommand(makeTexturedQuad(transparentRed, 1, 1,
+                                         SO_TEXTURE_MODEL_DECAL,
+                                         SbVec4f(1.0f, 1.0f, 1.0f, 1.0f)));
+    VK_CHECK(harness.backend.render(drawlist, harness.renderParams()),
+             "render failed");
+    const uint8_t * center = pixelAt(harness.readback(), 16, 16);
+    VK_CHECK(nearColor(center, 255, 255, 255), "DECAL produced "
+                                               << describePixel(center));
+  });
+
+  cases.add("BLEND: red texel + green blend color = cyan", [&harness] {
+    SoDrawList drawlist;
+    drawlist.addCommand(makeTexturedQuad(opaqueRed, 1, 1, SO_TEXTURE_MODEL_BLEND,
+                                         SbVec4f(1.0f, 1.0f, 1.0f, 1.0f),
+                                         SbVec4f(0.0f, 1.0f, 0.0f, 1.0f)));
+    VK_CHECK(harness.backend.render(drawlist, harness.renderParams()),
+             "render failed");
+    const uint8_t * center = pixelAt(harness.readback(), 16, 16);
+    VK_CHECK(nearColor(center, 0, 255, 255), "BLEND produced "
+                                             << describePixel(center));
+  });
+
+  const int failures = cases.run();
   harness.shutdown();
   SoDB::finish();
   return failures == 0 ? 0 : 1;

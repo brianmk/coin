@@ -30,6 +30,29 @@
 
 using namespace CoinVulkanDetail;
 
+namespace {
+
+// Record the identity of an uploaded texture on the cache entry: the pixel
+// pointer, dimensions/components, sampler state and the sampled content hash.
+// Both upload-completion paths (own-queue and external) stamped the same ten
+// fields by hand.
+void stampTextureContent(VulkanCachedTexture & entry,
+                         const SoTextureData & texture)
+{
+  entry.pixelsKey = texture.pixels;
+  entry.width = texture.width;
+  entry.height = texture.height;
+  entry.numComponents = texture.numComponents;
+  entry.minFilter = texture.minFilter;
+  entry.magFilter = texture.magFilter;
+  entry.wrapS = texture.wrapS;
+  entry.wrapT = texture.wrapT;
+  entry.model = texture.model;
+  entry.contentHash = hashTextureContent(texture);
+}
+
+} // namespace
+
 // --- Texture cache --------------------------------------------------------
 
 void
@@ -441,17 +464,7 @@ SoVulkanRenderBackend::finalizePendingTextureUploads()
     if (upload.index >= this->textureCache.size()) continue;
     VulkanCachedTexture & texEntry = this->textureCache[upload.index];
     if (this->finalizeTexture(texEntry, *upload.texture)) {
-      const SoTextureData & texture = *upload.texture;
-      texEntry.pixelsKey = texture.pixels;
-      texEntry.width = texture.width;
-      texEntry.height = texture.height;
-      texEntry.numComponents = texture.numComponents;
-      texEntry.minFilter = texture.minFilter;
-      texEntry.magFilter = texture.magFilter;
-      texEntry.wrapS = texture.wrapS;
-      texEntry.wrapT = texture.wrapT;
-      texEntry.model = texture.model;
-      texEntry.contentHash = hashTextureContent(texture);
+      stampTextureContent(texEntry, *upload.texture);
     }
     else {
       // The entry's image is referenced by the recorded copies, so the
@@ -501,17 +514,7 @@ SoVulkanRenderBackend::flushPendingTextureUploadsExternal()
     if (upload.index >= this->textureCache.size()) continue;
     VulkanCachedTexture & texEntry = this->textureCache[upload.index];
     if (this->finalizeTexture(texEntry, *upload.texture)) {
-      const SoTextureData & texture = *upload.texture;
-      texEntry.pixelsKey = texture.pixels;
-      texEntry.width = texture.width;
-      texEntry.height = texture.height;
-      texEntry.numComponents = texture.numComponents;
-      texEntry.minFilter = texture.minFilter;
-      texEntry.magFilter = texture.magFilter;
-      texEntry.wrapS = texture.wrapS;
-      texEntry.wrapT = texture.wrapT;
-      texEntry.model = texture.model;
-      texEntry.contentHash = hashTextureContent(texture);
+      stampTextureContent(texEntry, *upload.texture);
     }
     else {
       this->destroyTextureEntry(texEntry);

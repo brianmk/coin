@@ -37,8 +37,9 @@ SoRTXRenderBackend::ensureNormalPoolCapacity(VkDeviceSize bytes)
   // is only referenced by acceleration-structure-phase submissions, which
   // complete before the next pool resize can run (per-frame queue drain),
   // so releasing it here is safe.
-  VkDeviceSize newCapacity = std::max<VkDeviceSize>(64 * 1024, bytes);
-  while (newCapacity < this->normalPoolCapacity + bytes) {
+  VkDeviceSize newCapacity =
+    std::max<VkDeviceSize>(64 * 1024, this->normalPoolCapacity);
+  while (newCapacity < bytes) {
     newCapacity *= 2;
   }
   VkBuffer newBuffer = VK_NULL_HANDLE;
@@ -56,6 +57,16 @@ SoRTXRenderBackend::ensureNormalPoolCapacity(VkDeviceSize bytes)
     return false;
   }
   if (this->normalPoolBuffer != VK_NULL_HANDLE) {
+    // Preserve the records already appended at lower offsets.  Material
+    // records carry those offsets and the pool is grow-only, so the new
+    // buffer must keep the old contents; resetting normalPoolUsed here would
+    // make the next append reuse offset 0, and every material would then read
+    // the last geometry's normals (the cylinder cap picking up the sphere's
+    // radial normals and shading as a per-triangle fan).
+    if (this->normalPoolMapped != nullptr && this->normalPoolUsed > 0) {
+      std::memcpy(newMapped, this->normalPoolMapped,
+                  static_cast<size_t>(this->normalPoolUsed));
+    }
     vkDestroyBuffer(this->device, this->normalPoolBuffer, this->allocator);
     this->normalPoolBuffer = VK_NULL_HANDLE;
     vkFreeMemory(this->device, this->normalPoolMemory, this->allocator);
@@ -66,7 +77,8 @@ SoRTXRenderBackend::ensureNormalPoolCapacity(VkDeviceSize bytes)
   this->normalPoolBuffer = newBuffer;
   this->normalPoolMemory = newMemory;
   this->normalPoolMapped = newMapped;
-  this->normalPoolUsed = 0;
+  // normalPoolUsed is deliberately NOT reset: the copied records keep every
+  // previously recorded offset valid.
   // The pool identity changed: refresh the descriptor sets.
   return this->updateDescriptors();
 }
@@ -83,7 +95,7 @@ SoRTXRenderBackend::appendTriangleNormals(const SoRenderCommand & command,
   if (triangleCount == 0) return 0;
 
   const VkDeviceSize bytes =
-    static_cast<VkDeviceSize>(triangleCount) * 4 * sizeof(float);
+    static_cast<VkDeviceSize>(triangleCount) * 3 * 4 * sizeof(float);
 
   // Reuse the entry's existing pool slot when the triangle count is
   // unchanged; otherwise append (the pool grows over the session).
@@ -103,11 +115,23 @@ SoRTXRenderBackend::appendTriangleNormals(const SoRenderCommand & command,
   }
   entry.normalCount = triangleCount;
 
-  // Object-space per-triangle geometric normals (flat shading).
+  // Three object-space normals per triangle (the triangle's vertex normals),
+  // so the tracer can barycentric-interpolate smooth shading.  The mesh's
+  // per-vertex normals are indexed by the same vertex index and stride as the
+  // positions (matching the raster vertex packing); when a mesh carries no
+  // normals, or a vertex index is out of range, fall back to the geometric
+  // face normal for that vertex.
   float * out = static_cast<float *>(this->normalPoolMapped) +
     static_cast<size_t>(entry.normalPoolOffset) * 4;
   const auto vertex = [&geometry, posStrideFloats](uint32_t i) {
     return geometry.positions + static_cast<size_t>(i) * posStrideFloats;
+  };
+  const auto vertexNormal = [&geometry, posStrideFloats](uint32_t i)
+    -> const float * {
+    if (geometry.normals && i < geometry.normalCount) {
+      return geometry.normals + static_cast<size_t>(i) * posStrideFloats;
+    }
+    return nullptr;
   };
   for (uint32_t t = 0; t < triangleCount; ++t) {
     const uint32_t i0 = indexed ? geometry.indices[static_cast<size_t>(t) * 3 + 0] : t * 3 + 0;
@@ -128,10 +152,18 @@ SoRTXRenderBackend::appendTriangleNormals(const SoRenderCommand & command,
     else {
       nx = 0.0f; ny = 0.0f; nz = 1.0f;
     }
-    out[static_cast<size_t>(t) * 4 + 0] = nx;
-    out[static_cast<size_t>(t) * 4 + 1] = ny;
-    out[static_cast<size_t>(t) * 4 + 2] = nz;
-    out[static_cast<size_t>(t) * 4 + 3] = 0.0f;
+    const uint32_t idx[3] = {i0, i1, i2};
+    for (uint32_t k = 0; k < 3; ++k) {
+      const float * vn = vertexNormal(idx[k]);
+      float * dst = out + (static_cast<size_t>(t) * 3 + k) * 4;
+      if (vn) {
+        dst[0] = vn[0]; dst[1] = vn[1]; dst[2] = vn[2];
+      }
+      else {
+        dst[0] = nx; dst[1] = ny; dst[2] = nz;
+      }
+      dst[3] = 0.0f;
+    }
   }
   return bytes;
 }
@@ -263,7 +295,7 @@ SoRTXRenderBackend::buildNeePool(const SoDrawList & drawlist)
   }
 
   this->neePoolCount = entryCount;
-  if (getenv("FC_VULKAN_RT_DEBUG") && entryCount > 0) {
+  if (SoVulkanShared::envString("FC_VULKAN_RT_DEBUG") && entryCount > 0) {
     const float * e = static_cast<const float *>(this->neePoolMapped);
     fprintf(stderr, "[RTDBG] nee pool triangles=%u bytes=%llu enabled=%d "
                     "mis=%d xformT=(%.2f,%.2f,%.2f)\n",
@@ -470,7 +502,7 @@ SoRTXRenderBackend::compactBlas(RTXCachedGeometry & entry)
       compactSize >= entry.blasSize) {
     entry.compacted = true;  // nothing to save; stop asking
     entry.wantsCompact = false;
-    if (getenv("FC_VULKAN_RT_DEBUG")) {
+    if (SoVulkanShared::envString("FC_VULKAN_RT_DEBUG")) {
       fprintf(stderr, "[RTDBG] compact size=%llu -> %llu saved=0\n",
               static_cast<unsigned long long>(origSize),
               static_cast<unsigned long long>(compactSize));
@@ -557,7 +589,7 @@ SoRTXRenderBackend::compactBlas(RTXCachedGeometry & entry)
   // consumed by recordAccelerationStructures to compute asDirty and is the
   // "instance set changed" signal, which is exactly what this is.)
   this->asTransformChanged = true;
-  if (getenv("FC_VULKAN_RT_DEBUG")) {
+  if (SoVulkanShared::envString("FC_VULKAN_RT_DEBUG")) {
     fprintf(stderr, "[RTDBG] compact size=%llu -> %llu saved=1\n",
             static_cast<unsigned long long>(origSize),
             static_cast<unsigned long long>(compactSize));
@@ -593,7 +625,7 @@ SoRTXRenderBackend::compactPendingBlases()
       this->compactBlas(entry);
     }
   }
-  if (getenv("FC_VULKAN_RT_DEBUG")) {
+  if (SoVulkanShared::envString("FC_VULKAN_RT_DEBUG")) {
     fprintf(stderr, "[RTDBG] compactSweep cache=%zu candidates=%u\n",
             this->geometryCache.size(), candidates);
   }
@@ -633,7 +665,7 @@ SoRTXRenderBackend::updateGeometryCache(const SoDrawList & drawlist)
     const bool indexed = geometry.indexCount > 0 && geometry.indices != nullptr;
 
     const bool traced = (command.pass != SO_RENDERPASS_OVERLAY);
-    if (!traced && getenv("FC_VULKAN_RT_GEO") &&
+    if (!traced && SoVulkanShared::envString("FC_VULKAN_RT_GEO") &&
         geometry.vertexCount == 6 && geometry.indexCount == 0) {
       fprintf(stderr, "[GCR] FR fr=%u OVERLAY vc=6 cmd=%p pos=%p\n", frame,
               static_cast<const void *>(&command),
@@ -655,16 +687,33 @@ SoRTXRenderBackend::updateGeometryCache(const SoDrawList & drawlist)
       // translucent geometry and composites it as thin glass.
       const uint64_t signal = hashGeometrySignal(geometry, vertexStride, indexed);
       const auto found = this->commandToCache.find(&command);
+      bool matched = false;
       if (found != this->commandToCache.end()) {
         RTXCachedGeometry & e = this->geometryCache[found->second];
-        e.cacheGeneration = frame;
-        e.commandKey = &command;
-        if (e.blas != VK_NULL_HANDLE && e.changeSignal != signal) {
-          e.changeSignal = signal;
-          e.contentHash = hashGeometry(geometry, vertexStride, indexed);
+        // The pointer map is only an optimization: the draw-list is a
+        // per-frame arena whose slots are reused, so a slot that held this
+        // traced command last frame can hold an unrelated OVERLAY command
+        // (a highlight/selection overlay) this frame.  Re-key the entry only
+        // when the geometry actually matches; otherwise the stale mapping
+        // would overwrite the traced entry's content hash with the overlay's
+        // and make the next traced frame look like a scene change, restarting
+        // the path-tracing accumulation on every hover.
+        const bool sameGeometry =
+          e.vertexCount == geometry.vertexCount &&
+          e.indexCount == geometry.indexCount &&
+          e.vertexStride == vertexStride &&
+          ((e.idxKey != nullptr) == indexed) &&
+          e.changeSignal == signal;
+        if (sameGeometry) {
+          e.cacheGeneration = frame;
+          e.commandKey = &command;
+          matched = true;
+        }
+        else {
+          this->commandToCache.erase(found);
         }
       }
-      else {
+      if (!matched) {
         for (RTXCachedGeometry & e : this->geometryCache) {
           if (e.blas != VK_NULL_HANDLE && e.changeSignal == signal &&
               e.vertexCount == geometry.vertexCount &&
@@ -685,7 +734,7 @@ SoRTXRenderBackend::updateGeometryCache(const SoDrawList & drawlist)
     // TEMP breadcrumb: per-frame pointer/thread/retained trace for the probe
     // box so we can see whether the geometry pointer is stable across frames
     // and on which thread updateGeometryCache reads it.
-    if (getenv("FC_VULKAN_RT_GEO") &&
+    if (SoVulkanShared::envString("FC_VULKAN_RT_GEO") &&
         geometry.indexCount == 0 &&
         (geometry.vertexCount == 36 || geometry.vertexCount == 6)) {
       const float * tp = geometry.positions;
@@ -785,7 +834,7 @@ SoRTXRenderBackend::updateGeometryCache(const SoDrawList & drawlist)
           ((entry.idxKey != nullptr) == indexed) &&
           entry.indexHash == indexHash;
         this->cacheChanged = true;
-        if (getenv("FC_VULKAN_RT_GEO")) {
+        if (SoVulkanShared::envString("FC_VULKAN_RT_GEO")) {
           const float * p0 = static_cast<const float *>(geometry.positions);
           fprintf(stderr,
                   "[GCR] CONTENT fr=%u tid=%llx cmd=%p pass=%d vc=%u ic=%u "
@@ -875,7 +924,7 @@ SoRTXRenderBackend::updateGeometryCache(const SoDrawList & drawlist)
       }
       else {
         this->cacheChanged = true;
-        if (getenv("FC_VULKAN_RT_GEO")) {
+        if (SoVulkanShared::envString("FC_VULKAN_RT_GEO")) {
           fprintf(stderr,
                   "[GCR] NEW fr=%u tid=%llx cmd=%p pass=%d vc=%u ic=%u "
                   "stride=%u ret=%d pos=%p hash=%016llx\n",
@@ -914,7 +963,7 @@ SoRTXRenderBackend::updateGeometryCache(const SoDrawList & drawlist)
       if (std::memcmp(entryPtr->transformBits, m,
                       sizeof(entryPtr->transformBits)) != 0) {
         this->asTransformChanged = true;
-        if (getenv("FC_VULKAN_RT_GEO")) {
+        if (SoVulkanShared::envString("FC_VULKAN_RT_GEO")) {
           fprintf(stderr, "[GCR] TRANSFORM cmd=%p pass=%d vc=%u\n",
                   static_cast<const void *>(&command),
                   static_cast<int>(command.pass), geometry.vertexCount);
@@ -935,7 +984,7 @@ SoRTXRenderBackend::updateGeometryCache(const SoDrawList & drawlist)
       const uint64_t mh = hashMaterial(command.material);
       if (mh != 0 && mh != entryPtr->materialHash) {
         this->cacheChanged = true;
-        if (getenv("FC_VULKAN_RT_GEO")) {
+        if (SoVulkanShared::envString("FC_VULKAN_RT_GEO")) {
           fprintf(stderr, "[GCR] MATERIAL cmd=%p pass=%d vc=%u old=%016llx new=%016llx\n",
                   static_cast<const void *>(&command),
                   static_cast<int>(command.pass), geometry.vertexCount,
@@ -962,7 +1011,7 @@ SoRTXRenderBackend::updateGeometryCache(const SoDrawList & drawlist)
     }
   }
   if (anyStale) {
-    if (getenv("FC_VULKAN_RT_GEO")) {
+    if (SoVulkanShared::envString("FC_VULKAN_RT_GEO")) {
       size_t nstale = 0;
       for (size_t i = 0; i < this->geometryCache.size(); ++i) {
         if (this->geometryCache[i].cacheGeneration != frame) {
@@ -1075,7 +1124,7 @@ SoRTXRenderBackend::buildBlas(RTXCachedGeometry & entry,
   const bool indexed = entry.indexCount > 0 && entry.idxKey != nullptr;
   const uint32_t posStrideFloats = entry.vertexStride / sizeof(float);
 
-  if (getenv("FC_VULKAN_RT_DEBUG")) {
+  if (SoVulkanShared::envString("FC_VULKAN_RT_DEBUG")) {
     static uint32_t blasSeq = 0;
     fprintf(stderr,
             "[RTDBG] buildBlas #%u verts=%u idx=%u stride=%u indexed=%d "
@@ -1095,7 +1144,7 @@ SoRTXRenderBackend::buildBlas(RTXCachedGeometry & entry,
   // range: halves AS memory and traversal cost on static geometry.  The 32-bit
   // path is the default and is used whenever the gate is off or coords would
   // overflow half precision.
-  const bool packEnabled = getenv("FC_VULKAN_AS_PACK") != nullptr;
+  const bool packEnabled = SoVulkanShared::envString("FC_VULKAN_AS_PACK") != nullptr;
   std::vector<float> positions(static_cast<size_t>(entry.vertexCount) * 3);
   float pMin[3] = {1e30f, 1e30f, 1e30f};
   float pMax[3] = {-1e30f, -1e30f, -1e30f};
@@ -1138,7 +1187,7 @@ SoRTXRenderBackend::buildBlas(RTXCachedGeometry & entry,
   else {
     vertexSrc = positions.data();
   }
-  if (getenv("FC_VULKAN_RT_DEBUG")) {
+  if (SoVulkanShared::envString("FC_VULKAN_RT_DEBUG")) {
     fprintf(stderr, "[RTDBG] blasFmt build=1 packed=%d stride=%u fmt=0x%x\n",
             useHalf ? 1 : 0, entry.blasVertexStride,
             static_cast<unsigned>(entry.blasVertexFormat));
@@ -1277,7 +1326,7 @@ SoRTXRenderBackend::buildBlas(RTXCachedGeometry & entry,
   // ALONE (the NVIDIA "max compaction" recipe); a compacted BLAS loses its
   // ALLOW_UPDATE refit capability, and recordAccelerationStructures already
   // rebuilds (instead of refits) any compacted entry that needs a position fix.
-  const bool compactGate = getenv("FC_VULKAN_AS_COMPACT") != nullptr;
+  const bool compactGate = SoVulkanShared::envString("FC_VULKAN_AS_COMPACT") != nullptr;
   if (compactGate) {
     buildInfo.flags = VK_BUILD_ACCELERATION_STRUCTURE_ALLOW_COMPACTION_BIT_KHR;
     entry.wantsCompact = true;
@@ -1358,7 +1407,7 @@ SoRTXRenderBackend::refitBlas(RTXCachedGeometry & entry,
   const SoGeometryDesc & geometry = command.geometry;
   const uint32_t posStrideFloats = entry.vertexStride / sizeof(float);
 
-  if (getenv("FC_VULKAN_RT_DEBUG")) {
+  if (SoVulkanShared::envString("FC_VULKAN_RT_DEBUG")) {
     fprintf(stderr,
             "[RTDBG] refitBlas verts=%u idx=%u stride=%u pos=%p\n",
             entry.vertexCount, entry.indexCount, entry.vertexStride,
@@ -1579,9 +1628,9 @@ SoRTXRenderBackend::buildTlas(const SoDrawList & drawlist,
   // The instance set changing is tracked so the refit/UPDATE path is never
   // reused across a differing set (a MODE_UPDATE TLAS keeps stale instances).
   this->statTlasCulled = 0;
-  const bool cullEnabled = getenv("FC_VULKAN_TLAS_CULL") != nullptr;
+  const bool cullEnabled = SoVulkanShared::envString("FC_VULKAN_TLAS_CULL") != nullptr;
   float cullPixels = 1.0f;
-  if (const char * s = getenv("FC_VULKAN_TLAS_PIX")) {
+  if (const char * s = SoVulkanShared::envString("FC_VULKAN_TLAS_PIX")) {
     cullPixels = static_cast<float>(std::atof(s));
   }
   if (cullPixels <= 0.0f) cullPixels = 1.0f;
@@ -1694,7 +1743,7 @@ SoRTXRenderBackend::buildTlas(const SoDrawList & drawlist,
   }
   this->instanceCount = static_cast<uint32_t>(instances.size());
 
-  if (getenv("FC_VULKAN_RT_DEBUG")) {
+  if (SoVulkanShared::envString("FC_VULKAN_RT_DEBUG")) {
     if (!this->lastTlasDebugLogged || this->lastTlasTotal != instances.size() ||
         this->lastTlasCulled != this->statTlasCulled) {
       fprintf(stderr,
@@ -1858,11 +1907,9 @@ SoRTXRenderBackend::buildTlas(const SoDrawList & drawlist,
 // --- Material buffer ------------------------------------------------------
 
 void
-SoRTXRenderBackend::setSceneLights(const std::vector<SoLightData> & lights,
-                                   const SbVec3f & ambient)
+SoRTXRenderBackend::setSceneLights(const SoLightingData & lighting)
 {
-  this->sceneLights = lights;
-  this->sceneAmbient = ambient;
+  this->sceneLighting = lighting;
 }
 
 void
@@ -1915,10 +1962,10 @@ SoRTXRenderBackend::updateMaterials(const SoDrawList & drawlist)
   // every command on every frame.
   this->rtPbrEnabled = COIN_VULKAN_ENV_FLAG("FC_VULKAN_RT_PBR");
   {
-    const char * neeEnv = getenv("FC_VULKAN_PT_NEE");
+    const char * neeEnv = SoVulkanShared::envString("FC_VULKAN_PT_NEE");
     this->rtNeeEnabled =
       (neeEnv == nullptr) ? true : COIN_VULKAN_ENV_FLAG("FC_VULKAN_PT_NEE");
-    const char * misEnv = getenv("FC_VULKAN_PT_MIS");
+    const char * misEnv = SoVulkanShared::envString("FC_VULKAN_PT_MIS");
     this->rtMisEnabled =
       (misEnv == nullptr) ? true : COIN_VULKAN_ENV_FLAG("FC_VULKAN_PT_MIS");
   }
@@ -1926,11 +1973,11 @@ SoRTXRenderBackend::updateMaterials(const SoDrawList & drawlist)
   this->rtRoughOverride = false;
   this->rtMetalValue = 0.0f;
   this->rtRoughValue = 0.0f;
-  if (const char * metalEnv = getenv("FC_VULKAN_RT_METAL")) {
+  if (const char * metalEnv = SoVulkanShared::envString("FC_VULKAN_RT_METAL")) {
     this->rtMetalOverride = true;
     this->rtMetalValue = strtof(metalEnv, nullptr);
   }
-  if (const char * roughEnv = getenv("FC_VULKAN_RT_ROUGH")) {
+  if (const char * roughEnv = SoVulkanShared::envString("FC_VULKAN_RT_ROUGH")) {
     this->rtRoughOverride = true;
     this->rtRoughValue = strtof(roughEnv, nullptr);
   }
@@ -1993,33 +2040,28 @@ SoRTXRenderBackend::updateMaterials(const SoDrawList & drawlist)
     static const SoLightingData emptyLighting;
     if (!lighting) lighting = &emptyLighting;
 
+    // The host-pushed authoritative set (the viewer headlight + document
+    // lights) when present, else the per-command IR capture.  The IR capture
+    // can drop to zero lights on the retained/replayed path tracer
+    // (SoLightElement::getLights goes empty after the first frames), which
+    // renders surfaces at ambient-only (near-black).  Both sources carry
+    // world-space light geometry (the standard IR convention), which the RT
+    // shaders consume directly.
+    const SoLightingData & effective =
+      this->sceneLighting.lights.empty() ? *lighting : this->sceneLighting;
+
     // Fold the scene ambient into the material ambient (matches the raster
     // shader: litColor += ambientLight * materialAmbient).
-    // When the GL host pushed an authoritative light set (setSceneLights),
-    // use its ambient; otherwise use the per-command IR lighting ambient.
-    const SbVec3f & sceneAmbient = this->sceneLights.empty()
-      ? lighting->ambient : this->sceneAmbient;
+    const SbVec3f & sceneAmbient = effective.ambient;
     out.ambient[0] = sceneAmbient[0] * material.ambient[0];
     out.ambient[1] = sceneAmbient[1] * material.ambient[1];
     out.ambient[2] = sceneAmbient[2] * material.ambient[2];
     out.ambient[3] = 1.0f;
 
-    // Light list: the host-pushed authoritative set (the viewer headlight +
-    // document lights) when present, else the per-command IR capture.  The
-    // IR capture can drop to zero lights on the retained/replayed path
-    // tracer (SoLightElement::getLights goes empty after the first frames),
-    // which renders surfaces at ambient-only (near-black).  Both sources
-    // carry world-space light geometry (the standard IR convention), which
-    // the RT shaders consume directly.
-    const std::vector<SoLightData> * lightSource = &lighting->lights;
-    if (!this->sceneLights.empty()) {
-      lightSource = &this->sceneLights;
-    }
-    const int lightCount = std::min<int>(
-      static_cast<int>(lightSource->size()), MAX_SHADER_LIGHTS);
+    const int lightCount = effective.lightCount();
     out.params[2] = static_cast<float>(lightCount);
     for (int l = 0; l < lightCount; ++l) {
-      const SoLightData & light = (*lightSource)[static_cast<size_t>(l)];
+      const SoLightData & light = effective.lights[static_cast<size_t>(l)];
       float * type = out.lightType + l * 4;
       type[0] = static_cast<float>(light.type);
       type[1] = type[2] = 0.0f;

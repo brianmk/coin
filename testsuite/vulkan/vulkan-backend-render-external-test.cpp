@@ -129,12 +129,14 @@ main()
 
   // renderExternal must be rejected without a command buffer or render pass.
   {
-    if (harness.backend.renderExternal(drawlist, params, VK_NULL_HANDLE, pass)) {
+    if (harness.backend.renderExternal(drawlist, params, VK_NULL_HANDLE, pass,
+                                       framebuffer)) {
       std::cerr << "FAIL: renderExternal accepted a null command buffer"
                 << std::endl;
       ++failures;
     }
-    if (harness.backend.renderExternal(drawlist, params, nullptr, VK_NULL_HANDLE)) {
+    if (harness.backend.renderExternal(drawlist, params, VK_NULL_HANDLE,
+                                       VK_NULL_HANDLE, framebuffer)) {
       std::cerr << "FAIL: renderExternal accepted a null render pass"
                 << std::endl;
       ++failures;
@@ -166,7 +168,8 @@ main()
     vkCmdBeginRenderPass(buffer, &rpbi, VK_SUBPASS_CONTENTS_INLINE);
 
     const bool recorded = harness.backend.renderExternal(drawlist, params,
-                                                         buffer, pass);
+                                                          buffer, pass,
+                                                          framebuffer);
 
     vkCmdEndRenderPass(buffer);
     vkEndCommandBuffer(buffer);

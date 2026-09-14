@@ -86,13 +86,25 @@ SoRTXRenderBackend::updatePathTracingState(const SoDrawList & /*drawlist*/,
     curBgBottom[1] = this->envSkyBottom[1];
     curBgBottom[2] = this->envSkyBottom[2];
   }
-  else {
+  else if (params.backgroundGradient) {
     curBgTop[0] = params.backgroundTopColor[0];
     curBgTop[1] = params.backgroundTopColor[1];
     curBgTop[2] = params.backgroundTopColor[2];
     curBgBottom[0] = params.backgroundBottomColor[0];
     curBgBottom[1] = params.backgroundBottomColor[1];
     curBgBottom[2] = params.backgroundBottomColor[2];
+  }
+  else {
+    // Flat background: mirror the raster backend, which clears to
+    // params.clearColor when no gradient is active.  The sky must use that
+    // solid colour rather than the (black) gradient endpoints, or path tracing
+    // renders a black background where raster shows the configured colour.
+    curBgTop[0] = params.clearColor[0];
+    curBgTop[1] = params.clearColor[1];
+    curBgTop[2] = params.clearColor[2];
+    curBgBottom[0] = params.clearColor[0];
+    curBgBottom[1] = params.clearColor[1];
+    curBgBottom[2] = params.clearColor[2];
   }
   curBgTop[3] = 1.0f;
   curBgBottom[3] = 1.0f;
@@ -295,7 +307,7 @@ SoRTXRenderBackend::updatePathTracingState(const SoDrawList & /*drawlist*/,
   }
   // else: converged idle -- nothing to do until the camera or scene moves.
 
-  if (getenv("FC_VULKAN_RT_DEBUG") && this->ptEnabled) {
+  if (SoVulkanShared::envString("FC_VULKAN_RT_DEBUG") && this->ptEnabled) {
     fprintf(stderr,
             "[RTDBG] ptState frame=%u viewChanged=%d sceneChanged=%d "
             "bgChanged=%d latch=%d accum=%d frameIndex=%u idle=%u "
@@ -307,7 +319,7 @@ SoRTXRenderBackend::updatePathTracingState(const SoDrawList & /*drawlist*/,
             this->ptIdleFrames, this->ptReprojectFrame ? 1 : 0);
   }
 
-  if (getenv("FC_VULKAN_PT_DEBUG")) {
+  if (SoVulkanShared::envString("FC_VULKAN_PT_DEBUG")) {
     static uint32_t debugFrame = 0;
     if ((debugFrame++ % 30) == 0 || viewChanged || sceneChanged) {
       float maxViewDelta = 0.0f;
@@ -443,7 +455,7 @@ SoRTXRenderBackend::updateAdaptiveStats()
   this->ptLastActiveFraction =
     (this->ptEnabled && this->ptAccumulating && total > 0)
       ? static_cast<float>(active) / static_cast<float>(total) : 1.0f;
-  if (getenv("FC_VULKAN_RT_DEBUG") && this->ptEnabled) {
+  if (SoVulkanShared::envString("FC_VULKAN_RT_DEBUG") && this->ptEnabled) {
     fprintf(stderr,
             "[RTDBG] adaptive frame=%u active=%u/%llu fraction=%.4f "
             "frameIndex=%u accum=%d self=%p buf=%ux%u reprojected=%u "
@@ -576,7 +588,7 @@ SoRTXRenderBackend::recordAccelerationStructures(
       ++this->statBlasReused;
     }
   }
-  if (getenv("FC_VULKAN_RT_DEBUG")) {
+  if (SoVulkanShared::envString("FC_VULKAN_RT_DEBUG")) {
       fprintf(stderr,
               "[RTDBG] blas frame=%u built=%u refit=%u reused=%u cache=%zu\n",
               params.frame, this->statBlasBuilt, this->statBlasRefit,
@@ -708,13 +720,24 @@ SoRTXRenderBackend::recordAccelerationStructures(
       frame.bgBottom[1] = this->envSkyBottom[1];
       frame.bgBottom[2] = this->envSkyBottom[2];
     }
-    else {
+    else if (params.backgroundGradient) {
       frame.bgTop[0] = params.backgroundTopColor[0];
       frame.bgTop[1] = params.backgroundTopColor[1];
       frame.bgTop[2] = params.backgroundTopColor[2];
       frame.bgBottom[0] = params.backgroundBottomColor[0];
       frame.bgBottom[1] = params.backgroundBottomColor[1];
       frame.bgBottom[2] = params.backgroundBottomColor[2];
+    }
+    else {
+      // Flat background (see updatePathTracingState): use the solid clear
+      // colour, matching the raster backend instead of the black gradient
+      // endpoints.
+      frame.bgTop[0] = params.clearColor[0];
+      frame.bgTop[1] = params.clearColor[1];
+      frame.bgTop[2] = params.clearColor[2];
+      frame.bgBottom[0] = params.clearColor[0];
+      frame.bgBottom[1] = params.clearColor[1];
+      frame.bgBottom[2] = params.clearColor[2];
     }
     frame.bgTop[3] = 1.0f;
     frame.bgBottom[3] = 1.0f;
@@ -826,7 +849,7 @@ SoRTXRenderBackend::recordAccelerationStructures(
       std::memcpy(pf + 16, &pValue[0][0], sizeof(float) * 16);
     }
 
-    if (getenv("FC_VULKAN_RT_DEBUG")) {
+    if (SoVulkanShared::envString("FC_VULKAN_RT_DEBUG")) {
       static uint32_t debugFrame = 0;
       if ((debugFrame++ % 120) == 0) {
         fprintf(stderr,
@@ -1027,7 +1050,7 @@ SoRTXRenderBackend::recordTraceAndPresent(const SoRenderParams & params,
     this->denoiseEffectiveScale,
     0.0f,
     0.0f};
-  if (getenv("FC_VULKAN_PT_DENOISE_TIMING")) {
+  if (SoVulkanShared::envString("FC_VULKAN_PT_DENOISE_TIMING")) {
     fprintf(stderr,
             "[DENOISE-STATE] ord=%u frame=%u accum=%d pend=%d ready=%d "
             "denoise=%d kind=%d\n",

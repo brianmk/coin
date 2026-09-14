@@ -14,6 +14,11 @@
 #define COIN_BUILD_VULKAN_RENDERER 0
 #endif
 
+// Public view-mode enum and settings blob; always available (no Vulkan
+// dependency).
+#include <Inventor/rendering/SoVulkanViewMode.h>
+#include <Inventor/rendering/SoVulkanViewSettings.h>
+
 #if COIN_BUILD_VULKAN_RENDERER
 
 #include <Inventor/SbColor4f.h>
@@ -156,6 +161,19 @@ public:
   SbBool getPointsOverlay(void) const;
   const SbColor4f & getEdgeColor(void) const;
 
+  /*!
+    \brief Apply the whole Vulkan viewport display/tuning settings blob.
+
+    The manager diffs against the last applied blob and re-applies only when it
+    changed, so a caller may push it every frame.  Structural state (scene,
+    camera, viewport region, render target) and the stateful path-tracing
+    enable/start latch remain separate calls.  Call invalidateViewSettings()
+    after an RTX engine is (re)built so the tuning reaches the fresh engine.
+  */
+  void setViewSettings(const SoVulkanViewSettings & settings);
+  //! Force the next setViewSettings() to re-apply even if unchanged.
+  void invalidateViewSettings(void);
+
   void setClearEnabled(SbBool clearwindow, SbBool clearzbuffer);
   void getClearEnabled(SbBool & clearwindow, SbBool & clearzbuffer) const;
 
@@ -276,14 +294,15 @@ public:
   /*!
     \brief Select the ray-traced view mode.
 
-    \a mode is one of the RtxViewMode values in SoRTXRenderBackend:
-      0 = off/raster (interactive), 1 = single-sample ambient-occlusion
-    preview, 2 = accumulating path tracer.  Only meaningful while the
-    ray-tracing backend is active (see setPathTracingEnabled()).
+    \a mode is a SoVulkanViewMode (shared with the embedding application):
+    RtxModeOff (raster), RtxModeAmbientOcclusion (single-sample preview),
+    RtxModePathTrace (accumulating), RtxModeEnvironment (IBL preview).  Only
+    meaningful while the ray-tracing backend is active (see
+    setPathTracingEnabled()).
   */
-  void setViewMode(int mode);
-  //! Current ray-traced view mode (RtxViewMode value, 0=off.
-  int getViewMode(void) const;
+  void setViewMode(SoVulkanViewMode mode);
+  //! Current ray-traced view mode (see setViewMode()).
+  SoVulkanViewMode getViewMode(void) const;
   /*!
     \brief Select the "cubemap" environment preset for the environment-lit
     view (and the path-tracer background).
@@ -298,18 +317,17 @@ public:
   //! Number of available environment/cubemap presets.
   static int getEnvMapCount(void);
   /*!
-    \brief Provide the authoritative scene lighting (GL host -> RT backend).
+    \brief Provide the authoritative scene lighting (GL host -> both backends).
 
-    \a lights is the effective eye-space light set (the viewer headlight plus
-    any document SoLight nodes) and \a ambient the intensity-scaled scene
-    ambient.  Fired through to the RT backend so the path tracer uses the
-    host's lights instead of the IR draw-list lighting capture, which can
-    drop to zero lights on the retained/replayed frame and render surfaces
-    at ambient-only (near-black).  Passing an empty \a lights restores the
+    \a lighting is the camera-anchored world-space viewer light set (headlight,
+    backlight and fill light) plus the intensity-scaled scene ambient.  Fired
+    through to the raster executor and the RT backend so both use the host's
+    lights instead of the IR draw-list lighting capture (which can drop to zero
+    lights on the retained/replayed frame, rendering surfaces at
+    ambient-only/near-black).  Passing an empty light list restores the
     per-command IR lighting.
   */
-  void setSceneLights(const std::vector<SoLightData> & lights,
-                      const SbVec3f & ambient);
+  void setSceneLights(const SoLightingData & lighting);
   //! Human-readable name of an environment preset index.
   static const char * getEnvMapName(int index);
   /*!

@@ -35,14 +35,12 @@ namespace {
 
 long vkGeometryBreadcrumbNowUs()
 {
-  return (long)std::chrono::duration_cast<std::chrono::microseconds>(
-    std::chrono::steady_clock::now().time_since_epoch()).count();
+  return SoVulkanShared::steadyNowUs();
 }
 
 bool vkGeometryBreadcrumbEnabled()
 {
-  static const bool enabled = std::getenv("FC_GUI_OPEN_BREADCRUMB") != nullptr;
-  return enabled;
+  return SoVulkanShared::breadcrumbsEnabled();
 }
 
 VkDeviceSize alignGeometryUpload(VkDeviceSize bytes)
@@ -84,6 +82,46 @@ static inline uint16_t floatToHalf(float value)
   // Normalized value.  Round to nearest even on the 13 dropped mantissa bits.
   return static_cast<uint16_t>(sign | (halfExp << 10) |
                                ((mant + 0x1000u) >> 13));
+}
+
+// True when updateGeometryCache() should visit a command.  On an overlay-only
+// render only SO_RENDERPASS_OVERLAY commands and the non-triangle residual
+// geometry the RT backend did not trace are in scope; a full render visits
+// every command with usable geometry.  Both cache passes shared this filter.
+bool shouldProcessGeometry(const SoRenderCommand & command,
+                           const bool overlaysOnly)
+{
+  const bool isResidual =
+    command.geometry.topology != SO_TOPOLOGY_TRIANGLES &&
+    command.pass != SO_RENDERPASS_OVERLAY;
+  if (overlaysOnly && command.pass != SO_RENDERPASS_OVERLAY && !isResidual) {
+    return false;
+  }
+  const SoGeometryDesc & geometry = command.geometry;
+  return geometry.positions && geometry.vertexCount != 0 &&
+    geometry.vertexCount <= MAX_VERTEX_COUNT;
+}
+
+// Record the identity of an uploaded geometry stream on the cache entry: the
+// producer-owned pointers, counts/strides, and the sampled content hash.  The
+// two upload paths (per-command and shared-arena) stamped the same eleven
+// fields by hand.
+void stampGeometryKeys(VulkanCachedCommand & entry,
+                       const SoGeometryDesc & geometry,
+                       const uint32_t vertexCount,
+                       const uint32_t vertexStride)
+{
+  entry.posKey = geometry.positions;
+  entry.normalKey = geometry.normals;
+  entry.colorKey = geometry.colors;
+  entry.texcoordKey = geometry.texcoords;
+  entry.idxKey = geometry.indices;
+  entry.vertexCount = vertexCount;
+  entry.indexCount = geometry.indexCount;
+  entry.vertexStride = vertexStride;
+  entry.texcoordStride = geometry.texcoordStride;
+  entry.normalCount = geometry.normalCount;
+  entry.contentHash = hashGeometryContent(geometry);
 }
 
 void packInterleavedVertices(const SoGeometryDesc & geometry, uint8_t * vertices)
@@ -155,6 +193,20 @@ SoVulkanRenderBackend::getOrCreateCache(const SoRenderCommand * command)
   this->gpuCache.back().commandKey = command;
   this->commandToCache[command] = index;
   return this->gpuCache.back();
+}
+
+const VulkanCachedCommand *
+SoVulkanRenderBackend::findCachedDrawable(
+  const SoRenderCommand & command) const
+{
+  if (!command.geometry.positions || command.geometry.vertexCount == 0) {
+    return nullptr;
+  }
+  const auto found = this->commandToCache.find(&command);
+  if (found == this->commandToCache.end()) return nullptr;
+  const VulkanCachedCommand & entry = this->gpuCache[found->second];
+  if (entry.vertexBuffer == VK_NULL_HANDLE) return nullptr;
+  return &entry;
 }
 
 bool
@@ -240,6 +292,48 @@ SoVulkanRenderBackend::createBuffer(VkDeviceSize size,
 }
 
 bool
+SoVulkanRenderBackend::createMappedBuffer(VkDeviceSize size,
+                                          VkBufferUsageFlags usage,
+                                          VkBuffer & buffer,
+                                          VkDeviceMemory & memory,
+                                          void ** mapped)
+{
+  buffer = VK_NULL_HANDLE;
+  memory = VK_NULL_HANDLE;
+  if (mapped) *mapped = nullptr;
+  if (!this->createBuffer(size, usage, buffer, memory, nullptr)) {
+    return false;
+  }
+  void * host = nullptr;
+  if (vkMapMemory(this->device, memory, 0, size, 0, &host) != VK_SUCCESS) {
+    vkDestroyBuffer(this->device, buffer, this->allocator);
+    vkFreeMemory(this->device, memory, this->allocator);
+    buffer = VK_NULL_HANDLE;
+    memory = VK_NULL_HANDLE;
+    return false;
+  }
+  if (mapped) *mapped = host;
+  return true;
+}
+
+void
+SoVulkanRenderBackend::deferDestroyBufferMemory(VkBuffer buffer,
+                                                VkDeviceMemory memory)
+{
+  if (buffer == VK_NULL_HANDLE && memory == VK_NULL_HANDLE) return;
+  const VkDevice device = this->device;
+  const VkAllocationCallbacks * allocator = this->allocator;
+  this->deferDestroy([device, allocator, buffer, memory]() {
+    if (buffer != VK_NULL_HANDLE) {
+      vkDestroyBuffer(device, buffer, allocator);
+    }
+    if (memory != VK_NULL_HANDLE) {
+      vkFreeMemory(device, memory, allocator);
+    }
+  });
+}
+
+bool
 SoVulkanRenderBackend::createBufferDeviceLocal(VkDeviceSize size,
                                                VkBufferUsageFlags usage,
                                                VkBuffer & buffer,
@@ -281,62 +375,26 @@ SoVulkanRenderBackend::createBufferDeviceLocal(VkDeviceSize size,
   }
 
   // One-shot transfer command buffer.  The per-frame buffers are not yet begun
-  // at this point (updateGeometryCache runs before beginCommandBuffer), so we
-  // allocate a transient buffer from the shared pool and fence-wait it.
-  VkCommandBufferAllocateInfo allocInfo {};
-  allocInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
-  allocInfo.commandPool = this->commandPool;
-  allocInfo.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
-  allocInfo.commandBufferCount = 1;
-  VkCommandBuffer transfer = VK_NULL_HANDLE;
-  bool ok = vkAllocateCommandBuffers(this->device, &allocInfo, &transfer) ==
-    VK_SUCCESS;
+  // at this point (updateGeometryCache runs before beginCommandBuffer), so the
+  // shared one-shot helper allocates a transient buffer from the command pool,
+  // records the copy + barrier, submits, and drains the queue before returning.
+  const bool ok = SoVulkanShared::withOneShotSubmit(
+    this->device, this->queue, this->commandPool, this->allocator,
+    [this, staging, buffer, size](VkCommandBuffer transfer) {
+      VkBufferCopy copy {};
+      copy.size = size;
+      vkCmdCopyBuffer(transfer, staging, buffer, 1, &copy);
+      // Make the device-local writes visible to a later vertex-input read.
+      // The submit is drained before returning, but completion alone does not
+      // establish a memory dependency for the buffer read as vertex/index
+      // attributes in a later submit, so transition TRANSFER_WRITE ->
+      // VERTEX_ATTRIBUTE/INDEX read explicitly.
+      SoVulkanShared::bufferTransition(
+        transfer, buffer, 0, size, VK_ACCESS_TRANSFER_WRITE_BIT,
+        VK_ACCESS_VERTEX_ATTRIBUTE_READ_BIT | VK_ACCESS_INDEX_READ_BIT,
+        VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_VERTEX_INPUT_BIT);
+    });
 
-  if (ok) {
-    VkCommandBufferBeginInfo bi {};
-    bi.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
-    bi.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
-    ok = vkBeginCommandBuffer(transfer, &bi) == VK_SUCCESS;
-  }
-  if (ok) {
-    VkBufferCopy copy {};
-    copy.size = size;
-    vkCmdCopyBuffer(transfer, staging, buffer, 1, &copy);
-    // Make the device-local writes visible to a later vertex-input read.  The
-    // transfer is fenced so the copy has executed, but fence completion alone
-    // does not establish a memory dependency for the buffer being read as
-    // vertex/index attributes in a subsequent submit.  This barrier transitions
-    // it from TRANSFER_WRITE to VERTEX_ATTRIBUTE/INDEX read.
-    SoVulkanShared::bufferTransition(
-      transfer, buffer, 0, size, VK_ACCESS_TRANSFER_WRITE_BIT,
-      VK_ACCESS_VERTEX_ATTRIBUTE_READ_BIT | VK_ACCESS_INDEX_READ_BIT,
-      VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_VERTEX_INPUT_BIT);
-    ok = vkEndCommandBuffer(transfer) == VK_SUCCESS;
-  }
-
-  VkFence fence = VK_NULL_HANDLE;
-  if (ok) {
-    VkFenceCreateInfo fci {};
-    fci.sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO;
-    ok = vkCreateFence(this->device, &fci, this->allocator, &fence) == VK_SUCCESS;
-  }
-  if (ok) {
-    VkSubmitInfo submit {};
-    submit.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
-    submit.commandBufferCount = 1;
-    submit.pCommandBuffers = &transfer;
-    ok = vkQueueSubmit(this->queue, 1, &submit, fence) == VK_SUCCESS;
-  }
-  if (ok) {
-    ok = vkWaitForFences(this->device, 1, &fence, VK_TRUE, UINT64_MAX) ==
-      VK_SUCCESS;
-  }
-  if (fence != VK_NULL_HANDLE) {
-    vkDestroyFence(this->device, fence, this->allocator);
-  }
-  if (transfer != VK_NULL_HANDLE) {
-    vkFreeCommandBuffers(this->device, this->commandPool, 1, &transfer);
-  }
   vkDestroyBuffer(this->device, staging, this->allocator);
   vkFreeMemory(this->device, stagingMemory, this->allocator);
 
@@ -427,17 +485,7 @@ SoVulkanRenderBackend::uploadGeometry(VulkanCachedCommand & entry,
     }
   }
 
-  entry.posKey = geometry.positions;
-  entry.normalKey = geometry.normals;
-  entry.colorKey = geometry.colors;
-  entry.texcoordKey = geometry.texcoords;
-  entry.idxKey = geometry.indices;
-  entry.vertexCount = vertexCount;
-  entry.indexCount = geometry.indexCount;
-  entry.vertexStride = posStride;
-  entry.texcoordStride = geometry.texcoordStride;
-  entry.normalCount = geometry.normalCount;
-  entry.contentHash = hashGeometryContent(geometry);
+  stampGeometryKeys(entry, geometry, vertexCount, posStride);
   entry.vertexOffset = 0;
   entry.indexOffset = 0;
   entry.sharedBlockId = 0;
@@ -495,17 +543,7 @@ SoVulkanRenderBackend::uploadGeometryShared(VulkanCachedCommand & entry,
   entry.sharedBlockId = blockId;
   ++block.refCount;
 
-  entry.posKey = geometry.positions;
-  entry.normalKey = geometry.normals;
-  entry.colorKey = geometry.colors;
-  entry.texcoordKey = geometry.texcoords;
-  entry.idxKey = geometry.indices;
-  entry.vertexCount = vertexCount;
-  entry.indexCount = geometry.indexCount;
-  entry.vertexStride = posStride;
-  entry.texcoordStride = geometry.texcoordStride;
-  entry.normalCount = geometry.normalCount;
-  entry.contentHash = hashGeometryContent(geometry);
+  stampGeometryKeys(entry, geometry, vertexCount, posStride);
   return true;
 }
 
@@ -533,13 +571,8 @@ SoVulkanRenderBackend::destroyCacheEntry(VulkanCachedCommand & entry)
       entry.vertexMemory = VK_NULL_HANDLE;
     }
   }
-  for (const VulkanCachedCommand::VulkanWideLineBuffer & slot : entry.wideLineBuffers) {
-    if (slot.buffer) {
-      vkDestroyBuffer(this->device, slot.buffer, this->allocator);
-    }
-    if (slot.memory) {
-      vkFreeMemory(this->device, slot.memory, this->allocator);
-    }
+  for (VulkanCachedCommand::VulkanWideLineBuffer & slot : entry.wideLineBuffers) {
+    slot.destroy(this->device, this->allocator);
   }
   entry.wideLineBuffers.clear();
   entry = VulkanCachedCommand();
@@ -640,6 +673,26 @@ SoVulkanRenderBackend::allocateGeometryArena(uint32_t blockId, VkDeviceSize size
 }
 
 void
+SoVulkanRenderBackend::releaseGeometryBlockResources(VulkanGeometryBlock & block)
+{
+  if (block.mapped != nullptr) {
+    vkUnmapMemory(this->device, block.memory);
+    block.mapped = nullptr;
+  }
+  if (block.buffer != VK_NULL_HANDLE) {
+    vkDestroyBuffer(this->device, block.buffer, this->allocator);
+    block.buffer = VK_NULL_HANDLE;
+  }
+  if (block.memory != VK_NULL_HANDLE) {
+    vkFreeMemory(this->device, block.memory, this->allocator);
+    block.memory = VK_NULL_HANDLE;
+  }
+  block.capacity = 0;
+  block.used = 0;
+  block.refCount = 0;
+}
+
+void
 SoVulkanRenderBackend::releaseGeometryBlock(uint32_t blockId)
 {
   if (blockId == 0 || blockId > this->geometryBlocks.size()) {
@@ -655,20 +708,7 @@ SoVulkanRenderBackend::releaseGeometryBlock(uint32_t blockId)
   if (block.refCount > 0) {
     return;
   }
-  if (block.mapped != nullptr) {
-    vkUnmapMemory(this->device, block.memory);
-    block.mapped = nullptr;
-  }
-  if (block.buffer != VK_NULL_HANDLE) {
-    vkDestroyBuffer(this->device, block.buffer, this->allocator);
-    block.buffer = VK_NULL_HANDLE;
-  }
-  if (block.memory != VK_NULL_HANDLE) {
-    vkFreeMemory(this->device, block.memory, this->allocator);
-    block.memory = VK_NULL_HANDLE;
-  }
-  block.capacity = 0;
-  block.used = 0;
+  this->releaseGeometryBlockResources(block);
   this->freeGeometryBlockIds.push_back(blockId);
 }
 
@@ -687,21 +727,7 @@ void
 SoVulkanRenderBackend::destroyAllGeometryBlocks()
 {
   for (VulkanGeometryBlock & block : this->geometryBlocks) {
-    if (block.mapped != nullptr) {
-      vkUnmapMemory(this->device, block.memory);
-      block.mapped = nullptr;
-    }
-    if (block.buffer != VK_NULL_HANDLE) {
-      vkDestroyBuffer(this->device, block.buffer, this->allocator);
-      block.buffer = VK_NULL_HANDLE;
-    }
-    if (block.memory != VK_NULL_HANDLE) {
-      vkFreeMemory(this->device, block.memory, this->allocator);
-      block.memory = VK_NULL_HANDLE;
-    }
-    block.capacity = 0;
-    block.used = 0;
-    block.refCount = 0;
+    this->releaseGeometryBlockResources(block);
   }
   this->geometryBlocks.clear();
   this->freeGeometryBlockIds.clear();
@@ -742,18 +768,10 @@ SoVulkanRenderBackend::updateGeometryCache(const SoDrawList & drawlist,
   VkDeviceSize retainedUploadBytes = 0;
   for (int i = 0; i < drawlist.getNumCommands(); ++i) {
     const SoRenderCommand & command = drawlist.getCommand(i);
-    const bool isResidual =
-      command.geometry.topology != SO_TOPOLOGY_TRIANGLES &&
-      command.pass != SO_RENDERPASS_OVERLAY;
-    if (overlaysOnly && command.pass != SO_RENDERPASS_OVERLAY &&
-        !isResidual) {
+    if (!shouldProcessGeometry(command, overlaysOnly)) {
       continue;
     }
     const SoGeometryDesc & geometry = command.geometry;
-    if (!geometry.positions || geometry.vertexCount == 0 ||
-        geometry.vertexCount > MAX_VERTEX_COUNT) {
-      continue;
-    }
 
     VulkanCachedCommand & entry = this->getOrCreateCache(&command);
     const uint32_t vertexStride = geometry.vertexStride
@@ -827,22 +845,14 @@ SoVulkanRenderBackend::updateGeometryCache(const SoDrawList & drawlist,
     const SoRenderCommand & command = drawlist.getCommand(i);
     // Overlay-only renders (ray-tracing compositing) draw SO_RENDERPASS_OVERLAY
     // commands (nav cube, axis cross, selection/hover highlights) plus the
-    // non-triangle residue the RT backend did not trace (BRep edge lines,
+    // non-triangle residue the RT backend did not trace (Brep edge lines,
     // point markers, polylines): those must be uploaded so the composite can
     // rasterize them onto the traced surface.  Pure triangle geometry is
     // already traced and skipping it here keeps the composite cheap.
-    const bool isResidual =
-      command.geometry.topology != SO_TOPOLOGY_TRIANGLES &&
-      command.pass != SO_RENDERPASS_OVERLAY;
-    if (overlaysOnly && command.pass != SO_RENDERPASS_OVERLAY &&
-        !isResidual) {
+    if (!shouldProcessGeometry(command, overlaysOnly)) {
       continue;
     }
     const SoGeometryDesc & geometry = command.geometry;
-    if (!geometry.positions || geometry.vertexCount == 0 ||
-        geometry.vertexCount > MAX_VERTEX_COUNT) {
-      continue;
-    }
     ++bcCommands;
     bcVertices += geometry.vertexCount;
     bcIndices += geometry.indexCount;
