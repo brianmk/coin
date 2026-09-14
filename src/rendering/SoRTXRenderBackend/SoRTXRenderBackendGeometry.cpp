@@ -27,60 +27,11 @@ using namespace SoRTXBackend;
 bool
 SoRTXRenderBackend::ensureNormalPoolCapacity(VkDeviceSize bytes)
 {
-  if (this->normalPoolBuffer != VK_NULL_HANDLE &&
-      this->normalPoolCapacity >= bytes) {
-    return true;
-  }
-  // Grow-only pool: double until the requested size fits.  The new buffer
-  // is created (and mapped) before the old one is released, so a failed
-  // allocation leaves the previous pool intact and usable.  The old buffer
-  // is only referenced by acceleration-structure-phase submissions, which
-  // complete before the next pool resize can run (per-frame queue drain),
-  // so releasing it here is safe.
-  VkDeviceSize newCapacity =
-    std::max<VkDeviceSize>(64 * 1024, this->normalPoolCapacity);
-  while (newCapacity < bytes) {
-    newCapacity *= 2;
-  }
-  VkBuffer newBuffer = VK_NULL_HANDLE;
-  VkDeviceMemory newMemory = VK_NULL_HANDLE;
-  void * newMapped = nullptr;
-  if (!this->createHostVisibleBuffer(
-        newCapacity, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
-        newBuffer, newMemory)) {
-    return false;
-  }
-  if (vkMapMemory(this->device, newMemory, 0, newCapacity, 0,
-                  &newMapped) != VK_SUCCESS) {
-    vkDestroyBuffer(this->device, newBuffer, this->allocator);
-    vkFreeMemory(this->device, newMemory, this->allocator);
-    return false;
-  }
-  if (this->normalPoolBuffer != VK_NULL_HANDLE) {
-    // Preserve the records already appended at lower offsets.  Material
-    // records carry those offsets and the pool is grow-only, so the new
-    // buffer must keep the old contents; resetting normalPoolUsed here would
-    // make the next append reuse offset 0, and every material would then read
-    // the last geometry's normals (the cylinder cap picking up the sphere's
-    // radial normals and shading as a per-triangle fan).
-    if (this->normalPoolMapped != nullptr && this->normalPoolUsed > 0) {
-      std::memcpy(newMapped, this->normalPoolMapped,
-                  static_cast<size_t>(this->normalPoolUsed));
-    }
-    vkDestroyBuffer(this->device, this->normalPoolBuffer, this->allocator);
-    this->normalPoolBuffer = VK_NULL_HANDLE;
-    vkFreeMemory(this->device, this->normalPoolMemory, this->allocator);
-    this->normalPoolMemory = VK_NULL_HANDLE;
-    this->normalPoolMapped = nullptr;
-  }
-  this->normalPoolCapacity = newCapacity;
-  this->normalPoolBuffer = newBuffer;
-  this->normalPoolMemory = newMemory;
-  this->normalPoolMapped = newMapped;
-  // normalPoolUsed is deliberately NOT reset: the copied records keep every
-  // previously recorded offset valid.
-  // The pool identity changed: refresh the descriptor sets.
-  return this->updateDescriptors();
+  return this->ensurePoolCapacity(bytes, this->normalPoolBuffer,
+                                  this->normalPoolMemory,
+                                  this->normalPoolMapped,
+                                  this->normalPoolCapacity,
+                                  this->normalPoolUsed, true);
 }
 
 VkDeviceSize
@@ -171,14 +122,27 @@ SoRTXRenderBackend::appendTriangleNormals(const SoRenderCommand & command,
 bool
 SoRTXRenderBackend::ensureNeePoolCapacity(VkDeviceSize bytes)
 {
-  if (this->neePoolBuffer != VK_NULL_HANDLE &&
-      this->neePoolCapacity >= bytes) {
+  return this->ensurePoolCapacity(bytes, this->neePoolBuffer,
+                                  this->neePoolMemory,
+                                  this->neePoolMapped,
+                                  this->neePoolCapacity,
+                                  this->neePoolUsed, false);
+}
+
+bool
+SoRTXRenderBackend::ensurePoolCapacity(VkDeviceSize bytes,
+                                       VkBuffer & poolBuffer,
+                                       VkDeviceMemory & poolMemory,
+                                       void *& poolMapped,
+                                       VkDeviceSize & poolCapacity,
+                                       VkDeviceSize & poolUsed,
+                                       bool refreshDescriptors)
+{
+  if (poolBuffer != VK_NULL_HANDLE && poolCapacity >= bytes) {
     return true;
   }
-  // Grow-only pool (see ensureNormalPoolCapacity for the lifetime
-  // argument; the pool is only read by per-frame drained submissions).
   VkDeviceSize newCapacity = std::max<VkDeviceSize>(64 * 1024, bytes);
-  while (newCapacity < this->neePoolCapacity + bytes) {
+  while (newCapacity < poolCapacity + bytes) {
     newCapacity *= 2;
   }
   VkBuffer newBuffer = VK_NULL_HANDLE;
@@ -195,18 +159,30 @@ SoRTXRenderBackend::ensureNeePoolCapacity(VkDeviceSize bytes)
     vkFreeMemory(this->device, newMemory, this->allocator);
     return false;
   }
-  if (this->neePoolBuffer != VK_NULL_HANDLE) {
-    vkDestroyBuffer(this->device, this->neePoolBuffer, this->allocator);
-    this->neePoolBuffer = VK_NULL_HANDLE;
-    vkFreeMemory(this->device, this->neePoolMemory, this->allocator);
-    this->neePoolMemory = VK_NULL_HANDLE;
-    this->neePoolMapped = nullptr;
+  if (poolBuffer != VK_NULL_HANDLE) {
+    // Preserve the existing contents and the used count when growing: every
+    // entry's pool offset is relative to the pool base, so dropping the old
+    // data would leave all previously appended entries pointing at
+    // clobbered memory (they would all read the last-written object's
+    // normals -- the source of the per-wedge cap artifacts).
+    std::memcpy(newMapped, poolMapped, poolUsed);
+    vkDestroyBuffer(this->device, poolBuffer, this->allocator);
+    poolBuffer = VK_NULL_HANDLE;
+    vkFreeMemory(this->device, poolMemory, this->allocator);
+    poolMemory = VK_NULL_HANDLE;
+    poolMapped = nullptr;
   }
-  this->neePoolCapacity = newCapacity;
-  this->neePoolBuffer = newBuffer;
-  this->neePoolMemory = newMemory;
-  this->neePoolMapped = newMapped;
-  this->neePoolUsed = 0;
+  else {
+    poolUsed = 0;
+  }
+  poolCapacity = newCapacity;
+  poolBuffer = newBuffer;
+  poolMemory = newMemory;
+  poolMapped = newMapped;
+  if (refreshDescriptors) {
+    // The pool identity changed: refresh the descriptor sets.
+    return this->updateDescriptors();
+  }
   return true;
 }
 
@@ -1120,31 +1096,38 @@ SoRTXRenderBackend::buildBlas(RTXCachedGeometry & entry,
                               const SoRenderCommand & command,
                               VkCommandBuffer cmd)
 {
+  return this->blasBuildOrRefit(entry, command, cmd, false);
+}
+
+bool
+SoRTXRenderBackend::blasBuildOrRefit(RTXCachedGeometry & entry,
+                                     const SoRenderCommand & command,
+                                     VkCommandBuffer cmd,
+                                     bool refit)
+{
   const SoGeometryDesc & geometry = command.geometry;
   const bool indexed = entry.indexCount > 0 && entry.idxKey != nullptr;
   const uint32_t posStrideFloats = entry.vertexStride / sizeof(float);
+  const char * tag = refit ? "refitBlas" : "buildBlas";
 
   if (SoVulkanShared::envString("FC_VULKAN_RT_DEBUG")) {
     static uint32_t blasSeq = 0;
     fprintf(stderr,
-            "[RTDBG] buildBlas #%u verts=%u idx=%u stride=%u indexed=%d "
+            "[RTDBG] %s #%u verts=%u idx=%u stride=%u indexed=%d "
             "pos=%p idxPtr=%p\n",
-            blasSeq++, entry.vertexCount, entry.indexCount, entry.vertexStride,
-            indexed ? 1 : 0, static_cast<const void *>(geometry.positions),
+            tag, blasSeq++, entry.vertexCount, entry.indexCount,
+            entry.vertexStride, indexed ? 1 : 0,
+            static_cast<const void *>(geometry.positions),
             static_cast<const void *>(geometry.indices));
   }
 
   // The path tracing compute shader shades flat faces from the object-space
   // triangle-normal pool; append this command's normals (the material
-  // records pick up the offset afterwards in updateMaterials()).
+  // records pick up the offset afterwards in updateMaterials()).  Refits
+  // append a fresh record too: moved vertices change the per-corner normals.
   this->appendTriangleNormals(command, entry);
 
-  // Position-only vertex buffer for the BLAS.  Optionally packed to 16-bit
-  // half floats (FC_VULKAN_AS_PACK) when the object positions fit the half
-  // range: halves AS memory and traversal cost on static geometry.  The 32-bit
-  // path is the default and is used whenever the gate is off or coords would
-  // overflow half precision.
-  const bool packEnabled = SoVulkanShared::envString("FC_VULKAN_AS_PACK") != nullptr;
+  // Gather the position-only vertices and the object-space bounds.
   std::vector<float> positions(static_cast<size_t>(entry.vertexCount) * 3);
   float pMin[3] = {1e30f, 1e30f, 1e30f};
   float pMax[3] = {-1e30f, -1e30f, -1e30f};
@@ -1165,16 +1148,29 @@ SoRTXRenderBackend::buildBlas(RTXCachedGeometry & entry,
     entry.objectMin[a] = pMin[a];
     entry.objectMax[a] = pMax[a];
   }
-  bool fitHalf = true;
-  for (int a = 0; a < 3; ++a) {
-    if (std::fabs(pMin[a]) > 60000.0f || std::fabs(pMax[a]) > 60000.0f) {
-      fitHalf = false;
-    }
+
+  // Builds enable half packing when the FC_VULKAN_AS_PACK gate is on and the
+  // object positions fit the half range (halves AS memory and traversal cost
+  // on static geometry).  Refits must upload the SAME format the BLAS was
+  // originally built with so the in-place MODE_UPDATE matches the build.
+  bool useHalf = false;
+  if (refit) {
+    useHalf = entry.blasVertexFormat == VK_FORMAT_R16G16B16_SFLOAT;
   }
-  const bool useHalf = packEnabled && fitHalf;
-  entry.blasVertexFormat =
-    useHalf ? VK_FORMAT_R16G16B16_SFLOAT : VK_FORMAT_R32G32B32_SFLOAT;
-  entry.blasVertexStride = useHalf ? 6 : 12;
+  else {
+    const bool packEnabled = SoVulkanShared::envString("FC_VULKAN_AS_PACK") != nullptr;
+    bool fitHalf = true;
+    for (int a = 0; a < 3; ++a) {
+      if (std::fabs(pMin[a]) > 60000.0f ||
+          std::fabs(pMax[a]) > 60000.0f) {
+        fitHalf = false;
+      }
+    }
+    useHalf = packEnabled && fitHalf;
+    entry.blasVertexFormat =
+      useHalf ? VK_FORMAT_R16G16B16_SFLOAT : VK_FORMAT_R32G32B32_SFLOAT;
+    entry.blasVertexStride = useHalf ? 6 : 12;
+  }
   std::vector<uint16_t> packedHalf;
   const void * vertexSrc = nullptr;
   if (useHalf) {
@@ -1188,19 +1184,37 @@ SoRTXRenderBackend::buildBlas(RTXCachedGeometry & entry,
     vertexSrc = positions.data();
   }
   if (SoVulkanShared::envString("FC_VULKAN_RT_DEBUG")) {
-    fprintf(stderr, "[RTDBG] blasFmt build=1 packed=%d stride=%u fmt=0x%x\n",
-            useHalf ? 1 : 0, entry.blasVertexStride,
+    fprintf(stderr, "[RTDBG] blasFmt %s packed=%d stride=%u fmt=0x%x\n",
+            tag, useHalf ? 1 : 0, entry.blasVertexStride,
             static_cast<unsigned>(entry.blasVertexFormat));
   }
   const VkDeviceSize vertexBytes =
     static_cast<VkDeviceSize>(entry.vertexCount) * entry.blasVertexStride;
-  if (!this->createDeviceLocalBuffer(
-        vertexBytes,
-        VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT_KHR |
-          VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT |
-          VK_BUFFER_USAGE_TRANSFER_DST_BIT,
-        entry.vertexBuffer, entry.vertexMemory)) {
-    return false;
+  const VkDeviceSize indexBytes =
+    indexed ? static_cast<VkDeviceSize>(entry.indexCount) * sizeof(uint32_t)
+            : 0;
+
+  // Builds create the device-local vertex/index buffers fresh; refits reuse
+  // the existing buffers (the index buffer and topology are unchanged, the
+  // refit precondition checked in updateGeometryCache()).
+  if (!refit) {
+    if (!this->createDeviceLocalBuffer(
+          vertexBytes,
+          VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT_KHR |
+            VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT |
+            VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+          entry.vertexBuffer, entry.vertexMemory)) {
+      return false;
+    }
+    if (indexed &&
+        !this->createDeviceLocalBuffer(
+          indexBytes,
+          VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT_KHR |
+            VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT |
+            VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+          entry.indexBuffer, entry.indexMemory)) {
+      return false;
+    }
   }
 
   VkBuffer staging = VK_NULL_HANDLE;
@@ -1214,7 +1228,8 @@ SoRTXRenderBackend::buildBlas(RTXCachedGeometry & entry,
   if (vkMapMemory(this->device, stagingMemory, 0, vertexBytes, 0, &mapped) !=
         VK_SUCCESS ||
       mapped == nullptr) {
-    this->emitError("buildBlas: vkMapMemory (vertex staging) failed");
+    this->emitError(
+      (std::string(tag) + ": vkMapMemory (vertex staging) failed").c_str());
     vkDestroyBuffer(this->device, staging, this->allocator);
     vkFreeMemory(this->device, stagingMemory, this->allocator);
     return false;
@@ -1224,20 +1239,7 @@ SoRTXRenderBackend::buildBlas(RTXCachedGeometry & entry,
 
   VkBuffer indexStaging = VK_NULL_HANDLE;
   VkDeviceMemory indexStagingMemory = VK_NULL_HANDLE;
-  VkDeviceSize indexBytes = 0;
-  if (indexed) {
-    indexBytes =
-      static_cast<VkDeviceSize>(entry.indexCount) * sizeof(uint32_t);
-    if (!this->createDeviceLocalBuffer(
-          indexBytes,
-          VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT_KHR |
-            VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT |
-            VK_BUFFER_USAGE_TRANSFER_DST_BIT,
-          entry.indexBuffer, entry.indexMemory)) {
-      vkDestroyBuffer(this->device, staging, this->allocator);
-      vkFreeMemory(this->device, stagingMemory, this->allocator);
-      return false;
-    }
+  if (indexed && !refit) {
     if (!this->createHostVisibleBuffer(indexBytes,
                                        VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
                                        indexStaging, indexStagingMemory)) {
@@ -1249,7 +1251,8 @@ SoRTXRenderBackend::buildBlas(RTXCachedGeometry & entry,
     if (vkMapMemory(this->device, indexStagingMemory, 0, indexBytes, 0,
                     &imapped) != VK_SUCCESS ||
         imapped == nullptr) {
-      this->emitError("buildBlas: vkMapMemory (index staging) failed");
+      this->emitError(
+        (std::string(tag) + ": vkMapMemory (index staging) failed").c_str());
       vkDestroyBuffer(this->device, staging, this->allocator);
       vkFreeMemory(this->device, stagingMemory, this->allocator);
       vkDestroyBuffer(this->device, indexStaging, this->allocator);
@@ -1263,7 +1266,7 @@ SoRTXRenderBackend::buildBlas(RTXCachedGeometry & entry,
   VkBufferCopy vertexCopy {};
   vertexCopy.size = vertexBytes;
   vkCmdCopyBuffer(cmd, staging, entry.vertexBuffer, 1, &vertexCopy);
-  if (indexed) {
+  if (indexed && !refit) {
     VkBufferCopy indexCopy {};
     indexCopy.size = indexBytes;
     vkCmdCopyBuffer(cmd, indexStaging, entry.indexBuffer, 1, &indexCopy);
@@ -1285,7 +1288,7 @@ SoRTXRenderBackend::buildBlas(RTXCachedGeometry & entry,
     this->pendingStagingDestroys.emplace_back(indexStaging, indexStagingMemory);
   }
 
-  // --- Build the BLAS ----------------------------------------------------
+  // --- Record the (re)build ----------------------------------------------
   VkAccelerationStructureGeometryTrianglesDataKHR triangles {};
   triangles.sType =
     VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_TRIANGLES_DATA_KHR;
@@ -1313,220 +1316,43 @@ SoRTXRenderBackend::buildBlas(RTXCachedGeometry & entry,
   buildInfo.sType =
     VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_BUILD_GEOMETRY_INFO_KHR;
   buildInfo.type = VK_ACCELERATION_STRUCTURE_TYPE_BOTTOM_LEVEL_KHR;
-  // ALLOW_UPDATE: lets position-only edits refit this BLAS in place (see
-  // refitBlas()) instead of destroying and rebuilding it.  ALLOW_COMPACTION
-  // (FC_VULKAN_AS_COMPACT) lets a later pass shrink the AS residency copy.
-  // They are mutually exclusive: NVIDIA's compaction docs note that
-  // ALLOW_UPDATE "must leave room for updated triangles" and that
-  // PREFER_FAST_TRACE "uses its own compaction method and results can differ
-  // from ALLOW_COMPACTION".  Building a BLAS with ALLOW_UPDATE + PREFER_FAST_TRACE
-  // and then COMPACT-copying it into the queried compacted-size buffer produced
-  // a malformed AS whose first use drove the driver to VK_ERROR_DEVICE_LOST.
-  // So when compaction is requested the BLAS is built with ALLOW_COMPACTION
-  // ALONE (the NVIDIA "max compaction" recipe); a compacted BLAS loses its
-  // ALLOW_UPDATE refit capability, and recordAccelerationStructures already
-  // rebuilds (instead of refits) any compacted entry that needs a position fix.
-  const bool compactGate = SoVulkanShared::envString("FC_VULKAN_AS_COMPACT") != nullptr;
-  if (compactGate) {
-    buildInfo.flags = VK_BUILD_ACCELERATION_STRUCTURE_ALLOW_COMPACTION_BIT_KHR;
-    entry.wantsCompact = true;
-    entry.compacted = false;
-  }
-  else {
+  buildInfo.geometryCount = 1;
+  buildInfo.pGeometries = &asGeometry;
+  if (refit) {
     buildInfo.flags = VK_BUILD_ACCELERATION_STRUCTURE_PREFER_FAST_TRACE_BIT_KHR |
                       VK_BUILD_ACCELERATION_STRUCTURE_ALLOW_UPDATE_BIT_KHR;
-  }
-  buildInfo.mode = VK_BUILD_ACCELERATION_STRUCTURE_MODE_BUILD_KHR;
-  buildInfo.geometryCount = 1;
-  buildInfo.pGeometries = &asGeometry;
-
-  VkAccelerationStructureBuildSizesInfoKHR sizeInfo {};
-  sizeInfo.sType =
-    VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_BUILD_SIZES_INFO_KHR;
-  vkGetAccelerationStructureBuildSizesKHR(
-    this->device, VK_ACCELERATION_STRUCTURE_BUILD_TYPE_DEVICE_KHR,
-    &buildInfo, &maxPrimitives, &sizeInfo);
-  if (!this->createScratchBuffer(sizeInfo.buildScratchSize)) {
-    return false;
-  }
-
-  if (!this->createDeviceLocalBuffer(
-        sizeInfo.accelerationStructureSize,
-        VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_STORAGE_BIT_KHR |
-          VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT,
-        entry.blasBuffer, entry.blasMemory)) {
-    return false;
-  }
-  entry.blasSize = sizeInfo.accelerationStructureSize;
-  VkAccelerationStructureCreateInfoKHR asCI {};
-  asCI.sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_CREATE_INFO_KHR;
-  asCI.buffer = entry.blasBuffer;
-  asCI.size = sizeInfo.accelerationStructureSize;
-  asCI.type = VK_ACCELERATION_STRUCTURE_TYPE_BOTTOM_LEVEL_KHR;
-  if (vkCreateAccelerationStructureKHR(this->device, &asCI, this->allocator,
-                                       &entry.blas) != VK_SUCCESS) {
-    return false;
-  }
-  // Capture the BLAS device address now.  It is constant for the lifetime of
-  // the BLAS, so the per-frame instance collection in buildTlas() reuses it
-  // instead of calling vkGetAccelerationStructureDeviceAddressKHR every frame.
-  entry.devAddr = 0;
-  VkAccelerationStructureDeviceAddressInfoKHR devAddrInfo {};
-  devAddrInfo.sType =
-    VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_DEVICE_ADDRESS_INFO_KHR;
-  devAddrInfo.accelerationStructure = entry.blas;
-  entry.devAddr = vkGetAccelerationStructureDeviceAddressKHR(this->device,
-                                                             &devAddrInfo);
-
-  buildInfo.dstAccelerationStructure = entry.blas;
-  buildInfo.scratchData.deviceAddress = this->scratchAddress;
-  VkAccelerationStructureBuildRangeInfoKHR rangeInfo {};
-  rangeInfo.primitiveCount = maxPrimitives;
-  rangeInfo.primitiveOffset = 0;
-  rangeInfo.firstVertex = 0;
-  rangeInfo.transformOffset = 0;
-  const VkAccelerationStructureBuildRangeInfoKHR * rangeInfos[] = {&rangeInfo};
-  vkCmdBuildAccelerationStructuresKHR(cmd, 1, &buildInfo, rangeInfos);
-
-  VkMemoryBarrier blasBarrier {};
-  blasBarrier.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
-  blasBarrier.srcAccessMask = VK_ACCESS_ACCELERATION_STRUCTURE_WRITE_BIT_KHR;
-  blasBarrier.dstAccessMask = VK_ACCESS_ACCELERATION_STRUCTURE_READ_BIT_KHR;
-  vkCmdPipelineBarrier(cmd,
-                       VK_PIPELINE_STAGE_ACCELERATION_STRUCTURE_BUILD_BIT_KHR,
-                       VK_PIPELINE_STAGE_ACCELERATION_STRUCTURE_BUILD_BIT_KHR,
-                       0, 1, &blasBarrier, 0, nullptr, 0, nullptr);
-  return true;
-}
-
-bool
-SoRTXRenderBackend::refitBlas(RTXCachedGeometry & entry,
-                              const SoRenderCommand & command,
-                              VkCommandBuffer cmd)
-{
-  const SoGeometryDesc & geometry = command.geometry;
-  const uint32_t posStrideFloats = entry.vertexStride / sizeof(float);
-
-  if (SoVulkanShared::envString("FC_VULKAN_RT_DEBUG")) {
-    fprintf(stderr,
-            "[RTDBG] refitBlas verts=%u idx=%u stride=%u pos=%p\n",
-            entry.vertexCount, entry.indexCount, entry.vertexStride,
-            static_cast<const void *>(geometry.positions));
-  }
-
-  // Upload the new vertex positions into the EXISTING device buffers; the
-  // index buffer and topology are unchanged (the refit precondition checked
-  // in updateGeometryCache()).  The byte size and packing must match the
-  // format the BLAS was originally built with (entry.blasVertexFormat).
-  const VkDeviceSize vertexBytes =
-    static_cast<VkDeviceSize>(entry.vertexCount) * entry.blasVertexStride;
-
-  // Moved vertices change the object-space flat normals: append a fresh
-  // normal-pool record and let updateMaterials() pick up the new offset
-  // (the pool is grow-only, matching the rebuild path).
-  this->appendTriangleNormals(command, entry);
-  std::vector<float> positions(static_cast<size_t>(entry.vertexCount) * 3);
-  float pMin[3] = {1e30f, 1e30f, 1e30f};
-  float pMax[3] = {-1e30f, -1e30f, -1e30f};
-  for (uint32_t i = 0; i < entry.vertexCount; ++i) {
-    const float * p =
-      geometry.positions + static_cast<size_t>(i) * posStrideFloats;
-    const float px = p[0], py = p[1], pz = p[2];
-    positions[static_cast<size_t>(i) * 3 + 0] = px;
-    positions[static_cast<size_t>(i) * 3 + 1] = py;
-    positions[static_cast<size_t>(i) * 3 + 2] = pz;
-    if (px < pMin[0]) pMin[0] = px;
-    if (py < pMin[1]) pMin[1] = py;
-    if (pz < pMin[2]) pMin[2] = pz;
-    if (px > pMax[0]) pMax[0] = px;
-    if (py > pMax[1]) pMax[1] = py;
-    if (pz > pMax[2]) pMax[2] = pz;
-  }
-  for (int a = 0; a < 3; ++a) {
-    entry.objectMin[a] = pMin[a];
-    entry.objectMax[a] = pMax[a];
-  }
-  std::vector<uint16_t> packedHalf;
-  const void * vertexSrc = nullptr;
-  if (entry.blasVertexFormat == VK_FORMAT_R16G16B16_SFLOAT) {
-    packedHalf.resize(static_cast<size_t>(entry.vertexCount) * 3);
-    for (size_t i = 0; i < positions.size(); ++i) {
-      packedHalf[i] = floatToHalf(positions[i]);
-    }
-    vertexSrc = packedHalf.data();
+    buildInfo.mode = VK_BUILD_ACCELERATION_STRUCTURE_MODE_UPDATE_KHR;
+    buildInfo.srcAccelerationStructure = entry.blas;
+    buildInfo.dstAccelerationStructure = entry.blas;
   }
   else {
-    vertexSrc = positions.data();
+    // ALLOW_UPDATE: lets position-only edits refit this BLAS in place (see
+    // refitBlas()) instead of destroying and rebuilding it.  ALLOW_COMPACTION
+    // (FC_VULKAN_AS_COMPACT) lets a later pass shrink the AS residency copy.
+    // They are mutually exclusive: NVIDIA's compaction docs note that
+    // ALLOW_UPDATE "must leave room for updated triangles" and that
+    // PREFER_FAST_TRACE "uses its own compaction method and results can differ
+    // from ALLOW_COMPACTION".  Building a BLAS with ALLOW_UPDATE + PREFER_FAST_TRACE
+    // and then COMPACT-copying it into the queried compacted-size buffer produced
+    // a malformed AS whose first use drove the driver to VK_ERROR_DEVICE_LOST.
+    // So when compaction is requested the BLAS is built with ALLOW_COMPACTION
+    // ALONE (the NVIDIA "max compaction" recipe); a compacted BLAS loses its
+    // ALLOW_UPDATE refit capability, and recordAccelerationStructures already
+    // rebuilds (instead of refits) any compacted entry that needs a position fix.
+    const bool compactGate = SoVulkanShared::envString("FC_VULKAN_AS_COMPACT") != nullptr;
+    if (compactGate) {
+      buildInfo.flags =
+        VK_BUILD_ACCELERATION_STRUCTURE_ALLOW_COMPACTION_BIT_KHR;
+      entry.wantsCompact = true;
+      entry.compacted = false;
+    }
+    else {
+      buildInfo.flags =
+        VK_BUILD_ACCELERATION_STRUCTURE_PREFER_FAST_TRACE_BIT_KHR |
+        VK_BUILD_ACCELERATION_STRUCTURE_ALLOW_UPDATE_BIT_KHR;
+    }
+    buildInfo.mode = VK_BUILD_ACCELERATION_STRUCTURE_MODE_BUILD_KHR;
   }
-
-  VkBuffer staging = VK_NULL_HANDLE;
-  VkDeviceMemory stagingMemory = VK_NULL_HANDLE;
-  if (!this->createHostVisibleBuffer(vertexBytes,
-                                     VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
-                                     staging, stagingMemory)) {
-    return false;
-  }
-  void * mapped = nullptr;
-  if (vkMapMemory(this->device, stagingMemory, 0, vertexBytes, 0, &mapped) !=
-        VK_SUCCESS ||
-      mapped == nullptr) {
-    this->emitError("refitBlas: vkMapMemory (vertex staging) failed");
-    vkDestroyBuffer(this->device, staging, this->allocator);
-    vkFreeMemory(this->device, stagingMemory, this->allocator);
-    return false;
-  }
-  std::memcpy(mapped, vertexSrc, static_cast<size_t>(vertexBytes));
-  vkUnmapMemory(this->device, stagingMemory);
-
-  VkBufferCopy vertexCopy {};
-  vertexCopy.size = vertexBytes;
-  vkCmdCopyBuffer(cmd, staging, entry.vertexBuffer, 1, &vertexCopy);
-  VkMemoryBarrier copyBarrier {};
-  copyBarrier.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
-  copyBarrier.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
-  copyBarrier.dstAccessMask =
-    VK_ACCESS_ACCELERATION_STRUCTURE_READ_BIT_KHR;
-  vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_TRANSFER_BIT,
-                       VK_PIPELINE_STAGE_ACCELERATION_STRUCTURE_BUILD_BIT_KHR,
-                       0, 1, &copyBarrier, 0, nullptr, 0, nullptr);
-  this->pendingStagingDestroys.emplace_back(staging, stagingMemory);
-
-  // --- In-place UPDATE build ---------------------------------------------
-  VkAccelerationStructureGeometryTrianglesDataKHR triangles {};
-  triangles.sType =
-    VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_TRIANGLES_DATA_KHR;
-  triangles.vertexFormat = entry.blasVertexFormat;
-  triangles.vertexData.deviceAddress =
-    this->getDeviceAddress(entry.vertexBuffer);
-  triangles.vertexStride = entry.blasVertexStride;
-  triangles.maxVertex = entry.vertexCount - 1;
-  const bool indexed = entry.indexCount > 0;
-  triangles.indexType =
-    indexed ? VK_INDEX_TYPE_UINT32 : VK_INDEX_TYPE_NONE_KHR;
-  triangles.indexData.deviceAddress =
-    indexed ? this->getDeviceAddress(entry.indexBuffer) : 0;
-
-  VkAccelerationStructureGeometryKHR asGeometry {};
-  asGeometry.sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_KHR;
-  asGeometry.geometryType = VK_GEOMETRY_TYPE_TRIANGLES_KHR;
-  asGeometry.geometry.triangles = triangles;
-  asGeometry.flags = VK_GEOMETRY_OPAQUE_BIT_KHR;
-
-  const uint32_t maxPrimitives =
-    indexed ? entry.indexCount / 3 : entry.vertexCount / 3;
-  if (maxPrimitives == 0) return false;
-
-  VkAccelerationStructureBuildGeometryInfoKHR buildInfo {};
-  buildInfo.sType =
-    VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_BUILD_GEOMETRY_INFO_KHR;
-  buildInfo.type = VK_ACCELERATION_STRUCTURE_TYPE_BOTTOM_LEVEL_KHR;
-  buildInfo.flags = VK_BUILD_ACCELERATION_STRUCTURE_PREFER_FAST_TRACE_BIT_KHR |
-                    VK_BUILD_ACCELERATION_STRUCTURE_ALLOW_UPDATE_BIT_KHR;
-  buildInfo.mode = VK_BUILD_ACCELERATION_STRUCTURE_MODE_UPDATE_KHR;
-  buildInfo.srcAccelerationStructure = entry.blas;
-  buildInfo.dstAccelerationStructure = entry.blas;
-  buildInfo.geometryCount = 1;
-  buildInfo.pGeometries = &asGeometry;
 
   VkAccelerationStructureBuildSizesInfoKHR sizeInfo {};
   sizeInfo.sType =
@@ -1539,6 +1365,37 @@ SoRTXRenderBackend::refitBlas(RTXCachedGeometry & entry,
   if (!this->createScratchBuffer(sizeInfo.buildScratchSize)) {
     return false;
   }
+
+  if (!refit) {
+    if (!this->createDeviceLocalBuffer(
+          sizeInfo.accelerationStructureSize,
+          VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_STORAGE_BIT_KHR |
+            VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT,
+          entry.blasBuffer, entry.blasMemory)) {
+      return false;
+    }
+    entry.blasSize = sizeInfo.accelerationStructureSize;
+    VkAccelerationStructureCreateInfoKHR asCI {};
+    asCI.sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_CREATE_INFO_KHR;
+    asCI.buffer = entry.blasBuffer;
+    asCI.size = sizeInfo.accelerationStructureSize;
+    asCI.type = VK_ACCELERATION_STRUCTURE_TYPE_BOTTOM_LEVEL_KHR;
+    if (vkCreateAccelerationStructureKHR(this->device, &asCI, this->allocator,
+                                         &entry.blas) != VK_SUCCESS) {
+      return false;
+    }
+    // Capture the BLAS device address now.  It is constant for the lifetime of
+    // the BLAS, so the per-frame instance collection in buildTlas() reuses it
+    // instead of calling vkGetAccelerationStructureDeviceAddressKHR every frame.
+    entry.devAddr = 0;
+    VkAccelerationStructureDeviceAddressInfoKHR devAddrInfo {};
+    devAddrInfo.sType =
+      VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_DEVICE_ADDRESS_INFO_KHR;
+    devAddrInfo.accelerationStructure = entry.blas;
+    entry.devAddr = vkGetAccelerationStructureDeviceAddressKHR(this->device,
+                                                               &devAddrInfo);
+    buildInfo.dstAccelerationStructure = entry.blas;
+  }
   buildInfo.scratchData.deviceAddress = this->scratchAddress;
 
   VkAccelerationStructureBuildRangeInfoKHR rangeInfo {};
@@ -1558,8 +1415,18 @@ SoRTXRenderBackend::refitBlas(RTXCachedGeometry & entry,
                        VK_PIPELINE_STAGE_ACCELERATION_STRUCTURE_BUILD_BIT_KHR,
                        0, 1, &blasBarrier, 0, nullptr, 0, nullptr);
 
-  entry.refitPending = false;
+  if (refit) {
+    entry.refitPending = false;
+  }
   return true;
+}
+
+bool
+SoRTXRenderBackend::refitBlas(RTXCachedGeometry & entry,
+                              const SoRenderCommand & command,
+                              VkCommandBuffer cmd)
+{
+  return this->blasBuildOrRefit(entry, command, cmd, true);
 }
 
 // A world-space AABB projects to a sub-N-pixel footprint exactly when the
