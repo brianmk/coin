@@ -721,6 +721,7 @@ SoVulkanRenderManager::setViewSettings(const SoVulkanViewSettings & settings)
                               settings.backgroundBottom);
   this->setWireframeOverlay(settings.wireframeOverlay ? TRUE : FALSE);
   this->setPointsOverlay(settings.pointsOverlay ? TRUE : FALSE);
+  this->setTessellationOverlay(settings.tessellationOverlay ? TRUE : FALSE);
   this->setEdgeColor(settings.edgeColor);
 
   // The RTX-forwarded fields are only meaningful once the RT backend exists;

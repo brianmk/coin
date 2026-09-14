@@ -929,6 +929,26 @@ SoVulkanRenderBackend::buildWorkItems(const SoDrawList & drawlist,
       const int redrawFillMode = tessellationOverlay
         ? SoDrawStyleElement::LINES
         : wireframeFillMode;
+    // Wireframe/point/tessellation overlays: re-draw opaque geometry in the
+    // requested fill mode using a uniform edge color.
+    //
+    // The LINES (edge) overlay re-draws only the B-Rep feature-edge commands
+    // (SoBrepEdgeSet emits SO_TOPOLOGY_LINES / LINE_STRIP): re-drawing every
+    // triangle command in polygon-LINES would paint the raw tessellation --
+    // the straight seam meridian on a sphere and the radial fan spokes on a
+    // cylinder cap -- instead of the true feature edges (rims, creases,
+    // seams).  A CAD edge overlay must show only feature edges; smooth curved
+    // surfaces carry no feature edges and read as clean.
+    //
+    // The debug tessellation overlay is the opposite request: re-draw the
+    // TRIANGLE commands in polygon-LINES so the raw triangulation edges are
+    // visible on top of the shaded geometry.  It takes precedence over the
+    // fill-mode overlay for those commands, so with both the LINES overlay
+    // and the tessellation overlay on, lines and triangles are both re-drawn.
+    // The POINTS overlay re-draws every command (its purpose is to show all
+    // vertices), lines included.
+    if (!transparent && (wireframeFillMode >= 0 || tessellationOverlay)) {
+      const bool isEdgeOverlay = (wireframeFillMode == SoDrawStyleElement::LINES);
       for (int i = 0; i < drawlist.getNumCommands(); ++i) {
         const int index =
           i < static_cast<int>(order.size()) ? order[i] : i;
@@ -954,10 +974,20 @@ SoVulkanRenderBackend::buildWorkItems(const SoDrawList & drawlist,
           }
         }
         if (!this->findCachedDrawable(command)) continue;
+        const SoPrimitiveTopology topo = command.geometry.topology;
+        const bool lineTopo = topo == SO_TOPOLOGY_LINES ||
+          topo == SO_TOPOLOGY_LINE_STRIP;
+        const bool triTopo = topo == SO_TOPOLOGY_TRIANGLES ||
+          topo == SO_TOPOLOGY_TRIANGLE_STRIP;
+        const bool tessHit = tessellationOverlay && triTopo;
+        if (isEdgeOverlay && !lineTopo && !tessHit) continue;
+        if (wireframeFillMode < 0 && !tessHit) continue;
         VulkanWorkItem item;
         item.single = &command;
         item.count = 1;
         item.fillModeOverride = redrawFillMode;
+        item.fillModeOverride =
+          tessHit ? SoDrawStyleElement::LINES : wireframeFillMode;
         item.uniformColorOverride = overlayColor;
         item.slotBase = nextSlot++;
         out.push_back(item);
@@ -1133,8 +1163,8 @@ SoVulkanRenderBackend::recordFrame(const SoDrawList & drawlist,
   this->applyViewport(params, target, ctx);
 
   // Vulkan-only display options, configured through setWireframeOverlay()/
-  // setPointsOverlay()/setEdgeColor().  Environment variables act as a
-  // diagnostic fallback for the command line.
+  // setPointsOverlay()/setTessellationOverlay()/setEdgeColor().  Environment
+  // variables act as a diagnostic fallback for the command line.
   const bool wireframeOverlay =
     this->wireframeOverlay || COIN_VULKAN_ENV_FLAG("FC_VULKAN_WIREFRAME");
   const bool pointsOverlay =

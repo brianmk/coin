@@ -256,6 +256,12 @@ struct Harness
   VkImageView depthView = VK_NULL_HANDLE;
   bool haveDepth = false;
 
+  // True when the device was created with the fillModeNonSolid feature
+  // (VK_POLYGON_MODE_LINE/POINT).  Tests that rely on wireframe or point
+  // fill modes -- including the overlay re-draws, which render in LINES
+  // mode -- must skip on devices without it.
+  bool haveFillModeNonSolid = false;
+
   SoVulkanDeviceContext deviceContext;
   SoVulkanRenderTarget target;
   SoVulkanRenderBackend backend;
@@ -318,10 +324,22 @@ struct Harness
     queueInfo.queueCount = 1;
     queueInfo.pQueuePriorities = &priority;
 
+    // Enable the supported fillModeNonSolid feature at device creation,
+    // exactly like the FreeCAD embedding app does.  Without it the
+    // VK_POLYGON_MODE_LINE/POINT pipelines (thin lines, points, and the
+    // overlay re-draws, which render in LINES mode) are a spec violation
+    // and the driver refuses them.
+    VkPhysicalDeviceFeatures physicalFeatures {};
+    vkGetPhysicalDeviceFeatures(this->physicalDevice, &physicalFeatures);
+    VkPhysicalDeviceFeatures enabledFeatures {};
+    enabledFeatures.fillModeNonSolid = physicalFeatures.fillModeNonSolid;
+    this->haveFillModeNonSolid = enabledFeatures.fillModeNonSolid;
+
     VkDeviceCreateInfo deviceInfo {};
     deviceInfo.sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO;
     deviceInfo.queueCreateInfoCount = 1;
     deviceInfo.pQueueCreateInfos = &queueInfo;
+    deviceInfo.pEnabledFeatures = &enabledFeatures;
     if (vkCreateDevice(this->physicalDevice, &deviceInfo, nullptr,
                        &this->device) != VK_SUCCESS) {
       vkDestroyInstance(this->instance, nullptr);

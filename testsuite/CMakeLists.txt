@@ -257,6 +257,7 @@ if(HAVE_EGL)
 			VulkanBackendClearTest vulkan/vulkan-backend-clear-test.cpp
 			VulkanBackendYFlipTest vulkan/vulkan-backend-yflip-test.cpp
 			VulkanBackendStencilTest vulkan/vulkan-backend-stencil-test.cpp
+			VulkanBackendTessOverlayTest vulkan/vulkan-backend-tess-overlay-test.cpp
 			VulkanBackendMaterialTest vulkan/vulkan-backend-material-test.cpp
 			VulkanBackendRetainedChangeTest vulkan/vulkan-backend-retained-change-test.cpp
 			VulkanBackendParallelTest vulkan/vulkan-backend-parallel-test.cpp
