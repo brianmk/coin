@@ -98,6 +98,11 @@ namespace CoinVulkanDetail {
 // recorded a second time in the overlay block.  recordDrawCommand() bails
 // out before claiming a slot for skipped commands, so this worst case is a
 // safe upper bound.
+// overlay redraw is active (opaque commands only; the tessellation overlay
+// redraws triangle commands, the LINES overlay line commands, the POINTS
+// overlay everything), and overlay commands are recorded a second time in the
+// overlay block.  recordDrawCommand() bails out before claiming a slot for
+// skipped commands, so this worst case is a safe upper bound.
   inline uint32_t
 countDrawCommands(const SoDrawList & drawlist, const int wireframeFillMode,
                   const bool tessellationOverlay)
@@ -111,6 +116,18 @@ countDrawCommands(const SoDrawList & drawlist, const int wireframeFillMode,
     if ((wireframeFillMode >= 0 || tessellationOverlay) &&
         command.pass != SO_RENDERPASS_TRANSPARENT) {
       ++draws;
+    if (command.pass != SO_RENDERPASS_TRANSPARENT) {
+      const SoPrimitiveTopology topo = command.geometry.topology;
+      const bool triTopo = topo == SO_TOPOLOGY_TRIANGLES ||
+        topo == SO_TOPOLOGY_TRIANGLE_STRIP;
+      // At most one overlay redraw per command (the tessellation overlay
+      // takes precedence over the fill-mode overlay for its commands).
+      if (tessellationOverlay && triTopo) {
+        ++draws;
+      }
+      else if (wireframeFillMode >= 0) {
+        ++draws;
+      }
     }
     // The on-top annotations pass re-records every depth-disabled command
     // after both passes (recordFrame), consuming a second lighting slot.

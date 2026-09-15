@@ -984,6 +984,8 @@ private:
   // the raw tessellation (triangle edges) is visible on top of the shaded
   // geometry.  Distinct from the wireframe/edge overlay, which draws only
   // the true B-Rep feature-edge line commands.
+  // Debug overlay: re-draw the triangle commands in polygon-LINES so the raw
+  // tessellation is visible (see buildWorkItems()).
   SbBool tessellationOverlay = FALSE;
   SbColor4f edgeColor = SbColor4f(0.05f, 0.05f, 0.05f, 1.0f);
 
