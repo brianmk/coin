@@ -117,7 +117,7 @@ var NAVTREEINDEX =
 "classSoVRMLTransform.html#a684806244953ca61a598b4629a827ff1",
 "classSoVertexProperty.html#a863e26ab8c979e8e7f99a124add086cc",
 "functions.html",
-"worker_8h_source.html"
+"types_8h_source.html"
 ];
 
 var SYNCONMSG = 'click to disable panel synchronisation';

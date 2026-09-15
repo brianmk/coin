@@ -87460,6 +87460,13 @@
       <arglist></arglist>
     </member>
     <member kind="variable">
+      <type>bool</type>
+      <name>tessellationOverlay</name>
+      <anchorfile>structSoVulkanViewSettings.html</anchorfile>
+      <anchor>aeb84ea8a8fb3a4806ae2b447c6132c6c</anchor>
+      <arglist></arglist>
+    </member>
+    <member kind="variable">
       <type>SoVulkanViewMode</type>
       <name>viewMode</name>
       <anchorfile>structSoVulkanViewSettings.html</anchorfile>
