@@ -639,6 +639,25 @@ private:
   // parallel; the command-buffer recording itself stays single-threaded.
   void expandWideLinesParallel(const SoDrawList & drawlist,
                                const SoRenderParams & params);
+  // Expand ONE large non-stippled LINE_LIST command by partitioning its
+  // segments across the worker pool.  The whole-command round-robin above
+  // leaves a single dominant command (a Voronoi lattice's edge set, say)
+  // serial; this splits that command's segments instead.  Runs on the owner
+  // thread and joins each phase before returning.
+  bool expandWideLinesSplit(VulkanCachedCommand & entry,
+                            const SoRenderCommand & command,
+                            const SoRenderParams & params,
+                            const SbMat & proj,
+                            float lineWidth);
+  // Dispatch one split phase over [0, count): the owner runs range 0 inline,
+  // workers 1..W-1 run the rest, then the owner joins.  `phase` is passed to
+  // every non-owner job.
+  void dispatchWideLineSplit(int phase, uint32_t count,
+                             const SoRenderParams & params);
+  // Execute one split phase for segments [begin, end) using wlineSplitCtx.
+  // Safe to call concurrently: ranges are disjoint and every write goes to a
+  // per-segment slot (phase 1) or a prefix-summed slot (phase 2).
+  void expandWideLinesSplitRange(int phase, uint32_t begin, uint32_t end);
   bool endAndSubmit();
   void applyViewport(const SoRenderParams & params,
                      const SoVulkanRenderTarget & target,
@@ -869,6 +888,14 @@ private:
     // expansion pre-pass is joined before recording starts).
     bool expandWideLines = false;
     std::vector<const SoRenderCommand *> wideLineCommands;
+    // Intra-command split: when non-zero the worker expands segments
+    // [wlineSplitBegin, wlineSplitEnd) of the single command in
+    // wlineSplitCtx instead of `wideLineCommands`.  1 = clip transform +
+    // validity, 2 = emit quads.  These dispatches originate on the owner
+    // thread only, so a worker never re-enters the pool.
+    int wlineSplitPhase = 0;
+    uint32_t wlineSplitBegin = 0;
+    uint32_t wlineSplitEnd = 0;
   };
   std::vector<ParallelRecordJob> recordJobs;
   std::mutex recordMutex;
@@ -1130,6 +1157,35 @@ private:
   // worker-thread debug writes are pure noise (and the diagnostics are the
   // only place the expansion touches shared I/O).
   std::thread::id wlineOwnerThread;
+
+  // Intra-command wide-line split.  The thread_local scratch inside
+  // expandWideLines() is per-worker because each worker owns whole commands;
+  // the split path partitions ONE command, so its phases share these
+  // owner-sized buffers: phase 1 writes disjoint clip/valid ranges, the owner
+  // prefix-sums the quad offsets, phase 2 writes disjoint quad ranges.  Sized
+  // once per command and reused across frames.  Only touched on the owner
+  // thread (and read/written by workers during a joined dispatch).
+  struct WideLineSplitCtx {
+    const SoRenderCommand * command = nullptr;
+    const SoGeometryDesc * geometry = nullptr;
+    SbMat mvp;
+    float vpWidth = 1.0f;
+    float vpHeight = 1.0f;
+    float lineWidth = 1.0f;
+    float nearEps = 1.0e-5f;
+    // Phase 2 writes the compacted quads straight into the slot's mapped
+    // buffer (host-visible), so no intermediate quad array + full-size memcpy
+    // is needed -- that copy is hundreds of MB for a million-segment edge set.
+    float * outBase = nullptr;
+    uint32_t posStrideFloats = 3;
+    uint32_t segmentCount = 0;
+  };
+  WideLineSplitCtx wlineSplitCtx;
+  std::vector<float> wlineSplitClip;      // vertexCount * 4
+  std::vector<uint8_t> wlineSplitValid;   // segmentCount
+  std::vector<size_t> wlineSplitOffsets;  // segmentCount (float index into quads)
+  // Commands routed to the split path for the current frame (owner thread).
+  std::vector<const SoRenderCommand *> wlineSplitScratch;
 
   std::vector<VulkanCachedCommand> gpuCache;
   std::unordered_map<const SoRenderCommand *, size_t> commandToCache;

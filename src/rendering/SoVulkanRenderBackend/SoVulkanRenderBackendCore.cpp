@@ -412,7 +412,14 @@ SoVulkanRenderBackend::recordJobWorker(const size_t workerIndex)
       // Wide-line CPU expansion: no command buffer, just the per-command quad
       // computation.  Each command's cache entry is touched by exactly one
       // worker, and the scratch is thread-local, so this is race-free.
-      if (!job.params) {
+      if (job.wlineSplitPhase != 0) {
+        // One command partitioned by segment range: the shared scratch is
+        // owner-sized and every range writes disjoint slots.
+        this->expandWideLinesSplitRange(job.wlineSplitPhase,
+                                        job.wlineSplitBegin, job.wlineSplitEnd);
+        job.ok = true;
+      }
+      else if (!job.params) {
         job.ok = false;
       }
       else {
