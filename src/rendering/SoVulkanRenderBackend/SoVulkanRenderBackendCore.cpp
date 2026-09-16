@@ -391,6 +391,7 @@ SoVulkanRenderBackend::recordJobWorker(const size_t workerIndex)
 {
   uint32_t processed = 0;
   while (true) {
+    uint32_t generation = 0;
     {
       std::unique_lock<std::mutex> lk(this->recordMutex);
       this->recordCvSpawn.wait(lk, [this, &processed] {
@@ -399,6 +400,7 @@ SoVulkanRenderBackend::recordJobWorker(const size_t workerIndex)
       });
       if (this->recordPoolStopped) return;
       processed = this->recordJobGeneration;
+      generation = processed;
     }
     vkBackendTrace(this->uboFrameIndex, "recordJobWorker.wake",
                    "w=%zu gen=%u", workerIndex, processed);
@@ -444,8 +446,24 @@ SoVulkanRenderBackend::recordJobWorker(const size_t workerIndex)
     }
     vkBackendTrace(this->uboFrameIndex, "recordJobWorker.done",
                    "w=%zu ok=%d", workerIndex, job.ok ? 1 : 0);
-    this->recordDoneCount.fetch_add(1);
-    this->recordCvDone.notify_all();
+    // The done count is the condition the recording thread waits on
+    // (recordCvDone.wait), so it must be published under recordMutex together
+    // with the notify.  Incrementing/notifying outside the lock races the
+    // waiter's final predicate check: the notify can fire after the waiter
+    // evaluated the predicate but before it blocks, and is lost, leaving the
+    // recording thread asleep forever with the count already satisfied.
+    //
+    // Publish only while this worker's generation is still current.  If the
+    // recording thread already dispatched the next job while this one ran, this
+    // completion belongs to a superseded generation; counting it would let the
+    // next join see a spurious done and proceed before every worker has run.
+    {
+      std::lock_guard<std::mutex> lk(this->recordMutex);
+      if (this->recordJobGeneration == generation) {
+        this->recordDoneCount.fetch_add(1);
+        this->recordCvDone.notify_all();
+      }
+    }
   }
 }
 

@@ -830,8 +830,9 @@ SoVulkanRenderBackend::buildWorkItems(const SoDrawList & drawlist,
     if (transparent) {
       // Transparent geometry must preserve painter's order, so never batch.
       for (int i = 0; i < drawlist.getNumCommands(); ++i) {
-        const int index =
-          i < static_cast<int>(order.size()) ? order[i] : i;
+        const int index = (i < static_cast<int>(order.size()) &&
+                           order[i] < drawlist.getNumCommands())
+          ? order[i] : i;
         const SoRenderCommand & command = drawlist.getCommand(index);
         if (command.pass == SO_RENDERPASS_OVERLAY) continue;
         if (command.pass != SO_RENDERPASS_TRANSPARENT) continue;
@@ -853,8 +854,9 @@ SoVulkanRenderBackend::buildWorkItems(const SoDrawList & drawlist,
         this->batchBucketScratch;
       buckets.clear();
       for (int i = 0; i < drawlist.getNumCommands(); ++i) {
-        const int index =
-          i < static_cast<int>(order.size()) ? order[i] : i;
+        const int index = (i < static_cast<int>(order.size()) &&
+                           order[i] < drawlist.getNumCommands())
+          ? order[i] : i;
         const SoRenderCommand & command = drawlist.getCommand(index);
         if (command.pass == SO_RENDERPASS_OVERLAY) continue;
         if (command.pass == SO_RENDERPASS_TRANSPARENT) continue;
@@ -930,8 +932,9 @@ SoVulkanRenderBackend::buildWorkItems(const SoDrawList & drawlist,
         ? SoDrawStyleElement::LINES
         : wireframeFillMode;
       for (int i = 0; i < drawlist.getNumCommands(); ++i) {
-        const int index =
-          i < static_cast<int>(order.size()) ? order[i] : i;
+        const int index = (i < static_cast<int>(order.size()) &&
+                           order[i] < drawlist.getNumCommands())
+          ? order[i] : i;
         const SoRenderCommand & command = drawlist.getCommand(index);
         if (command.pass == SO_RENDERPASS_OVERLAY) continue;
         if (command.pass == SO_RENDERPASS_TRANSPARENT) continue;
@@ -1337,10 +1340,10 @@ SoVulkanRenderBackend::recordFrame(const SoDrawList & drawlist,
       load[dst] += h.first;
     }
     // Dispatch: main records worker 0, spawned threads record workers 1..W-1.
-    this->recordDoneCount = 0;
     uint32_t generation = 0;
     {
       std::lock_guard<std::mutex> lk(this->recordMutex);
+      this->recordDoneCount.store(0);
       generation = ++this->recordJobGeneration;
     }
     vkBackendTrace(this->uboFrameIndex, "recordFrame.dispatch",

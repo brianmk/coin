@@ -755,9 +755,12 @@ SoVulkanRenderBackend::expandWideLinesParallel(const SoDrawList & drawlist,
     this->recordJobs[i % W].wideLineCommands.push_back(wideLines[i]);
   }
 
-  this->recordDoneCount.store(0);
+  // Reset the done counter and bump the generation under recordMutex so the
+  // workers' count publication and the recording thread's predicate check are
+  // ordered by the same lock (see recordJobWorker's increment).
   {
     std::lock_guard<std::mutex> lk(this->recordMutex);
+    this->recordDoneCount.store(0);
     ++this->recordJobGeneration;
   }
   this->recordCvSpawn.notify_all();
@@ -952,9 +955,12 @@ SoVulkanRenderBackend::dispatchWideLineSplit(int phase, uint32_t count,
     job.wlineSplitEnd = static_cast<uint32_t>(
       (static_cast<uint64_t>(count) * (w + 1)) / W);
   }
-  this->recordDoneCount.store(0);
+  // Reset the done counter and bump the generation under recordMutex so the
+  // workers' count publication and the recording thread's predicate check are
+  // ordered by the same lock (see recordJobWorker's increment).
   {
     std::lock_guard<std::mutex> lk(this->recordMutex);
+    this->recordDoneCount.store(0);
     ++this->recordJobGeneration;
   }
   this->recordCvSpawn.notify_all();
