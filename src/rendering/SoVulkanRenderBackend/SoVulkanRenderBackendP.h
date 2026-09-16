@@ -116,7 +116,6 @@ countDrawCommands(const SoDrawList & drawlist, const int wireframeFillMode,
     if ((wireframeFillMode >= 0 || tessellationOverlay) &&
         command.pass != SO_RENDERPASS_TRANSPARENT) {
       ++draws;
-    if (command.pass != SO_RENDERPASS_TRANSPARENT) {
       const SoPrimitiveTopology topo = command.geometry.topology;
       const bool triTopo = topo == SO_TOPOLOGY_TRIANGLES ||
         topo == SO_TOPOLOGY_TRIANGLE_STRIP;
