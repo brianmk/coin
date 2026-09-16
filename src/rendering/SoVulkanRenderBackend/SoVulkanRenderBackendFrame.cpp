@@ -823,6 +823,14 @@ SoVulkanRenderBackend::buildWorkItems(const SoDrawList & drawlist,
   };
 
   uint32_t nextSlot = 0;
+  // A replayed list reuses the previous frame's sorted order, which may be
+  // shorter than (or hold stale indices for) the current command list; fall
+  // back to the identity order for those entries.
+  const auto orderedIndex = [&order, &drawlist](int i) {
+    return (i < static_cast<int>(order.size()) &&
+            order[i] < drawlist.getNumCommands())
+      ? order[i] : i;
+  };
   // Opaque then transparent, honoring the draw-list sort order.  Overlay
   // commands are handled by the dedicated overlay block outside the work list.
   for (int passIndex = 0; passIndex < 2; ++passIndex) {
@@ -830,9 +838,7 @@ SoVulkanRenderBackend::buildWorkItems(const SoDrawList & drawlist,
     if (transparent) {
       // Transparent geometry must preserve painter's order, so never batch.
       for (int i = 0; i < drawlist.getNumCommands(); ++i) {
-        const int index = (i < static_cast<int>(order.size()) &&
-                           order[i] < drawlist.getNumCommands())
-          ? order[i] : i;
+        const int index = orderedIndex(i);
         const SoRenderCommand & command = drawlist.getCommand(index);
         if (command.pass == SO_RENDERPASS_OVERLAY) continue;
         if (command.pass != SO_RENDERPASS_TRANSPARENT) continue;
@@ -854,9 +860,7 @@ SoVulkanRenderBackend::buildWorkItems(const SoDrawList & drawlist,
         this->batchBucketScratch;
       buckets.clear();
       for (int i = 0; i < drawlist.getNumCommands(); ++i) {
-        const int index = (i < static_cast<int>(order.size()) &&
-                           order[i] < drawlist.getNumCommands())
-          ? order[i] : i;
+        const int index = orderedIndex(i);
         const SoRenderCommand & command = drawlist.getCommand(index);
         if (command.pass == SO_RENDERPASS_OVERLAY) continue;
         if (command.pass == SO_RENDERPASS_TRANSPARENT) continue;
@@ -932,9 +936,7 @@ SoVulkanRenderBackend::buildWorkItems(const SoDrawList & drawlist,
         ? SoDrawStyleElement::LINES
         : wireframeFillMode;
       for (int i = 0; i < drawlist.getNumCommands(); ++i) {
-        const int index = (i < static_cast<int>(order.size()) &&
-                           order[i] < drawlist.getNumCommands())
-          ? order[i] : i;
+        const int index = orderedIndex(i);
         const SoRenderCommand & command = drawlist.getCommand(index);
         if (command.pass == SO_RENDERPASS_OVERLAY) continue;
         if (command.pass == SO_RENDERPASS_TRANSPARENT) continue;

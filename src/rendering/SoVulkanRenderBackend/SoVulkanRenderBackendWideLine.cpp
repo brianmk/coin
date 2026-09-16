@@ -955,9 +955,7 @@ SoVulkanRenderBackend::dispatchWideLineSplit(int phase, uint32_t count,
     job.wlineSplitEnd = static_cast<uint32_t>(
       (static_cast<uint64_t>(count) * (w + 1)) / W);
   }
-  // Reset the done counter and bump the generation under recordMutex so the
-  // workers' count publication and the recording thread's predicate check are
-  // ordered by the same lock (see recordJobWorker's increment).
+  // Reset/bump under recordMutex; see expandWideLinesParallel().
   {
     std::lock_guard<std::mutex> lk(this->recordMutex);
     this->recordDoneCount.store(0);
