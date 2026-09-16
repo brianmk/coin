@@ -974,7 +974,6 @@ SoVulkanRenderBackend::buildWorkItems(const SoDrawList & drawlist,
           }
         }
         if (!this->findCachedDrawable(command)) continue;
-        const SoPrimitiveTopology topo = command.geometry.topology;
         const bool lineTopo = topo == SO_TOPOLOGY_LINES ||
           topo == SO_TOPOLOGY_LINE_STRIP;
         const bool triTopo = topo == SO_TOPOLOGY_TRIANGLES ||
