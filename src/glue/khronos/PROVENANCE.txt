@@ -1,36 +1,42 @@
 Khronos header provenance
 =========================
 
-The headers in this directory are vendored snapshots of generated Khronos
-API headers used by Coin's core-profile OpenGL build, including the Windows
-WGL declarations.
+These files are unmodified vendored snapshots of generated Khronos API
+headers used by Coin's private core-profile OpenGL implementation.
 
-Sources:
+OpenGL and WGL
+--------------
 
-  OpenGL and WGL headers:
-    https://github.com/KhronosGroup/OpenGL-Registry
+Repository: https://github.com/KhronosGroup/OpenGL-Registry
+Commit: 1cdd228e34966dd6b95bd203e9f84faba0f371a1
+Import date: 2026-08-28
 
-  Khronos platform types:
-    https://github.com/KhronosGroup/EGL-Registry
+File                 Git blob                                  SHA-256
+GL/glcorearb.h       99148caa608f9b880aded37ccd97aab87fd87836  65fae555a8b3b5709099837001e0c14228b3e45651e2d0fa2ad22649833921e1
+GL/glext.h           069e992db61b7c459fe3505d4e54c7189593092f  d7b6f15b1bb209e08bd6ada36983f8bb40429e66c24083aa2474d55205d97047
+GL/wglext.h          0dfea0a9515d241f08912ad3a97c7010680e17c7  f6830dd670574c46dd58b119a21d857edc1dd161cba23e8644dffb6920999f68
 
-Imported files:
+Generated header versions:
 
-  GL/glcorearb.h
-  GL/glext.h
-  GL/wglext.h
-  KHR/khrplatform.h
+GL_GLEXT_VERSION: 20260803
+WGL_WGLEXT_VERSION: 20260126
 
-Snapshot metadata:
+Khronos platform types
+----------------------
 
-  Import date: 2026-07-31
-  GL_GLEXT_VERSION: 20190326
-  WGL_WGLEXT_VERSION: 20190228
-  khrplatform.h semantic commit:
-    67a3e0864c2d75ea5287b9f3d2eb74a745936692
+Repository: https://github.com/KhronosGroup/EGL-Registry
+Commit: 5961a7fe64cf8a126890ced6f13d69e0a1e1b83e
+Import date: 2026-08-28
 
-The original OpenGL Registry commit for the GL/WGL snapshot was not recorded
-when these files were first imported. The embedded version values and the
-upstream copyright and license notices are retained in the headers above.
+File                 Git blob                                  SHA-256
+KHR/khrplatform.h    01646449caedc958effc3b450360aefd260671ab  7b1e01aaa7ad8f6fc34b5c7bdf79ebf5189bb09e2c4d2e79fc5d350623d11e83
 
-If these headers are updated, record the exact upstream commit or release,
-the update date, and any Coin-specific modifications here.
+Verification
+------------
+
+Fetch each file from the repository and commit recorded above, then compare
+its SHA-256 hash with this table. No Coin-specific changes are permitted in
+these vendored files; local integration belongs outside this directory.
+
+When updating the snapshot, update the commits, blob IDs, hashes, generated
+header versions, and import date together.

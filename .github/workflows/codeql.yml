@@ -4,7 +4,7 @@ on:
   workflow_dispatch:  # Allow manual triggers
   push:
     branches: [ "master", "freecad-master" ]
-  pull_request:
+  pull_request: {}
   schedule:
     - cron: '21 10 * * 4'
 

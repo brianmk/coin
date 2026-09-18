@@ -541,10 +541,25 @@ static cc_dict * gldict = NULL;
 
 static SbBool glglue_detect_context_legacy_rendering(const cc_glglue * glue);
 
+static char *
+glglue_strdup(const char * string)
+{
+  if (!string) return NULL;
+  const size_t length = strlen(string) + 1;
+  char * copy = (char *)malloc(length);
+  assert(copy && "could not copy OpenGL string");
+  if (copy) memcpy(copy, string, length);
+  return copy;
+}
+
 static void
 free_glglue_instance(uintptr_t COIN_UNUSED_ARG(key), void * value, void * COIN_UNUSED_ARG(closure))
 {
   cc_glglue * glue = (cc_glglue*) value;
+  free(glue->versionstr);
+  free(glue->vendorstr);
+  free(glue->rendererstr);
+  free(glue->extensionsstr);
   cc_dict_destruct(glue->glextdict);
   free(value);
 }
@@ -2435,9 +2450,10 @@ cc_glglue_instance(int contextid)
     /* NB: if you are getting a crash here, it's because an attempt at
      * setting up a cc_glglue instance was made when there is no
      * current OpenGL context. */
-    gi->versionstr = (const char *)glGetString(GL_VERSION);
-    assert(gi->versionstr && "could not call glGetString() -- no current GL context?");
+    const char * versionstr = (const char *)glGetString(GL_VERSION);
+    assert(versionstr && "could not call glGetString() -- no current GL context?");
     assert(glGetError() == GL_NO_ERROR && "GL error when calling glGetString() -- no current GL context?");
+    gi->versionstr = glglue_strdup(versionstr);
 
     glglue_set_glVersion(gi);
 
@@ -2456,7 +2472,7 @@ cc_glglue_instance(int contextid)
     }
 #endif
 
-    gi->vendorstr = (const char *)glGetString(GL_VENDOR);
+    gi->vendorstr = glglue_strdup((const char *)glGetString(GL_VENDOR));
     gi->vendor_is_SGI = strcmp((const char *)gi->vendorstr, "SGI") == 0;
     gi->vendor_is_nvidia = strcmp((const char*)gi->vendorstr, "NVIDIA Corporation") == 0;
     gi->vendor_is_intel =
@@ -2472,11 +2488,11 @@ cc_glglue_instance(int contextid)
       if (env) gi->nvidia_color_per_face_bug = 0;
     }
 
-    gi->rendererstr = (const char *)glGetString(GL_RENDERER);
+    gi->rendererstr = glglue_strdup((const char *)glGetString(GL_RENDERER));
     // GL_EXTENSIONS is invalid in an OpenGL core context. Use the indexed
     // query path below for OpenGL 3.0 and newer contexts.
     gi->extensionsstr = cc_glglue_glversion_matches_at_least(gi, 3, 0, 0) ?
-      NULL : (const char *)glGetString(GL_EXTENSIONS);
+      NULL : glglue_strdup((const char *)glGetString(GL_EXTENSIONS));
 
     /* Randall O'Reilly reports that the above call is deprecated from OpenGL 3.0
        onwards and may, particularly on some Linux systems, return NULL.
