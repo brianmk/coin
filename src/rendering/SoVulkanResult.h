@@ -70,14 +70,14 @@ private:
 /*!
   \brief Propagate a failed Result out of the current function.
 
-  Usage: `SO_VULKAN_TRY(uploadTexture(...));` where the enclosing function
+  Usage: `COIN_VULKAN_TRY(uploadTexture(...));` where the enclosing function
   returns SoVulkan::Result.  A no-op on success.
 */
-#define SO_VULKAN_TRY(expr)                                                    \
+#define COIN_VULKAN_TRY(expr)                                                  \
   do {                                                                         \
-    ::SoVulkan::Result so_vulkan_try_result = (expr);                          \
-    if (!so_vulkan_try_result.isOk()) {                                        \
-      return so_vulkan_try_result;                                             \
+    ::SoVulkan::Result coin_vulkan_try_result = (expr);                        \
+    if (!coin_vulkan_try_result.isOk()) {                                      \
+      return coin_vulkan_try_result;                                           \
     }                                                                          \
   } while (false)
 

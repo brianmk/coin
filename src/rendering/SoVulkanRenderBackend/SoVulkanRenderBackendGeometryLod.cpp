@@ -85,9 +85,9 @@ bool geometryLodAlways()
 
 // Print the previous frame's survivor count per compacted command.  This is
 // the only way to prove the compaction is correct on a real, large mesh: a
-// nav-cube-only run says nothing (see the note on geometryLodStats callers).
-// With FC_VULKAN_GEOM_LOD_PIXELS=0 every triangle must survive (survivors ==
-// prims); with the default threshold a zoomed-out mesh must cull heavily.
+// nav-cube-only run says nothing.  With FC_VULKAN_GEOM_LOD_PIXELS=0 every
+// triangle must survive (survivors == prims); with the default threshold a
+// zoomed-out mesh must cull heavily.
 bool geometryLodStats()
 {
   return SoVulkanConfig::get().geometryLod.stats;
@@ -578,7 +578,7 @@ SoVulkanRenderBackend::prepareExternalGeometryLod(
   this->updateLightingSetup(drawlist);
   this->updateGeometryCache(drawlist, /*overlaysOnly*/ false,
                             params.geometryContentUnchanged);
-  SO_VULKAN_TRY(this->flushPendingTextureUploadsExternal());
+  COIN_VULKAN_TRY(this->flushPendingTextureUploadsExternal());
   // Tell the subsequent renderExternal() the setup already ran.
   this->externalFramePrepared = true;
 

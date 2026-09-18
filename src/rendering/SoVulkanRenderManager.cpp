@@ -1983,9 +1983,9 @@ SoVulkanRenderManagerP::prepareRenderParams(SbBool clearwindow,
     // SoCube, ~36 vertices) - the real document shapes may not be in it at
     // all.  Do not assume "the scene rendered" just because main > 0: check
     // mainMaxVc against the shape's real vertex count.  Feature work that is
-    // only ever exercised against the nav cube (see the VALIDATION NOTE in
-    // SoVulkanRenderBackendGeometryLod.cpp) can appear to work while never
-    // touching real, indexed document geometry.
+    // only ever exercised against the nav cube can appear to work while never
+    // touching real, indexed document geometry (tools/fcprobe/vk_geomlod_probe.py
+    // is the check that guards against exactly this).
     const int numMain = static_cast<int>(this->mainCommandCount);
     if (numMain < list.getNumCommands()) {
       list.truncate(numMain);

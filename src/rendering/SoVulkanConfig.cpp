@@ -4,6 +4,8 @@
 #include "rendering/SoVulkanShared.h"
 
 #include <cstdio>
+#include <cstdlib>
+#include <string>
 
 namespace SoVulkanConfig {
 
@@ -20,13 +22,24 @@ float readNonNegativeFloat(const char * name, float fallback)
 }
 
 // Read a strictly positive uint32; a missing/invalid value keeps the default.
+// Parsed with strtoll (not envInt) so a value above INT_MAX -- e.g. a large
+// FC_VULKAN_GEOM_LOD_MAX_INDEX -- saturates at UINT32_MAX instead of
+// overflowing the int round-trip.
 uint32_t readPositiveUint(const char * name, uint32_t fallback)
 {
-  if (!SoVulkanShared::envSet(name)) {
+  const char * value = SoVulkanShared::envString(name);
+  if (value == nullptr || *value == '\0') {
     return fallback;
   }
-  const int value = SoVulkanShared::envInt(name, static_cast<int>(fallback));
-  return value > 0 ? static_cast<uint32_t>(value) : fallback;
+  char * end = nullptr;
+  const long long parsed = std::strtoll(value, &end, 10);
+  if (end == value || parsed <= 0) {
+    return fallback;
+  }
+  if (parsed > static_cast<long long>(UINT32_MAX)) {
+    return UINT32_MAX;
+  }
+  return static_cast<uint32_t>(parsed);
 }
 
 // Optional overrides: nullopt means "leave the caller's default".
@@ -169,22 +182,35 @@ void dump()
                c.accelerationStructures.compact ? 1 : 0,
                c.rayTracing.sbtPipeline ? 1 : 0);
   const PathTracing & pt = c.pathTracing;
+  // Print the resolved value, not just presence: for a diagnostics dump the
+  // value is the useful part.  "-" means the backend default is in force.
+  auto optU = [](const std::optional<uint32_t> & v) {
+    return v ? std::to_string(*v) : std::string("-");
+  };
+  auto optF = [](const std::optional<float> & v) {
+    return v ? std::to_string(*v) : std::string("-");
+  };
+  auto optB = [](const std::optional<bool> & v) {
+    return v ? std::string(*v ? "1" : "0") : std::string("-");
+  };
   std::fprintf(stderr,
                "[VKCONFIG] pt bounces=%s settle=%s maxSamples=%s adaptive=%s "
                "minSamples=%s threshold=%s stopFraction=%s firefly=%s "
                "temporal=%s\n",
-               pt.bounces ? "set" : "-", pt.settleFrames ? "set" : "-",
-               pt.maxSamples ? "set" : "-", pt.adaptive ? "set" : "-",
-               pt.adaptiveMinSamples ? "set" : "-",
-               pt.adaptiveThreshold ? "set" : "-",
-               pt.adaptiveStopFraction ? "set" : "-",
-               pt.fireflySigma ? "set" : "-", pt.temporal ? "set" : "-");
+               optU(pt.bounces).c_str(), optU(pt.settleFrames).c_str(),
+               optU(pt.maxSamples).c_str(), optB(pt.adaptive).c_str(),
+               optU(pt.adaptiveMinSamples).c_str(),
+               optF(pt.adaptiveThreshold).c_str(),
+               optF(pt.adaptiveStopFraction).c_str(),
+               optF(pt.fireflySigma).c_str(), optB(pt.temporal).c_str());
   std::fprintf(stderr,
                "[VKCONFIG] memPool=%d parallel=%d workerCap=%s extSec=%d "
                "asyncCompute=%d wlineCpu=%d\n",
                c.memoryPool.enabled ? 1 : 0,
                c.concurrency.parallelRecord ? 1 : 0,
-               c.concurrency.recordWorkerCap ? "set" : "-",
+               c.concurrency.recordWorkerCap
+                 ? std::to_string(*c.concurrency.recordWorkerCap).c_str()
+                 : "-",
                c.concurrency.externalSecondary ? 1 : 0,
                c.concurrency.asyncCompute ? 1 : 0,
                c.raster.wideLineCpu ? 1 : 0);
