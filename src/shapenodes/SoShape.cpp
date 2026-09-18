@@ -983,15 +983,26 @@ SoShape::IRRender(SoIRRenderAction * action)
   if (!action) return;
   if (getenv("FC_IR_BREADCRUMB")) {
     static int n = 0;
-    if (n++ < 10) fprintf(stderr, "[BC-IR] IRRender shape=%p type=%s\n",
-                          (void *)this,
-                          this->getTypeId().getName().getString());
+    if (n++ < 300) {
+      fprintf(stderr, "[BC-IR] IRRender shape=%p type=%s\n", (void *)this,
+              this->getTypeId().getName().getString());
+    }
   }
 
   SoState * state = action->getState();
 
   const SoShapeStyleElement * shapestyle = SoShapeStyleElement::get(state);
   const unsigned int shapestyleflags = shapestyle->getFlags();
+  if (getenv("FC_IR_BREADCRUMB")) {
+    const char * tn = this->getTypeId().getName().getString();
+    static int m = 0;
+    if (m++ < 20000 && tn && std::strstr(tn, "SoBrep")) {
+      fprintf(stderr,
+              "[BC-IR] IRRender flags shape=%p type=%s flags=0x%x invisible=%d\n",
+              (void *)this, tn, shapestyleflags,
+              (shapestyleflags & SoShapeStyleElement::INVISIBLE) ? 1 : 0);
+    }
+  }
   if (shapestyleflags & SoShapeStyleElement::INVISIBLE) return;
 
   // Draw style BOUNDS: record the shape's local bounding box as a solid
@@ -1122,6 +1133,18 @@ SoShape::IRRender(SoIRRenderAction * action)
   // viewport's render manager) would otherwise race on irBatchScratch.  The
   // retained geometry itself is safe to read unlocked (emitRuns is a snapshot
   // holding shared_ptr refs), so this only serializes the scratch.
+  if (getenv("FC_IR_BREADCRUMB")) {
+    size_t totalVerts = 0;
+    for (const SoIRRetainedGeometry & run : emitRuns) {
+      totalVerts += run.vertexCount;
+    }
+    if (totalVerts > 100000) {
+      fprintf(stderr,
+              "[BC-IR] emit shape=%p type=%s action=%p runs=%zu verts=%zu\n",
+              (void *)this, this->getTypeId().getName().getString(),
+              (void *)action, emitRuns.size(), totalVerts);
+    }
+  }
   PRIVATE(this)->lock();
   for (const SoIRRetainedGeometry & run : emitRuns) {
     soshape_emit_ir_commands(action, this, state, run, true,

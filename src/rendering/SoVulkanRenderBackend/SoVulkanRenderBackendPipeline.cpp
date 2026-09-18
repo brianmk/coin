@@ -280,11 +280,19 @@ SoVulkanRenderBackend::getOrCreatePipeline(const SoRenderCommand & command,
     ? command.state.raster.polygonOffsetFactor * kUseDecal
     : (overlay ? -0.5f : 0.0f);
   PipelineKey key;
-  // Wide-line rendering (line width > 1 and/or a stipple pattern) expands
-  // segments into quads on the CPU and draws them with the wide-line
-  // pipeline as triangle lists, mirroring the GL wide-line geometry shader.
-  // The overlay wireframe redraw stays on the plain line path.
-  key.wideLine = isWideLine(command, fillModeOverride);
+  // Wide-line rendering (line width > 1 and/or a stipple pattern) draws each
+  // segment as a quad.  Eligible commands expand the quad on the GPU in the
+  // instanced vertex shader (key.wideLineInstanced); the rest expand on the
+  // CPU and are drawn as a triangle list, mirroring the GL wide-line geometry
+  // shader.  The overlay wireframe redraw stays on the plain line path.
+  key.wideLine = isWideLine(command, fillModeOverride, this->interactionLodActive);
+  // GPU-instanced variant when the command is eligible AND its static instance
+  // endpoint buffer exists.  The record path and the wide-line expansion
+  // pre-pass apply the identical per-command test, so the key and the draw
+  // always agree.
+  key.wideLineInstanced = key.wideLine && isInstancedWideLine(command) &&
+    cacheEntry != nullptr &&
+    cacheEntry->instancedLineBuffer != VK_NULL_HANDLE;
   key.renderPass = pass;
   key.topology = command.geometry.topology;
   key.fillMode = overlay ? static_cast<uint8_t>(fillModeOverride)
@@ -386,8 +394,9 @@ SoVulkanRenderBackend::getOrCreatePipeline(const SoRenderCommand & command,
   VkPipelineShaderStageCreateInfo stages[2] {};
   stages[0].sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
   stages[0].stage = VK_SHADER_STAGE_VERTEX_BIT;
-  stages[0].module = key.wideLine ? this->wideLineVertexModule
-                                  : this->vertexModule;
+  stages[0].module = key.wideLineInstanced ? this->wideLineInstancedVertexModule
+                    : key.wideLine ? this->wideLineVertexModule
+                                   : this->vertexModule;
   stages[0].pName = "main";
   stages[1].sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
   stages[1].stage = VK_SHADER_STAGE_FRAGMENT_BIT;
@@ -399,15 +408,18 @@ SoVulkanRenderBackend::getOrCreatePipeline(const SoRenderCommand & command,
   // wide-line path substitutes its own 36-byte clip-space layout at binding 0.
   VkVertexInputBindingDescription binding[2] {};
   binding[0].binding = 0;
-  binding[0].stride = key.wideLine ? 36u : VULKAN_VERTEX_STRIDE;
-  binding[0].inputRate = VK_VERTEX_INPUT_RATE_VERTEX;
-  // Binding 1 (visual pipelines only): the per-instance model matrix, four
-  // R32G32B32A32 rows advanced per instance (rate INSTANCE).  This lets a
-  // group of commands sharing geometry/material but differing only by model
-  // matrix be drawn as one instanced vkCmdDraw.  A one-element instance buffer
-  // is bound for ordinary non-instanced draws, so every visual draw carries
-  // the attribute.  Wide-line pipelines keep their own layout (no instancing).
-  if (!key.wideLine) {
+  // GPU-instanced wide lines read one instance per segment from binding 0
+  // (four vec4: p0, p1, c0, c1); the CPU-expanded path reads its 36-byte
+  // clip-space quad stream; the visual path reads the interleaved vertex.
+  binding[0].stride = key.wideLineInstanced ? sizeof(float) * 16
+                     : key.wideLine ? 36u : VULKAN_VERTEX_STRIDE;
+  binding[0].inputRate = key.wideLineInstanced
+    ? VK_VERTEX_INPUT_RATE_INSTANCE : VK_VERTEX_INPUT_RATE_VERTEX;
+  // Binding 1: the per-instance model matrix, four R32G32B32A32 rows advanced
+  // per instance (rate INSTANCE).  Used by the visual pipelines and by the
+  // GPU-instanced wide-line pipeline.  The CPU-expanded wide-line pipeline
+  // keeps its own single-binding layout.
+  if (!key.wideLine || key.wideLineInstanced) {
     binding[1].binding = 1;
     binding[1].stride = sizeof(float) * 16; // mat4, 4 x vec4
     binding[1].inputRate = VK_VERTEX_INPUT_RATE_INSTANCE;
@@ -464,14 +476,38 @@ SoVulkanRenderBackend::getOrCreatePipeline(const SoRenderCommand & command,
   wideLineAttributes[2].format = VK_FORMAT_R32_SFLOAT;
   wideLineAttributes[2].offset = 32;
 
+  // GPU-instanced wide-line layout: the segment endpoints/colors at binding 0
+  // (locations 0..3) and the per-instance model matrix at binding 1
+  // (locations 4..7, matching the visual pass).
+  VkVertexInputAttributeDescription instancedLineAttributes[8] {};
+  instancedLineAttributes[0] = { 0, 0, VK_FORMAT_R32G32B32A32_SFLOAT, 0 };
+  instancedLineAttributes[1] = { 1, 0, VK_FORMAT_R32G32B32A32_SFLOAT, 16 };
+  instancedLineAttributes[2] = { 2, 0, VK_FORMAT_R32G32B32A32_SFLOAT, 32 };
+  instancedLineAttributes[3] = { 3, 0, VK_FORMAT_R32G32B32A32_SFLOAT, 48 };
+  instancedLineAttributes[4] = { 4, 1, VK_FORMAT_R32G32B32A32_SFLOAT, 0 };
+  instancedLineAttributes[5] = { 5, 1, VK_FORMAT_R32G32B32A32_SFLOAT, 16 };
+  instancedLineAttributes[6] = { 6, 1, VK_FORMAT_R32G32B32A32_SFLOAT, 32 };
+  instancedLineAttributes[7] = { 7, 1, VK_FORMAT_R32G32B32A32_SFLOAT, 48 };
+
   VkPipelineVertexInputStateCreateInfo vertexInput {};
   vertexInput.sType =
     VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO;
-  vertexInput.vertexBindingDescriptionCount = key.wideLine ? 1u : 2u;
   vertexInput.pVertexBindingDescriptions = binding;
-  vertexInput.vertexAttributeDescriptionCount = key.wideLine ? 3u : 8u;
-  vertexInput.pVertexAttributeDescriptions =
-    key.wideLine ? wideLineAttributes : attributes;
+  if (key.wideLineInstanced) {
+    vertexInput.vertexBindingDescriptionCount = 2u;
+    vertexInput.vertexAttributeDescriptionCount = 8u;
+    vertexInput.pVertexAttributeDescriptions = instancedLineAttributes;
+  }
+  else if (key.wideLine) {
+    vertexInput.vertexBindingDescriptionCount = 1u;
+    vertexInput.vertexAttributeDescriptionCount = 3u;
+    vertexInput.pVertexAttributeDescriptions = wideLineAttributes;
+  }
+  else {
+    vertexInput.vertexBindingDescriptionCount = 2u;
+    vertexInput.vertexAttributeDescriptionCount = 8u;
+    vertexInput.pVertexAttributeDescriptions = attributes;
+  }
 
   VkPipelineInputAssemblyStateCreateInfo inputAssembly {};
   inputAssembly.sType =

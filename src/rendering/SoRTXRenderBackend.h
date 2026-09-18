@@ -277,6 +277,21 @@ public:
   void setPathTracingBounces(uint32_t bounces);
 
   /*!
+    \brief Enable/disable interaction LOD (quality reduction while the camera
+    moves).
+
+    While engaged the path tracer traces with a single bounce and the
+    progressive run stays at its live preview, so an interactive orbit of a
+    heavy scene costs one cheap bounce per frame instead of the full
+    multi-bounce trace.  Disengaging restarts a clean full-quality
+    accumulation against the current camera.  The viewport drives this from
+    its navigation activity; a no-op when path tracing is disabled.
+  */
+  void setInteractionLod(SbBool active);
+  //! True while interaction LOD is engaged (see setInteractionLod).
+  SbBool getInteractionLod(void) const;
+
+  /*!
     \brief Frames of a static camera before the accumulation auto-restarts
     (1..120, default 6).
 
@@ -686,6 +701,14 @@ private:
   // traces to phase markers and frame dumps on one monotonic key.
   uint32_t ptLastFrame = 0;
   uint32_t ptMaxBounces = 4;
+  //! Bounce count requested by the settings; ptMaxBounces is derived from
+  //! this and the interaction-LOD state (see setInteractionLod).
+  uint32_t ptMaxBouncesBase = 4;
+  //! Bounce count used while interaction LOD is engaged (single bounce: the
+  //! cheapest still-correct transport for a moving preview).
+  uint32_t ptInteractionBounces = 1;
+  //! Interaction LOD state, set by setInteractionLod().
+  SbBool ptInteractionLod = FALSE;
   // Consecutive frames with an unchanged camera/scene while not accumulating.
   // Once this reaches the settle threshold (see updatePathTracingState) a
   // fresh accumulation auto-starts, so the view refines itself after a move
@@ -899,10 +922,22 @@ private:
   uint32_t statBlasBuilt = 0;
   uint32_t statBlasRefit = 0;
   uint32_t statBlasReused = 0;
-  // Instances skipped this frame by the sub-pixel TLAS cull (FC_VULKAN_TLAS_CULL).
-  // A count > 0 means the TLAS instance set differs from last frame, so the
-  // MODE_UPDATE refit path is suppressed in favour of a full MODE_BUILD.
+  // Instances skipped this frame by the TLAS instance cull (frustum +
+  // sub-pixel).  A count > 0 means the TLAS instance set differs from last
+  // frame, so the MODE_UPDATE refit path is suppressed in favour of a full
+  // MODE_BUILD.
   uint32_t statTlasCulled = 0;
+  // Whether TLAS instance culling is enabled.  Resolved once at initialize()
+  // from FC_VULKAN_TLAS_CULL (default on; "0" disables) so the buildTlas cull
+  // and the interaction-LOD rebuild decision cannot disagree.
+  bool tlasCullEnabled = true;
+  // Sub-pixel cull threshold in pixels (FC_VULKAN_TLAS_PIX, default 1.0).  An
+  // instance whose projected footprint is below this in both axes is dropped.
+  float tlasCullPixels = 1.0f;
+  // Force exactly one more TLAS build after interaction LOD disengages so the
+  // resting view is culled against the final (static) camera pose.  Consumed
+  // by recordAccelerationStructures().
+  bool tlasCullRebuildPending = false;
   // CPU cost of this frame's updateGeometryCache() scan (per-command
   // topology/transform/geometry change detection), in milliseconds.  Feeds
   // the [RTDBG] frameTiming geomScan= field under FC_VULKAN_FRAME_TIMING so

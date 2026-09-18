@@ -79,6 +79,14 @@ struct SoRenderParams {
   //! are re-produced every frame and must still be verified.  FALSE by
   //! default so a backend that ignores it is always correct.
   SbBool geometryContentUnchanged = FALSE;
+
+  //! Set by the embedding while the camera is moving (interaction LOD).  A
+  //! backend may drop per-frame work that is invisible in motion and restore
+  //! full quality when the camera stops.  The Vulkan backend uses it to draw
+  //! wide lines as plain 1px GPU lines instead of re-expanding every segment
+  //! into quads on the CPU, which dominates navigation on large edge sets.
+  //! FALSE by default so a backend that ignores it is always correct.
+  SbBool interactionLod = FALSE;
 };
 
 /*!

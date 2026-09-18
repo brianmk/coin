@@ -437,12 +437,15 @@ SoVulkanRenderBackend::uploadGeometry(VulkanCachedCommand & entry,
   bool vertexCreated = false;
   if (geometry.retained) {
     vertexCreated = this->createBufferDeviceLocal(vertexBytes,
-                                                  VK_BUFFER_USAGE_VERTEX_BUFFER_BIT,
+                                                  VK_BUFFER_USAGE_VERTEX_BUFFER_BIT |
+                                                    VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
                                                   entry.vertexBuffer,
                                                   entry.vertexMemory, vertices);
   }
   if (!vertexCreated) {
-    vertexCreated = this->createBuffer(vertexBytes, VK_BUFFER_USAGE_VERTEX_BUFFER_BIT,
+    vertexCreated = this->createBuffer(vertexBytes,
+                                       VK_BUFFER_USAGE_VERTEX_BUFFER_BIT |
+                                         VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
                                        entry.vertexBuffer, entry.vertexMemory,
                                        vertices);
   }
@@ -457,13 +460,16 @@ SoVulkanRenderBackend::uploadGeometry(VulkanCachedCommand & entry,
     bool indexCreated = false;
     if (geometry.retained) {
       indexCreated = this->createBufferDeviceLocal(indexBytes,
-                                                    VK_BUFFER_USAGE_INDEX_BUFFER_BIT,
+                                                    VK_BUFFER_USAGE_INDEX_BUFFER_BIT |
+                                                      VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
                                                     entry.indexBuffer,
                                                     entry.indexMemory,
                                                     geometry.indices);
     }
     if (!indexCreated) {
-      indexCreated = this->createBuffer(indexBytes, VK_BUFFER_USAGE_INDEX_BUFFER_BIT,
+      indexCreated = this->createBuffer(indexBytes,
+                                        VK_BUFFER_USAGE_INDEX_BUFFER_BIT |
+                                          VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
                                         entry.indexBuffer, entry.indexMemory,
                                         geometry.indices);
     }
@@ -571,6 +577,7 @@ SoVulkanRenderBackend::destroyCacheEntry(VulkanCachedCommand & entry)
     slot.destroy(this->device, this->allocator);
   }
   entry.wideLineBuffers.clear();
+  this->destroySubPixelResources(entry);
   entry = VulkanCachedCommand();
 }
 
@@ -596,7 +603,8 @@ SoVulkanRenderBackend::allocateGeometryBlock(VkDeviceSize capacity)
   VkBufferCreateInfo ci {};
   ci.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
   ci.size = capacity;
-  ci.usage = VK_BUFFER_USAGE_VERTEX_BUFFER_BIT | VK_BUFFER_USAGE_INDEX_BUFFER_BIT;
+  ci.usage = VK_BUFFER_USAGE_VERTEX_BUFFER_BIT |
+    VK_BUFFER_USAGE_INDEX_BUFFER_BIT | VK_BUFFER_USAGE_STORAGE_BUFFER_BIT;
   ci.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
 
   VkBuffer buffer = VK_NULL_HANDLE;

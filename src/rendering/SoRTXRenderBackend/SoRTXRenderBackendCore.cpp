@@ -339,7 +339,51 @@ SoRTXRenderBackend::getPathTracingSampleCount(void) const
 void
 SoRTXRenderBackend::setPathTracingBounces(const uint32_t bounces)
 {
-  this->ptMaxBounces = std::max(1u, std::min(16u, bounces));
+  this->ptMaxBouncesBase = std::max(1u, std::min(16u, bounces));
+  // The effective count follows the interaction-LOD state so a settings push
+  // during navigation does not undo the reduced preview.
+  this->ptMaxBounces =
+    this->ptInteractionLod ? this->ptInteractionBounces : this->ptMaxBouncesBase;
+}
+
+void
+SoRTXRenderBackend::setInteractionLod(SbBool active)
+{
+  if (this->ptInteractionLod == active) return;
+  this->ptInteractionLod = active;
+  this->ptMaxBounces =
+    active ? this->ptInteractionBounces : this->ptMaxBouncesBase;
+  if (SoVulkanShared::envString("FC_VULKAN_RT_DEBUG")) {
+    fprintf(stderr, "[RTDBG] interactionLod active=%d bounces=%u\n",
+            active ? 1 : 0, this->ptMaxBounces);
+  }
+  // Leaving the reduced preview must restart a clean full-quality accumulation
+  // against the now-static camera: the reduced-bounce history must not be
+  // carried forward, and the adaptive sampler must not freeze against it.
+  // Mirrors the reset in setViewMode()/setPathTracingEnabled().  Engaging
+  // needs no reset here: the camera move that engaged it already invalidated
+  // the run, so resetting on entry would only thrash the run on a slow drag.
+  if (!active) {
+    this->ptAccumulating = FALSE;
+    this->ptStartLatch = FALSE;
+    this->ptFrameIndex = 0;
+    this->ptIdleFrames = 0;
+    this->ptWasMoving = FALSE;
+    this->ptDenoisePending = FALSE;
+    this->ptConverged = FALSE;
+    this->denoiseResultReady = FALSE;
+    this->ptForceFullResolve = TRUE;
+    // Culling is camera-dependent, so rebuild the TLAS once against the final
+    // static pose; otherwise an instance culled mid-drag would stay missing
+    // (or an off-screen instance stay present) at rest.
+    this->tlasCullRebuildPending = true;
+  }
+}
+
+SbBool
+SoRTXRenderBackend::getInteractionLod(void) const
+{
+  return this->ptInteractionLod;
 }
 
 void
@@ -695,7 +739,9 @@ SoRTXRenderBackend::initialize(const SoRenderBackendInitParams & params)
   if (const char * bounces = SoVulkanShared::envString("FC_VULKAN_PT_BOUNCES")) {
     const int value = std::atoi(bounces);
     if (value >= 1 && value <= 16) {
-      this->ptMaxBounces = static_cast<uint32_t>(value);
+      this->ptMaxBouncesBase = static_cast<uint32_t>(value);
+      this->ptMaxBounces = this->ptInteractionLod
+        ? this->ptInteractionBounces : this->ptMaxBouncesBase;
     }
   }
   if (const char * settle = SoVulkanShared::envString("FC_VULKAN_PT_SETTLE")) {
@@ -708,6 +754,18 @@ SoRTXRenderBackend::initialize(const SoRenderBackendInitParams & params)
     const int value = std::atoi(maxsamples);
     if (value >= 1 && value <= 100000) {
       this->ptMaxSamples = static_cast<uint32_t>(value);
+    }
+  }
+  // TLAS instance culling (frustum + sub-pixel).  On by default: for a CAD
+  // viewport dominated by far/small meshes it grades the TLAS traversal cost.
+  // FC_VULKAN_TLAS_CULL=0 restores the uncalled (pre-existing) behavior.
+  if (const char * cull = SoVulkanShared::envString("FC_VULKAN_TLAS_CULL")) {
+    this->tlasCullEnabled = !(cull[0] == '0' && cull[1] == '\0');
+  }
+  if (const char * pix = SoVulkanShared::envString("FC_VULKAN_TLAS_PIX")) {
+    const float value = static_cast<float>(std::atof(pix));
+    if (value > 0.0f) {
+      this->tlasCullPixels = value;
     }
   }
   // Adaptive sampling tuning (see PathTrace.glsl u_adaptive).

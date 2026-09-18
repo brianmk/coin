@@ -218,13 +218,50 @@ isPatternedLine(const SoRenderCommand & command)
 }
 
   inline bool
-isWideLine(const SoRenderCommand & command, const int fillModeOverride)
+isWideLine(const SoRenderCommand & command, const int fillModeOverride,
+           const bool interactionLod = false)
 {
   const SoPrimitiveTopology topology = command.geometry.topology;
   const bool lineTopology = topology == SO_TOPOLOGY_LINES ||
     topology == SO_TOPOLOGY_LINE_STRIP;
-  return lineTopology && fillModeOverride < 0 &&
-    (command.state.raster.lineWidth > 1.0f || isPatternedLine(command));
+  if (!lineTopology || fillModeOverride >= 0) return false;
+  // A stipple pattern needs the expanded path regardless of width (the
+  // fragment shader tests the per-pixel distance), so interaction LOD must
+  // not downgrade it.
+  if (isPatternedLine(command)) return true;
+  // During camera interaction, draw wide lines as plain 1px GPU lines
+  // instead of expanding every segment into quads on the CPU.  The expansion
+  // is the dominant per-frame cost on large edge sets and is invisible while
+  // the camera moves; full width is restored when the camera stops.
+  return command.state.raster.lineWidth > 1.0f && !interactionLod;
+}
+
+  // True when a wide line should be drawn by the GPU-instanced vertex shader
+  // instead of the CPU quad expansion: a non-stippled LINE_LIST whose
+  // segments each reference exactly their own two vertices.  Both passes are
+  // eligible: the instanced shader reads the same per-draw view/projection
+  // (set 1 DrawBlock + push-constant proj) the record path resolves for the
+  // command, which already selects the frame camera for frame-camera
+  // overlays and the command's own camera for self-camera overlays.
+  inline bool
+instancedWideLineForceCpu()
+{
+  // FC_VULKAN_WLINE_CPU forces the CPU quad expansion for A/B comparison and
+  // as an escape hatch if a driver mishandles the instanced path.
+  static const bool forced = [] {
+    const char * e = std::getenv("FC_VULKAN_WLINE_CPU");
+    return e && *e && *e != '0';
+  }();
+  return forced;
+}
+
+  inline bool
+isInstancedWideLine(const SoRenderCommand & command)
+{
+  return !instancedWideLineForceCpu() &&
+    command.geometry.topology == SO_TOPOLOGY_LINES &&
+    !isPatternedLine(command) &&
+    command.state.raster.lineWidth > 1.0f;
 }
 
 // True when an overlay command spans the whole frame viewport (the selection/
@@ -446,7 +483,13 @@ hashTextureContent(const SoTextureData & texture)
 // across all pipelines, mirroring the GL backend's VAO-per-command bookkeeping
 // without any per-command vertex-state objects.
 constexpr uint32_t VULKAN_VERTEX_STRIDE = 32;
-constexpr int MAX_VERTEX_COUNT = 10000000;
+// Largest vertex count a single command may upload.  A flat-shaded CAD mesh
+// expands to 3 unique vertices per triangle (per-face normals prevent sharing),
+// so a Voron-class assembly reaches tens of millions of vertices in one
+// command; the old 10M ceiling silently dropped it (no vertex buffer, so the
+// object vanished from the raster pass).  Override with
+// FC_VULKAN_MAX_VERTEX_COUNT for a smaller/larger budget.
+constexpr int MAX_VERTEX_COUNT = 64000000;
 
 struct alignas(16) VulkanPushConstants {
   float proj[16];       // projection matrix (view/model live in the UBO)
@@ -464,11 +507,16 @@ struct alignas(16) VulkanPushConstants {
                         // y = stipple pattern bits (wide-line) / round
                         //     points (visual), z = line primitive,
                         // w = point primitive
+  float lineGeom[4];    // x = line width (device px), y = viewport width,
+                        // z = viewport height, w = device pixel ratio.  Read
+                        // only by the GPU-instanced wide-line vertex shader.
 };
 static_assert(offsetof(VulkanPushConstants, lineParams) == 144,
               "lineParams must land at shader offset 144");
-static_assert(sizeof(VulkanPushConstants) == 160,
-              "push-constant block must be 160 bytes");
+static_assert(offsetof(VulkanPushConstants, lineGeom) == 160,
+              "lineGeom must land at shader offset 160");
+static_assert(sizeof(VulkanPushConstants) == 176,
+              "push-constant block must be 176 bytes");
 
 // Push-constant block for the background gradient pass (BackgroundFragment.glsl).
 struct alignas(16) VulkanBackgroundPush {
