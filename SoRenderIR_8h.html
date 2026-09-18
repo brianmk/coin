@@ -137,7 +137,7 @@ $(function(){initNavTree('SoRenderIR_8h.html',''); initResizable(); });
 </div><!--header-->
 <div class="contents">
 
-<p>Backend-neutral intermediate representation for retained rendering.  
+<p>Retained intermediate representation for the Vulkan renderer.  
 <a href="#details">More...</a></p>
 <div class="textblock"><code>#include &lt;Inventor/SbBasic.h&gt;</code><br />
 <code>#include &lt;Inventor/SbMatrix.h&gt;</code><br />
@@ -385,8 +385,9 @@ Variables</h2></td></tr>
 <tr class="separator:ab95fd8abdf7585db4c36f7d5429e0d64"><td class="memSeparator" colspan="2">&#160;</td></tr>
 </table>
 <a name="details" id="details"></a><h2 class="groupheader">Detailed Description</h2>
-<div class="textblock"><p>Backend-neutral intermediate representation for retained rendering. </p>
-<p><a class="el" href="classSoIRRenderAction.html" title="Render action that traverses a scene graph into a backend-neutral draw list.">SoIRRenderAction</a> produces a <a class="el" href="classSoDrawList.html" title="Container holding the commands and auxiliary tables for one frame.">SoDrawList</a> while traversing a scene graph. A renderer backend consumes that list to produce pixels or another backend-specific result. The types in this file deliberately use semantic values instead of OpenGL enums so the intermediate representation does not require a particular graphics API.</p>
+<div class="textblock"><p>Retained intermediate representation for the Vulkan renderer. </p>
+<p><a class="el" href="classSoIRRenderAction.html" title="Render action that traverses a scene graph into a backend-neutral draw list.">SoIRRenderAction</a> produces a <a class="el" href="classSoDrawList.html" title="Container holding the commands and auxiliary tables for one frame.">SoDrawList</a> while traversing a scene graph, and Coin's Vulkan backends (SoVulkanRenderBackend for raster, SoRTXRenderBackend for ray tracing) consume that list to produce pixels. The types in this file deliberately use semantic values instead of OpenGL enums so the intermediate representation does not require a particular graphics API.</p>
+<dl class="section note"><dt>Note</dt><dd>This is the Vulkan/retained path, not a universal Coin abstraction. The production OpenGL viewport still renders through <a class="el" href="classSoGLRenderAction.html" title="The SoGLRenderAction class renders the scene graph with OpenGL calls.">SoGLRenderAction</a> directly and does not traverse the IR. SoGLRenderBackend consumes a <a class="el" href="classSoDrawList.html" title="Container holding the commands and auxiliary tables for one frame.">SoDrawList</a> only as a reference implementation used by the testsuite (see <a class="el" href="classSbList.html#ab18cad4eb2d06030cd564917a8c331f4">testsuite/drawlist-gl-test.cpp</a>); it is not built into libCoin and is not on the OpenGL viewport's code path.</dd></dl>
 <p>Geometry and embedded texture pointers are borrowed from the producer. They normally refer to storage owned by the current <a class="el" href="classSoIRRenderAction.html" title="Render action that traverses a scene graph into a backend-neutral draw list.">SoIRRenderAction</a> frame and must not be retained after that frame is cleared, rewound, or replaced. Device objects, caches, and other implementation resources belong to the consumer, not to the intermediate representation. </p>
 </div><h2 class="groupheader">Enumeration Type Documentation</h2>
 <a id="acddfab061472f7415bacaa229b588cda" name="acddfab061472f7415bacaa229b588cda"></a>
@@ -537,7 +538,7 @@ Variables</h2></td></tr>
 <div id="nav-path" class="navpath"><!-- id is needed for treeview function! -->
   <ul>
     <li class="navelem"><a class="el" href="dir_d44c64559bbebec7f509842c48db8b23.html">include</a></li><li class="navelem"><a class="el" href="dir_469ed70aca823fd8322768ad54869f94.html">Inventor</a></li><li class="navelem"><a class="el" href="dir_5d343cc747bd41482eefe196ea3ce274.html">rendering</a></li><li class="navelem"><a class="el" href="SoRenderIR_8h.html">SoRenderIR.h</a></li>
-    <li class="footer">Generated on Fri Sep 18 2026 20:53:03 for Coin by <a href="https://www.doxygen.org/index.html"><img class="footer" src="doxygen.svg" width="104" height="31" alt="doxygen"/></a> 1.10.0 </li>
+    <li class="footer">Generated on Fri Sep 18 2026 22:39:13 for Coin by <a href="https://www.doxygen.org/index.html"><img class="footer" src="doxygen.svg" width="104" height="31" alt="doxygen"/></a> 1.10.0 </li>
   </ul>
 </div>
 </body>
