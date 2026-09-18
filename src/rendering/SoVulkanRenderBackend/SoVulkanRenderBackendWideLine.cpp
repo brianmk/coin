@@ -29,6 +29,41 @@
 
 using namespace CoinVulkanDetail;
 
+namespace {
+
+// Segments below this stay on the whole-command path: the dispatch/join cost
+// (~tens of microseconds) is not worth splitting a small command.
+constexpr uint32_t kWideLineSplitMinSegments = 2048;
+
+// Row-major SbMat product, identical to the lambda in expandWideLines().
+inline void wlineMultiplyMat(const SbMat & a, const SbMat & b, SbMat & out)
+{
+  for (int r = 0; r < 4; ++r) {
+    for (int c = 0; c < 4; ++c) {
+      out[r][c] = a[r][0] * b[0][c] + a[r][1] * b[1][c] +
+        a[r][2] * b[2][c] + a[r][3] * b[3][c];
+    }
+  }
+}
+
+// Clip-space transform with the same Y-flip / depth remap as the visual
+// vertex shader (mirrors the lambda in expandWideLines()).
+inline void wlineTransformPoint(const SbMat & mvp, const float * p, float out[4])
+{
+  const float x = p[0];
+  const float y = p[1];
+  const float z = p[2];
+  out[0] = mvp[0][0] * x + mvp[0][1] * y + mvp[0][2] * z + mvp[0][3];
+  out[1] = -(mvp[1][0] * x + mvp[1][1] * y + mvp[1][2] * z + mvp[1][3]);
+  const float cz = mvp[2][0] * x + mvp[2][1] * y + mvp[2][2] * z + mvp[2][3];
+  const float cw = mvp[3][0] * x + mvp[3][1] * y + mvp[3][2] * z + mvp[3][3];
+  out[2] = 0.5f * cz + 0.5f * cw;
+  out[3] = cw;
+}
+
+} // namespace
+
+
 bool
 SoVulkanRenderBackend::ensureInstanceModelRingCapacity()
 {
@@ -396,6 +431,20 @@ SoVulkanRenderBackend::expandWideLines(VulkanCachedCommand & entry,
       if (wdiag) ++diagSkippedDeg;
       continue;
     }
+    // Frustum reject (see expandWideLinesSplitRange): a segment wholly off
+    // the sides of the view is not worth expanding -- the GPU would clip it.
+    {
+      const float mx = lineWidth / vpWidth;
+      const float my = lineWidth / vpHeight;
+      const float minx = std::min(ndc0x, ndc1x) - mx;
+      const float maxx = std::max(ndc0x, ndc1x) + mx;
+      const float miny = std::min(ndc0y, ndc1y) - my;
+      const float maxy = std::max(ndc0y, ndc1y) + my;
+      if (maxx < -1.0f || minx > 1.0f || maxy < -1.0f || miny > 1.0f) {
+        if (wdiag) ++diagSkippedDeg;
+        continue;
+      }
+    }
     const float dirx = dx / length;
     const float diry = dy / length;
     // Anisotropic NDC offset mirroring the GL geometry shader
@@ -628,6 +677,11 @@ SoVulkanRenderBackend::expandWideLinesParallel(const SoDrawList & drawlist,
   // entries that will actually be drawn.
   std::vector<const SoRenderCommand *> & wideLines = this->wlineExpandScratch;
   wideLines.clear();
+  std::vector<const SoRenderCommand *> & splitCmds = this->wlineSplitScratch;
+  splitCmds.clear();
+  const uint32_t W = this->maxRecordWorkers;
+  const bool canSplit = W > 1 && !this->recordWorkers.empty() &&
+    !COIN_VULKAN_ENV_FLAG("FC_VULKAN_WLINE_SERIAL");
   for (int i = 0; i < drawlist.getNumCommands(); ++i) {
     const SoRenderCommand & command = drawlist.getCommand(i);
     if (!isWideLine(command, -1)) continue;
@@ -637,11 +691,40 @@ SoVulkanRenderBackend::expandWideLinesParallel(const SoDrawList & drawlist,
     const auto found = this->commandToCache.find(&command);
     if (found == this->commandToCache.end()) continue;
     if (this->gpuCache[found->second].vertexBuffer == VK_NULL_HANDLE) continue;
-    wideLines.push_back(&command);
+    // A single dominant non-stippled LINE_LIST command (a lattice edge set)
+    // cannot be balanced by the whole-command round-robin below -- one worker
+    // would expand all of it.  Route it to the segment-range split instead.
+    // Stippled lines stay serial: their per-vertex distance is order-dependent.
+    const SoGeometryDesc & geometry = command.geometry;
+    const uint32_t count = geometry.indexCount && geometry.indices
+      ? geometry.indexCount : geometry.vertexCount;
+    const bool splittable =
+      command.pass != SO_RENDERPASS_OVERLAY &&
+      geometry.topology == SO_TOPOLOGY_LINES &&
+      !isPatternedLine(command) &&
+      count / 2 >= kWideLineSplitMinSegments;
+    if (canSplit && splittable) {
+      splitCmds.push_back(&command);
+    }
+    else {
+      wideLines.push_back(&command);
+    }
   }
+
+  // Expand the large commands first, on this (owner) thread; each split
+  // dispatch joins before the next, so the pool is idle when it runs.
+  for (const SoRenderCommand * command : splitCmds) {
+    const auto found = this->commandToCache.find(command);
+    if (found == this->commandToCache.end()) continue;
+    VulkanCachedCommand & entry = this->gpuCache[found->second];
+    SbMat projValue;
+    this->resolveCommandProj(*command, params, false, projValue);
+    this->expandWideLinesSplit(entry, *command, params, projValue,
+        std::max(1.0f, command->state.raster.lineWidth) * this->frameDpr);
+  }
+
   if (wideLines.empty()) return;
 
-  const uint32_t W = this->maxRecordWorkers;
   if (W <= 1 || this->recordWorkers.empty()) {
     // Serial fallback (single core, or the pool failed to build).
     for (const SoRenderCommand * command : wideLines) {
@@ -660,6 +743,11 @@ SoVulkanRenderBackend::expandWideLinesParallel(const SoDrawList & drawlist,
   for (uint32_t w = 0; w < W; ++w) {
     ParallelRecordJob & job = this->recordJobs[w];
     job.expandWideLines = true;
+    // Must clear the split phase: a preceding split dispatch left it set on
+    // the workers, and the worker loop keys the split branch on it.  Without
+    // this reset they would re-run the stale split range instead of their
+    // assigned wideLineCommands.
+    job.wlineSplitPhase = 0;
     job.params = &params;
     job.wideLineCommands.clear();
   }
@@ -667,9 +755,12 @@ SoVulkanRenderBackend::expandWideLinesParallel(const SoDrawList & drawlist,
     this->recordJobs[i % W].wideLineCommands.push_back(wideLines[i]);
   }
 
-  this->recordDoneCount.store(0);
+  // Reset the done counter and bump the generation under recordMutex so the
+  // workers' count publication and the recording thread's predicate check are
+  // ordered by the same lock (see recordJobWorker's increment).
   {
     std::lock_guard<std::mutex> lk(this->recordMutex);
+    this->recordDoneCount.store(0);
     ++this->recordJobGeneration;
   }
   this->recordCvSpawn.notify_all();
@@ -692,3 +783,375 @@ SoVulkanRenderBackend::expandWideLinesParallel(const SoDrawList & drawlist,
     });
   }
 }
+
+// --- Intra-command split --------------------------------------------------
+//
+// The round-robin in expandWideLinesParallel() balances by COMMAND, so one
+// command holding an entire scene's edges is expanded by a single worker.
+// This path partitions that one command's segments instead.  It is limited to
+// non-stippled LINE_LIST geometry (each segment then references exactly its
+// own two vertices and carries no order-dependent state), which is what a
+// large BRep edge set produces.  The output is byte-identical to the serial
+// expansion: phase 1 marks each segment, an exclusive prefix sum compacts the
+// visible ones, and phase 2 emits them at the prefix offsets.
+
+bool
+SoVulkanRenderBackend::expandWideLinesSplit(VulkanCachedCommand & entry,
+                                            const SoRenderCommand & command,
+                                            const SoRenderParams & params,
+                                            const SbMat & proj,
+                                            const float lineWidth)
+{
+  const SoGeometryDesc & geometry = command.geometry;
+  const uint32_t vertexCount = geometry.vertexCount;
+  if (!vertexCount) return false;
+
+  const uint32_t posStride = geometry.vertexStride
+    ? geometry.vertexStride : sizeof(float) * 3;
+  const uint32_t posStrideFloats = posStride / sizeof(float);
+  const uint32_t count = geometry.indexCount && geometry.indices
+    ? geometry.indexCount : vertexCount;
+  const uint32_t segmentCount = count / 2;
+  if (!segmentCount) return false;
+
+  // Main-pass only (the caller routes overlay commands to the serial path),
+  // so the frame view/projection apply, exactly as in expandWideLines().
+  SbMat model;
+  command.modelMatrix.getValue(model);
+  SbMat view;
+  params.viewMatrix.getValue(view);
+  SbMat vp;
+  wlineMultiplyMat(view, proj, vp);
+  SbMat wm;
+  wlineMultiplyMat(model, vp, wm);
+  SbMat mvp;
+  for (int r = 0; r < 4; ++r) {
+    for (int c = 0; c < 4; ++c) {
+      mvp[r][c] = wm[c][r];
+    }
+  }
+
+  const SbVec2s viewportSize = params.viewport.getViewportSizePixels();
+  const float vpWidth = static_cast<float>(viewportSize[0] > 0
+    ? viewportSize[0] : 1);
+  const float vpHeight = static_cast<float>(viewportSize[1] > 0
+    ? viewportSize[1] : 1);
+
+  if (entry.wideLineBuffers.size() < this->maxFramesInFlight) {
+    entry.wideLineBuffers.resize(this->maxFramesInFlight);
+  }
+  VulkanCachedCommand::VulkanWideLineBuffer & slot =
+    entry.wideLineBuffers[this->uboFrameIndex % this->maxFramesInFlight];
+  // Same fingerprint as expandWideLines(), so the inline call made by
+  // recordDrawCommand() during the record pass is a cache hit and does not
+  // re-expand.
+  uint64_t wfp = entry.contentHash;
+  auto mixWide = [&wfp](uint32_t bits) {
+    wfp ^= bits + 0x9E3779B97F4A7C15ULL + (wfp << 6) + (wfp >> 2);
+  };
+  for (int r = 0; r < 4; ++r) {
+    for (int c = 0; c < 4; ++c) {
+      uint32_t bits;
+      std::memcpy(&bits, &view[r][c], sizeof(bits));
+      mixWide(bits);
+      std::memcpy(&bits, &proj[r][c], sizeof(bits));
+      mixWide(bits);
+    }
+  }
+  uint32_t lwBits;
+  std::memcpy(&lwBits, &lineWidth, sizeof(lwBits));
+  mixWide(lwBits);
+  mixWide(static_cast<uint32_t>(viewportSize[0]));
+  mixWide(static_cast<uint32_t>(viewportSize[1]));
+  if (slot.buffer != VK_NULL_HANDLE && slot.size > 0 &&
+      slot.expandFingerprint == wfp) {
+    entry.wideLineVertexCount = slot.expandVertexCount;
+    return true;
+  }
+
+  // Grow-only scratch, sized on the owner thread before any worker reads it.
+  const size_t clipFloats = static_cast<size_t>(vertexCount) * 4;
+  if (this->wlineSplitClip.size() < clipFloats) {
+    this->wlineSplitClip.resize(clipFloats);
+  }
+  if (this->wlineSplitValid.size() < segmentCount) {
+    this->wlineSplitValid.resize(segmentCount);
+  }
+  if (this->wlineSplitOffsets.size() < segmentCount) {
+    this->wlineSplitOffsets.resize(segmentCount);
+  }
+
+  WideLineSplitCtx & c = this->wlineSplitCtx;
+  c.command = &command;
+  c.geometry = &geometry;
+  std::memcpy(&c.mvp, &mvp, sizeof(SbMat));
+  c.vpWidth = vpWidth;
+  c.vpHeight = vpHeight;
+  c.lineWidth = lineWidth;
+  c.nearEps = 1.0e-5f;
+  c.outBase = nullptr;
+  c.posStrideFloats = posStrideFloats;
+  c.segmentCount = segmentCount;
+
+  this->dispatchWideLineSplit(1, segmentCount, params);
+
+  // Exclusive prefix sum of the emitted-quad offsets, in floats.  Cheap
+  // (one add per segment) next to the expansion it compacts.
+  size_t total = 0;
+  for (uint32_t s = 0; s < segmentCount; ++s) {
+    this->wlineSplitOffsets[s] = total;
+    if (this->wlineSplitValid[s]) total += 54;
+  }
+  if (total < 9) {
+    // Nothing visible (mirrors expandWideLines()'s outIndex < 9 early-out).
+    return false;
+  }
+
+  const VkDeviceSize needed = static_cast<VkDeviceSize>(total) * sizeof(float);
+  if (slot.size < needed) {
+    if (slot.buffer != VK_NULL_HANDLE || slot.memory != VK_NULL_HANDLE) {
+      const VkBuffer oldBuffer = slot.buffer;
+      const VkDeviceMemory oldMemory = slot.memory;
+      slot.buffer = VK_NULL_HANDLE;
+      slot.memory = VK_NULL_HANDLE;
+      slot.mapped = nullptr;
+      slot.size = 0;
+      this->deferDestroyBufferMemory(oldBuffer, oldMemory);
+    }
+    if (!this->createMappedBuffer(needed, VK_BUFFER_USAGE_VERTEX_BUFFER_BIT,
+                                  slot.buffer, slot.memory, &slot.mapped)) {
+      this->emitError("expandWideLinesSplit: quad buffer create/map failed");
+      slot.size = 0;
+      return false;
+    }
+    slot.size = needed;
+  }
+
+  // Phase 2 emits the compacted quads directly into the slot's persistent
+  // mapping (prepareWideLineBuffers() already sized it for the worst case).
+  c.outBase = static_cast<float *>(slot.mapped);
+  this->dispatchWideLineSplit(2, segmentCount, params);
+
+  slot.expandFingerprint = wfp;
+  slot.expandVertexCount = static_cast<uint32_t>(total / 9);
+  entry.wideLineVertexCount = static_cast<uint32_t>(total / 9);
+  return true;
+}
+
+void
+SoVulkanRenderBackend::dispatchWideLineSplit(int phase, uint32_t count,
+                                             const SoRenderParams & params)
+{
+  const uint32_t W = this->maxRecordWorkers;
+  for (uint32_t w = 0; w < W; ++w) {
+    ParallelRecordJob & job = this->recordJobs[w];
+    job.expandWideLines = true;
+    job.params = &params;
+    job.wideLineCommands.clear();
+    // The owner (w == 0) is not a pool thread; it runs its range inline.
+    job.wlineSplitPhase = (w == 0) ? 0 : phase;
+    job.wlineSplitBegin = static_cast<uint32_t>(
+      (static_cast<uint64_t>(count) * w) / W);
+    job.wlineSplitEnd = static_cast<uint32_t>(
+      (static_cast<uint64_t>(count) * (w + 1)) / W);
+  }
+  // Reset/bump under recordMutex; see expandWideLinesParallel().
+  {
+    std::lock_guard<std::mutex> lk(this->recordMutex);
+    this->recordDoneCount.store(0);
+    ++this->recordJobGeneration;
+  }
+  this->recordCvSpawn.notify_all();
+  this->expandWideLinesSplitRange(phase, this->recordJobs[0].wlineSplitBegin,
+                                  this->recordJobs[0].wlineSplitEnd);
+  this->recordJobs[0].ok = true;
+  {
+    std::unique_lock<std::mutex> lk(this->recordMutex);
+    this->recordCvDone.wait(lk, [this] {
+      return this->recordDoneCount.load() >= this->maxRecordWorkers - 1;
+    });
+  }
+}
+
+void
+SoVulkanRenderBackend::expandWideLinesSplitRange(int phase, uint32_t begin,
+                                                 uint32_t end)
+{
+  const WideLineSplitCtx & c = this->wlineSplitCtx;
+  const SoGeometryDesc & geometry = *c.geometry;
+  const uint32_t * const indices = geometry.indices;
+  const float * const positions = geometry.positions;
+  const float * const colors = geometry.colors;
+  float * const clipCache = this->wlineSplitClip.data();
+  uint8_t * const valid = this->wlineSplitValid.data();
+  const float nearEps = c.nearEps;
+
+  if (phase == 1) {
+    // Clip transform + per-segment visibility.  Writes only this range's
+    // vertices and slots, so the ranges never overlap.
+    for (uint32_t s = begin; s < end; ++s) {
+      const uint32_t i0 = indices ? indices[s * 2] : s * 2;
+      const uint32_t i1 = indices ? indices[s * 2 + 1] : s * 2 + 1;
+      float * const c0 = clipCache + static_cast<size_t>(i0) * 4;
+      float * const c1 = clipCache + static_cast<size_t>(i1) * 4;
+      wlineTransformPoint(c.mvp,
+        positions + static_cast<size_t>(i0) * c.posStrideFloats, c0);
+      wlineTransformPoint(c.mvp,
+        positions + static_cast<size_t>(i1) * c.posStrideFloats, c1);
+
+      const float fa = c0[2];
+      const float fb = c1[2];
+      const bool visible0 = (c0[3] > nearEps) && (fa >= 0.0f);
+      const bool visible1 = (c1[3] > nearEps) && (fb >= 0.0f);
+      bool ok = false;
+      if (visible0 || visible1) {
+        float tA;
+        float tB;
+        if (visible0 && visible1) {
+          tA = 0.0f;
+          tB = 1.0f;
+        }
+        else {
+          const float denom = fa - fb;
+          const float tclip = (denom != 0.0f) ? fa / denom : 0.0f;
+          tA = visible0 ? 0.0f : tclip;
+          tB = visible1 ? 1.0f : tclip;
+        }
+        const float cA3 = c0[3] + tA * (c1[3] - c0[3]);
+        const float cB3 = c0[3] + tB * (c1[3] - c0[3]);
+        if (cA3 > nearEps && cB3 > nearEps) {
+          const float cA0 = c0[0] + tA * (c1[0] - c0[0]);
+          const float cA1 = c0[1] + tA * (c1[1] - c0[1]);
+          const float cB0 = c0[0] + tB * (c1[0] - c0[0]);
+          const float cB1 = c0[1] + tB * (c1[1] - c0[1]);
+          const float ndc0x = cA0 / cA3;
+          const float ndc0y = cA1 / cA3;
+          const float ndc1x = cB0 / cB3;
+          const float ndc1y = cB1 / cB3;
+          const float dx = ndc1x - ndc0x;
+          const float dy = ndc1y - ndc0y;
+          ok = std::sqrt(dx * dx + dy * dy) >= 1.0e-8f;
+          if (ok) {
+            // Frustum reject.  Without it a segment wholly off the sides of
+            // the view is still expanded into quads and uploaded, only for
+            // the GPU to clip it; that keeps the per-frame cost independent
+            // of how much of a large edge set is actually on screen.  The
+            // quad extends sideways by half a line width, so pad the segment's
+            // NDC box by that margin (|off| <= lineWidth/viewport).
+            const float mx = c.lineWidth / c.vpWidth;
+            const float my = c.lineWidth / c.vpHeight;
+            const float minx = std::min(ndc0x, ndc1x) - mx;
+            const float maxx = std::max(ndc0x, ndc1x) + mx;
+            const float miny = std::min(ndc0y, ndc1y) - my;
+            const float maxy = std::max(ndc0y, ndc1y) + my;
+            if (maxx < -1.0f || minx > 1.0f || maxy < -1.0f || miny > 1.0f) {
+              ok = false;
+            }
+          }
+        }
+      }
+      valid[s] = ok ? static_cast<uint8_t>(1) : static_cast<uint8_t>(0);
+    }
+    return;
+  }
+
+  // Phase 2: emit the visible segments at their prefix-summed offsets.
+  const size_t * const offsets = this->wlineSplitOffsets.data();
+  float * const quads = c.outBase;
+  const float defaultColor[4] = { 1.0f, 1.0f, 1.0f, 1.0f };
+  static const int triOrder[6] = { 0, 1, 2, 2, 1, 3 };
+  for (uint32_t s = begin; s < end; ++s) {
+    if (!valid[s]) continue;
+    const uint32_t i0 = indices ? indices[s * 2] : s * 2;
+    const uint32_t i1 = indices ? indices[s * 2 + 1] : s * 2 + 1;
+    const float * const col0 = colors
+      ? colors + static_cast<size_t>(i0) * 4 : nullptr;
+    const float * const col1 = colors
+      ? colors + static_cast<size_t>(i1) * 4 : nullptr;
+    const float * const c0 = clipCache + static_cast<size_t>(i0) * 4;
+    const float * const c1 = clipCache + static_cast<size_t>(i1) * 4;
+
+    const float fa = c0[2];
+    const float fb = c1[2];
+    const bool visible0 = (c0[3] > nearEps) && (fa >= 0.0f);
+    const bool visible1 = (c1[3] > nearEps) && (fb >= 0.0f);
+    float tA;
+    float tB;
+    if (visible0 && visible1) {
+      tA = 0.0f;
+      tB = 1.0f;
+    }
+    else {
+      const float denom = fa - fb;
+      const float tclip = (denom != 0.0f) ? fa / denom : 0.0f;
+      tA = visible0 ? 0.0f : tclip;
+      tB = visible1 ? 1.0f : tclip;
+    }
+
+    const float cA[4] = {
+      c0[0] + tA * (c1[0] - c0[0]),
+      c0[1] + tA * (c1[1] - c0[1]),
+      c0[2] + tA * (c1[2] - c0[2]),
+      c0[3] + tA * (c1[3] - c0[3]),
+    };
+    const float cB[4] = {
+      c0[0] + tB * (c1[0] - c0[0]),
+      c0[1] + tB * (c1[1] - c0[1]),
+      c0[2] + tB * (c1[2] - c0[2]),
+      c0[3] + tB * (c1[3] - c0[3]),
+    };
+    // Phase 1 already rejected these; recomputed for the emit math below.
+    if (cA[3] <= nearEps || cB[3] <= nearEps) continue;
+
+    const float ndc0x = cA[0] / cA[3];
+    const float ndc0y = cA[1] / cA[3];
+    const float ndc1x = cB[0] / cB[3];
+    const float ndc1y = cB[1] / cB[3];
+    const float dx = ndc1x - ndc0x;
+    const float dy = ndc1y - ndc0y;
+    const float length = std::sqrt(dx * dx + dy * dy);
+    if (length < 1.0e-8f) continue;
+    const float dirx = dx / length;
+    const float diry = dy / length;
+    const float offx = -diry * c.lineWidth / c.vpWidth;
+    const float offy = dirx * c.lineWidth / c.vpHeight;
+
+    // Quad corners: [0]=p0+off, [1]=p0-off, [2]=p1+off, [3]=p1-off.
+    float corners[4][4];
+    for (int corner = 0; corner < 4; ++corner) {
+      const int endpoint = corner < 2 ? 0 : 1;
+      const float sign = (corner % 2 == 0) ? 1.0f : -1.0f;
+      const float w = endpoint == 0 ? cA[3] : cB[3];
+      corners[corner][0] = (endpoint == 0 ? cA[0] : cB[0]) + sign * offx * w;
+      corners[corner][1] = (endpoint == 0 ? cA[1] : cB[1]) + sign * offy * w;
+      corners[corner][2] = endpoint == 0 ? cA[2] : cB[2];
+      corners[corner][3] = w;
+    }
+    const float * const p0 = col0 ? col0 : defaultColor;
+    const float * const p1 = col1 ? col1 : defaultColor;
+    float colA[4];
+    float colB[4];
+    for (int i = 0; i < 4; ++i) {
+      colA[i] = p0[i] + tA * (p1[i] - p0[i]);
+      colB[i] = p0[i] + tB * (p1[i] - p0[i]);
+    }
+
+    float * out = quads + offsets[s];
+    for (int t = 0; t < 6; ++t) {
+      const int corner = triOrder[t];
+      const int endpoint = corner < 2 ? 0 : 1;
+      const float * col = endpoint == 0 ? colA : colB;
+      out[0] = corners[corner][0];
+      out[1] = corners[corner][1];
+      out[2] = corners[corner][2];
+      out[3] = corners[corner][3];
+      out[4] = col[0];
+      out[5] = col[1];
+      out[6] = col[2];
+      out[7] = col[3];
+      out[8] = 0.0f;  // non-stippled split path: distance is unused
+      out += 9;
+    }
+  }
+}
+

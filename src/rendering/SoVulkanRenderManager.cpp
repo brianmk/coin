@@ -368,6 +368,12 @@ public:
   //! list means the previous frame's sorted order is still exact.
   SbMatrix lastSortView;
   SbBool lastSortValid = FALSE;
+  //! Command count the retained list's sorted order was built for.  The
+  //! overlay/decoration region is truncated and re-appended every frame, so a
+  //! replayed frame may reuse the previous order only while the total command
+  //! count is unchanged; otherwise the order still holds indices of overlay
+  //! commands that no longer exist (an out-of-range getCommand()).
+  int lastSortCommandCount = -1;
   //! Child pointers last installed in frameRoot, so navigation frames stop
   //! churning the separator's child list (and its notifications).
   SoNode * rootChildren[4] = {nullptr, nullptr, nullptr, nullptr};
@@ -2171,16 +2177,21 @@ SoVulkanRenderManagerP::prepareRenderParams(SbBool clearwindow,
     this->lastSortValid = FALSE;
   }
   else if (irReplayed && this->lastSortValid &&
+           list.getNumCommands() == this->lastSortCommandCount &&
            std::memcmp(&this->lastSortView[0][0], &params.viewMatrix[0][0],
                        sizeof(float) * 16) == 0) {
-    // A retained (replayed) list with a bit-identical view sorts exactly as
-    // the previous frame: reuse the previous frame's sorted order instead of
-    // re-deriving every command's sort key and re-running the stable sort.
+    // A retained (replayed) list with a bit-identical view and an unchanged
+    // command count sorts exactly as the previous frame: reuse the previous
+    // frame's sorted order instead of re-deriving every command's sort key and
+    // re-running the stable sort.  The count check is required because the
+    // overlay region above was truncated/re-appended this frame; if its size
+    // changed, the previous order holds stale (out-of-range) indices.
   }
   else {
     list.buildSortedOrder(params.viewMatrix);
     this->lastSortView = params.viewMatrix;
     this->lastSortValid = TRUE;
+    this->lastSortCommandCount = list.getNumCommands();
   }
   if (wantCpuTiming) {
     cpuSortMs = (vkRenderBreadcrumbNowUs() - sortT0) * 0.001;
