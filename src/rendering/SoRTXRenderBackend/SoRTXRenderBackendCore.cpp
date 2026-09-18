@@ -4,6 +4,7 @@
 // member functions for the "Core" concern of the Vulkan RTX backend.
 
 #include "rendering/SoRTXRenderBackend.h"
+#include "rendering/SoVulkanConfig.h"
 #include <Inventor/errors/SoDebugError.h>
 #include <algorithm>
 #include <array>
@@ -669,7 +670,8 @@ SoRTXRenderBackend::initialize(const SoRenderBackendInitParams & params)
   // Dispatch mode: the SBT pipeline is opt-in (FC_VULKAN_RT_SBT=1); the
   // default ray-query compute path avoids a hang in NVIDIA driver 610.x
   // where triangle hit-group execution stalls the GPU.
-  this->useSbtPipeline = COIN_VULKAN_ENV_FLAG("FC_VULKAN_RT_SBT");
+  this->useSbtPipeline =
+    SoVulkanConfig::get().rayTracing.sbtPipeline ? TRUE : FALSE;
 
   // All entry points are resolved from here on.  Mark the backend
   // initialized before creating resources so that a failure in any
@@ -735,77 +737,50 @@ SoRTXRenderBackend::initialize(const SoRenderBackendInitParams & params)
     return FALSE;
   }
 
-  // Optional path tracing tuning (kept out of the public API for now).
-  if (const char * bounces = SoVulkanShared::envString("FC_VULKAN_PT_BOUNCES")) {
-    const int value = std::atoi(bounces);
-    if (value >= 1 && value <= 16) {
-      this->ptMaxBouncesBase = static_cast<uint32_t>(value);
-      this->ptMaxBounces = this->ptInteractionLod
-        ? this->ptInteractionBounces : this->ptMaxBouncesBase;
-    }
+  // Optional path tracing tuning (SoVulkanConfig resolves the environment
+  // once; an unset variable leaves the backend's member default in place).
+  const SoVulkanConfig::PathTracing & pt = SoVulkanConfig::get().pathTracing;
+  if (pt.bounces) {
+    this->ptMaxBouncesBase = *pt.bounces;
+    this->ptMaxBounces = this->ptInteractionLod
+      ? this->ptInteractionBounces : this->ptMaxBouncesBase;
   }
-  if (const char * settle = SoVulkanShared::envString("FC_VULKAN_PT_SETTLE")) {
-    const int value = std::atoi(settle);
-    if (value >= 1 && value <= 120) {
-      this->ptSettleFrames = static_cast<uint32_t>(value);
-    }
+  if (pt.settleFrames) {
+    this->ptSettleFrames = *pt.settleFrames;
   }
-  if (const char * maxsamples = SoVulkanShared::envString("FC_VULKAN_PT_MAXSAMPLES")) {
-    const int value = std::atoi(maxsamples);
-    if (value >= 1 && value <= 100000) {
-      this->ptMaxSamples = static_cast<uint32_t>(value);
-    }
+  if (pt.maxSamples) {
+    this->ptMaxSamples = *pt.maxSamples;
   }
   // TLAS instance culling (frustum + sub-pixel).  Opt-in: it changes the
   // default trace path (small/far instances can pop in), so it stays off
-  // until it has been validated across a wider range of scenes than the
-  // single large-mesh case.  FC_VULKAN_TLAS_CULL=1 (any value other than "0")
-  // enables it; unset or "0" leaves the pre-existing behavior.
-  if (const char * cull = SoVulkanShared::envString("FC_VULKAN_TLAS_CULL")) {
-    this->tlasCullEnabled = !(cull[0] == '0' && cull[1] == '\0');
-  }
-  if (const char * pix = SoVulkanShared::envString("FC_VULKAN_TLAS_PIX")) {
-    const float value = static_cast<float>(std::atof(pix));
-    if (value > 0.0f) {
-      this->tlasCullPixels = value;
-    }
-  }
+  // until validated across a wider range of scenes.  Resolved once in
+  // SoVulkanConfig (FC_VULKAN_TLAS_CULL; default off, "0"/"false"/"off" off).
+  this->tlasCullEnabled = SoVulkanConfig::get().rtxCull.enabled;
+  this->tlasCullPixels = SoVulkanConfig::get().rtxCull.pixels;
   // Adaptive sampling tuning (see PathTrace.glsl u_adaptive).
-  if (const char * adaptive = SoVulkanShared::envString("FC_VULKAN_PT_ADAPTIVE")) {
-    this->ptAdaptiveEnabled = std::atoi(adaptive) != 0 ? TRUE : FALSE;
+  if (pt.adaptive) {
+    this->ptAdaptiveEnabled = *pt.adaptive ? TRUE : FALSE;
   }
-  if (const char * minsamples = SoVulkanShared::envString("FC_VULKAN_PT_MIN_SAMPLES")) {
-    const int value = std::atoi(minsamples);
-    if (value >= 1 && value <= 256) {
-      this->ptAdaptiveMinSamples = static_cast<uint32_t>(value);
-    }
+  if (pt.adaptiveMinSamples) {
+    this->ptAdaptiveMinSamples = *pt.adaptiveMinSamples;
   }
-  if (const char * threshold = SoVulkanShared::envString("FC_VULKAN_PT_THRESHOLD")) {
-    const float value = static_cast<float>(std::atof(threshold));
-    if (value > 0.0f && value <= 1.0f) {
-      this->ptAdaptiveThreshold = value;
-    }
+  if (pt.adaptiveThreshold) {
+    this->ptAdaptiveThreshold = *pt.adaptiveThreshold;
   }
-  if (const char * stopfraction = SoVulkanShared::envString("FC_VULKAN_PT_STOP_FRACTION")) {
-    const float value = static_cast<float>(std::atof(stopfraction));
+  if (pt.adaptiveStopFraction) {
     // 0 disables the fraction-based auto-stop (run to the sample cap only).
-    if (value >= 0.0f && value <= 1.0f) {
-      this->ptAdaptiveStopFraction = value;
-    }
+    this->ptAdaptiveStopFraction = *pt.adaptiveStopFraction;
   }
   // Firefly rejection: replace samples far brighter than the pixel's running
   // mean (outlier spikes) with that mean.  FC_VULKAN_PT_FIREFLY is the
   // standard-deviation multiplier; 0 disables it (on by default at 5.0, the
   // member default) so the override only needs to set 0 to turn it off.
-  if (const char * firefly = SoVulkanShared::envString("FC_VULKAN_PT_FIREFLY")) {
-    const float value = static_cast<float>(std::atof(firefly));
-    if (value >= 0.0f) {
-      this->ptFireflySigma = value;
-    }
+  if (pt.fireflySigma) {
+    this->ptFireflySigma = *pt.fireflySigma;
   }
   // Temporal reprojection: carry converged samples across camera moves.
-  if (const char * temporal = SoVulkanShared::envString("FC_VULKAN_PT_TEMPORAL")) {
-    this->ptTemporalEnabled = std::atoi(temporal) != 0 ? TRUE : FALSE;
+  if (pt.temporal) {
+    this->ptTemporalEnabled = *pt.temporal ? TRUE : FALSE;
   }
 
   this->setInitialized(TRUE);

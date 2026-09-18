@@ -101,10 +101,17 @@ struct SoRenderBackendInitParams {
 
 /*!
   class SoRenderBackend
-  rief Backend-neutral lifecycle and DrawList execution interface.
+  \brief Retained-render lifecycle and DrawList execution interface.
 
   The retained IR does not depend on this interface or on a graphics API.
   Concrete backends own all device resources.
+
+  This interface exists for the Vulkan renderer: SoVulkanRenderBackend and
+  SoRTXRenderBackend are its production implementations. SoGLRenderBackend is
+  a reference implementation exercised by the testsuite only; it is not built
+  into libCoin and the OpenGL viewport does not use it (SoRenderManager still
+  renders through SoGLRenderAction). Treat this as the Vulkan backend
+  interface rather than a promise that every backend is interchangeable.
 */
 class SoRenderBackend {
 public:

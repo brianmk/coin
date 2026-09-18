@@ -458,8 +458,6 @@ SoVulkanRenderBackend::finalizePendingTextureUploads()
   // buffers to the frame's deferred-destruction batch.  Staging buffers are
   // referenced by the just-recorded submission, so they are released only
   // after the slot fence signals.
-  VkDevice device = this->device;
-  const VkAllocationCallbacks * allocator = this->allocator;
   for (const PendingTextureUpload & upload : this->pendingUploads) {
     if (upload.index >= this->textureCache.size()) continue;
     VulkanCachedTexture & texEntry = this->textureCache[upload.index];
@@ -477,10 +475,10 @@ SoVulkanRenderBackend::finalizePendingTextureUploads()
   this->pendingUploads.clear();
 }
 
-bool
+SoVulkan::Result
 SoVulkanRenderBackend::flushPendingTextureUploadsExternal()
 {
-  if (this->pendingUploads.empty()) return true;
+  if (this->pendingUploads.empty()) return SoVulkan::Result::ok();
 
   // External path: the caller owns the frame command buffer and is already
   // inside a render pass, so the copies cannot be merged into it.  All
@@ -501,9 +499,14 @@ SoVulkanRenderBackend::flushPendingTextureUploadsExternal()
                                       upload.stagingOffset);
           }
         })) {
-    this->emitError(
-      "flushPendingTextureUploadsExternal: one-shot upload failed");
-    goto fail;
+    // Reset the half-initialized entries so the next frame retries cleanly.
+    for (const PendingTextureUpload & upload : this->pendingUploads) {
+      if (upload.index < this->textureCache.size()) {
+        this->destroyTextureEntry(this->textureCache[upload.index]);
+      }
+    }
+    this->pendingUploads.clear();
+    return SoVulkan::Result::error("one-shot texture upload failed");
   }
 
   // Host-side completion (views/samplers/descriptor sets) and content
@@ -521,17 +524,7 @@ SoVulkanRenderBackend::flushPendingTextureUploadsExternal()
     }
   }
   this->pendingUploads.clear();
-  return true;
-
-fail:
-  for (const PendingTextureUpload & upload : this->pendingUploads) {
-    if (upload.index < this->textureCache.size()) {
-      // Reset the half-initialized entry so the next frame retries cleanly.
-      this->destroyTextureEntry(this->textureCache[upload.index]);
-    }
-  }
-  this->pendingUploads.clear();
-  return false;
+  return SoVulkan::Result::ok();
 }
 
 bool

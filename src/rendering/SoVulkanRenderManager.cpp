@@ -28,6 +28,7 @@
 #include "rendering/SoVulkanRenderBackend.h"
 #include "rendering/SoRTXRenderBackend.h"
 #include "rendering/SoVulkanShared.h"
+#include "rendering/SoVulkanConfig.h"
 
 class SoVulkanRenderManagerP;
 static void vulkanSceneGraphChangedCallback(void * data, SoSensor * sensor);
@@ -860,6 +861,11 @@ SoVulkanRenderManager::initialize(SoVulkanDeviceContext * context)
     return FALSE;
   }
   this->pimpl->backendInitialized = TRUE;
+  // One-shot, after a successful device init (the early return above skips
+  // re-entry), so FC_VULKAN_BACKEND_DEBUG runs get a resolved-config dump.
+  if (SoVulkanShared::envFlagEnabled("FC_VULKAN_BACKEND_DEBUG")) {
+    SoVulkanConfig::dump();
+  }
   // Retain the borrowed context so ensureRayTracing() can bring the RT
   // backend up later if it was skipped at startup (path tracing off).
   this->pimpl->initContext = context;
@@ -1240,12 +1246,16 @@ SoVulkanRenderManager::prepareExternalFrame(SbBool clearwindow,
             params.interactionLod == TRUE ? 1 : 0);
   }
 
-  if (!this->pimpl->backend.prepareExternalGeometryLod(*drawlist, params,
-                                                       commandBuffer)) {
+  const SoVulkan::Result lodResult =
+    this->pimpl->backend.prepareExternalGeometryLod(*drawlist, params,
+                                                    commandBuffer);
+  if (!lodResult.isOk()) {
     // Non-fatal: renderExternal() still records the frame, just without the
-    // geometry-LOD pre-pass (the full-detail draw is always valid).
+    // geometry-LOD pre-pass (the full-detail draw is always valid).  The
+    // reason travels in the Result instead of being reconstructed from a log.
     SoDebugError::postWarning("SoVulkanRenderManager::prepareExternalFrame",
-                              "geometry-LOD pre-pass failed");
+                              "geometry-LOD pre-pass failed: %s",
+                              lodResult.message().c_str());
   }
   return TRUE;
 }
