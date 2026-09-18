@@ -198,8 +198,12 @@ if(HAVE_EGL)
 		${PROJECT_SOURCE_DIR}/src
 		${PROJECT_SOURCE_DIR}/include
 		${PROJECT_BINARY_DIR}/include
+		# SoGLRenderBackend.cpp includes the generated data/shaders/gl/*.h
+		# headers (coin_embed_gl_shader); they live under ${PROJECT_BINARY_DIR}/data.
+		${PROJECT_BINARY_DIR}/data
 		${COIN_TARGET_INCLUDE_DIRECTORIES}
 	)
+	add_dependencies(RetainedMaterialLightingGLTest coin_generated_data_headers)
 	add_test(NAME RetainedMaterialLightingGLTest COMMAND RetainedMaterialLightingGLTest)
 	set_tests_properties(RetainedMaterialLightingGLTest PROPERTIES SKIP_RETURN_CODE 77)
 
@@ -211,8 +215,12 @@ if(HAVE_EGL)
 		${PROJECT_SOURCE_DIR}/src
 		${PROJECT_SOURCE_DIR}/include
 		${PROJECT_BINARY_DIR}/include
+		# SoGLRenderBackend.cpp includes the generated data/shaders/gl/*.h
+		# headers (coin_embed_gl_shader); they live under ${PROJECT_BINARY_DIR}/data.
+		${PROJECT_BINARY_DIR}/data
 		${COIN_TARGET_INCLUDE_DIRECTORIES}
 	)
+	add_dependencies(RetainedRasterGLTest coin_generated_data_headers)
 	add_test(NAME RetainedRasterGLTest COMMAND RetainedRasterGLTest)
 	set_tests_properties(RetainedRasterGLTest PROPERTIES SKIP_RETURN_CODE 77)
 
@@ -224,8 +232,12 @@ if(HAVE_EGL)
 		${PROJECT_SOURCE_DIR}/src
 		${PROJECT_SOURCE_DIR}/include
 		${PROJECT_BINARY_DIR}/include
+		# SoGLRenderBackend.cpp includes the generated data/shaders/gl/*.h
+		# headers (coin_embed_gl_shader); they live under ${PROJECT_BINARY_DIR}/data.
+		${PROJECT_BINARY_DIR}/data
 		${COIN_TARGET_INCLUDE_DIRECTORIES}
 	)
+	add_dependencies(DrawListGLTest coin_generated_data_headers)
 	add_test(NAME DrawListGLTest COMMAND DrawListGLTest)
 	set_tests_properties(DrawListGLTest PROPERTIES SKIP_RETURN_CODE 77)
 
