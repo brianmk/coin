@@ -9,11 +9,16 @@
 // The draw is then issued as vkCmdDrawIndexedIndirect, so culled triangles
 // cost neither vertex shading nor rasterization.
 //
-// Vulkan forbids compute inside a render pass, so the pre-pass is recorded
-// into the caller's command buffer BEFORE vkCmdBeginRenderPass
-// (prepareExternalGeometryLod() performs the per-frame setup and then calls
-// recordGeometryLodPrepass()).  A trailing memory barrier orders the compute
-// writes against the DRAW_INDIRECT / VERTEX_INPUT reads of the draws.
+// Vulkan forbids compute inside a render pass.  The own-queue path records the
+// pre-pass into its own command buffer before vkCmdBeginRenderPass; the
+// external path (renderExternal()) cannot, because the caller owns and has
+// already begun its pass, so it records the dispatches into a transient
+// command buffer (beginExternalGeometryLod()) and submits it after the frame
+// is recorded (submitExternalGeometryLod()), before the caller submits its
+// pass.  Recording before and submitting after the frame recording overlaps
+// the CPU work with the previous GPU frame.  A trailing memory barrier orders
+// the compute writes against the DRAW_INDIRECT / VERTEX_INPUT reads of the
+// draws.
 //
 // Resources are per (command, in-flight frame) because the compacted index
 // buffer is rewritten every frame and must not alias a buffer a still
@@ -30,6 +35,8 @@
 #include "rendering/SoVulkanRenderBackend.h"
 #include "rendering/SoVulkanRenderBackend/SoVulkanRenderBackendP.h"
 #include "rendering/SoVulkanConfig.h"
+
+#include <Inventor/errors/SoDebugError.h>
 
 #include <algorithm>
 #include <atomic>
@@ -540,48 +547,75 @@ SoVulkanRenderBackend::recordGeometryLodPrepass(VkCommandBuffer cb,
   }
 }
 
-SoVulkan::Result
-SoVulkanRenderBackend::prepareExternalGeometryLod(
-    const SoDrawList & drawlist, const SoRenderParams & params,
-    VkCommandBuffer commandBuffer)
+VkCommandBuffer
+SoVulkanRenderBackend::beginExternalGeometryLod(const SoDrawList & drawlist,
+                                                const SoRenderParams & params)
 {
-  if (COIN_VULKAN_ENV_FLAG("FC_VULKAN_BACKEND_DEBUG")) {
-    fprintf(stderr,
-            "[GEOMLOD] enter init=%d lod=%d enabled=%d pipe=%p cb=%p cmds=%d\n",
-            this->isInitialized() ? 1 : 0, params.interactionLod == TRUE ? 1 : 0,
-            geometryLodEnabled() ? 1 : 0,
-            reinterpret_cast<const void *>(this->subPixelCullPipeline),
-            reinterpret_cast<const void *>(commandBuffer),
-            drawlist.getNumCommands());
-  }
-  if (!this->isInitialized()) {
-    return SoVulkan::Result::error("geometry LOD: backend not initialized");
-  }
   // Geometry LOD only runs while the camera moves; otherwise the full-detail
-  // draw is used and the normal per-frame setup happens inside renderExternal.
-  if (params.interactionLod != TRUE && !geometryLodAlways()) {
-    return SoVulkan::Result::ok();
-  }
-  if (!geometryLodEnabled()) return SoVulkan::Result::ok();
-  if (this->subPixelCullPipeline == VK_NULL_HANDLE) return SoVulkan::Result::ok();
-  if (commandBuffer == VK_NULL_HANDLE) return SoVulkan::Result::ok();
-  if (this->validateRenderTarget(params) == nullptr) {
-    return SoVulkan::Result::invalidArgument("geometry LOD: no render target");
-  }
+  // draw is used.  Everything else is a no-op.
+  if (params.interactionLod != TRUE && !geometryLodAlways()) return VK_NULL_HANDLE;
+  if (!geometryLodEnabled()) return VK_NULL_HANDLE;
+  if (this->subPixelCullPipeline == VK_NULL_HANDLE) return VK_NULL_HANDLE;
 
-  // The external pass is a caller-supplied LOAD render pass, and the frame
-  // setup must run before the caller begins that pass so the compaction
-  // dispatches see the current geometry cache.  Mirror prepareExternalFrame().
-  this->renderPasses.setClearedByLoad(false, false);
-  this->cacheFrameMatrices(params);
-  this->beginFrame();
-  this->updateLightingSetup(drawlist);
-  this->updateGeometryCache(drawlist, /*overlaysOnly*/ false,
-                            params.geometryContentUnchanged);
-  COIN_VULKAN_TRY(this->flushPendingTextureUploadsExternal());
-  // Tell the subsequent renderExternal() the setup already ran.
-  this->externalFramePrepared = true;
+  // The caller's external pass is a LOAD render pass and is already begun, so
+  // the compaction cannot be recorded into it.  Record the dispatches into a
+  // transient command buffer now, before recordFrame() so the draw path sees
+  // the compacted slots; submitExternalGeometryLod() submits it after the
+  // frame is recorded, which overlaps the CPU frame recording with the
+  // previous GPU frame.
+  VkCommandBufferAllocateInfo allocInfo {};
+  allocInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
+  allocInfo.commandPool = this->commandPool;
+  allocInfo.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+  allocInfo.commandBufferCount = 1;
+  VkCommandBuffer cb = VK_NULL_HANDLE;
+  if (vkAllocateCommandBuffers(this->device, &allocInfo, &cb) != VK_SUCCESS) {
+    SoDebugError::postWarning("SoVulkanRenderBackend::beginExternalGeometryLod",
+                              "geometry-LOD transient buffer allocation failed; "
+                              "falling back to the full-detail draw");
+    return VK_NULL_HANDLE;
+  }
+  VkCommandBufferBeginInfo beginInfo {};
+  beginInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
+  beginInfo.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+  if (vkBeginCommandBuffer(cb, &beginInfo) != VK_SUCCESS) {
+    vkFreeCommandBuffers(this->device, this->commandPool, 1, &cb);
+    SoDebugError::postWarning("SoVulkanRenderBackend::beginExternalGeometryLod",
+                              "geometry-LOD transient buffer begin failed; "
+                              "falling back to the full-detail draw");
+    return VK_NULL_HANDLE;
+  }
+  this->recordGeometryLodPrepass(cb, drawlist, params);
+  if (vkEndCommandBuffer(cb) != VK_SUCCESS) {
+    vkFreeCommandBuffers(this->device, this->commandPool, 1, &cb);
+    SoDebugError::postWarning("SoVulkanRenderBackend::beginExternalGeometryLod",
+                              "geometry-LOD transient buffer end failed; "
+                              "falling back to the full-detail draw");
+    return VK_NULL_HANDLE;
+  }
+  return cb;
+}
 
-  this->recordGeometryLodPrepass(commandBuffer, drawlist, params);
-  return SoVulkan::Result::ok();
+void
+SoVulkanRenderBackend::submitExternalGeometryLod(VkCommandBuffer commandBuffer)
+{
+  if (commandBuffer == VK_NULL_HANDLE) return;
+  VkSubmitInfo submit {};
+  submit.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
+  submit.commandBufferCount = 1;
+  submit.pCommandBuffers = &commandBuffer;
+  const bool ok =
+    vkQueueSubmit(this->queue, 1, &submit, VK_NULL_HANDLE) == VK_SUCCESS;
+  // Host wait: the compacted writes must be complete and visible before the
+  // caller submits its pass, and the caller's submission is out of reach, so
+  // no semaphore can be threaded through it.  The queue drains here; because
+  // the frame was already recorded above, only the LOD dispatch itself is on
+  // the critical path.
+  vkQueueWaitIdle(this->queue);
+  vkFreeCommandBuffers(this->device, this->commandPool, 1, &commandBuffer);
+  if (!ok) {
+    SoDebugError::postWarning("SoVulkanRenderBackend::submitExternalGeometryLod",
+                              "geometry-LOD transient submit failed; "
+                              "falling back to the full-detail draw");
+  }
 }

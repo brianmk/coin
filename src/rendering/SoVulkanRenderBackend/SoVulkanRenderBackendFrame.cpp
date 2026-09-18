@@ -486,27 +486,19 @@ SoVulkanRenderBackend::prepareExternalFrame(
   this->cacheFrameMatrices(params);
   const bool wantCpuTiming = timing != nullptr;
   double t0 = wantCpuTiming ? SoVulkanShared::steadyNowMs() : 0.0;
-  // prepareExternalGeometryLod() already ran the frame setup and recorded the
-  // geometry-LOD compute pre-pass before the caller began its render pass, so
-  // the frame cursor must not advance a second time.
-  if (this->externalFramePrepared) {
-    this->externalFramePrepared = false;
+  this->beginFrame();
+  this->updateLightingSetup(drawlist);
+  if (wantCpuTiming) {
+    const double t1 = SoVulkanShared::steadyNowMs();
+    timing->setupMs = t1 - t0;
+    t0 = t1;
   }
-  else {
-    this->beginFrame();
-    this->updateLightingSetup(drawlist);
-    if (wantCpuTiming) {
-      const double t1 = SoVulkanShared::steadyNowMs();
-      timing->setupMs = t1 - t0;
-      t0 = t1;
-    }
-    this->updateGeometryCache(drawlist, overlaysOnly,
-                              params.geometryContentUnchanged);
-    if (wantCpuTiming) {
-      const double t1 = SoVulkanShared::steadyNowMs();
-      timing->geomMs = t1 - t0;
-      t0 = t1;
-    }
+  this->updateGeometryCache(drawlist, overlaysOnly,
+                            params.geometryContentUnchanged);
+  if (wantCpuTiming) {
+    const double t1 = SoVulkanShared::steadyNowMs();
+    timing->geomMs = t1 - t0;
+    t0 = t1;
   }
   // The composite path never goes through recordFrame(), so it must reserve
   // the lighting slots its overlay/residual draws consume here; otherwise the
@@ -780,6 +772,15 @@ SoVulkanRenderBackend::renderExternal(const SoDrawList & drawlist,
     return FALSE;
   }
 
+  // GPU geometry-LOD pre-pass.  Vulkan forbids compute inside a render pass
+  // and the caller has already begun its pass, so the sub-pixel compaction is
+  // recorded into a transient command buffer here, before recordFrame(), so
+  // the draw path sees the compacted slots; it is submitted below, after the
+  // frame is recorded.  Recording before and submitting after overlaps the
+  // CPU frame recording with the previous GPU frame.  Non-fatal on failure:
+  // the full-detail draw recorded below is always valid.
+  VkCommandBuffer lodBuffer = this->beginExternalGeometryLod(drawlist, params);
+
   const double recordT0 = wantCpuTiming ? vkBackendRenderNowMs() : 0.0;
   const long recordBcStart = vkBackendRenderBreadcrumbEnabled() ? vkBackendRenderNowUs() : 0;
   this->recordContext.buffer = commandBuffer;
@@ -787,15 +788,26 @@ SoVulkanRenderBackend::renderExternal(const SoDrawList & drawlist,
                                           this->recordContext, framebuffer);
   vkBackendRenderBreadcrumbSince(recordBcStart, 5000, "renderExternal recordFrame end");
   this->recordContext.buffer = VK_NULL_HANDLE;
+  const double recordEnd = wantCpuTiming ? vkBackendRenderNowMs() : 0.0;
+
+  // Submit the pre-pass and wait so the compacted writes are visible before
+  // the caller submits its pass.  Only the LOD dispatch is on the critical
+  // path now; the frame recording above overlapped the previous GPU frame.
+  const double lodT0 = wantCpuTiming ? vkBackendRenderNowMs() : 0.0;
+  this->submitExternalGeometryLod(lodBuffer);
   if (wantCpuTiming) {
-    const double recordMs = vkBackendRenderNowMs() - recordT0;
+    timing.lodMs = vkBackendRenderNowMs() - lodT0;
+  }
+
+  if (wantCpuTiming) {
+    const double recordMs = recordEnd - recordT0;
     const double totalMs = recordMs + timing.texMs + timing.geomMs +
-                           timing.setupMs;
+                           timing.setupMs + timing.lodMs;
     std::fprintf(stderr,
                  "[RTDBG] cpuTimingRaster mode=full setup=%.2f geom=%.2f "
-                 "tex=%.2f record=%.2f total=%.2f\n",
-                 timing.setupMs, timing.geomMs, timing.texMs, recordMs,
-                 totalMs);
+                 "tex=%.2f lod=%.2f record=%.2f total=%.2f\n",
+                 timing.setupMs, timing.geomMs, timing.texMs, timing.lodMs,
+                 recordMs, totalMs);
     std::fflush(stderr);
   }
   vkBackendRenderBreadcrumbSince(externalBcStart, 5000, "renderExternal end");
