@@ -148,8 +148,12 @@ if(COIN_BUILD_VULKAN_RENDERER)
       data/shaders/vulkan/visual/Fragment.glsl frag)
     coin_embed_vulkan_spirv(vulkan_wide_line_vertex
       data/shaders/vulkan/wide-line/WideLineVertex.glsl vert)
+    coin_embed_vulkan_spirv(vulkan_wide_line_instanced_vertex
+      data/shaders/vulkan/wide-line/WideLineInstancedVertex.glsl vert)
     coin_embed_vulkan_spirv(vulkan_wide_line_fragment
       data/shaders/vulkan/wide-line/WideLineFragment.glsl frag)
+    coin_embed_vulkan_spirv(vulkan_geometry_lod_subpixel_cull
+      data/shaders/vulkan/geometry-lod/SubPixelCull.glsl comp)
     coin_embed_vulkan_spirv(vulkan_background_vertex
       data/shaders/vulkan/visual/BackgroundVertex.glsl vert)
     coin_embed_vulkan_spirv(vulkan_background_fragment

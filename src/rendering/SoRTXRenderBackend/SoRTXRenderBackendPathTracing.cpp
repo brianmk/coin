@@ -610,20 +610,39 @@ SoRTXRenderBackend::recordAccelerationStructures(
   this->cacheChanged = false;
   this->asTransformChanged = false;
 
-  if (this->asDirty) {
+  // Culling is camera-dependent, so a moving camera must re-evaluate the TLAS
+  // instance set even when the geometry/transforms are unchanged.  This is
+  // deliberately limited to interaction (navigation) plus one final rebuild
+  // on release: a static idle view keeps the "camera orbit skips the AS
+  // phase" optimisation.  A cull-only rebuild re-records the TLAS and its
+  // descriptors; the geometry, NEE pool and materials are unchanged.
+  //
+  // While interacting, only keep rebuilding when the previous build actually
+  // culled something: on a scene with few large instances (nothing culled)
+  // this avoids paying a per-frame TLAS build for no benefit, and since
+  // nothing was culled the TLAS is still complete.  The one-shot pending
+  // rebuild after release always runs so the resting pose is culled correctly.
+  const bool cullRebuild = this->tlasCullEnabled
+    && (this->tlasCullRebuildPending
+        || (this->ptInteractionLod && this->statTlasCulled > 0));
+  this->tlasCullRebuildPending = false;
+
+  if (this->asDirty || cullRebuild) {
     // Alternate the descriptor pair so the set we (re)populate below is not
     // the one the previous, still-in-flight submission bound.  On non-dirty
     // frames the index is left untouched so the trace keeps binding the set
     // that was last populated -- the root cause of the alternate-frame black
     // flash was tracing through a set that had never been updated.
     this->descriptorSetIndex = (this->descriptorSetIndex + 1) & 1u;
-    // Emissive-triangle pool for NEE.  Rebuilt only when the AS is dirty so
-    // the baked object-to-world transforms stay fresh on transform-only
-    // edits (which refit BLASes instead of rebuilding geometry).  Runs before
-    // updateMaterials(), which carries the pool offsets into the RTMaterial
-    // records.
-    this->buildNeePool(drawlist);
-    this->updateMaterials(drawlist);
+    if (this->asDirty) {
+      // Emissive-triangle pool for NEE.  Rebuilt only when the AS is dirty so
+      // the baked object-to-world transforms stay fresh on transform-only
+      // edits (which refit BLASes instead of rebuilding geometry).  Runs
+      // before updateMaterials(), which carries the pool offsets into the
+      // RTMaterial records.
+      this->buildNeePool(drawlist);
+      this->updateMaterials(drawlist);
+    }
 
     // TLAS build (instances reference the BLASes built above).  The TLAS
     // handle may change here, so refresh the binding-0 descriptor before the

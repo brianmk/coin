@@ -235,6 +235,24 @@ public:
                         VkFramebuffer framebuffer);
 
   /*!
+    \brief Prepare the next renderExternal() frame before the caller begins its
+    render pass, recording the GPU geometry-LOD pre-pass into \a commandBuffer.
+
+    Vulkan forbids compute inside a render pass, so the raster backend's
+    sub-pixel compaction dispatches cannot be recorded once the caller has
+    begun its pass.  The caller must invoke this first (with the same
+    clearwindow/clearzbuffer it will pass to renderExternal()), then begin the
+    render pass, then call renderExternal().  renderExternal() detects the
+    prepared frame and skips the setup already performed here.
+
+    A no-op (returns TRUE) in ray-tracing mode, where the RT backend owns its
+    own command buffers.  Returns FALSE only when frame preparation failed.
+  */
+  SbBool prepareExternalFrame(SbBool clearwindow,
+                              SbBool clearzbuffer,
+                              VkCommandBuffer commandBuffer);
+
+  /*!
     \brief Select the ray-tracing backend for the next render() calls.
 
     Ray tracing requires a Vulkan 1.2+ device with VK_KHR_acceleration_structure
@@ -354,6 +372,17 @@ public:
 
   //! Maximum path-tracing bounces (1..16); forwarded to the RT backend.
   void setPathTracingBounces(uint32_t bounces);
+
+  /*!
+    \brief Enable/disable interaction LOD on the RT backend.
+
+    While engaged the path tracer runs a single bounce so an interactive
+    orbit/pan of a heavy scene stays responsive; disengaging restarts a clean
+    full-quality accumulation.  The state is remembered so a later RT-backend
+    bring-up re-applies it.  A no-op when the ray-tracing backend is not
+    active.
+  */
+  void setInteractionLod(SbBool active);
 
   //! Frames of a static camera before the accumulation auto-restarts
   //! (1..120); forwarded to the RT backend.

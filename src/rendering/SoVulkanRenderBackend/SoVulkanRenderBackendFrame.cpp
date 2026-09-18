@@ -243,6 +243,32 @@ SoVulkanRenderBackend::shutdown()
   // The render-pass/framebuffer cache owns the current pass + framebuffer;
   // releasing it after the deferred destroys flush above (queue is idle).
   this->renderPasses.destroyAll();
+  if (this->subPixelCullPipeline != VK_NULL_HANDLE) {
+    vkDestroyPipeline(this->device, this->subPixelCullPipeline, this->allocator);
+    this->subPixelCullPipeline = VK_NULL_HANDLE;
+  }
+  if (this->subPixelCullModule != VK_NULL_HANDLE) {
+    vkDestroyShaderModule(this->device, this->subPixelCullModule,
+                          this->allocator);
+    this->subPixelCullModule = VK_NULL_HANDLE;
+  }
+  if (this->subPixelPipelineLayout != VK_NULL_HANDLE) {
+    vkDestroyPipelineLayout(this->device, this->subPixelPipelineLayout,
+                            this->allocator);
+    this->subPixelPipelineLayout = VK_NULL_HANDLE;
+  }
+  if (this->subPixelSetLayout != VK_NULL_HANDLE) {
+    vkDestroyDescriptorSetLayout(this->device, this->subPixelSetLayout,
+                                 this->allocator);
+    this->subPixelSetLayout = VK_NULL_HANDLE;
+  }
+  for (VkDescriptorPool pool : this->subPixelDescriptorPools) {
+    if (pool != VK_NULL_HANDLE) {
+      vkDestroyDescriptorPool(this->device, pool, this->allocator);
+    }
+  }
+  this->subPixelDescriptorPools.clear();
+  this->subPixelDescriptorSetCount = 0;
   if (this->fragmentModule != VK_NULL_HANDLE) {
     vkDestroyShaderModule(this->device, this->fragmentModule, this->allocator);
     this->fragmentModule = VK_NULL_HANDLE;
@@ -260,6 +286,11 @@ SoVulkanRenderBackend::shutdown()
     vkDestroyShaderModule(this->device, this->wideLineVertexModule,
                           this->allocator);
     this->wideLineVertexModule = VK_NULL_HANDLE;
+  }
+  if (this->wideLineInstancedVertexModule != VK_NULL_HANDLE) {
+    vkDestroyShaderModule(this->device, this->wideLineInstancedVertexModule,
+                          this->allocator);
+    this->wideLineInstancedVertexModule = VK_NULL_HANDLE;
   }
   if (this->backgroundFragmentModule != VK_NULL_HANDLE) {
     vkDestroyShaderModule(this->device, this->backgroundFragmentModule, this->allocator);
@@ -454,19 +485,27 @@ SoVulkanRenderBackend::prepareExternalFrame(
   this->cacheFrameMatrices(params);
   const bool wantCpuTiming = timing != nullptr;
   double t0 = wantCpuTiming ? SoVulkanShared::steadyNowMs() : 0.0;
-  this->beginFrame();
-  this->updateLightingSetup(drawlist);
-  if (wantCpuTiming) {
-    const double t1 = SoVulkanShared::steadyNowMs();
-    timing->setupMs = t1 - t0;
-    t0 = t1;
+  // prepareExternalGeometryLod() already ran the frame setup and recorded the
+  // geometry-LOD compute pre-pass before the caller began its render pass, so
+  // the frame cursor must not advance a second time.
+  if (this->externalFramePrepared) {
+    this->externalFramePrepared = false;
   }
-  this->updateGeometryCache(drawlist, overlaysOnly,
-                            params.geometryContentUnchanged);
-  if (wantCpuTiming) {
-    const double t1 = SoVulkanShared::steadyNowMs();
-    timing->geomMs = t1 - t0;
-    t0 = t1;
+  else {
+    this->beginFrame();
+    this->updateLightingSetup(drawlist);
+    if (wantCpuTiming) {
+      const double t1 = SoVulkanShared::steadyNowMs();
+      timing->setupMs = t1 - t0;
+      t0 = t1;
+    }
+    this->updateGeometryCache(drawlist, overlaysOnly,
+                              params.geometryContentUnchanged);
+    if (wantCpuTiming) {
+      const double t1 = SoVulkanShared::steadyNowMs();
+      timing->geomMs = t1 - t0;
+      t0 = t1;
+    }
   }
   // The composite path never goes through recordFrame(), so it must reserve
   // the lighting slots its overlay/residual draws consume here; otherwise the
@@ -865,7 +904,7 @@ SoVulkanRenderBackend::buildWorkItems(const SoDrawList & drawlist,
         if (command.pass == SO_RENDERPASS_OVERLAY) continue;
         if (command.pass == SO_RENDERPASS_TRANSPARENT) continue;
         if (!command.state.depth.enabled) continue; // on-top annotation (later)
-        if (isWideLine(command, -1)) {
+        if (isWideLine(command, -1, this->interactionLodActive)) {
           // CPU-expanded per command, so never batched.  It still goes into a
           // secondary: prepareWideLineBuffers() has already grown the
           // per-command quad buffer on the recording thread, so the parallel
@@ -1004,15 +1043,18 @@ SoVulkanRenderBackend::buildWorkItems(const SoDrawList & drawlist,
     if (tgt) {
       for (const VulkanWorkItem & item : out) {
         if (!item.recordToSecondary) continue;
+        const SoRenderCommand * const cmd =
+          item.count > 1 ? item.commands[0] : item.single;
+        // Pass the cache entry so the warmed key matches the one the record
+        // path builds (it depends on the command's wide-line instance buffer).
+        VulkanCachedCommand * entry = nullptr;
+        const auto found = this->commandToCache.find(cmd);
+        if (found != this->commandToCache.end()) {
+          entry = &this->gpuCache[found->second];
+        }
         VkPipeline warmed = VK_NULL_HANDLE;
-        if (item.count > 1) {
-          this->getOrCreatePipeline(*item.commands[0], *tgt, renderPass, warmed,
-                                    false, -1, false);
-        }
-        else {
-          this->getOrCreatePipeline(*item.single, *tgt, renderPass, warmed,
-                                    false, -1, false);
-        }
+        this->getOrCreatePipeline(*cmd, *tgt, renderPass, warmed,
+                                  false, -1, false, entry);
       }
     }
   }
@@ -1122,6 +1164,9 @@ SoVulkanRenderBackend::recordFrame(const SoDrawList & drawlist,
 {
   vkBackendTrace(this->uboFrameIndex, "recordFrame.enter",
                  "cmds=%d", drawlist.getNumCommands());
+  // Latch the interaction-LOD state before any isWideLine() decision so the
+  // wide-line expansion, pipeline key and draw path all agree for this frame.
+  this->interactionLodActive = params.interactionLod == TRUE;
   // Wide-line CPU expansion: grow the per-command quad buffers (device-memory
   // allocation is not thread-safe) and compute the quads across the worker
   // pool before recording, which then only binds the cached buffers.  The

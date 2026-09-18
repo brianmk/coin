@@ -41,7 +41,10 @@ packPushConstants(const SoRenderCommand & command,
                   const float * uniformColorOverride,
                   const float * projFloats, const float dpr,
                   const float stippleFactor, const float stipplePatternBits,
-                  const bool wideLine)
+                  const bool wideLine,
+                  const float lineWidthPx = 0.0f,
+                  const float viewportWidthPx = 0.0f,
+                  const float viewportHeightPx = 0.0f)
 {
   VulkanPushConstants push {};
   std::memcpy(push.proj, projFloats, sizeof(float) * 16);
@@ -87,6 +90,12 @@ packPushConstants(const SoRenderCommand & command,
   push.lineParams[2] = wideLine ? 1.0f : 0.0f;
   push.lineParams[3] =
     command.geometry.topology == SO_TOPOLOGY_POINTS ? 1.0f : 0.0f;
+  // Geometry the GPU-instanced wide-line shader needs to size the quad: the
+  // line width in device pixels and the device-pixel viewport dimensions.
+  push.lineGeom[0] = lineWidthPx;
+  push.lineGeom[1] = viewportWidthPx;
+  push.lineGeom[2] = viewportHeightPx;
+  push.lineGeom[3] = dpr;
   return push;
 }
 
@@ -664,7 +673,7 @@ SoVulkanRenderBackend::recordDrawCommand(const SoDrawList & drawlist,
   // Wide-line rendering mirrors the GL wide-line path: line width > 1 or a
   // stipple pattern expands each segment into a quad.  The overlay
   // wireframe/point redraws keep the plain line path.
-  const bool useWideLine = isWideLine(command, fillModeOverride);
+  const bool useWideLine = isWideLine(command, fillModeOverride, this->interactionLodActive);
   const bool patternedLine = isPatternedLine(command);
   // Line stipple mirrors classic GL (glLineStipple): each pattern bit
   // covers linePatternScaleFactor PIXELS in screen space.  The fragment
@@ -681,7 +690,7 @@ SoVulkanRenderBackend::recordDrawCommand(const SoDrawList & drawlist,
 
   VkPipeline pipeline = VK_NULL_HANDLE;
   if (!this->getOrCreatePipeline(command, target, pass, pipeline, transparent,
-                                 fillModeOverride, overlayPass) ||
+                                 fillModeOverride, overlayPass, &entry) ||
       pipeline == VK_NULL_HANDLE) {
     if (COIN_VULKAN_ENV_FLAG("FC_VULKAN_BACKEND_DEBUG")) {
       fprintf(stderr, "[VKBE] cmd %p pass=%d skip: pipeline creation failed "
@@ -735,13 +744,25 @@ SoVulkanRenderBackend::recordDrawCommand(const SoDrawList & drawlist,
   const bool indexed =
     entry.indexBuffer != VK_NULL_HANDLE && command.geometry.indexCount &&
     command.geometry.indices;
+  // GPU geometry LOD: when the pre-pass compacted this command for the current
+  // frame, the draw reads the compacted index buffer through an indirect
+  // command whose indexCount the compute shader wrote.  It applies to
+  // non-indexed triangle lists too (the compaction emits sequential indices).
+  const VulkanCachedCommand::VulkanSubPixelSlot * subPixel =
+    (!useWideLine) ? this->subPixelSlotFor(entry) : nullptr;
   vkBackendTrace(this->uboFrameIndex, "draw.bindVbuf0",
                  "slot=%u vbuf=%p off=%llu", slotIndex,
                  reinterpret_cast<const void *>(entry.vertexBuffer),
                  static_cast<unsigned long long>(vertexOffset));
   vkCmdBindVertexBuffers(ctx.buffer, 0, 1, &entry.vertexBuffer,
                          &vertexOffset);
-  if (indexed && !useWideLine) {
+  if (!useWideLine && subPixel != nullptr) {
+    vkBackendTrace(this->uboFrameIndex, "draw.bindIbufLod", "slot=%u",
+                   slotIndex);
+    vkCmdBindIndexBuffer(ctx.buffer, subPixel->indexBuffer, 0,
+                         VK_INDEX_TYPE_UINT32);
+  }
+  else if (indexed && !useWideLine) {
     vkBackendTrace(this->uboFrameIndex, "draw.bindIbuf", "slot=%u", slotIndex);
     vkCmdBindIndexBuffer(ctx.buffer, entry.indexBuffer,
                          entry.indexOffset, VK_INDEX_TYPE_UINT32);
@@ -816,9 +837,13 @@ SoVulkanRenderBackend::recordDrawCommand(const SoDrawList & drawlist,
               pp[3][0], pp[3][1], pp[3][2], pp[3][3]);
     }
   }
+  const SbVec2s lineViewportSize = params.viewport.getViewportSizePixels();
   const VulkanPushConstants push = packPushConstants(
     command, entry, uniformColorOverride, &projValue[0][0], this->frameDpr,
-    stippleFactor, stipplePatternBits, useWideLine);
+    stippleFactor, stipplePatternBits, useWideLine,
+    std::max(1.0f, command.state.raster.lineWidth) * this->frameDpr,
+    static_cast<float>(lineViewportSize[0] > 0 ? lineViewportSize[0] : 1),
+    static_cast<float>(lineViewportSize[1] > 0 ? lineViewportSize[1] : 1));
 
   vkBackendTrace(this->uboFrameIndex, "draw.pushConstants", "slot=%u",
                  slotIndex);
@@ -904,7 +929,14 @@ SoVulkanRenderBackend::recordDrawCommand(const SoDrawList & drawlist,
             projValue[3][0], projValue[3][1], projValue[3][2], projValue[3][3]);
   }
 
-  if (useWideLine) {
+  // GPU-instanced wide lines: the vertex shader expands each segment from a
+  // static instance-rate endpoint stream, so there is no per-frame CPU work
+  // and no quad upload.  Falls back to the CPU expansion when the endpoint
+  // buffer is unavailable.
+  const bool useInstancedWideLine = useWideLine &&
+    isInstancedWideLine(command) && entry.instancedLineBuffer != VK_NULL_HANDLE;
+
+  if (useWideLine && !useInstancedWideLine) {
     // CPU-side quad expansion in clip space (line width and/or stipple);
     // the wide-line pipeline draws it as a triangle list.  Binds here so
     // the projection matrix (projValue) is already resolved.
@@ -920,25 +952,16 @@ SoVulkanRenderBackend::recordDrawCommand(const SoDrawList & drawlist,
                            &wideOffset);
   }
 
-  if (useWideLine) {
-    static int wldrawDiag = 0;
-    if (COIN_VULKAN_ENV_FLAG("FC_VULKAN_BACKEND_DEBUG") && wldrawDiag++ < 40) {
-      fprintf(stderr, "[WLINE2] DRAW cmd=%p wideLineVertexCount=%u pass=%d\n",
-              (const void*)&command, entry.wideLineVertexCount,
-              static_cast<int>(command.pass));
-    }
-    vkCmdDraw(ctx.buffer, entry.wideLineVertexCount, 1, 0, 0);
-  }
-  else {
-    // Bind the per-instance model matrix (binding 1, rate INSTANCE) and draw
-    // with instanceCount=1.  Every visual pipeline now carries the instanced
-    // model attribute, so binding 1 must be bound for every visual draw (the
-    // shader reads the transform from it rather than the UBO).  The model is
-    // written into a per-command ring slot at the SAME element index the draw
-    // UBO uses, so the GPU reads this draw's transform even though recording
-    // completes before execution (a single shared offset would collapse every
-    // draw onto the last-committed model).  A batched group writes a run of
-    // [slotIndex .. slotIndex+N) elements and draws instanceCount=N.
+  // Bind the per-instance model matrix (binding 1, rate INSTANCE) for the
+  // visual and GPU-instanced wide-line paths; both read the transform from
+  // the attribute rather than the UBO.  The model is written into a
+  // per-command ring slot at the SAME element index the draw UBO uses, so the
+  // GPU reads this draw's transform even though recording completes before
+  // execution (a single shared offset would collapse every draw onto the
+  // last-committed model).  A batched group writes a run of
+  // [slotIndex .. slotIndex+N) elements and draws instanceCount=N.  The
+  // CPU-expanded wide-line path does not use binding 1.
+  if (useInstancedWideLine || !useWideLine) {
     const VkDeviceSize instElement =
       static_cast<VkDeviceSize>((this->uboFrameIndex % this->maxFramesInFlight) *
         this->uboSlotsPerFrame + slotIndex);
@@ -959,7 +982,39 @@ SoVulkanRenderBackend::recordDrawCommand(const SoDrawList & drawlist,
                    slotIndex);
     vkCmdBindVertexBuffers(ctx.buffer, 1, 1,
                            &this->instanceModelBuffer, &instByteOffset);
-    if (indexed) {
+  }
+
+  if (useInstancedWideLine) {
+    VkDeviceSize zeroOffset = 0;
+    vkCmdBindVertexBuffers(ctx.buffer, 0, 1,
+                           &entry.instancedLineBuffer, &zeroOffset);
+    vkBackendTrace(this->uboFrameIndex, "draw.wideLineInstanced",
+                   "slot=%u segs=%u cmd=%p", slotIndex,
+                   entry.instancedLineSegmentCount,
+                   reinterpret_cast<const void *>(&command));
+    // Six vertices per segment (two triangles); the vertex shader selects the
+    // corner from gl_VertexIndex.
+    vkCmdDraw(ctx.buffer, 6u, entry.instancedLineSegmentCount, 0, 0);
+  }
+  else if (useWideLine) {
+    static int wldrawDiag = 0;
+    if (COIN_VULKAN_ENV_FLAG("FC_VULKAN_BACKEND_DEBUG") && wldrawDiag++ < 40) {
+      fprintf(stderr, "[WLINE2] DRAW cmd=%p wideLineVertexCount=%u pass=%d\n",
+              (const void*)&command, entry.wideLineVertexCount,
+              static_cast<int>(command.pass));
+    }
+    vkCmdDraw(ctx.buffer, entry.wideLineVertexCount, 1, 0, 0);
+  }
+  else {
+    if (subPixel != nullptr) {
+      vkBackendTrace(this->uboFrameIndex, "draw.drawIndexedIndirect",
+                     "slot=%u buf=%p cmd=%p", slotIndex,
+                     reinterpret_cast<const void *>(ctx.buffer),
+                     reinterpret_cast<const void *>(&command));
+      vkCmdDrawIndexedIndirect(ctx.buffer, subPixel->indirectBuffer, 0, 1,
+                               sizeof(VkDrawIndexedIndirectCommand));
+    }
+    else if (indexed) {
       vkBackendTrace(this->uboFrameIndex, "draw.drawIndexed",
                      "slot=%u buf=%p ic=%u cmd=%p", slotIndex,
                      reinterpret_cast<const void *>(ctx.buffer),
@@ -1009,7 +1064,7 @@ SoVulkanRenderBackend::recordCommandBatch(const SoDrawList & drawlist,
   const VulkanCachedCommand & entryRef = this->gpuCache[found->second];
   if (entryRef.vertexBuffer == VK_NULL_HANDLE) return false;
 
-  if (isWideLine(command, fillModeOverride)) {
+  if (isWideLine(command, fillModeOverride, this->interactionLodActive)) {
     // Not batchable; caller falls back to per-command draws.
     return false;
   }

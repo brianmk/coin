@@ -23,7 +23,9 @@
 #include "rendering/vulkan/visual/Fragment.spv.h"
 #include "rendering/vulkan/visual/Vertex.spv.h"
 #include "rendering/vulkan/visual/WideLineFragment.spv.h"
+#include "rendering/vulkan/visual/WideLineInstancedVertex.spv.h"
 #include "rendering/vulkan/visual/WideLineVertex.spv.h"
+#include "rendering/vulkan/visual/SubPixelCull.spv.h"
 #include "rendering/vulkan/visual/BackgroundVertex.spv.h"
 #include "rendering/vulkan/visual/BackgroundFragment.spv.h"
 
@@ -294,6 +296,13 @@ SoVulkanRenderBackend::initialize(const SoRenderBackendInitParams & params)
     this->emitError("failed to create Vulkan pipeline cache");
     this->shutdown();
     return FALSE;
+  }
+
+  if (!this->createSubPixelCullPipeline()) {
+    // Geometry LOD is an optional acceleration: a device without compute (or
+    // with too small a push-constant budget) simply keeps the full-draw path.
+    // The pipeline stays null and the pre-pass no-ops.
+    this->emitLog("geometry-LOD compute pipeline unavailable; full draws only");
   }
 
   this->emitLog("initialized");
@@ -1022,6 +1031,8 @@ SoVulkanRenderBackend::deferDestroyCacheEntry(VulkanCachedCommand & entry)
   if (entry.vertexBuffer == VK_NULL_HANDLE &&
       entry.indexBuffer == VK_NULL_HANDLE &&
       entry.sharedBlockId == 0 &&
+      entry.instancedLineBuffer == VK_NULL_HANDLE &&
+      entry.subPixelSlots.empty() &&
       entry.wideLineBuffers.empty()) {
     entry = VulkanCachedCommand();
     return;
@@ -1030,11 +1041,36 @@ SoVulkanRenderBackend::deferDestroyCacheEntry(VulkanCachedCommand & entry)
     const uint32_t sharedBlockId = entry.sharedBlockId;
     std::vector<VulkanCachedCommand::VulkanWideLineBuffer> wideLine =
       std::move(entry.wideLineBuffers);
+    std::vector<VulkanCachedCommand::VulkanSubPixelSlot> subPixel =
+      std::move(entry.subPixelSlots);
+    const VkBuffer instancedLineBuffer = entry.instancedLineBuffer;
+    const VkDeviceMemory instancedLineMemory = entry.instancedLineMemory;
     VkDevice device = this->device;
     const VkAllocationCallbacks * allocator = this->allocator;
-    this->deferDestroy([device, allocator, wideLine]() mutable {
+    this->deferDestroy([device, allocator, wideLine, subPixel, instancedLineBuffer,
+                        instancedLineMemory]() mutable {
       for (VulkanCachedCommand::VulkanWideLineBuffer & slot : wideLine) {
         slot.destroy(device, allocator);
+      }
+      for (VulkanCachedCommand::VulkanSubPixelSlot & slot : subPixel) {
+        if (slot.indexBuffer != VK_NULL_HANDLE) {
+          vkDestroyBuffer(device, slot.indexBuffer, allocator);
+        }
+        if (slot.indexMemory != VK_NULL_HANDLE) {
+          vkFreeMemory(device, slot.indexMemory, allocator);
+        }
+        if (slot.indirectBuffer != VK_NULL_HANDLE) {
+          vkDestroyBuffer(device, slot.indirectBuffer, allocator);
+        }
+        if (slot.indirectMemory != VK_NULL_HANDLE) {
+          vkFreeMemory(device, slot.indirectMemory, allocator);
+        }
+      }
+      if (instancedLineBuffer != VK_NULL_HANDLE) {
+        vkDestroyBuffer(device, instancedLineBuffer, allocator);
+      }
+      if (instancedLineMemory != VK_NULL_HANDLE) {
+        vkFreeMemory(device, instancedLineMemory, allocator);
       }
     });
     this->deferReleaseGeometryBlock(sharedBlockId);
@@ -1047,13 +1083,38 @@ SoVulkanRenderBackend::deferDestroyCacheEntry(VulkanCachedCommand & entry)
   const VkDeviceMemory vertexMemory = entry.vertexMemory;
   const VkBuffer indexBuffer = entry.indexBuffer;
   const VkDeviceMemory indexMemory = entry.indexMemory;
+  const VkBuffer instancedLineBuffer = entry.instancedLineBuffer;
+  const VkDeviceMemory instancedLineMemory = entry.instancedLineMemory;
   std::vector<VulkanCachedCommand::VulkanWideLineBuffer> wideLine =
     std::move(entry.wideLineBuffers);
+  std::vector<VulkanCachedCommand::VulkanSubPixelSlot> subPixel =
+    std::move(entry.subPixelSlots);
   this->deferDestroy(
     [device, allocator, vertexBuffer, vertexMemory, indexBuffer,
-     indexMemory, wideLine]() mutable {
+     indexMemory, instancedLineBuffer, instancedLineMemory, wideLine,
+     subPixel]() mutable {
       for (VulkanCachedCommand::VulkanWideLineBuffer & slot : wideLine) {
         slot.destroy(device, allocator);
+      }
+      for (VulkanCachedCommand::VulkanSubPixelSlot & slot : subPixel) {
+        if (slot.indexBuffer != VK_NULL_HANDLE) {
+          vkDestroyBuffer(device, slot.indexBuffer, allocator);
+        }
+        if (slot.indexMemory != VK_NULL_HANDLE) {
+          vkFreeMemory(device, slot.indexMemory, allocator);
+        }
+        if (slot.indirectBuffer != VK_NULL_HANDLE) {
+          vkDestroyBuffer(device, slot.indirectBuffer, allocator);
+        }
+        if (slot.indirectMemory != VK_NULL_HANDLE) {
+          vkFreeMemory(device, slot.indirectMemory, allocator);
+        }
+      }
+      if (instancedLineBuffer != VK_NULL_HANDLE) {
+        vkDestroyBuffer(device, instancedLineBuffer, allocator);
+      }
+      if (instancedLineMemory != VK_NULL_HANDLE) {
+        vkFreeMemory(device, instancedLineMemory, allocator);
       }
       if (indexBuffer != VK_NULL_HANDLE) {
         vkDestroyBuffer(device, indexBuffer, allocator);
@@ -1311,6 +1372,109 @@ SoVulkanRenderBackend::createWideLineShaders()
     this->wideLineVertexModule = VK_NULL_HANDLE;
     return false;
   }
+  if (!this->createShaderModule(
+        coin_vulkan_wide_line_instanced_vertex_spirv,
+        coin_vulkan_wide_line_instanced_vertex_spirv_count,
+        this->wideLineInstancedVertexModule)) {
+    vkDestroyShaderModule(this->device, this->wideLineFragmentModule,
+                          this->allocator);
+    vkDestroyShaderModule(this->device, this->wideLineVertexModule,
+                          this->allocator);
+    this->wideLineFragmentModule = VK_NULL_HANDLE;
+    this->wideLineVertexModule = VK_NULL_HANDLE;
+    return false;
+  }
+  return true;
+}
+
+bool
+SoVulkanRenderBackend::createSubPixelCullPipeline()
+{
+  // Descriptor set 0: the command's vertex buffer (0), original index buffer
+  // (1), compacted output index buffer (2) and the indirect command (3).  The
+  // input descriptors bind the whole (possibly shared) buffer; the shader
+  // applies the per-command base offset from its push constants, so no
+  // descriptor offset-alignment constraint applies.
+  VkDescriptorSetLayoutBinding bindings[4] {};
+  for (uint32_t i = 0; i < 4; ++i) {
+    bindings[i].binding = i;
+    bindings[i].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+    bindings[i].descriptorCount = 1;
+    bindings[i].stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+    bindings[i].pImmutableSamplers = nullptr;
+  }
+  VkDescriptorSetLayoutCreateInfo slci {};
+  slci.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
+  slci.bindingCount = 4;
+  slci.pBindings = bindings;
+  if (vkCreateDescriptorSetLayout(this->device, &slci, this->allocator,
+                                  &this->subPixelSetLayout) != VK_SUCCESS) {
+    this->subPixelSetLayout = VK_NULL_HANDLE;
+    return false;
+  }
+
+  // Push constants: mat4 mvp (64) + vec4 params (16) + vec4 offsets (16).
+  constexpr VkPushConstantRange range {
+    VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(float) * 24
+  };
+  VkPipelineLayoutCreateInfo plci {};
+  plci.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
+  plci.setLayoutCount = 1;
+  plci.pSetLayouts = &this->subPixelSetLayout;
+  plci.pushConstantRangeCount = 1;
+  plci.pPushConstantRanges = &range;
+  if (vkCreatePipelineLayout(this->device, &plci, this->allocator,
+                             &this->subPixelPipelineLayout) != VK_SUCCESS) {
+    this->subPixelPipelineLayout = VK_NULL_HANDLE;
+    return false;
+  }
+
+  if (!this->createShaderModule(
+        coin_vulkan_geometry_lod_subpixel_cull_spirv,
+        coin_vulkan_geometry_lod_subpixel_cull_spirv_count,
+        this->subPixelCullModule)) {
+    return false;
+  }
+
+  VkComputePipelineCreateInfo cpci {};
+  cpci.sType = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO;
+  cpci.stage.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+  cpci.stage.stage = VK_SHADER_STAGE_COMPUTE_BIT;
+  cpci.stage.module = this->subPixelCullModule;
+  cpci.stage.pName = "main";
+  cpci.layout = this->subPixelPipelineLayout;
+  if (vkCreateComputePipelines(this->device, this->pipelineCacheHandle, 1,
+                               &cpci, this->allocator,
+                               &this->subPixelCullPipeline) != VK_SUCCESS) {
+    this->subPixelCullPipeline = VK_NULL_HANDLE;
+    return false;
+  }
+
+  // Dedicated, append-only storage-buffer descriptor pool.  Sets are never
+  // freed while a frame may reference them; when the pool fills a fresh one is
+  // appended (mirroring descriptorPools).
+  VkDescriptorPoolSize size {};
+  size.type = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+  size.descriptorCount = 4096 * 4;
+  VkDescriptorPoolCreateInfo dpci {};
+  dpci.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
+  dpci.maxSets = 4096;
+  dpci.poolSizeCount = 1;
+  dpci.pPoolSizes = &size;
+  VkDescriptorPool pool = VK_NULL_HANDLE;
+  if (vkCreateDescriptorPool(this->device, &dpci, this->allocator,
+                             &pool) != VK_SUCCESS) {
+    return false;
+  }
+  this->subPixelDescriptorPools.push_back(pool);
+  this->subPixelDescriptorSetCount = 0;
+
+  // Cache the device's single-binding storage-buffer range limit so the
+  // pre-pass can reject a command whose vertex/index buffer cannot legally be
+  // bound whole (see subPixelMaxStorageRange in the header).
+  VkPhysicalDeviceProperties props {};
+  vkGetPhysicalDeviceProperties(this->physicalDevice, &props);
+  this->subPixelMaxStorageRange = props.limits.maxStorageBufferRange;
   return true;
 }
 
