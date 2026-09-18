@@ -302,6 +302,10 @@ public:
   SbBool wireframeOverlay = FALSE;
   SbBool pointsOverlay = FALSE;
   SbBool tessellationOverlay = FALSE;
+  //! Interaction LOD state, forwarded to the RT backend.  Persisted here so a
+  //! later RT-backend bring-up (setViewSettings/invalidateViewSettings) can
+  //! re-apply it.
+  SbBool interactionLod = FALSE;
   SbColor4f edgeColor = SbColor4f(0.05f, 0.05f, 0.05f, 1.0f);
   //! Last settings blob applied through setViewSettings(), and whether one has
   //! been applied yet (so the first call always applies).
@@ -464,6 +468,14 @@ public:
                              SbBool clearzbuffer,
                              SoDrawList *& drawlist,
                              SoRenderParams & params);
+
+  // Frame prepared by prepareExternalFrame() (manager) and consumed by the
+  // next renderExternal().  The geometry-LOD pre-pass must be recorded before
+  // the caller begins its render pass, so the draw list and params are built
+  // there and reused here instead of being rebuilt inside the pass.
+  bool preparedFrameValid = false;
+  SoDrawList * preparedDrawlist = nullptr;
+  SoRenderParams preparedParams;
 
   // Dump the [CLIP] diagnostic trace (env-gated by FC_VULKAN_CLIP_DEBUG;
   // FC_VULKAN_CLIP_VERBOSE adds the per-25-frame verbose lines).  Extracted
@@ -750,6 +762,10 @@ SoVulkanRenderManager::setViewSettings(const SoVulkanViewSettings & settings)
                                    ? nullptr
                                    : settings.pathTracingDenoiser.c_str());
     this->setPathTracingDenoiserScale(settings.pathTracingDenoiserScale);
+    // Re-apply the interaction-LOD state: the RT backend starts with it off,
+    // so a bring-up after this state was set (device re-init / lazy RT build)
+    // must pick it up.  Idempotent (the setter early-returns when unchanged).
+    this->setInteractionLod(this->pimpl->interactionLod);
   }
 }
 
@@ -1098,6 +1114,20 @@ SoVulkanRenderManager::setPathTracingSettleFrames(const uint32_t frames)
 }
 
 void
+SoVulkanRenderManager::setInteractionLod(SbBool active)
+{
+  this->pimpl->interactionLod = active;
+  // Routine, per-navigation state push, not a user-facing tuning setter: forward
+  // it silently when the RT backend exists and remember it for the eventual
+  // bring-up (setViewSettings re-applies it).  Routing this through withRtx()
+  // emitted a "ray-tracing backend is not initialized" warning on every camera
+  // move in a raster view, spamming the console on a huge scene.
+  if (this->pimpl->rtxBackendInitialized) {
+    this->pimpl->rtxBackend.setInteractionLod(active);
+  }
+}
+
+void
 SoVulkanRenderManager::setPathTracingMaxSamples(const uint32_t samples)
 {
   this->pimpl->withRtx("SoVulkanRenderManager::setPathTracingMaxSamples",
@@ -1186,6 +1216,41 @@ SoVulkanRenderManager::render(SbBool clearwindow, SbBool clearzbuffer)
 }
 
 SbBool
+SoVulkanRenderManager::prepareExternalFrame(SbBool clearwindow,
+                                            SbBool clearzbuffer,
+                                            VkCommandBuffer commandBuffer)
+{
+  // Ray tracing owns its own command buffers and has no raster geometry-LOD
+  // pre-pass; renderExternal() then prepares the frame normally.
+  if (this->getRayTracingActive()) return TRUE;
+
+  SoRenderParams params;
+  SoDrawList * drawlist = nullptr;
+  if (!this->pimpl->prepareRenderParams(clearwindow, clearzbuffer, drawlist,
+                                        params)) {
+    return FALSE;
+  }
+  params.frame = ++this->pimpl->frameOrdinal;
+  this->pimpl->preparedDrawlist = drawlist;
+  this->pimpl->preparedParams = params;
+  this->pimpl->preparedFrameValid = true;
+
+  if (SoVulkanShared::envFlagEnabled("FC_VULKAN_BACKEND_DEBUG")) {
+    fprintf(stderr, "[GEOMPREP] cmds=%d lod=%d\n", drawlist->getNumCommands(),
+            params.interactionLod == TRUE ? 1 : 0);
+  }
+
+  if (!this->pimpl->backend.prepareExternalGeometryLod(*drawlist, params,
+                                                       commandBuffer)) {
+    // Non-fatal: renderExternal() still records the frame, just without the
+    // geometry-LOD pre-pass (the full-detail draw is always valid).
+    SoDebugError::postWarning("SoVulkanRenderManager::prepareExternalFrame",
+                              "geometry-LOD pre-pass failed");
+  }
+  return TRUE;
+}
+
+SbBool
 SoVulkanRenderManager::renderExternal(SbBool clearwindow,
                                       SbBool clearzbuffer,
                                       VkCommandBuffer commandBuffer,
@@ -1195,14 +1260,24 @@ SoVulkanRenderManager::renderExternal(SbBool clearwindow,
   const long renderBcStart = vkRenderBreadcrumbEnabled() ? vkRenderBreadcrumbNowUs() : 0;
   SoRenderParams params;
   SoDrawList * drawlist = nullptr;
-  if (!this->pimpl->prepareRenderParams(clearwindow, clearzbuffer, drawlist,
-                                        params)) {
+  if (this->pimpl->preparedFrameValid) {
+    // prepareExternalFrame() already built the draw list/params and ran the
+    // frame setup + geometry-LOD pre-pass before the caller's render pass.
+    drawlist = this->pimpl->preparedDrawlist;
+    params = this->pimpl->preparedParams;
+    this->pimpl->preparedFrameValid = false;
+    this->pimpl->preparedDrawlist = nullptr;
+  }
+  else if (!this->pimpl->prepareRenderParams(clearwindow, clearzbuffer,
+                                             drawlist, params)) {
     return FALSE;
+  }
+  else {
+    params.frame = ++this->pimpl->frameOrdinal;
   }
   if (renderBcStart) {
     vkRenderBreadcrumbSince(renderBcStart, 5000, "renderExternal prepareRenderParams end");
   }
-  params.frame = ++this->pimpl->frameOrdinal;
   const long backendBcStart = vkRenderBreadcrumbEnabled() ? vkRenderBreadcrumbNowUs() : 0;
   if (this->getRayTracingActive()) {
     if (!this->pimpl->rtxBackend.renderExternal(*drawlist, params,
@@ -1632,6 +1707,16 @@ SoVulkanRenderManagerP::prepareRenderParams(SbBool clearwindow,
   const long applyBcStart = vkRenderBreadcrumbEnabled() ? vkRenderBreadcrumbNowUs() : 0;
   SoIRRenderAction & action = this->irAction;
   action.setViewportRegion(this->viewportRegion);
+  {
+    static bool loggedAction = false;
+    if (!loggedAction && SoVulkanShared::envFlagEnabled("FC_VULKAN_BACKEND_DEBUG")) {
+      loggedAction = true;
+      fprintf(stderr,
+              "[DRAWLIST] manager irAction=%p overlayAction=%p scene=%p\n",
+              (void *)&this->irAction, (void *)&this->overlayIrAction,
+              (void *)this->scene);
+    }
+  }
 
   params.viewport = this->viewportRegion;
   // The viewport region is in device pixels, so carry the device-pixel ratio
@@ -1689,6 +1774,11 @@ SoVulkanRenderManagerP::prepareRenderParams(SbBool clearwindow,
   // Hand the camera generation counter to the backends so a camera move is
   // detected unambiguously (see SoRenderParams::cameraVersion).
   params.cameraVersion = this->cameraVersion;
+  // Interaction LOD is driven by the viewport adapter's camera-move timer and
+  // applies to every backend: the RT backend lowers its bounce count, the
+  // raster Vulkan backend draws wide lines as plain 1px lines (no CPU quad
+  // expansion) for the duration of the motion.
+  params.interactionLod = this->interactionLod ? TRUE : FALSE;
 
   // SoIRRenderAction::apply() resets the frame, so the camera and the scene
   // must be traversed in a single apply() call.  The managed scene graph is
@@ -1878,6 +1968,14 @@ SoVulkanRenderManagerP::prepareRenderParams(SbBool clearwindow,
     }
   }
   {
+    // The main region is whatever the MAIN IR action recorded, and on a fresh
+    // document that is often just the hidden anchor cube (a tiny non-indexed
+    // SoCube, ~36 vertices) - the real document shapes may not be in it at
+    // all.  Do not assume "the scene rendered" just because main > 0: check
+    // mainMaxVc against the shape's real vertex count.  Feature work that is
+    // only ever exercised against the nav cube (see the VALIDATION NOTE in
+    // SoVulkanRenderBackendGeometryLod.cpp) can appear to work while never
+    // touching real, indexed document geometry.
     const int numMain = static_cast<int>(this->mainCommandCount);
     if (numMain < list.getNumCommands()) {
       list.truncate(numMain);
@@ -1888,6 +1986,19 @@ SoVulkanRenderManagerP::prepareRenderParams(SbBool clearwindow,
       for (int i = 0; i < ovlCount; ++i) {
         list.addCommand(ovl.getCommand(i));
       }
+    }
+    if (SoVulkanShared::envFlagEnabled("FC_VULKAN_BACKEND_DEBUG")) {
+      int mainMax = 0;
+      int totalMax = 0;
+      for (int i = 0; i < list.getNumCommands(); ++i) {
+        const int vc = static_cast<int>(list.getCommand(i).geometry.vertexCount);
+        if (i < numMain && vc > mainMax) mainMax = vc;
+        if (vc > totalMax) totalMax = vc;
+      }
+      fprintf(stderr,
+              "[DRAWLIST] main=%d total=%d replayed=%d mainMaxVc=%d totalMaxVc=%d\n",
+              numMain, list.getNumCommands(), irReplayed ? 1 : 0, mainMax,
+              totalMax);
     }
   }
 
@@ -2242,7 +2353,13 @@ SoVulkanRenderManagerP::prepareRenderParams(SbBool clearwindow,
 
   // Reconstruct near/far from the recorded projection matrix and compare with
   // the auto-clipped values so mismatches (per-object clipping) are obvious.
-  this->dumpClipDebug(list, params);
+  // This is a diagnostic: its [CLIP] traces walk the draw-list vertices (a
+  // multi-million-vertex mesh costs seconds per dump), so it MUST stay behind
+  // the FC_VULKAN_CLIP_DEBUG gate.  Without the gate it dominates the frame on
+  // a large scene.
+  if (clipDebugEnabled()) {
+    this->dumpClipDebug(list, params);
+  }
 
   return TRUE;
 }

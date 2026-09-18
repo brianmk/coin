@@ -21,6 +21,7 @@ if(COIN_BUILD_VULKAN_RENDERER)
 		SoVulkanRenderBackend/SoVulkanRenderBackendTexture.cpp
 		SoVulkanRenderBackend/SoVulkanRenderBackendCommand.cpp
 		SoVulkanRenderBackend/SoVulkanRenderBackendWideLine.cpp
+		SoVulkanRenderBackend/SoVulkanRenderBackendGeometryLod.cpp
 		SoVulkanRenderBackend/SoVulkanRenderBackendFrame.cpp
 		SoVulkanRenderManager.cpp
 		SoRTXRenderBackend/SoRTXRenderBackendCore.cpp

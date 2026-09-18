@@ -1,7 +1,11 @@
 // src/rendering/SoVulkanRenderBackend/SoVulkanRenderBackendWideLine.cpp
 //
-// CPU expansion of wide and/or stippled lines into triangle-list quads.
-// expandWideLines() walks each segment and:
+// CPU expansion of wide and/or stippled lines into triangle-list quads.  This
+// is the fallback path: plain wide lines are normally expanded on the GPU by
+// the instanced vertex shader (see buildInstancedLineBuffer() and
+// WideLineInstancedVertex.glsl).  The CPU path still handles stippled lines
+// (order-dependent distance), line strips, a missing instance buffer, and the
+// FC_VULKAN_WLINE_CPU override.  expandWideLines() walks each segment and:
 //
 //   - transforms the endpoints to clip space
 //   - near-plane clips, interpolating the hidden endpoint onto the plane
@@ -581,18 +585,109 @@ SoVulkanRenderBackend::expandWideLines(VulkanCachedCommand & entry,
   return true;
 }
 
+bool
+SoVulkanRenderBackend::buildInstancedLineBuffer(VulkanCachedCommand & entry,
+                                                const SoRenderCommand & command)
+{
+  if (!isInstancedWideLine(command)) return false;
+  const SoGeometryDesc & geometry = command.geometry;
+  const uint32_t * const indices = geometry.indices;
+  const float * const positions = geometry.positions;
+  const float * const colors = geometry.colors;
+  if (!positions || geometry.vertexCount == 0) return false;
+
+  const uint32_t posStride = geometry.vertexStride
+    ? geometry.vertexStride : sizeof(float) * 3;
+  const uint32_t posStrideFloats = posStride / sizeof(float);
+  const uint32_t count = geometry.indexCount && indices
+    ? geometry.indexCount : geometry.vertexCount;
+  const uint32_t segmentCount = count / 2;
+  if (!segmentCount) return false;
+
+  // The endpoint stream is a pure function of the (object-space) geometry, so
+  // rebuild only when the content hash changes.  contentHash==0 (unhashed) is
+  // treated as a miss on the first call, when the buffer is still null.
+  //
+  // LIMITATION: an unhashed command (contentHash==0) that is edited in place
+  // keeps its first-built endpoints, because 0 == 0 short-circuits here once
+  // the buffer exists.  The hash is the only change signal, so a producer that
+  // mutates geometry without updating contentHash (or invalidating
+  // instancedLineHash) would render stale wide lines.  Leave contentHash==0
+  // for genuinely immutable geometry.
+  if (entry.instancedLineBuffer != VK_NULL_HANDLE &&
+      entry.instancedLineHash == entry.contentHash) {
+    return true;
+  }
+
+  const VkDeviceSize needed =
+    static_cast<VkDeviceSize>(segmentCount) * 16u * sizeof(float);
+  if (entry.instancedLineBuffer != VK_NULL_HANDLE ||
+      entry.instancedLineMemory != VK_NULL_HANDLE) {
+    const VkBuffer oldBuffer = entry.instancedLineBuffer;
+    const VkDeviceMemory oldMemory = entry.instancedLineMemory;
+    entry.instancedLineBuffer = VK_NULL_HANDLE;
+    entry.instancedLineMemory = VK_NULL_HANDLE;
+    entry.instancedLineSegmentCount = 0;
+    this->deferDestroyBufferMemory(oldBuffer, oldMemory);
+  }
+  void * mapped = nullptr;
+  if (!this->createMappedBuffer(needed, VK_BUFFER_USAGE_VERTEX_BUFFER_BIT,
+                                entry.instancedLineBuffer,
+                                entry.instancedLineMemory, &mapped)) {
+    this->emitError(
+      "buildInstancedLineBuffer: endpoint buffer create/map failed");
+    entry.instancedLineBuffer = VK_NULL_HANDLE;
+    entry.instancedLineMemory = VK_NULL_HANDLE;
+    return false;
+  }
+
+  // Four vec4 per segment: p0, p1, c0, c1.  Colors default to opaque white
+  // when the geometry carries none; the shader only reads them when the
+  // use-vertex-color flag is set, in which case the producer supplied them.
+  float * const out = static_cast<float *>(mapped);
+  for (uint32_t s = 0; s < segmentCount; ++s) {
+    const uint32_t i0 = indices ? indices[s * 2] : s * 2;
+    const uint32_t i1 = indices ? indices[s * 2 + 1] : s * 2 + 1;
+    const float * const p0 =
+      positions + static_cast<size_t>(i0) * posStrideFloats;
+    const float * const p1 =
+      positions + static_cast<size_t>(i1) * posStrideFloats;
+    const float * const c0 =
+      colors ? colors + static_cast<size_t>(i0) * 4 : nullptr;
+    const float * const c1 =
+      colors ? colors + static_cast<size_t>(i1) * 4 : nullptr;
+    float * const o = out + static_cast<size_t>(s) * 16;
+    o[0] = p0[0]; o[1] = p0[1]; o[2] = p0[2]; o[3] = 1.0f;
+    o[4] = p1[0]; o[5] = p1[1]; o[6] = p1[2]; o[7] = 1.0f;
+    if (c0) { o[8] = c0[0]; o[9] = c0[1]; o[10] = c0[2]; o[11] = c0[3]; }
+    else { o[8] = o[9] = o[10] = o[11] = 1.0f; }
+    if (c1) { o[12] = c1[0]; o[13] = c1[1]; o[14] = c1[2]; o[15] = c1[3]; }
+    else { o[12] = o[13] = o[14] = o[15] = 1.0f; }
+  }
+  entry.instancedLineSegmentCount = segmentCount;
+  entry.instancedLineHash = entry.contentHash;
+  return true;
+}
+
 void
 SoVulkanRenderBackend::prepareWideLineBuffers(const SoDrawList & drawlist)
 {
   for (int i = 0; i < drawlist.getNumCommands(); ++i) {
     const SoRenderCommand & command = drawlist.getCommand(i);
-    if (!isWideLine(command, -1)) continue;
+    if (!isWideLine(command, -1, this->interactionLodActive)) continue;
     const SoGeometryDesc & geometry = command.geometry;
     if (!geometry.positions || geometry.vertexCount == 0) continue;
     const auto found = this->commandToCache.find(&command);
     if (found == this->commandToCache.end()) continue;
     VulkanCachedCommand & entry = this->gpuCache[found->second];
     if (entry.vertexBuffer == VK_NULL_HANDLE) continue;
+
+    // GPU-instanced wide line: build the static endpoint stream (once) and
+    // skip the CPU quad buffer -- the vertex shader expands on the GPU.  A
+    // failed build falls through to the CPU expansion below.
+    if (this->buildInstancedLineBuffer(entry, command)) {
+      continue;
+    }
 
     const uint32_t count = geometry.indexCount && geometry.indices
       ? geometry.indexCount : geometry.vertexCount;
@@ -684,13 +779,19 @@ SoVulkanRenderBackend::expandWideLinesParallel(const SoDrawList & drawlist,
     !COIN_VULKAN_ENV_FLAG("FC_VULKAN_WLINE_SERIAL");
   for (int i = 0; i < drawlist.getNumCommands(); ++i) {
     const SoRenderCommand & command = drawlist.getCommand(i);
-    if (!isWideLine(command, -1)) continue;
+    if (!isWideLine(command, -1, this->interactionLodActive)) continue;
     if (!command.geometry.positions || command.geometry.vertexCount == 0) {
       continue;
     }
     const auto found = this->commandToCache.find(&command);
     if (found == this->commandToCache.end()) continue;
     if (this->gpuCache[found->second].vertexBuffer == VK_NULL_HANDLE) continue;
+    // Drawn by the GPU-instanced path: the vertex shader expands the segment,
+    // so there is nothing to expand on the CPU.
+    if (isInstancedWideLine(command) &&
+        this->gpuCache[found->second].instancedLineBuffer != VK_NULL_HANDLE) {
+      continue;
+    }
     // A single dominant non-stippled LINE_LIST command (a lattice edge set)
     // cannot be balanced by the whole-command round-robin below -- one worker
     // would expand all of it.  Route it to the segment-range split instead.

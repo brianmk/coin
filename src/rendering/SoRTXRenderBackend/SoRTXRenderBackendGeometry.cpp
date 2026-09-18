@@ -1429,33 +1429,44 @@ SoRTXRenderBackend::refitBlas(RTXCachedGeometry & entry,
   return this->blasBuildOrRefit(entry, command, cmd, true);
 }
 
-// A world-space AABB projects to a sub-N-pixel footprint exactly when the
-// whole box is in front of the camera and its clip-space extent (in pixels)
-// is below the cull threshold.  A box straddling the near plane (any corner
-// behind the camera) is never culled: it is either adjacent to / crossing
-// the camera, so assuming it is visible is the conservative choice and avoids
-// a pop-in.  Uses the same row-vector "p * (viewMatrix * projMatrix)" clip
-// the frame block and ray shaders derive from, so the NDC bounds match the
-// pixels the object would actually cover.
+// Projected screen-space footprint of a world-space AABB.  A box wholly in
+// front of the near plane has meaningful NDC bounds; a box wholly at/behind it
+// is not visible; a box straddling it has no reliable bounds, so the caller
+// must be conservative (keep it).  Uses the same row-vector
+// "p * (viewMatrix * projMatrix)" clip the frame block and ray shaders derive
+// from, so the NDC bounds match the pixels the object would actually cover.
 namespace {
-bool projectFootprintSubPixel(const float mn[3], const float mx[3],
-                              const SbMatrix & viewProj, float vw, float vh,
-                              float cullPixels)
+struct ProjectedFootprint {
+  bool allBehind = true;   //!< every corner at/behind the near plane
+  bool allFront = true;    //!< every corner in front of the near plane
+  float minNx = 1e30f;
+  float maxNx = -1e30f;
+  float minNy = 1e30f;
+  float maxNy = -1e30f;
+};
+
+void projectFootprint(const float mn[3], const float mx[3],
+                      const SbMatrix & viewProj, ProjectedFootprint & fp)
 {
+  fp = ProjectedFootprint {};
   const float corners[8][3] = {
     {mn[0], mn[1], mn[2]}, {mn[0], mn[1], mx[2]},
     {mn[0], mx[1], mn[2]}, {mn[0], mx[1], mx[2]},
     {mx[0], mn[1], mn[2]}, {mx[0], mn[1], mx[2]},
     {mx[0], mx[1], mn[2]}, {mx[0], mx[1], mx[2]},
   };
-  float minNx = 1e30f, maxNx = -1e30f, minNy = 1e30f, maxNy = -1e30f;
   for (int k = 0; k < 8; ++k) {
     const float x = corners[k][0], y = corners[k][1], z = corners[k][2];
     // Row-vector: out[j] = sum_r v[r] * M[r][j]  (v[3] == 1).
     const float cw =
       x * viewProj[0][3] + y * viewProj[1][3] + z * viewProj[2][3] +
       viewProj[3][3];
-    if (cw <= 1e-6f) return false;  // behind / on the near plane -> keep
+    if (cw <= 1e-6f) {
+      // Behind / on the near plane: no meaningful NDC position.
+      fp.allFront = false;
+      continue;
+    }
+    fp.allBehind = false;
     const float cx =
       x * viewProj[0][0] + y * viewProj[1][0] + z * viewProj[2][0] +
       viewProj[3][0];
@@ -1464,14 +1475,11 @@ bool projectFootprintSubPixel(const float mn[3], const float mx[3],
       viewProj[3][1];
     const float nx = cx / cw;
     const float ny = cy / cw;
-    if (nx < minNx) minNx = nx;
-    if (nx > maxNx) maxNx = nx;
-    if (ny < minNy) minNy = ny;
-    if (ny > maxNy) maxNy = ny;
+    if (nx < fp.minNx) fp.minNx = nx;
+    if (nx > fp.maxNx) fp.maxNx = nx;
+    if (ny < fp.minNy) fp.minNy = ny;
+    if (ny > fp.maxNy) fp.maxNy = ny;
   }
-  const float px = (maxNx - minNx) * vw * 0.5f;
-  const float py = (maxNy - minNy) * vh * 0.5f;
-  return px < cullPixels && py < cullPixels;
 }
 } // namespace
 
@@ -1488,19 +1496,22 @@ SoRTXRenderBackend::buildTlas(const SoDrawList & drawlist,
     this->instanceScratch;
   instances.clear();
 
-  // Sub-pixel instance culling (FC_VULKAN_TLAS_CULL, off unless requested so
-  // the default trace path is unchanged).  Culling drops instances whose
-  // projected footprint is below FC_VULKAN_TLAS_PIX pixels, which for a CAD
-  // viewport dominated by far/small meshes grades the TLAS traversal cost.
-  // The instance set changing is tracked so the refit/UPDATE path is never
-  // reused across a differing set (a MODE_UPDATE TLAS keeps stale instances).
+  // Instance culling (frustum + sub-pixel).  Dropping off-screen instances
+  // and instances whose projected footprint is below FC_VULKAN_TLAS_PIX
+  // pixels grades the TLAS traversal cost for a CAD viewport dominated by
+  // far/small meshes.  The instance set changing is tracked so the
+  // refit/UPDATE path is never reused across a differing set (a MODE_UPDATE
+  // TLAS keeps stale instances).  The configuration is resolved once at
+  // initialize() (FC_VULKAN_TLAS_CULL, default on).
   this->statTlasCulled = 0;
-  const bool cullEnabled = SoVulkanShared::envString("FC_VULKAN_TLAS_CULL") != nullptr;
-  float cullPixels = 1.0f;
-  if (const char * s = SoVulkanShared::envString("FC_VULKAN_TLAS_PIX")) {
-    cullPixels = static_cast<float>(std::atof(s));
+  const bool cullEnabled = this->tlasCullEnabled;
+  float cullPixels = this->tlasCullPixels;
+  // While the camera is navigating (interaction LOD), grade more
+  // aggressively: a moving preview can afford to drop instances up to a few
+  // pixels, and the reduced trace is the whole point of the interaction mode.
+  if (this->ptInteractionLod) {
+    cullPixels = std::max(cullPixels, 3.0f);
   }
-  if (cullPixels <= 0.0f) cullPixels = 1.0f;
   float vw = 0.0f, vh = 0.0f;
   SbMatrix viewProj;
   if (cullEnabled) {
@@ -1533,9 +1544,12 @@ SoRTXRenderBackend::buildTlas(const SoDrawList & drawlist,
       }
     }
 
-    // Sub-pixel cull: transform the object-space AABB into world space and
-    // project it; skip the instance if it cannot cover a full pixel.  This
-    // runs before the instance struct is built, and a culled instance is
+    // Instance cull: transform the object-space AABB into world space and
+    // project it; skip the instance when it is entirely behind the camera,
+    // entirely outside the viewport frustum, or too small to cover the
+    // threshold.  A box straddling the near plane is kept (conservative: its
+    // projected bounds are unreliable, and it is adjacent to the camera).
+    // This runs before the instance struct is built, and a culled instance is
     // simply absent from the TLAS (the material buffer / custom index for the
     // surviving instances is untouched, so ray hits stay correctly indexed).
     if (cullEnabled) {
@@ -1561,7 +1575,28 @@ SoRTXRenderBackend::buildTlas(const SoDrawList & drawlist,
         if (wy > wmax[1]) wmax[1] = wy;
         if (wz > wmax[2]) wmax[2] = wz;
       }
-      if (projectFootprintSubPixel(wmin, wmax, viewProj, vw, vh, cullPixels)) {
+      ProjectedFootprint fp;
+      projectFootprint(wmin, wmax, viewProj, fp);
+      bool cull = false;
+      if (fp.allBehind) {
+        cull = true;  // entirely behind the camera -> not visible
+      }
+      else if (fp.allFront) {
+        // Off-screen frustum reject (NDC is [-1, 1] in both axes).
+        if (fp.maxNx < -1.0f || fp.minNx > 1.0f
+            || fp.maxNy < -1.0f || fp.minNy > 1.0f) {
+          cull = true;
+        }
+        else {
+          const float px = (fp.maxNx - fp.minNx) * vw * 0.5f;
+          const float py = (fp.maxNy - fp.minNy) * vh * 0.5f;
+          if (px < cullPixels && py < cullPixels) {
+            cull = true;
+          }
+        }
+      }
+      // else: straddling the near plane -> keep (conservative).
+      if (cull) {
         ++this->statTlasCulled;
         continue;
       }

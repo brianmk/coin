@@ -68,6 +68,12 @@ struct PipelineKey {
   uint8_t stencilZPassOp = 0;
   uint32_t sampleCount = 1;
   bool wideLine = false;
+  //! GPU-instanced wide-line variant: the same wide-line output, but the
+  //! vertex shader expands the segment on the GPU from an instance-rate
+  //! endpoint buffer instead of drawing the CPU-expanded quads.  Shares the
+  //! fragment module with `wideLine` but needs a distinct pipeline (different
+  //! vertex module and vertex input layout).
+  bool wideLineInstanced = false;
 
   bool operator==(const PipelineKey & other) const
   {
@@ -98,7 +104,8 @@ struct PipelineKey {
         stencilFailOp == other.stencilFailOp &&
         stencilZFailOp == other.stencilZFailOp &&
         stencilZPassOp == other.stencilZPassOp)) &&
-      sampleCount == other.sampleCount && wideLine == other.wideLine;
+      sampleCount == other.sampleCount && wideLine == other.wideLine &&
+      wideLineInstanced == other.wideLineInstanced;
   }
 };
 
@@ -121,6 +128,40 @@ struct VulkanCachedCommand {
   uint32_t sharedBlockId = 0;
   uint32_t vertexCount = 0;
   uint32_t indexCount = 0;
+
+  // GPU-instanced wide-line endpoint stream (object space, static per
+  // geometry): four vec4 per segment (p0, p1, c0, c1).  Built once when the
+  // geometry is first seen and reused until the content hash changes; the
+  // vertex shader expands each segment on the GPU, so no per-frame CPU work
+  // or quad upload happens for this command.  A null buffer means the build
+  // failed (or the command is not eligible) and the CPU expansion is used.
+  VkBuffer instancedLineBuffer = VK_NULL_HANDLE;
+  VkDeviceMemory instancedLineMemory = VK_NULL_HANDLE;
+  uint32_t instancedLineSegmentCount = 0;
+  uint64_t instancedLineHash = 0;
+
+  // GPU sub-pixel geometry LOD (raster only).  While the camera moves the
+  // backend compacts an eligible triangle command's index list on the GPU,
+  // dropping triangles whose projected screen area falls below a threshold,
+  // and draws the survivors with vkCmdDrawIndexedIndirect.  One slot per
+  // in-flight frame: the compacted index buffer is rewritten every frame, so
+  // it must not alias a buffer a still-executing frame may read.  Slots are
+  // built lazily by the pre-pass and kept until the geometry content changes.
+  struct VulkanSubPixelSlot {
+    VkBuffer indexBuffer = VK_NULL_HANDLE;      // compacted indices
+    VkDeviceMemory indexMemory = VK_NULL_HANDLE;
+    VkBuffer indirectBuffer = VK_NULL_HANDLE;   // VkDrawIndexedIndirectCommand
+    VkDeviceMemory indirectMemory = VK_NULL_HANDLE;
+    VkDescriptorSet descriptorSet = VK_NULL_HANDLE;
+    uint32_t maxIndices = 0;                    // capacity of indexBuffer
+    // Frame ordinal this slot was compacted for (0 = not ready).  The draw
+    // path uses the slot only when it matches the frame being recorded.
+    uint64_t readyFrame = 0;
+  };
+  std::vector<VulkanSubPixelSlot> subPixelSlots;
+  // Content hash of the geometry the slots were built from; a change rebuilds
+  // them (mirrors instancedLineHash).
+  uint64_t subPixelHash = 0;
 
   // CPU-expanded wide-line quads (per-frame content; line width > 1 or a
   // stipple pattern).  One host-visible scratch buffer per in-flight frame
@@ -292,6 +333,21 @@ public:
                             const SoRenderParams & params);
 
   /*!
+    \brief Prepare an external frame and record the GPU geometry-LOD pre-pass.
+
+    Runs the per-frame setup (beginFrame, geometry cache update, lighting
+    setup, texture flush) and then records the sub-pixel compaction compute
+    dispatches for the frame into \a commandBuffer.  Vulkan forbids compute
+    inside a render pass, so the caller MUST invoke this before
+    vkCmdBeginRenderPass and then call renderExternal() with the same
+    drawlist/params; renderExternal() detects the prepared frame and skips the
+    setup it already performed.  A no-op when geometry LOD is inactive.
+  */
+  SbBool prepareExternalGeometryLod(const SoDrawList & drawlist,
+                                    const SoRenderParams & params,
+                                    VkCommandBuffer commandBuffer);
+
+  /*!
     \brief Declare how many recorded frames the caller may keep in flight.
 
     Drives the deferred-destruction batch count and the lighting UBO ring
@@ -340,6 +396,7 @@ private:
   bool createShaders(VkShaderModule & vertexModule,
                      VkShaderModule & fragmentModule);
   bool createWideLineShaders();
+  bool createSubPixelCullPipeline();
   bool createBackgroundResources();
   bool createPipelineCache();
   // Wrap a SPIR-V blob in a VkShaderModule.  The three shader-pair creators
@@ -618,6 +675,44 @@ private:
   // destroy ring are not thread-safe, so expandWideLines() must never grow a
   // buffer inside a worker.
   void prepareWideLineBuffers(const SoDrawList & drawlist);
+  // Build (once per content hash) the object-space instance endpoint stream
+  // for a GPU-instanced wide line: four vec4 per segment (p0, p1, c0, c1).
+  // Runs on the recording thread; returns false if the command is not
+  // eligible or the buffer could not be created, so the caller falls back to
+  // the CPU quad expansion.
+  bool buildInstancedLineBuffer(VulkanCachedCommand & entry,
+                                const SoRenderCommand & command);
+
+  // --- GPU sub-pixel geometry LOD (raster) ------------------------------
+  // True when a command can be compacted: an indexed triangle list in a
+  // non-overlay pass.  Line/point/overlay geometry keeps its existing path.
+  static bool isSubPixelEligible(const SoRenderCommand & command);
+  // The sub-pixel slot for the current frame, or nullptr when the command was
+  // not compacted this frame (the caller then draws the full geometry).
+  const VulkanCachedCommand::VulkanSubPixelSlot * subPixelSlotFor(
+    const VulkanCachedCommand & entry) const;
+  // Lazily create (and size) the compacted index / indirect buffers and the
+  // storage-buffer descriptor set for one slot of one command.  Rebuilt when
+  // the geometry content hash changes.  Returns false to fall back to a full
+  // draw.
+  bool ensureSubPixelSlot(VulkanCachedCommand & entry,
+                          const SoRenderCommand & command, uint32_t slot);
+  // Release every slot's buffers/descriptor set (cache eviction / teardown).
+  void destroySubPixelResources(VulkanCachedCommand & entry);
+  // Deferred variant for the geometry-change path: the buffers may still be
+  // referenced by an in-flight frame's indirect draw, so hand them to the
+  // deferred-destruction ring instead of freeing them now.
+  void deferDestroySubPixelResources(VulkanCachedCommand & entry);
+  // Allocate a storage-buffer descriptor set from the sub-pixel pool,
+  // appending a fresh pool when the active one is exhausted.
+  bool allocateSubPixelDescriptorSet(VkDescriptorSet & set);
+  // Record the compaction dispatches for the frame into \a cb.  Must run
+  // outside a render pass; a trailing memory barrier orders the writes
+  // against the indirect/index reads of the subsequent draws.
+  void recordGeometryLodPrepass(VkCommandBuffer cb,
+                                const SoDrawList & drawlist,
+                                const SoRenderParams & params);
+
   // Resolve the projection a command's wide-line quads must use (its own for a
   // self-camera overlay, else the frame projection), matching
   // recordDrawCommand()'s push-constant path exactly so the expansion cache
@@ -868,6 +963,11 @@ private:
   // thread and workers 1..N-1 are spawned threads, all joined in shutdown().
   bool parallelRecordEnabled = false;
   uint32_t maxRecordWorkers = 1;
+  // Interaction LOD for this frame (see SoRenderParams::interactionLod): wide
+  // lines are drawn as plain 1px GPU lines instead of being expanded into
+  // quads on the CPU.  Latched from the frame params at the top of recordFrame
+  // so every isWideLine() decision within the frame agrees.
+  bool interactionLodActive = false;
   std::vector<std::thread> recordWorkers;
   std::vector<VulkanRecordContext> workerRecordContexts;
   struct ParallelRecordJob {
@@ -1053,6 +1153,33 @@ private:
   // Wide-line (line width > 1 and/or stippled line pattern) pipeline shaders.
   VkShaderModule wideLineVertexModule = VK_NULL_HANDLE;
   VkShaderModule wideLineFragmentModule = VK_NULL_HANDLE;
+  // GPU-instanced wide-line vertex shader (no CPU quad expansion); shares the
+  // fragment shader above.  Used for main-pass, non-stippled line commands.
+  VkShaderModule wideLineInstancedVertexModule = VK_NULL_HANDLE;
+
+  // GPU sub-pixel geometry LOD resources (raster only).  The compute pipeline
+  // compacts eligible triangle commands' indices while the camera moves; the
+  // pipeline/descriptor layout live for the backend's lifetime, the per-slot
+  // buffers live in the geometry cache entries.
+  VkShaderModule subPixelCullModule = VK_NULL_HANDLE;
+  VkDescriptorSetLayout subPixelSetLayout = VK_NULL_HANDLE;
+  VkPipelineLayout subPixelPipelineLayout = VK_NULL_HANDLE;
+  VkPipeline subPixelCullPipeline = VK_NULL_HANDLE;
+  // Append-only storage-buffer descriptor pools.  A set is never freed while
+  // a frame may reference it, so when the active pool fills a fresh one is
+  // appended (mirroring descriptorPools); all are destroyed at shutdown.
+  std::vector<VkDescriptorPool> subPixelDescriptorPools;
+  uint32_t subPixelDescriptorSetCount = 0;
+  // Largest storage-buffer range the device accepts for one binding
+  // (VkPhysicalDeviceLimits::maxStorageBufferRange), cached when the pipeline
+  // is built.  A huge CAD mesh's vertex buffer can exceed it, in which case
+  // the pre-pass must skip the command (the descriptor update would otherwise
+  // be invalid) and the full draw is used.  0 means "unknown / do not guard".
+  uint64_t subPixelMaxStorageRange = 0;
+  // Set by prepareExternalGeometryLod() and consumed by the next
+  // prepareExternalFrame() call, so the external path performs its per-frame
+  // setup exactly once (before the caller's render pass begins).
+  bool externalFramePrepared = false;
 
   // Background gradient resources (no descriptor sets; push constants only).
   VkShaderModule backgroundVertexModule = VK_NULL_HANDLE;
@@ -1109,6 +1236,7 @@ private:
       hash = hashCombine(hash, std::hash<uint32_t>()(key.stencilZPassOp));
       hash = hashCombine(hash, std::hash<uint32_t>()(key.sampleCount));
       hash = hashCombine(hash, std::hash<uint32_t>()(key.wideLine));
+      hash = hashCombine(hash, std::hash<uint32_t>()(key.wideLineInstanced));
       return hash;
     }
   };
