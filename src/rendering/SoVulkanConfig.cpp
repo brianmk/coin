@@ -3,9 +3,9 @@
 
 #include "rendering/SoVulkanShared.h"
 
+#include <cstddef>
 #include <cstdio>
 #include <cstdlib>
-#include <string>
 
 namespace SoVulkanConfig {
 
@@ -184,33 +184,51 @@ void dump()
   const PathTracing & pt = c.pathTracing;
   // Print the resolved value, not just presence: for a diagnostics dump the
   // value is the useful part.  "-" means the backend default is in force.
-  auto optU = [](const std::optional<uint32_t> & v) {
-    return v ? std::to_string(*v) : std::string("-");
+  // Format into stack buffers rather than building std::strings per optional
+  // (no allocation on the debug path).
+  char sBounces[16], sSettle[16], sMaxSamples[16], sAdaptive[4];
+  char sMinSamples[16], sThreshold[24], sStopFraction[24], sFirefly[24];
+  char sTemporal[4], sWorkerCap[16];
+  auto putU = [](char * b, std::size_t n, const std::optional<uint32_t> & v) {
+    if (v) { std::snprintf(b, n, "%u", *v); }
+    else { std::snprintf(b, n, "-"); }
   };
-  auto optF = [](const std::optional<float> & v) {
-    return v ? std::to_string(*v) : std::string("-");
+  auto putF = [](char * b, std::size_t n, const std::optional<float> & v) {
+    if (v) { std::snprintf(b, n, "%.6g", static_cast<double>(*v)); }
+    else { std::snprintf(b, n, "-"); }
   };
-  auto optB = [](const std::optional<bool> & v) {
-    return v ? std::string(*v ? "1" : "0") : std::string("-");
+  auto putB = [](char * b, std::size_t n, const std::optional<bool> & v) {
+    if (v) { std::snprintf(b, n, "%d", *v ? 1 : 0); }
+    else { std::snprintf(b, n, "-"); }
   };
+  putU(sBounces, sizeof(sBounces), pt.bounces);
+  putU(sSettle, sizeof(sSettle), pt.settleFrames);
+  putU(sMaxSamples, sizeof(sMaxSamples), pt.maxSamples);
+  putB(sAdaptive, sizeof(sAdaptive), pt.adaptive);
+  putU(sMinSamples, sizeof(sMinSamples), pt.adaptiveMinSamples);
+  putF(sThreshold, sizeof(sThreshold), pt.adaptiveThreshold);
+  putF(sStopFraction, sizeof(sStopFraction), pt.adaptiveStopFraction);
+  putF(sFirefly, sizeof(sFirefly), pt.fireflySigma);
+  putB(sTemporal, sizeof(sTemporal), pt.temporal);
   std::fprintf(stderr,
                "[VKCONFIG] pt bounces=%s settle=%s maxSamples=%s adaptive=%s "
                "minSamples=%s threshold=%s stopFraction=%s firefly=%s "
                "temporal=%s\n",
-               optU(pt.bounces).c_str(), optU(pt.settleFrames).c_str(),
-               optU(pt.maxSamples).c_str(), optB(pt.adaptive).c_str(),
-               optU(pt.adaptiveMinSamples).c_str(),
-               optF(pt.adaptiveThreshold).c_str(),
-               optF(pt.adaptiveStopFraction).c_str(),
-               optF(pt.fireflySigma).c_str(), optB(pt.temporal).c_str());
+               sBounces, sSettle, sMaxSamples, sAdaptive, sMinSamples,
+               sThreshold, sStopFraction, sFirefly, sTemporal);
+  if (c.concurrency.recordWorkerCap) {
+    std::snprintf(sWorkerCap, sizeof(sWorkerCap), "%u",
+                  *c.concurrency.recordWorkerCap);
+  }
+  else {
+    std::snprintf(sWorkerCap, sizeof(sWorkerCap), "-");
+  }
   std::fprintf(stderr,
                "[VKCONFIG] memPool=%d parallel=%d workerCap=%s extSec=%d "
                "asyncCompute=%d wlineCpu=%d\n",
                c.memoryPool.enabled ? 1 : 0,
                c.concurrency.parallelRecord ? 1 : 0,
-               c.concurrency.recordWorkerCap
-                 ? std::to_string(*c.concurrency.recordWorkerCap).c_str()
-                 : "-",
+               sWorkerCap,
                c.concurrency.externalSecondary ? 1 : 0,
                c.concurrency.asyncCompute ? 1 : 0,
                c.raster.wideLineCpu ? 1 : 0);
