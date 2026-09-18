@@ -928,9 +928,12 @@ private:
   // MODE_BUILD.
   uint32_t statTlasCulled = 0;
   // Whether TLAS instance culling is enabled.  Resolved once at initialize()
-  // from FC_VULKAN_TLAS_CULL (default on; "0" disables) so the buildTlas cull
-  // and the interaction-LOD rebuild decision cannot disagree.
-  bool tlasCullEnabled = true;
+  // from FC_VULKAN_TLAS_CULL (opt-in: unset/"0" disables, anything else
+  // enables) so the buildTlas cull and the interaction-LOD rebuild decision
+  // cannot disagree.  Off by default: it changes the default trace path
+  // (small/far instances can pop in), so it stays opt-in until it has been
+  // validated across a wider range of scenes.
+  bool tlasCullEnabled = false;
   // Sub-pixel cull threshold in pixels (FC_VULKAN_TLAS_PIX, default 1.0).  An
   // instance whose projected footprint is below this in both axes is dropped.
   float tlasCullPixels = 1.0f;

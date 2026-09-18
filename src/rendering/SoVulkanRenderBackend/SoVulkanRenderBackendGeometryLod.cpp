@@ -21,34 +21,20 @@
 // geometry content hash changes.  Commands whose index count exceeds
 // FC_VULKAN_GEOM_LOD_MAX_INDEX fall back to the full draw to bound memory.
 //
-// ===========================================================================
-// VALIDATION NOTE - do NOT validate this on the navigation cube alone.
-// ===========================================================================
-// A fresh document's Vulkan main draw list usually contains exactly one
-// command: the hidden anchor cube (View3DInventorViewer's SoCube), a tiny
-// NON-indexed triangle list (~36 vertices).  Real document geometry
-// (SoBrepFaceSet / SoBrepEdgeSet, INDEXED, millions of vertices) can be
-// silently absent from the main region - see the manager's draw-list merge.
-// That makes the nav cube a dangerously easy and misleading test target: the
-// non-indexed compaction path "passes" there while the indexed path is never
-// exercised, and the LOD appears to work on a scene that has no real geometry
-// to cull.
-//
-// Before trusting any geometry-LOD result, confirm BOTH:
-//   1. the main region actually holds the shape (FC_VULKAN_BACKEND_DEBUG=1 ->
-//      "[DRAWLIST] main=.. mainMaxVc=.." must show the shape's vertex count,
-//      not 36); and
-//   2. the run exercised an INDEXED command (a real SoBrepFaceSet), not only
-//      the non-indexed nav cube.
-// A nav-cube-only result is not evidence that the feature works.
+// Validation caveat: a fresh document's main draw list is often just the
+// hidden nav cube (a tiny non-indexed list), so a nav-cube-only run exercises
+// neither the document geometry nor the indexed path and is not evidence the
+// feature works.  tools/fcprobe/vk_geomlod_probe.py asserts the LOD ran on a
+// real indexed Part shape and documents the check in full.
 
 #include "rendering/SoVulkanRenderBackend.h"
 #include "rendering/SoVulkanRenderBackend/SoVulkanRenderBackendP.h"
+#include "rendering/SoVulkanConfig.h"
 
 #include <algorithm>
+#include <atomic>
 #include <cstdint>
 #include <cstdio>
-#include <cstdlib>
 #include <cstring>
 
 using namespace CoinVulkanDetail;
@@ -65,18 +51,10 @@ static_assert(sizeof(SubPixelPush) == 96, "push block must be 96 bytes");
 
 // Minimum projected triangle area (px^2) that survives.  1 px keeps the LOD
 // visually faithful while dropping the sub-pixel filler that dominates a
-// zoomed-out CAD mesh.
+// zoomed-out CAD mesh.  Resolved once in SoVulkanConfig (FC_VULKAN_GEOM_LOD_*).
 float geometryLodMinAreaPixels()
 {
-  static const float value = [] {
-    const char * e = std::getenv("FC_VULKAN_GEOM_LOD_PIXELS");
-    if (e && *e) {
-      const float v = static_cast<float>(std::atof(e));
-      if (v >= 0.0f) return v;
-    }
-    return 1.0f;
-  }();
-  return value;
+  return SoVulkanConfig::get().geometryLod.minAreaPixels;
 }
 
 // Largest index count that gets a compacted buffer.  A pathologically large
@@ -89,24 +67,12 @@ float geometryLodMinAreaPixels()
 // in-flight slot, e.g. 93 MB/slot at 23.3M).
 uint32_t geometryLodMaxIndices()
 {
-  static const uint32_t value = [] {
-    const char * e = std::getenv("FC_VULKAN_GEOM_LOD_MAX_INDEX");
-    if (e && *e) {
-      const long v = std::atol(e);
-      if (v > 0) return static_cast<uint32_t>(v);
-    }
-    return 64000000u;
-  }();
-  return value;
+  return SoVulkanConfig::get().geometryLod.maxIndices;
 }
 
 bool geometryLodEnabled()
 {
-  static const bool value = [] {
-    const char * e = std::getenv("FC_VULKAN_GEOM_LOD");
-    return !(e && *e && *e == '0');
-  }();
-  return value;
+  return SoVulkanConfig::get().geometryLod.enabled;
 }
 
 // Force the pre-pass on even when the camera is not moving.  A verification
@@ -114,25 +80,36 @@ bool geometryLodEnabled()
 // diffed against the full draw.
 bool geometryLodAlways()
 {
-  static const bool value = [] {
-    const char * e = std::getenv("FC_VULKAN_GEOM_LOD_ALWAYS");
-    return e && *e && *e != '0';
-  }();
-  return value;
+  return SoVulkanConfig::get().geometryLod.always;
 }
 
 // Print the previous frame's survivor count per compacted command.  This is
 // the only way to prove the compaction is correct on a real, large mesh: a
-// nav-cube-only run says nothing (see the VALIDATION NOTE at the top).  With
-// FC_VULKAN_GEOM_LOD_PIXELS=0 every triangle must survive (survivors ==
-// prims); with the default threshold a zoomed-out mesh must cull heavily.
+// nav-cube-only run says nothing.  With FC_VULKAN_GEOM_LOD_PIXELS=0 every
+// triangle must survive (survivors == prims); with the default threshold a
+// zoomed-out mesh must cull heavily.
 bool geometryLodStats()
 {
-  static const bool value = [] {
-    const char * e = std::getenv("FC_VULKAN_GEOM_LOD_STATS");
-    return e && *e && *e != '0';
-  }();
-  return value;
+  return SoVulkanConfig::get().geometryLod.stats;
+}
+
+// Indexed-ness and element count of a command's triangle stream.  The IR emits
+// Voron-class meshes as non-indexed triangle lists and SoBrepFaceSet as
+// indexed, so the compaction handles both by treating non-indexed vertices as
+// sequential indices.  Shared by isSubPixelEligible(), ensureSubPixelSlot()
+// and recordGeometryLodPrepass() so the eligibility rule cannot drift between
+// the three call sites.
+struct SubPixelElementForm {
+  bool indexed;
+  uint32_t elements;
+};
+
+SubPixelElementForm subPixelElementForm(const SoRenderCommand & command)
+{
+  const bool indexed = command.geometry.indices != nullptr &&
+    command.geometry.indexCount >= 3;
+  return {indexed, indexed ? command.geometry.indexCount
+                           : command.geometry.vertexCount};
 }
 
 } // namespace
@@ -146,11 +123,8 @@ SoVulkanRenderBackend::isSubPixelEligible(const SoRenderCommand & command)
   // compaction must handle both forms.  Triangle lists always carry a multiple
   // of three elements; anything else is left to the full draw so compaction
   // can never change the visible set.
-  const bool indexed = command.geometry.indices != nullptr &&
-    command.geometry.indexCount >= 3;
-  const uint32_t elements = indexed ? command.geometry.indexCount
-                                    : command.geometry.vertexCount;
-  if (elements < 3 || (elements % 3) != 0) return false;
+  const SubPixelElementForm form = subPixelElementForm(command);
+  if (form.elements < 3 || (form.elements % 3) != 0) return false;
   return true;
 }
 
@@ -262,17 +236,15 @@ SoVulkanRenderBackend::ensureSubPixelSlot(VulkanCachedCommand & entry,
   // Non-indexed triangle lists are compacted by treating the vertices as
   // sequential indices; the output is always an index buffer, so the draw is
   // the same vkCmdDrawIndexedIndirect either way.
-  const bool indexed = command.geometry.indices != nullptr &&
-    command.geometry.indexCount >= 3;
-  const uint32_t elementCount = indexed ? command.geometry.indexCount
-                                        : command.geometry.vertexCount;
+  const SubPixelElementForm form = subPixelElementForm(command);
+  const bool indexed = form.indexed;
+  const uint32_t elementCount = form.elements;
   if (elementCount == 0) return false;
   if (elementCount > geometryLodMaxIndices()) {
-    // Log once so an oversized mesh does not silently lose the LOD (which is
-    // indistinguishable from the feature working, but doing nothing).
-    static bool loggedCap = false;
-    if (!loggedCap) {
-      loggedCap = true;
+    // Log once per command so an oversized mesh does not silently lose the LOD
+    // (which is indistinguishable from the feature working, but doing nothing).
+    if (!entry.warnedGeomLodCap) {
+      entry.warnedGeomLodCap = true;
       fprintf(stderr,
               "[GEOMLOD] command has %u elements > cap %u; geometry LOD "
               "skipped for it (raise FC_VULKAN_GEOM_LOD_MAX_INDEX)\n",
@@ -360,9 +332,8 @@ SoVulkanRenderBackend::ensureSubPixelSlot(VulkanCachedCommand & entry,
     const VkDeviceSize worst = std::max(std::max(vertexRange, indexRange),
                                         outRange);
     if (worst > this->subPixelMaxStorageRange) {
-      static bool loggedRange = false;
-      if (!loggedRange) {
-        loggedRange = true;
+      if (!entry.warnedGeomLodRange) {
+        entry.warnedGeomLodRange = true;
         fprintf(stderr,
                 "[GEOMLOD] command needs a %llu-byte storage range but the "
                 "device limit is %llu; geometry LOD skipped for it\n",
@@ -411,9 +382,13 @@ SoVulkanRenderBackend::recordGeometryLodPrepass(VkCommandBuffer cb,
   const int num = drawlist.getNumCommands();
   if (num == 0) return;
 
-  static bool dumpedCommands = false;
-  if (!dumpedCommands && COIN_VULKAN_ENV_FLAG("FC_VULKAN_BACKEND_DEBUG")) {
-    dumpedCommands = true;
+  const bool debug = COIN_VULKAN_ENV_FLAG("FC_VULKAN_BACKEND_DEBUG");
+
+  // Dump the command list once per process.  An atomic exchange makes the
+  // once-guard thread-safe (the prepass is single-threaded today, but the
+  // backend's record path is not, and a racy latch could double- or never-print).
+  static std::atomic<bool> dumpedCommands {false};
+  if (debug && !dumpedCommands.exchange(true)) {
     for (int i = 0; i < num; ++i) {
       const SoRenderCommand & c = drawlist.getCommand(i);
       fprintf(stderr,
@@ -437,15 +412,20 @@ SoVulkanRenderBackend::recordGeometryLodPrepass(VkCommandBuffer cb,
   uint32_t skipped = 0;
   uint32_t maxElements = 0;
   uint32_t maxPrims = 0;
+  // maxVc/maxIc span every command but only feed the debug summary line below,
+  // so they are accumulated in the main loop and only when it will print.
   uint32_t maxVc = 0;
   uint32_t maxIc = 0;
   for (int i = 0; i < num; ++i) {
-    const SoRenderCommand & c = drawlist.getCommand(i);
-    if (c.geometry.vertexCount > maxVc) maxVc = c.geometry.vertexCount;
-    if (c.geometry.indexCount > maxIc) maxIc = c.geometry.indexCount;
-  }
-  for (int i = 0; i < num; ++i) {
     const SoRenderCommand & command = drawlist.getCommand(i);
+    if (debug) {
+      if (command.geometry.vertexCount > maxVc) {
+        maxVc = command.geometry.vertexCount;
+      }
+      if (command.geometry.indexCount > maxIc) {
+        maxIc = command.geometry.indexCount;
+      }
+    }
     if (!isSubPixelEligible(command)) continue;
     const auto found = this->commandToCache.find(&command);
     if (found == this->commandToCache.end()) continue;
@@ -461,10 +441,9 @@ SoVulkanRenderBackend::recordGeometryLodPrepass(VkCommandBuffer cb,
     }
     VulkanCachedCommand::VulkanSubPixelSlot & s = entry.subPixelSlots[slot];
 
-    const bool indexed = command.geometry.indices != nullptr &&
-      command.geometry.indexCount >= 3;
-    const uint32_t elementCount = indexed ? command.geometry.indexCount
-                                          : command.geometry.vertexCount;
+    const SubPixelElementForm form = subPixelElementForm(command);
+    const bool indexed = form.indexed;
+    const uint32_t elementCount = form.elements;
     const uint32_t primCount = elementCount / 3;
 
     // Report the PREVIOUS frame's result before the cursor is reset.  The
@@ -554,14 +533,14 @@ SoVulkanRenderBackend::recordGeometryLodPrepass(VkCommandBuffer cb,
     VK_PIPELINE_STAGE_DRAW_INDIRECT_BIT | VK_PIPELINE_STAGE_VERTEX_INPUT_BIT,
     0, 1, &drawBarrier, 0, nullptr, 0, nullptr);
 
-  if (COIN_VULKAN_ENV_FLAG("FC_VULKAN_BACKEND_DEBUG")) {
+  if (debug) {
     fprintf(stderr, "[GEOMLOD] prepass slot=%u compacted=%u skipped=%u "
                     "threshold=%.2fpx2 maxPrims=%u maxVc=%u maxIc=%u\n",
             slot, compacted, skipped, areaThreshold, maxPrims, maxVc, maxIc);
   }
 }
 
-SbBool
+SoVulkan::Result
 SoVulkanRenderBackend::prepareExternalGeometryLod(
     const SoDrawList & drawlist, const SoRenderParams & params,
     VkCommandBuffer commandBuffer)
@@ -575,14 +554,20 @@ SoVulkanRenderBackend::prepareExternalGeometryLod(
             reinterpret_cast<const void *>(commandBuffer),
             drawlist.getNumCommands());
   }
-  if (!this->isInitialized()) return FALSE;
+  if (!this->isInitialized()) {
+    return SoVulkan::Result::error("geometry LOD: backend not initialized");
+  }
   // Geometry LOD only runs while the camera moves; otherwise the full-detail
   // draw is used and the normal per-frame setup happens inside renderExternal.
-  if (params.interactionLod != TRUE && !geometryLodAlways()) return TRUE;
-  if (!geometryLodEnabled()) return TRUE;
-  if (this->subPixelCullPipeline == VK_NULL_HANDLE) return TRUE;
-  if (commandBuffer == VK_NULL_HANDLE) return TRUE;
-  if (this->validateRenderTarget(params) == nullptr) return FALSE;
+  if (params.interactionLod != TRUE && !geometryLodAlways()) {
+    return SoVulkan::Result::ok();
+  }
+  if (!geometryLodEnabled()) return SoVulkan::Result::ok();
+  if (this->subPixelCullPipeline == VK_NULL_HANDLE) return SoVulkan::Result::ok();
+  if (commandBuffer == VK_NULL_HANDLE) return SoVulkan::Result::ok();
+  if (this->validateRenderTarget(params) == nullptr) {
+    return SoVulkan::Result::invalidArgument("geometry LOD: no render target");
+  }
 
   // The external pass is a caller-supplied LOAD render pass, and the frame
   // setup must run before the caller begins that pass so the compaction
@@ -593,13 +578,10 @@ SoVulkanRenderBackend::prepareExternalGeometryLod(
   this->updateLightingSetup(drawlist);
   this->updateGeometryCache(drawlist, /*overlaysOnly*/ false,
                             params.geometryContentUnchanged);
-  if (!this->flushPendingTextureUploadsExternal()) {
-    this->emitError("prepareExternalGeometryLod: texture upload failed");
-    return FALSE;
-  }
+  COIN_VULKAN_TRY(this->flushPendingTextureUploadsExternal());
   // Tell the subsequent renderExternal() the setup already ran.
   this->externalFramePrepared = true;
 
   this->recordGeometryLodPrepass(commandBuffer, drawlist, params);
-  return TRUE;
+  return SoVulkan::Result::ok();
 }

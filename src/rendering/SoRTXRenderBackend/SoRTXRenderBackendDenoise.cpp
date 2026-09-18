@@ -20,6 +20,7 @@
 // denoisedBuffer bound at present binding 5.
 
 #include "rendering/SoRTXRenderBackend.h"
+#include "rendering/SoVulkanConfig.h"
 #include <Inventor/errors/SoDebugError.h>
 #include <algorithm>
 #include <array>
@@ -470,7 +471,7 @@ SoRTXRenderBackend::createDenoiseBackend()
 void
 SoRTXRenderBackend::submitDenoiseCopy(VkCommandBuffer cmd)
 {
-  const bool async = SoVulkanShared::envString("FC_VULKAN_ASYNC_COMPUTE") != nullptr &&
+  const bool async = SoVulkanConfig::get().concurrency.asyncCompute &&
     this->hasComputeQueue && this->computeQueue != VK_NULL_HANDLE;
   VkQueue q = async ? this->computeQueue : this->queue;
   VkSubmitInfo si {};

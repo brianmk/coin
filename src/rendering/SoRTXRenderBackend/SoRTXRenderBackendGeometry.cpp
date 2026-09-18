@@ -4,6 +4,7 @@
 // member functions for the "Geometry" concern of the Vulkan RTX backend.
 
 #include "rendering/SoRTXRenderBackend.h"
+#include "rendering/SoVulkanConfig.h"
 #include <Inventor/errors/SoDebugError.h>
 #include <algorithm>
 #include <array>
@@ -1158,7 +1159,7 @@ SoRTXRenderBackend::blasBuildOrRefit(RTXCachedGeometry & entry,
     useHalf = entry.blasVertexFormat == VK_FORMAT_R16G16B16_SFLOAT;
   }
   else {
-    const bool packEnabled = SoVulkanShared::envString("FC_VULKAN_AS_PACK") != nullptr;
+    const bool packEnabled = SoVulkanConfig::get().accelerationStructures.pack;
     bool fitHalf = true;
     for (int a = 0; a < 3; ++a) {
       if (std::fabs(pMin[a]) > 60000.0f ||
@@ -1339,7 +1340,7 @@ SoRTXRenderBackend::blasBuildOrRefit(RTXCachedGeometry & entry,
     // ALONE (the NVIDIA "max compaction" recipe); a compacted BLAS loses its
     // ALLOW_UPDATE refit capability, and recordAccelerationStructures already
     // rebuilds (instead of refits) any compacted entry that needs a position fix.
-    const bool compactGate = SoVulkanShared::envString("FC_VULKAN_AS_COMPACT") != nullptr;
+    const bool compactGate = SoVulkanConfig::get().accelerationStructures.compact;
     if (compactGate) {
       buildInfo.flags =
         VK_BUILD_ACCELERATION_STRUCTURE_ALLOW_COMPACTION_BIT_KHR;

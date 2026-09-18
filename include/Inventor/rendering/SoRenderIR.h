@@ -16,13 +16,21 @@
 
 /*!
   \file SoRenderIR.h
-  \brief Backend-neutral intermediate representation for retained rendering.
+  \brief Retained intermediate representation for the Vulkan renderer.
 
-  SoIRRenderAction produces a SoDrawList while traversing a scene graph. A
-  renderer backend consumes that list to produce pixels or another
-  backend-specific result. The types in this file deliberately use
-  semantic values instead of OpenGL enums so the intermediate representation
-  does not require a particular graphics API.
+  SoIRRenderAction produces a SoDrawList while traversing a scene graph, and
+  Coin's Vulkan backends (SoVulkanRenderBackend for raster,
+  SoRTXRenderBackend for ray tracing) consume that list to produce pixels.
+  The types in this file deliberately use semantic values instead of OpenGL
+  enums so the intermediate representation does not require a particular
+  graphics API.
+
+  \note This is the Vulkan/retained path, not a universal Coin abstraction.
+  The production OpenGL viewport still renders through SoGLRenderAction
+  directly and does not traverse the IR. SoGLRenderBackend consumes a
+  SoDrawList only as a reference implementation used by the testsuite (see
+  testsuite/drawlist-gl-test.cpp); it is not built into libCoin and is not on
+  the OpenGL viewport's code path.
 
   Geometry and embedded texture pointers are borrowed from the producer. They
   normally refer to storage owned by the current SoIRRenderAction frame and

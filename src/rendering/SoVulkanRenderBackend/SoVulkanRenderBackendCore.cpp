@@ -16,6 +16,7 @@
 #include "rendering/SoVulkanRenderBackend.h"
 #include "rendering/SoVulkanRenderBackend/SoVulkanRenderBackendP.h"
 #include "rendering/SoVulkanShared.h"
+#include "rendering/SoVulkanConfig.h"
 
 #include <Inventor/elements/SoDrawStyleElement.h>
 #include <Inventor/errors/SoDebugError.h>
@@ -33,7 +34,6 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstdio>
-#include <cstdlib>
 #include <cstring>
 #include <limits>
 #include <atomic>
@@ -175,7 +175,7 @@ SoVulkanRenderBackend::initialize(const SoRenderBackendInitParams & params)
 
   // Opt-in device-memory sub-allocator (FC_VULKAN_MEM_POOL).  Default off so
   // the behaviour is byte-for-byte the legacy path unless explicitly enabled.
-  if (SoVulkanShared::envFlagEnabled("FC_VULKAN_MEM_POOL")) {
+  if (SoVulkanConfig::get().memoryPool.enabled) {
     this->memPool = std::make_unique<SoVulkanMemPool>(
       this->device, this->allocator);
   }
@@ -189,14 +189,14 @@ SoVulkanRenderBackend::initialize(const SoRenderBackendInitParams & params)
     unsigned int hw = std::thread::hardware_concurrency();
     this->maxRecordWorkers = hw == 0 ? 1 : hw;
     if (this->maxRecordWorkers > 8) this->maxRecordWorkers = 8;
-    const char * cap = SoVulkanShared::envString("FC_VULKAN_RECORD_WORKERS");
-    if (cap && cap[0]) {
-      const unsigned int v = static_cast<unsigned int>(std::atoi(cap));
-      if (v >= 1 && v < this->maxRecordWorkers) this->maxRecordWorkers = v;
+    const std::optional<unsigned int> & cap =
+      SoVulkanConfig::get().concurrency.recordWorkerCap;
+    if (cap && *cap >= 1 && *cap < this->maxRecordWorkers) {
+      this->maxRecordWorkers = *cap;
     }
     this->parallelRecordEnabled =
       this->maxRecordWorkers > 1 &&
-      SoVulkanShared::envFlagEnabled("FC_VULKAN_PARALLEL_RECORD");
+      SoVulkanConfig::get().concurrency.parallelRecord;
   }
   vkBackendTrace(0, "init.parallelConfig", "parallel=%d W=%u",
                  this->parallelRecordEnabled ? 1 : 0, this->maxRecordWorkers);

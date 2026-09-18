@@ -607,6 +607,13 @@ SoVulkanRenderBackend::buildInstancedLineBuffer(VulkanCachedCommand & entry,
   // The endpoint stream is a pure function of the (object-space) geometry, so
   // rebuild only when the content hash changes.  contentHash==0 (unhashed) is
   // treated as a miss on the first call, when the buffer is still null.
+  //
+  // LIMITATION: an unhashed command (contentHash==0) that is edited in place
+  // keeps its first-built endpoints, because 0 == 0 short-circuits here once
+  // the buffer exists.  The hash is the only change signal, so a producer that
+  // mutates geometry without updating contentHash (or invalidating
+  // instancedLineHash) would render stale wide lines.  Leave contentHash==0
+  // for genuinely immutable geometry.
   if (entry.instancedLineBuffer != VK_NULL_HANDLE &&
       entry.instancedLineHash == entry.contentHash) {
     return true;

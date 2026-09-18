@@ -8,11 +8,17 @@ set(COIN_RENDERING_FILES
 	SoRenderManagerP.cpp
 	SoRenderIR.cpp
 	SoRenderBackend.cpp
-	SoGLRenderBackend.cpp
+	# SoGLRenderBackend.cpp is intentionally NOT part of libCoin: it is a
+	# reference DrawList consumer used only by the testsuite. The production
+	# OpenGL viewport renders through SoRenderManager/SoGLRenderAction, not the
+	# IR, so the class is compiled into the GL testsuite targets instead (see
+	# testsuite/CMakeLists.txt). This keeps the installed renderer surface the
+	# Vulkan path only.
 )
 
 if(COIN_BUILD_VULKAN_RENDERER)
 	list(APPEND COIN_RENDERING_FILES
+		SoVulkanConfig.cpp
 		SoVulkanRenderBackend/SoVulkanRenderBackendCore.cpp
 		SoVulkanRenderBackend/SoVulkanRenderPassCache.cpp
 		SoVulkanRenderBackend/SoVulkanMemPool.cpp
@@ -74,6 +80,8 @@ set(COIN_RENDERING_INTERNAL_FILES
 	SoRenderIRP.h
 	SoRenderBackend.h
 	SoGLRenderBackend.h
+	SoVulkanConfig.h
+	SoVulkanResult.h
 	SoVulkanRenderBackend.h
 	SoVulkanRenderBackend/SoVulkanRenderBackendP.h
 	SoVulkanRenderBackend/SoVulkanRenderPassCache.h

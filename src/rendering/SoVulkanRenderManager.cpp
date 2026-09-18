@@ -28,6 +28,7 @@
 #include "rendering/SoVulkanRenderBackend.h"
 #include "rendering/SoRTXRenderBackend.h"
 #include "rendering/SoVulkanShared.h"
+#include "rendering/SoVulkanConfig.h"
 
 class SoVulkanRenderManagerP;
 static void vulkanSceneGraphChangedCallback(void * data, SoSensor * sensor);
@@ -860,6 +861,11 @@ SoVulkanRenderManager::initialize(SoVulkanDeviceContext * context)
     return FALSE;
   }
   this->pimpl->backendInitialized = TRUE;
+  // One-shot, after a successful device init (the early return above skips
+  // re-entry), so FC_VULKAN_BACKEND_DEBUG runs get a resolved-config dump.
+  if (SoVulkanShared::envFlagEnabled("FC_VULKAN_BACKEND_DEBUG")) {
+    SoVulkanConfig::dump();
+  }
   // Retain the borrowed context so ensureRayTracing() can bring the RT
   // backend up later if it was skipped at startup (path tracing off).
   this->pimpl->initContext = context;
@@ -1240,12 +1246,16 @@ SoVulkanRenderManager::prepareExternalFrame(SbBool clearwindow,
             params.interactionLod == TRUE ? 1 : 0);
   }
 
-  if (!this->pimpl->backend.prepareExternalGeometryLod(*drawlist, params,
-                                                       commandBuffer)) {
+  const SoVulkan::Result lodResult =
+    this->pimpl->backend.prepareExternalGeometryLod(*drawlist, params,
+                                                    commandBuffer);
+  if (!lodResult.isOk()) {
     // Non-fatal: renderExternal() still records the frame, just without the
-    // geometry-LOD pre-pass (the full-detail draw is always valid).
+    // geometry-LOD pre-pass (the full-detail draw is always valid).  The
+    // reason travels in the Result instead of being reconstructed from a log.
     SoDebugError::postWarning("SoVulkanRenderManager::prepareExternalFrame",
-                              "geometry-LOD pre-pass failed");
+                              "geometry-LOD pre-pass failed: %s",
+                              lodResult.message().c_str());
   }
   return TRUE;
 }
@@ -1973,9 +1983,9 @@ SoVulkanRenderManagerP::prepareRenderParams(SbBool clearwindow,
     // SoCube, ~36 vertices) - the real document shapes may not be in it at
     // all.  Do not assume "the scene rendered" just because main > 0: check
     // mainMaxVc against the shape's real vertex count.  Feature work that is
-    // only ever exercised against the nav cube (see the VALIDATION NOTE in
-    // SoVulkanRenderBackendGeometryLod.cpp) can appear to work while never
-    // touching real, indexed document geometry.
+    // only ever exercised against the nav cube can appear to work while never
+    // touching real, indexed document geometry (tools/fcprobe/vk_geomlod_probe.py
+    // is the check that guards against exactly this).
     const int numMain = static_cast<int>(this->mainCommandCount);
     if (numMain < list.getNumCommands()) {
       list.truncate(numMain);

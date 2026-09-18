@@ -6,6 +6,7 @@
 #include "rendering/SoRenderBackend.h"
 
 #include "rendering/SoVulkanShared.h"
+#include "rendering/SoVulkanResult.h"
 #include "rendering/SoVulkanRenderBackend/SoVulkanMemPool.h"
 #include "rendering/SoVulkanRenderBackend/SoVulkanRecordContext.h"
 #include "rendering/SoVulkanRenderBackend/SoVulkanRenderPassCache.h"
@@ -162,6 +163,13 @@ struct VulkanCachedCommand {
   // Content hash of the geometry the slots were built from; a change rebuilds
   // them (mirrors instancedLineHash).
   uint64_t subPixelHash = 0;
+  //! Geometry-LOD fallback diagnostics.  The oversized-cap and storage-range
+  //! conditions are per command and geometry-static, so they are latched on
+  //! the cache entry: thread-safe (no shared function-local static) and a
+  //! second, distinct offending command still gets its own warning instead of
+  //! being suppressed by the first.
+  bool warnedGeomLodCap = false;
+  bool warnedGeomLodRange = false;
 
   // CPU-expanded wide-line quads (per-frame content; line width > 1 or a
   // stipple pattern).  One host-visible scratch buffer per in-flight frame
@@ -342,10 +350,14 @@ public:
     vkCmdBeginRenderPass and then call renderExternal() with the same
     drawlist/params; renderExternal() detects the prepared frame and skips the
     setup it already performed.  A no-op when geometry LOD is inactive.
+
+    Returns Ok when the frame is prepared (or geometry LOD is not applicable),
+    and a failure Result with a reason otherwise.  A failure is non-fatal: the
+    caller can still record the full-detail frame via renderExternal().
   */
-  SbBool prepareExternalGeometryLod(const SoDrawList & drawlist,
-                                    const SoRenderParams & params,
-                                    VkCommandBuffer commandBuffer);
+  SoVulkan::Result prepareExternalGeometryLod(const SoDrawList & drawlist,
+                                              const SoRenderParams & params,
+                                              VkCommandBuffer commandBuffer);
 
   /*!
     \brief Declare how many recorded frames the caller may keep in flight.
@@ -584,7 +596,7 @@ private:
                        const SoTextureData & texture);
   bool recordPendingTextureUploads();
   void finalizePendingTextureUploads();
-  bool flushPendingTextureUploadsExternal();
+  SoVulkan::Result flushPendingTextureUploadsExternal();
   bool createSampler(SoTextureFilter minFilter, SoTextureFilter magFilter,
                      SoTextureWrap wrapS, SoTextureWrap wrapT,
                      VkSampler & sampler);

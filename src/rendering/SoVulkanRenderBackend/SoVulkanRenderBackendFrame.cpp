@@ -14,6 +14,7 @@
 
 #include "rendering/SoVulkanRenderBackend.h"
 #include "rendering/SoVulkanRenderBackend/SoVulkanRenderBackendP.h"
+#include "rendering/SoVulkanConfig.h"
 
 #include <Inventor/elements/SoDrawStyleElement.h>
 #include <Inventor/errors/SoDebugError.h>
@@ -515,9 +516,12 @@ SoVulkanRenderBackend::prepareExternalFrame(
     this->emitError("failed to reserve lighting UBO slots");
     return nullptr;
   }
-  if (!this->flushPendingTextureUploadsExternal()) {
-    char msg[128];
-    std::snprintf(msg, sizeof(msg), "%s: texture upload failed", caller);
+  const SoVulkan::Result uploadResult =
+    this->flushPendingTextureUploadsExternal();
+  if (!uploadResult.isOk()) {
+    char msg[256];
+    std::snprintf(msg, sizeof(msg), "%s: %s", caller,
+                  uploadResult.message().c_str());
     this->emitError(msg);
     return nullptr;
   }
@@ -1279,7 +1283,7 @@ SoVulkanRenderBackend::recordFrame(const SoDrawList & drawlist,
   const bool canUseSecondary =
     !this->secondaryCommandBuffers.empty() &&
     inheritFramebuffer != VK_NULL_HANDLE &&
-    (!externalPass || COIN_VULKAN_ENV_FLAG("FC_VULKAN_EXTERNAL_SECONDARY"));
+    (!externalPass || SoVulkanConfig::get().concurrency.externalSecondary);
   const bool debugFlags =
     COIN_VULKAN_ENV_FLAG("FC_VULKAN_MATRIX_DUMP") ||
     COIN_VULKAN_ENV_FLAG("FC_VULKAN_BLACK_DEBUG");

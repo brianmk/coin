@@ -23,7 +23,6 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstdio>
-#include <cstdlib>
 #include <cstring>
 #include <functional>
 #include <thread>
@@ -31,6 +30,7 @@
 #include <vulkan/vulkan.h>
 #include <Inventor/rendering/SoRenderIR.h>
 #include <rendering/SoFnv1a.h>
+#include <rendering/SoVulkanConfig.h>
 
 #ifndef _WIN32
 #include <unistd.h>
@@ -248,11 +248,7 @@ instancedWideLineForceCpu()
 {
   // FC_VULKAN_WLINE_CPU forces the CPU quad expansion for A/B comparison and
   // as an escape hatch if a driver mishandles the instanced path.
-  static const bool forced = [] {
-    const char * e = std::getenv("FC_VULKAN_WLINE_CPU");
-    return e && *e && *e != '0';
-  }();
-  return forced;
+  return SoVulkanConfig::get().raster.wideLineCpu;
 }
 
   inline bool
