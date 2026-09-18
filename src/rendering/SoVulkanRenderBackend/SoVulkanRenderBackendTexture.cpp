@@ -499,7 +499,11 @@ SoVulkanRenderBackend::flushPendingTextureUploadsExternal()
                                       upload.stagingOffset);
           }
         })) {
-    // Reset the half-initialized entries so the next frame retries cleanly.
+    // The one-shot submit copies the whole batch, so a failure means no upload
+    // in it completed -- there is no per-texture failure to isolate, and every
+    // pending entry is half-initialized.  Reset them all so the next frame
+    // retries cleanly.  (A given index appears at most once here; see the
+    // dedup in prepareGeometryTextures.)
     for (const PendingTextureUpload & upload : this->pendingUploads) {
       if (upload.index < this->textureCache.size()) {
         this->destroyTextureEntry(this->textureCache[upload.index]);
