@@ -1,3 +1,4 @@
+// coin-spirv source=rt/ShadowClosestHit.glsl source-sha256=b6786bc514a42ff4d53b43896facf03d13d5e76873273d055658735af78b8481 generator-sha256=c2b9b4bba4cce7604d816678c21c5cd3b1891e420524402edd2b23dee34adf54
 	// 1116.4.0
 	 #pragma once
 const uint32_t coin_vulkan_rt_shadowclosesthit_spirv[] = {

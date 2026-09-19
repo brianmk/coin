@@ -157,6 +157,48 @@ Config load()
   c.concurrency.asyncCompute = SoVulkanShared::envSet("FC_VULKAN_ASYNC_COMPUTE");
   c.raster.wideLineCpu =
     SoVulkanShared::envFlagEnabled("FC_VULKAN_WLINE_CPU", false);
+  c.raster.wideLineSerial =
+    SoVulkanShared::envFlagEnabled("FC_VULKAN_WLINE_SERIAL", false);
+  c.raster.rasterDecal =
+    SoVulkanShared::envFlagEnabled("FC_VULKAN_RASTER_DECAL", false);
+  c.raster.rpClear =
+    SoVulkanShared::envFlagEnabled("FC_VULKAN_RP_CLEAR", false);
+  c.raster.wireframe =
+    SoVulkanShared::envFlagEnabled("FC_VULKAN_WIREFRAME", false);
+  c.raster.points = SoVulkanShared::envFlagEnabled("FC_VULKAN_POINTS", false);
+  c.raster.tessellation =
+    SoVulkanShared::envFlagEnabled("FC_VULKAN_TESS", false);
+  if (const char * edge = SoVulkanShared::envString("FC_VULKAN_EDGE_COLOR")) {
+    c.raster.edgeColor = edge;
+  }
+  if (SoVulkanShared::envSet("FC_VULKAN_MAX_VERTEX_COUNT")) {
+    c.raster.maxVertexCount = readPositiveUint("FC_VULKAN_MAX_VERTEX_COUNT", 0);
+  }
+
+  c.debug.backendDebug =
+    SoVulkanShared::envFlagEnabled("FC_VULKAN_BACKEND_DEBUG", false);
+  c.debug.blackDebug =
+    SoVulkanShared::envFlagEnabled("FC_VULKAN_BLACK_DEBUG", false);
+  c.debug.matrixDump =
+    SoVulkanShared::envFlagEnabled("FC_VULKAN_MATRIX_DUMP", false);
+  c.debug.overlayCamDebug =
+    SoVulkanShared::envFlagEnabled("FC_VULKAN_OVERLAY_CAM_DEBUG", false);
+  c.debug.frameTiming =
+    SoVulkanShared::envFlagEnabled("FC_VULKAN_FRAME_TIMING", false);
+  c.debug.breadcrumbs =
+    SoVulkanShared::envFlagEnabled("FC_VULKAN_BREADCRUMBS", false);
+  c.debug.clipDebug =
+    SoVulkanShared::envFlagEnabled("FC_VULKAN_CLIP_DEBUG", false);
+  c.debug.clipVerbose =
+    SoVulkanShared::envFlagEnabled("FC_VULKAN_CLIP_VERBOSE", false);
+  c.debug.irReplay =
+    SoVulkanShared::envFlagEnabled("FC_VULKAN_IR_REPLAY", true);
+  // Presence-only (any value, including "0", enables): the historical checks
+  // were getenv() != nullptr.
+  c.debug.trace = SoVulkanShared::envSet("FC_VULKAN_TRACE");
+  c.debug.lightReplayDebug =
+    SoVulkanShared::envSet("FC_VULKAN_LIGHTREPLAY_DBG");
+  c.debug.lightFreshDebug = SoVulkanShared::envSet("FC_VULKAN_LIGHTFRESH_DBG");
 
   c.diagnostics.debugUtils =
     SoVulkanShared::envFlagEnabled("FC_VULKAN_DEBUG_UTILS", false);
@@ -268,6 +310,35 @@ void dump()
                c.diagnostics.debugPrintf ? 1 : 0,
                c.diagnostics.gpuTimestamps ? 1 : 0,
                c.diagnostics.pipelineFeedback ? 1 : 0);
+  std::fprintf(stderr,
+               "[VKCONFIG] raster wlineCpu=%d wlineSerial=%d decal=%d "
+               "rpClear=%d wireframe=%d points=%d tess=%d maxVerts=%u "
+               "edgeColor=%s\n",
+               c.raster.wideLineCpu ? 1 : 0,
+               c.raster.wideLineSerial ? 1 : 0,
+               c.raster.rasterDecal ? 1 : 0,
+               c.raster.rpClear ? 1 : 0,
+               c.raster.wireframe ? 1 : 0,
+               c.raster.points ? 1 : 0,
+               c.raster.tessellation ? 1 : 0,
+               c.raster.maxVertexCount,
+               c.raster.edgeColor.empty() ? "-" : c.raster.edgeColor.c_str());
+  std::fprintf(stderr,
+               "[VKCONFIG] debug backend=%d black=%d matrix=%d overlayCam=%d "
+               "frameTiming=%d breadcrumbs=%d clip=%d clipVerbose=%d "
+               "irReplay=%d trace=%d lightReplay=%d lightFresh=%d\n",
+               c.debug.backendDebug ? 1 : 0,
+               c.debug.blackDebug ? 1 : 0,
+               c.debug.matrixDump ? 1 : 0,
+               c.debug.overlayCamDebug ? 1 : 0,
+               c.debug.frameTiming ? 1 : 0,
+               c.debug.breadcrumbs ? 1 : 0,
+               c.debug.clipDebug ? 1 : 0,
+               c.debug.clipVerbose ? 1 : 0,
+               c.debug.irReplay ? 1 : 0,
+               c.debug.trace ? 1 : 0,
+               c.debug.lightReplayDebug ? 1 : 0,
+               c.debug.lightFreshDebug ? 1 : 0);
 }
 
 } // namespace SoVulkanConfig

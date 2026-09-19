@@ -38,6 +38,9 @@
 #   SPIRV_LAYOUTS      Absolute path to the expected-layout JSON consumed by
 #                      SPIRV_LAYOUT_CHECK.
 #   PYTHON_EXECUTABLE  Interpreter used to run SPIRV_LAYOUT_CHECK.
+#   GENERATOR_FILE     Path to this script.  When set, its SHA-256 is stamped
+#                      into the header (with the shader source hash) so a
+#                      generator change is detected as a stale header.
 #
 # Version pinning: the generated .spv.h headers are checked in, so the exact
 # SPIR-V does not depend on the host glslangValidator.  Regeneration with a
@@ -89,6 +92,45 @@ endif()
 # The generated header terminates with `};`; append the word-count constant.
 file(APPEND "${_tmp_output}"
   "\nconst uint32_t ${VARIABLE_NAME}_count = sizeof(${VARIABLE_NAME}) / sizeof(uint32_t);\n")
+
+# Reproducibility stamp: record the SHA-256 of the shader source (plus its
+# same-directory #include closure) and of the generator script.  A committed
+# header whose stamp does not match a fresh regeneration is stale (the GLSL was
+# edited without running coin_regenerate_vulkan_spirv); the
+# coin_check_vulkan_spirv target regenerates and diffs to enforce this.  The
+# stamp is a comment, so it does not affect the embedded SPIR-V.
+set(_hash_files "${INPUT_FILE}")
+get_filename_component(_input_dir "${INPUT_FILE}" DIRECTORY)
+file(READ "${INPUT_FILE}" _src_text)
+string(REGEX MATCHALL "#[ \t]*include[ \t]+\"[^\"]+\"" _inc_lines "${_src_text}")
+foreach(_inc_line ${_inc_lines})
+  string(REGEX REPLACE ".*\"([^\"]+)\".*" "\\1" _inc_name "${_inc_line}")
+  if(EXISTS "${_input_dir}/${_inc_name}")
+    list(APPEND _hash_files "${_input_dir}/${_inc_name}")
+  endif()
+endforeach()
+set(_hash_concat "")
+foreach(_hf ${_hash_files})
+  file(SHA256 "${_hf}" _hf_hash)
+  string(APPEND _hash_concat "${_hf_hash}")
+endforeach()
+string(SHA256 _source_hash "${_hash_concat}")
+if(DEFINED GENERATOR_FILE AND EXISTS "${GENERATOR_FILE}")
+  file(SHA256 "${GENERATOR_FILE}" _generator_hash)
+else()
+  set(_generator_hash "unknown")
+endif()
+# Record the source path (relative to data/shaders/vulkan) so a toolchain-free
+# checker can locate the GLSL and re-derive the source hash without running
+# glslangValidator (see tools/rendering/check_spirv_stamps.py).
+if(NOT DEFINED SOURCE_REL OR SOURCE_REL STREQUAL "")
+  get_filename_component(_source_rel "${INPUT_FILE}" NAME)
+else()
+  set(_source_rel "${SOURCE_REL}")
+endif()
+file(READ "${_tmp_output}" _header_body)
+file(WRITE "${_tmp_output}"
+  "// coin-spirv source=${_source_rel} source-sha256=${_source_hash} generator-sha256=${_generator_hash}\n${_header_body}")
 
 # Optional offline SPIR-V validation.  glslangValidator emits the C header
 # directly, so validate by compiling the same source to a throwaway .spv.  The

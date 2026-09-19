@@ -51,13 +51,13 @@ namespace {
 // SoVulkanShared::envFlagEnabled policy (honors "0"/"false"/"off" opt-outs).
 bool clipDebugEnabled()
 {
-  static const bool enabled = SoVulkanShared::envFlagEnabled("FC_VULKAN_CLIP_DEBUG");
+  static const bool enabled = SoVulkanConfig::get().debug.clipDebug;
   return enabled;
 }
 
 bool breadcrumbsEnabled()
 {
-  static const bool enabled = SoVulkanShared::envFlagEnabled("FC_VULKAN_BREADCRUMBS");
+  static const bool enabled = SoVulkanConfig::get().debug.breadcrumbs;
   return enabled;
 }
 
@@ -67,7 +67,7 @@ bool breadcrumbsEnabled()
 // existing frameTiming regex in vk_profile_probe.check.py is untouched.
 bool frameTimingEnabled()
 {
-  static const bool enabled = SoVulkanShared::envFlagEnabled("FC_VULKAN_FRAME_TIMING");
+  static const bool enabled = SoVulkanConfig::get().debug.frameTiming;
   return enabled;
 }
 
@@ -107,7 +107,7 @@ void vkRenderBreadcrumbSince(long startUs, long thresholdUs, const char* phase)
 // change (the cached-bbox correctness case).
 bool clipVerboseEnabled()
 {
-  static const bool enabled = SoVulkanShared::envFlagEnabled("FC_VULKAN_CLIP_VERBOSE");
+  static const bool enabled = SoVulkanConfig::get().debug.clipVerbose;
   return enabled;
 }
 
@@ -169,8 +169,7 @@ bool irReplayEnabled()
 {
   // On by default; the shared helper honors the full 0/false/off opt-out set
   // (this site used to accept only a leading '0', unlike every other flag).
-  static const bool enabled =
-    SoVulkanShared::envFlagEnabled("FC_VULKAN_IR_REPLAY", true);
+  static const bool enabled = SoVulkanConfig::get().debug.irReplay;
   return enabled;
 }
 
@@ -864,7 +863,7 @@ SoVulkanRenderManager::initialize(SoVulkanDeviceContext * context)
   this->pimpl->backendInitialized = TRUE;
   // One-shot, after a successful device init (the early return above skips
   // re-entry), so FC_VULKAN_BACKEND_DEBUG runs get a resolved-config dump.
-  if (SoVulkanShared::envFlagEnabled("FC_VULKAN_BACKEND_DEBUG")) {
+  if (SoVulkanConfig::get().debug.backendDebug) {
     SoVulkanConfig::dump();
   }
   // Retain the borrowed context so ensureRayTracing() can bring the RT
@@ -1315,7 +1314,7 @@ SoVulkanRenderManagerP::computeGraphFingerprint() const
   mixHash(h, reinterpret_cast<uintptr_t>(this->scene));
   mixHash(h, reinterpret_cast<uintptr_t>(this->overlayScene));
   mixHash(h, reinterpret_cast<uintptr_t>(this->decorationScene));
-  if (SoVulkanShared::envString("FC_VULKAN_LIGHTREPLAY_DBG")) {
+  if (SoVulkanConfig::get().debug.lightReplayDebug) {
     uint64_t hScene = 0xcbf29ce484222325ULL;
     uint64_t hOverlay = 0xcbf29ce484222325ULL;
     uint64_t hDecor = 0xcbf29ce484222325ULL;
@@ -1701,7 +1700,7 @@ SoVulkanRenderManagerP::prepareRenderParams(SbBool clearwindow,
   action.setViewportRegion(this->viewportRegion);
   {
     static bool loggedAction = false;
-    if (!loggedAction && SoVulkanShared::envFlagEnabled("FC_VULKAN_BACKEND_DEBUG")) {
+    if (!loggedAction && SoVulkanConfig::get().debug.backendDebug) {
       loggedAction = true;
       fprintf(stderr,
               "[DRAWLIST] manager irAction=%p overlayAction=%p scene=%p\n",
@@ -1979,7 +1978,7 @@ SoVulkanRenderManagerP::prepareRenderParams(SbBool clearwindow,
         list.addCommand(ovl.getCommand(i));
       }
     }
-    if (SoVulkanShared::envFlagEnabled("FC_VULKAN_BACKEND_DEBUG")) {
+    if (SoVulkanConfig::get().debug.backendDebug) {
       int mainMax = 0;
       int totalMax = 0;
       for (int i = 0; i < list.getNumCommands(); ++i) {
@@ -2248,7 +2247,7 @@ SoVulkanRenderManagerP::prepareRenderParams(SbBool clearwindow,
       }
     }
   }
-  if (SoVulkanShared::envString("FC_VULKAN_LIGHTREPLAY_DBG") && vkLightFrameDbgBudget-- > 0) {
+  if (SoVulkanConfig::get().debug.lightReplayDebug && vkLightFrameDbgBudget-- > 0) {
     const SbMatrix & v = params.viewMatrix;
     float qx = 0, qy = 0, qz = 0, qw = 1;
     SbVec3f camPos(0.0f, 0.0f, 0.0f);

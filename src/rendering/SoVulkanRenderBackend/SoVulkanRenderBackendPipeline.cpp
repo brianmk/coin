@@ -292,7 +292,7 @@ SoVulkanRenderBackend::getOrCreatePipeline(const SoRenderCommand & command,
   // decisively; the slope factor keeps it from detaching at grazing,
   // silhouette edges.
   constexpr float kDecalScale = 512.0f;
-  const float kUseDecal = COIN_VULKAN_ENV_FLAG("FC_VULKAN_RASTER_DECAL")
+  const float kUseDecal = SoVulkanConfig::get().raster.rasterDecal
     ? kDecalScale : 1.0f;
   const float depthBiasConstant = polygonOffset
     ? command.state.raster.polygonOffsetUnits * kUseDecal

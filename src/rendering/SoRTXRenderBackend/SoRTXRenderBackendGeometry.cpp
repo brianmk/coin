@@ -977,7 +977,7 @@ SoRTXRenderBackend::updateGeometryCache(const SoDrawList & drawlist)
     }
   }
 
-  if (COIN_VULKAN_ENV_FLAG("FC_VULKAN_BLACK_DEBUG")) {
+  if (SoVulkanConfig::get().debug.blackDebug) {
     static int geoFrame = 0;
     int tri = 0, triTraced = 0, triOverlay = 0, triTrans = 0;
     uint64_t vertsTraced = 0, vertsAll = 0;

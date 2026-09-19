@@ -101,7 +101,7 @@ bool shouldProcessGeometry(const SoRenderCommand & command,
   }
   const SoGeometryDesc & geometry = command.geometry;
   return geometry.positions && geometry.vertexCount != 0 &&
-    geometry.vertexCount <= MAX_VERTEX_COUNT;
+    geometry.vertexCount <= static_cast<uint32_t>(maxVertexCount());
 }
 
 // Record the identity of an uploaded geometry stream on the cache entry: the
@@ -211,115 +211,6 @@ SoVulkanRenderBackend::findCachedDrawable(
   return &entry;
 }
 
-bool
-SoVulkanRenderBackend::createBufferWithProperties(const VkDeviceSize size,
-                                                  const VkBufferUsageFlags usage,
-                                                  const VkMemoryPropertyFlags desiredProperties,
-                                                  VkBuffer & buffer,
-                                                  VmaAllocation & memory,
-                                                  const void * data)
-{
-  buffer = VK_NULL_HANDLE;
-  memory = nullptr;
-
-  VkBufferCreateInfo bci {};
-  bci.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
-  bci.size = size;
-  bci.usage = usage;
-  bci.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
-  VmaAllocationCreateInfo allocInfo {};
-  allocInfo.usage = VMA_MEMORY_USAGE_AUTO;
-  allocInfo.requiredFlags = desiredProperties;
-  if ((desiredProperties & VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT) != 0) {
-    // HOST_VISIBLE memory is either filled once here or written per frame
-    // through a persistent map; declare the sequential-write access VMA wants
-    // and, for the one-time fill, request the mapping up front.
-    allocInfo.flags = VMA_ALLOCATION_CREATE_HOST_ACCESS_SEQUENTIAL_WRITE_BIT;
-    if (data) {
-      allocInfo.flags |= VMA_ALLOCATION_CREATE_MAPPED_BIT;
-    }
-  }
-  VmaAllocationInfo allocationInfo {};
-  if (vmaCreateBuffer(this->vmaAllocator, &bci, &allocInfo, &buffer, &memory,
-                      &allocationInfo) != VK_SUCCESS) {
-    buffer = VK_NULL_HANDLE;
-    memory = nullptr;
-    return false;
-  }
-
-  if (data) {
-    void * mapped = allocationInfo.pMappedData;
-    const bool unmap = (mapped == nullptr);
-    if (unmap &&
-        vmaMapMemory(this->vmaAllocator, memory, &mapped) != VK_SUCCESS) {
-      this->emitError("createBufferWithProperties: vmaMapMemory failed");
-      vmaDestroyBuffer(this->vmaAllocator, buffer, memory);
-      buffer = VK_NULL_HANDLE;
-      memory = nullptr;
-      return false;
-    }
-    std::memcpy(mapped, data, static_cast<size_t>(size));
-    if (unmap) {
-      vmaUnmapMemory(this->vmaAllocator, memory);
-    }
-  }
-  return true;
-}
-
-bool
-SoVulkanRenderBackend::createBuffer(VkDeviceSize size,
-                                    VkBufferUsageFlags usage,
-                                    VkBuffer & buffer,
-                                    VmaAllocation & memory,
-                                    const void * data)
-{
-  return this->createBufferWithProperties(
-    size, usage,
-    VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
-    buffer, memory, data);
-}
-
-bool
-SoVulkanRenderBackend::createMappedBuffer(VkDeviceSize size,
-                                          VkBufferUsageFlags usage,
-                                          VkBuffer & buffer,
-                                          VmaAllocation & memory,
-                                          void ** mapped)
-{
-  buffer = VK_NULL_HANDLE;
-  memory = nullptr;
-  if (mapped) *mapped = nullptr;
-
-  VkBufferCreateInfo bci {};
-  bci.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
-  bci.size = size;
-  bci.usage = usage;
-  bci.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
-  VmaAllocationCreateInfo allocInfo {};
-  allocInfo.usage = VMA_MEMORY_USAGE_AUTO;
-  allocInfo.requiredFlags = VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT |
-                            VK_MEMORY_PROPERTY_HOST_COHERENT_BIT;
-  // VMA_MEMORY_USAGE_AUTO requires an explicit host-access flag whenever
-  // MAPPED is requested.
-  allocInfo.flags = VMA_ALLOCATION_CREATE_MAPPED_BIT |
-                    VMA_ALLOCATION_CREATE_HOST_ACCESS_SEQUENTIAL_WRITE_BIT;
-  VmaAllocationInfo allocationInfo {};
-  if (vmaCreateBuffer(this->vmaAllocator, &bci, &allocInfo, &buffer, &memory,
-                      &allocationInfo) != VK_SUCCESS) {
-    buffer = VK_NULL_HANDLE;
-    memory = nullptr;
-    return false;
-  }
-  if (allocationInfo.pMappedData == nullptr) {
-    vmaDestroyBuffer(this->vmaAllocator, buffer, memory);
-    buffer = VK_NULL_HANDLE;
-    memory = nullptr;
-    return false;
-  }
-  if (mapped) *mapped = allocationInfo.pMappedData;
-  return true;
-}
-
 void
 SoVulkanRenderBackend::deferDestroyBufferMemory(VkBuffer buffer,
                                                 VmaAllocation memory)
@@ -331,84 +222,6 @@ SoVulkanRenderBackend::deferDestroyBufferMemory(VkBuffer buffer,
       vmaDestroyBuffer(vma, buffer, memory);
     }
   });
-}
-
-bool
-SoVulkanRenderBackend::createBufferDeviceLocal(VkDeviceSize size,
-                                               VkBufferUsageFlags usage,
-                                               VkBuffer & buffer,
-                                               VmaAllocation & memory,
-                                               const void * data)
-{
-  // Retained static geometry is read by the GPU every frame, so it belongs in
-  // device-local VRAM rather than host-visible memory.  `data` is copied from
-  // a transient host-visible staging buffer with a one-shot transfer that is
-  // fenced before this function returns.  The GPU then reads the mesh from
-  // device memory instead of walking the PCIe/system bus every frame.
-  //
-  // This is only invoked from the geometry-change path (not steady-state), so
-  // the synchronous transfer is acceptable.  On any failure the buffer/memory
-  // are left null and the caller falls back to the host-visible createBuffer().
-  buffer = VK_NULL_HANDLE;
-  memory = nullptr;
-  VkBufferCreateInfo bci {};
-  bci.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
-  bci.size = size;
-  bci.usage = usage | VK_BUFFER_USAGE_TRANSFER_DST_BIT;
-  bci.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
-  VmaAllocationCreateInfo allocInfo {};
-  allocInfo.usage = VMA_MEMORY_USAGE_AUTO;
-  allocInfo.requiredFlags = VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT;
-  VmaAllocationInfo allocationInfo {};
-  if (vmaCreateBuffer(this->vmaAllocator, &bci, &allocInfo, &buffer, &memory,
-                      &allocationInfo) != VK_SUCCESS) {
-    buffer = VK_NULL_HANDLE;
-    memory = nullptr;
-    return false;
-  }
-
-  if (!data) return true;
-
-  VkBuffer staging = VK_NULL_HANDLE;
-  VmaAllocation stagingMemory = nullptr;
-  if (!this->createBuffer(size, VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
-                          staging, stagingMemory, data)) {
-    vmaDestroyBuffer(this->vmaAllocator, buffer, memory);
-    buffer = VK_NULL_HANDLE;
-    memory = nullptr;
-    return false;
-  }
-
-  // One-shot transfer command buffer.  The per-frame buffers are not yet begun
-  // at this point (updateGeometryCache runs before beginCommandBuffer), so the
-  // shared one-shot helper allocates a transient buffer from the command pool,
-  // records the copy + barrier, submits, and drains the queue before returning.
-  const bool ok = SoVulkanShared::withOneShotSubmit(
-    this->device, this->queue, this->commandPool, this->allocator,
-    [staging, buffer, size](VkCommandBuffer transfer) {
-      VkBufferCopy copy {};
-      copy.size = size;
-      vkCmdCopyBuffer(transfer, staging, buffer, 1, &copy);
-      // Make the device-local writes visible to a later vertex-input read.
-      // The submit is drained before returning, but completion alone does not
-      // establish a memory dependency for the buffer read as vertex/index
-      // attributes in a later submit, so transition TRANSFER_WRITE ->
-      // VERTEX_ATTRIBUTE/INDEX read explicitly.
-      SoVulkanShared::bufferTransition(
-        transfer, buffer, 0, size, VK_ACCESS_TRANSFER_WRITE_BIT,
-        VK_ACCESS_VERTEX_ATTRIBUTE_READ_BIT | VK_ACCESS_INDEX_READ_BIT,
-        VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_VERTEX_INPUT_BIT);
-    });
-
-  vmaDestroyBuffer(this->vmaAllocator, staging, stagingMemory);
-
-  if (!ok) {
-    vmaDestroyBuffer(this->vmaAllocator, buffer, memory);
-    buffer = VK_NULL_HANDLE;
-    memory = nullptr;
-    return false;
-  }
-  return true;
 }
 
 void
@@ -455,14 +268,14 @@ SoVulkanRenderBackend::uploadGeometry(VulkanCachedCommand & entry,
   // so its frequent re-uploads never take the synchronous transfer stall.
   bool vertexCreated = false;
   if (geometry.retained) {
-    vertexCreated = this->createBufferDeviceLocal(vertexBytes,
+    vertexCreated = this->buffers.createDeviceLocal(vertexBytes,
                                                   VK_BUFFER_USAGE_VERTEX_BUFFER_BIT |
                                                     VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
                                                   entry.vertexBuffer,
                                                   entry.vertexMemory, vertices);
   }
   if (!vertexCreated) {
-    vertexCreated = this->createBuffer(vertexBytes,
+    vertexCreated = this->buffers.create(vertexBytes,
                                        VK_BUFFER_USAGE_VERTEX_BUFFER_BIT |
                                          VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
                                        entry.vertexBuffer, entry.vertexMemory,
@@ -478,7 +291,7 @@ SoVulkanRenderBackend::uploadGeometry(VulkanCachedCommand & entry,
       static_cast<VkDeviceSize>(geometry.indexCount) * sizeof(uint32_t);
     bool indexCreated = false;
     if (geometry.retained) {
-      indexCreated = this->createBufferDeviceLocal(indexBytes,
+      indexCreated = this->buffers.createDeviceLocal(indexBytes,
                                                     VK_BUFFER_USAGE_INDEX_BUFFER_BIT |
                                                       VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
                                                     entry.indexBuffer,
@@ -486,7 +299,7 @@ SoVulkanRenderBackend::uploadGeometry(VulkanCachedCommand & entry,
                                                     geometry.indices);
     }
     if (!indexCreated) {
-      indexCreated = this->createBuffer(indexBytes,
+      indexCreated = this->buffers.create(indexBytes,
                                         VK_BUFFER_USAGE_INDEX_BUFFER_BIT |
                                           VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
                                         entry.indexBuffer, entry.indexMemory,
@@ -612,7 +425,7 @@ SoVulkanRenderBackend::invalidateCache()
   }
   this->gpuCache.clear();
   this->commandToCache.clear();
-  this->invalidateTextureCache();
+  this->textureCache.invalidate();
 }
 
 uint32_t
@@ -626,7 +439,7 @@ SoVulkanRenderBackend::allocateGeometryBlock(VkDeviceSize capacity)
   VkBuffer buffer = VK_NULL_HANDLE;
   VmaAllocation memory = nullptr;
   void * mapped = nullptr;
-  if (!this->createMappedBuffer(
+  if (!this->buffers.createMapped(
         capacity,
         VK_BUFFER_USAGE_VERTEX_BUFFER_BIT |
           VK_BUFFER_USAGE_INDEX_BUFFER_BIT | VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
@@ -748,7 +561,7 @@ SoVulkanRenderBackend::updateGeometryCache(const SoDrawList & drawlist,
   // staging pool (which persists across frames), so there is no per-upload
   // staging buffer to defer-destroy; just drop the pending list so the next
   // frame re-stages from scratch.
-  this->pendingUploads.clear();
+  this->textureCache.discardPending();
 
   const long cacheBcStart = vkGeometryBreadcrumbEnabled() ? vkGeometryBreadcrumbNowUs() : 0;
   int bcCommands = 0;
@@ -773,8 +586,8 @@ SoVulkanRenderBackend::updateGeometryCache(const SoDrawList & drawlist,
   this->needsGeometryScratch.assign(
     static_cast<size_t>(std::max(0, drawlist.getNumCommands())), 0);
   // Start this frame's texture staging at the front of the shared staging
-  // pool so pending uploads coalesce into one buffer (see prepareTextureUpload).
-  this->stagingPoolCursor = 0;
+  // pool so pending uploads coalesce into one buffer (see SoVulkanTextureCache).
+  this->textureCache.resetStaging();
   std::vector<uint8_t> & needsGeometry = this->needsGeometryScratch;
   int retainedUploads = 0;
   VkDeviceSize retainedUploadBytes = 0;
@@ -851,7 +664,7 @@ SoVulkanRenderBackend::updateGeometryCache(const SoDrawList & drawlist,
     // failures fall back to the white texture per command.
   }
 
-  this->pendingUploads.clear();
+  this->textureCache.discardPending();
 
   for (int i = 0; i < drawlist.getNumCommands(); ++i) {
     const SoRenderCommand & command = drawlist.getCommand(i);
@@ -900,51 +713,10 @@ SoVulkanRenderBackend::updateGeometryCache(const SoDrawList & drawlist,
       entry.compositeEpoch = this->overlayCompositeEpoch;
     }
 
-    const SoTextureData & texture = command.material.texture;
-    if (texture.pixels && texture.width > 0 && texture.height > 0) {
-      VulkanCachedTexture & texEntry = this->getOrCreateTexture(&command);
-      // Texture pixels come from per-frame action storage (arena), which may
-      // rewrite the same pointer in place, so the content hash is always
-      // re-verified -- pointer identity alone is not sound for textures.
-      const bool textureMatches = texEntry.image != VK_NULL_HANDLE &&
-        texEntry.pixelsKey == texture.pixels &&
-        texEntry.width == texture.width &&
-        texEntry.height == texture.height &&
-        texEntry.numComponents == texture.numComponents &&
-        texEntry.minFilter == texture.minFilter &&
-        texEntry.magFilter == texture.magFilter &&
-        texEntry.wrapS == texture.wrapS &&
-        texEntry.wrapT == texture.wrapT &&
-        texEntry.model == texture.model &&
-        texEntry.contentHash == hashTextureContent(texture);
-      if (!textureMatches) {
-        this->deferDestroyTextureEntry(texEntry);
-        // A command that appears twice in one draw list would otherwise
-        // prepare two uploads for the same entry (leaking the first image);
-        // the first pending upload for this index wins.
-        bool alreadyPending = false;
-        for (const PendingTextureUpload & prior : this->pendingUploads) {
-          if (prior.index == this->commandToTexture[&command]) {
-            alreadyPending = true;
-            break;
-          }
-        }
-        if (!alreadyPending) {
-          PendingTextureUpload upload;
-          upload.command = &command;
-          upload.index = this->commandToTexture[&command];
-          upload.texture = &texture;
-          ++bcTexturePrepares;
-          if (this->prepareTextureUpload(texEntry, texture, upload.stagingOffset,
-                                         upload.stagingBytes)) {
-            this->pendingUploads.push_back(upload);
-          }
-          // On failure the entry was reset by prepareTextureUpload();
-          // leaving the content keys unstamped makes the next frame retry.
-        }
-      }
-      texEntry.commandKey = &command;
-      texEntry.cacheGeneration = generation;
+    // Texture lookup/content-change detection, defer-destroy of the stale
+    // image and staging of a new upload all live in the cache.
+    if (this->textureCache.prepareCommand(command, generation)) {
+      ++bcTexturePrepares;
     }
   }
 
@@ -1017,28 +789,9 @@ SoVulkanRenderBackend::updateGeometryCache(const SoDrawList & drawlist,
                    return entry.cacheGeneration != generation;
                  });
     }
-    evictStale(this->textureCache,
-               [this](VulkanCachedTexture & entry) {
-                 this->deferDestroyTextureEntry(entry);
-               },
-               this->commandToTexture,
-               [generation](const VulkanCachedTexture & entry) {
-                 return entry.cacheGeneration != generation;
-               });
-
-    // Eviction compacts the texture cache and reindexes it, so the upload
-    // indices captured above are stale.  Re-resolve each pending upload
-    // through its command pointer; entries that were just prepared carry the
-    // current generation and survive the sweep.
-    for (PendingTextureUpload & upload : this->pendingUploads) {
-      const auto it = this->commandToTexture.find(upload.command);
-      if (it != this->commandToTexture.end()) {
-        upload.index = it->second;
-      }
-      else {
-        upload.index = std::numeric_limits<size_t>::max();
-      }
-    }
+    // Evict unvisited texture entries and re-resolve the pending-upload
+    // indices against the compacted cache (the sweep owns both).
+    this->textureCache.sweep(generation);
   }
 
   if (cacheBcStart) {

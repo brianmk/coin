@@ -1,3 +1,4 @@
+// coin-spirv source=rt/PathTrace.glsl source-sha256=bd18016c198e4970394dbd5c3f2aa9def79113fbdbefce13890e957e1a865cd7 generator-sha256=c2b9b4bba4cce7604d816678c21c5cd3b1891e420524402edd2b23dee34adf54
 	// 1116.4.0
 	 #pragma once
 const uint32_t coin_vulkan_rt_pathtrace_spirv[] = {

@@ -148,6 +148,7 @@ if(COIN_BUILD_VULKAN_RENDERER)
   endif()
 
   set(COIN_VULKAN_SPIRV_REGENERATE_TARGETS "")
+  set(COIN_VULKAN_SPIRV_CHECK_TARGETS "")
 
   macro(coin_embed_vulkan_spirv _name _input _stage)
     set(_input_file "${PROJECT_SOURCE_DIR}/${_input}")
@@ -156,17 +157,24 @@ if(COIN_BUILD_VULKAN_RENDERER)
     endif()
 
     get_filename_component(_basename "${_input}" NAME_WE)
-    # Optional fourth argument: the output subdirectory under
-    # src/rendering/vulkan/ (default "visual").  The RT shaders pass "rt" so
-    # the generated header lands directly next to the backend that includes
-    # it, instead of being written into visual/ and copied afterwards (which
-    # left stray untracked copies there).
-    set(_out_subdir "visual")
-    if(${ARGC} GREATER 3)
-      set(_out_subdir "${ARGV3}")
+    # RT shaders live in src/rendering/vulkan/rt/, the rest in .../visual/.
+    # Derive the output subdirectory from the source path so RT headers are
+    # written where the backend includes them (no post-build copy).  Use
+    # string(FIND) rather than if(... MATCHES): macro arguments are textually
+    # substituted, which makes the if() variable-vs-literal resolution
+    # ambiguous for a path token.
+    set(_spirv_subdir "visual")
+    string(FIND "${_input}" "/rt/" _rt_path_pos)
+    if(NOT _rt_path_pos EQUAL -1)
+      set(_spirv_subdir "rt")
     endif()
+    # Source path relative to data/shaders/vulkan, recorded in the header stamp
+    # so tools/rendering/check_spirv_stamps.py can locate the GLSL.  This is the
+    # real source subdir (wide-line/, geometry-lod/, ...), which differs from
+    # the header output subdir (always visual/ or rt/).
+    string(REPLACE "data/shaders/vulkan/" "" _source_rel "${_input}")
     set(_output_file
-      "${PROJECT_SOURCE_DIR}/src/rendering/vulkan/${_out_subdir}/${_basename}.spv.h")
+      "${PROJECT_SOURCE_DIR}/src/rendering/vulkan/${_spirv_subdir}/${_basename}.spv.h")
 
     string(REGEX REPLACE "[^A-Za-z0-9_]" "_" _logical_name "${_name}")
     set(_variable_name "coin_${_logical_name}_spirv")
@@ -197,6 +205,8 @@ if(COIN_BUILD_VULKAN_RENDERER)
         "-DSPIRV_LAYOUTS=${COIN_SPIRV_LAYOUTS}"
         "-DPYTHON_EXECUTABLE=${Python3_EXECUTABLE}"
         "-DGLSL_DEFINE=${_coin_glsl_define}"
+        "-DGENERATOR_FILE=${CMAKE_CURRENT_SOURCE_DIR}/GenerateVulkanSpirvHeader.cmake"
+        "-DSOURCE_REL=${_source_rel}"
         -P "${CMAKE_CURRENT_SOURCE_DIR}/GenerateVulkanSpirvHeader.cmake"
       DEPENDS
         "${_input_file}"
@@ -209,6 +219,37 @@ if(COIN_BUILD_VULKAN_RENDERER)
       DEPENDS "${_output_file}"
     )
     list(APPEND COIN_VULKAN_SPIRV_REGENERATE_TARGETS "${_target_name}")
+
+    # Fresh-regeneration check: recompile into the build tree and compare with
+    # the committed header byte-for-byte.  Always runs (add_custom_target with
+    # COMMAND, not an OUTPUT rule) so `coin_check_vulkan_spirv` cannot be
+    # skipped by an up-to-date timestamp.  Validation/layout reflection are
+    # deliberately not repeated here; this target only guards staleness.
+    set(_check_file
+      "${CMAKE_BINARY_DIR}/spirv-check/${_spirv_subdir}/${_basename}.spv.h")
+    add_custom_target(${_target_name}_check
+      COMMAND ${CMAKE_COMMAND} -E make_directory
+        "${CMAKE_BINARY_DIR}/spirv-check/${_spirv_subdir}"
+      COMMAND "${CMAKE_COMMAND}"
+        "-DGLSLANG_VALIDATOR=${COIN_GLSLANG_VALIDATOR}"
+        "-DINPUT_FILE=${_input_file}"
+        "-DOUTPUT_FILE=${_check_file}"
+        "-DSTAGE=${_stage}"
+        "-DVARIABLE_NAME=${_variable_name}"
+        "-DTARGET_ENV=${_target_env}"
+        "-DGLSL_DEFINE=${_coin_glsl_define}"
+        "-DGENERATOR_FILE=${CMAKE_CURRENT_SOURCE_DIR}/GenerateVulkanSpirvHeader.cmake"
+        "-DSOURCE_REL=${_source_rel}"
+        -P "${CMAKE_CURRENT_SOURCE_DIR}/GenerateVulkanSpirvHeader.cmake"
+      COMMAND "${CMAKE_COMMAND}"
+        "-DGENERATED_FILE=${_check_file}"
+        "-DCOMMITTED_FILE=${_output_file}"
+        "-DINPUT_FILE=${_input_file}"
+        -P "${CMAKE_CURRENT_SOURCE_DIR}/CompareVulkanSpirvHeader.cmake"
+      COMMENT "Checking committed Vulkan SPIR-V header ${_basename} (${_spirv_subdir})"
+      VERBATIM
+    )
+    list(APPEND COIN_VULKAN_SPIRV_CHECK_TARGETS "${_target_name}_check")
   endmacro()
 
   if(NOT COIN_GLSLANG_VALIDATOR)
@@ -268,6 +309,14 @@ if(COIN_BUILD_VULKAN_RENDERER)
     add_custom_target(coin_regenerate_vulkan_spirv
       DEPENDS ${COIN_VULKAN_SPIRV_REGENERATE_TARGETS}
       COMMENT "Regenerating all committed Vulkan SPIR-V headers")
+
+    # Verify every committed header matches a fresh regeneration.  Run this
+    # before pushing a shader change (or in CI) to catch a stale .spv.h.  The
+    # macro now writes RT headers directly into src/rendering/vulkan/rt/, so
+    # there is no separate copy step to keep in sync.
+    add_custom_target(coin_check_vulkan_spirv
+      DEPENDS ${COIN_VULKAN_SPIRV_CHECK_TARGETS}
+      COMMENT "Checking committed Vulkan SPIR-V headers against a fresh regeneration")
   endif()
 endif()
 

@@ -1,3 +1,4 @@
+// coin-spirv source=visual/Fragment.glsl source-sha256=7dc6ef91ff5ceb10776c71988d92626382493cf8d665b369cc33dbd8dd9dffe2 generator-sha256=c2b9b4bba4cce7604d816678c21c5cd3b1891e420524402edd2b23dee34adf54
 	// 1116.4.0
 	 #pragma once
 const uint32_t coin_vulkan_visual_fragment_spirv[] = {

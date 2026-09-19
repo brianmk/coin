@@ -15,6 +15,7 @@
 //     buffer per in-flight frame slot (drawn by the wide-line pipeline)
 
 #include "rendering/SoVulkanRenderBackend.h"
+#include "rendering/SoVulkanConfig.h"
 #include "rendering/SoVulkanRenderBackend/SoVulkanRenderBackendP.h"
 
 #include <Inventor/elements/SoDrawStyleElement.h>
@@ -101,7 +102,7 @@ SoVulkanRenderBackend::ensureInstanceModelBuffer(VkDeviceSize bytes)
     this->deferDestroyBufferMemory(oldBuffer, oldMemory);
   }
   const VkDeviceSize cap = std::max<VkDeviceSize>(bytes, 64u);
-  if (!this->createMappedBuffer(cap, VK_BUFFER_USAGE_VERTEX_BUFFER_BIT,
+  if (!this->buffers.createMapped(cap, VK_BUFFER_USAGE_VERTEX_BUFFER_BIT,
                                 this->instanceModelBuffer,
                                 this->instanceModelMemory,
                                 &this->instanceModelMapped)) {
@@ -140,7 +141,7 @@ SoVulkanRenderBackend::expandWideLines(VulkanCachedCommand & entry,
   static thread_local int wlineDiag = 0;
   const bool isSketchCmd = vertexCount >= 900;
   const bool wdiag = onOwnerThread &&
-    COIN_VULKAN_ENV_FLAG("FC_VULKAN_BACKEND_DEBUG")
+    SoVulkanConfig::get().debug.backendDebug
     && (isSketchCmd || wlineDiag < 40) && wlineDiag < 200;
   if (wdiag) {
     ++wlineDiag;
@@ -253,7 +254,7 @@ SoVulkanRenderBackend::expandWideLines(VulkanCachedCommand & entry,
   if (slot.buffer != VK_NULL_HANDLE && slot.size > 0 &&
       slot.expandFingerprint == wfp) {
     entry.wideLineVertexCount = slot.expandVertexCount;
-    if (onOwnerThread && COIN_VULKAN_ENV_FLAG("FC_VULKAN_BACKEND_DEBUG")) {
+    if (onOwnerThread && SoVulkanConfig::get().debug.backendDebug) {
       static thread_local uint64_t wlineHits = 0;
       if (++wlineHits % 200 == 0) {
         fprintf(stderr, "[WLINE-cache] hits=%llu cmd=%p\n",
@@ -536,7 +537,7 @@ SoVulkanRenderBackend::expandWideLines(VulkanCachedCommand & entry,
             static_cast<double>(command.viewMatrix[3][2]));
   }
 
-  if (onOwnerThread && COIN_VULKAN_ENV_FLAG("FC_VULKAN_BACKEND_DEBUG")) {
+  if (onOwnerThread && SoVulkanConfig::get().debug.backendDebug) {
     static thread_local int distLog = 0;
     if (distLog++ < 3) {
       fprintf(stderr, "[WLINE] verts=%u segs=%u quads=%zu dists:",
@@ -568,7 +569,7 @@ SoVulkanRenderBackend::expandWideLines(VulkanCachedCommand & entry,
     // Persistent host mapping.  The buffer is HOST_VISIBLE | HOST_COHERENT, so
     // the GPU observes a memcpy without any explicit flush, and keeping the
     // mapping alive avoids a vkMapMemory/vkUnmapMemory pair every frame.
-    if (!this->createMappedBuffer(needed, VK_BUFFER_USAGE_VERTEX_BUFFER_BIT,
+    if (!this->buffers.createMapped(needed, VK_BUFFER_USAGE_VERTEX_BUFFER_BIT,
                                   slot.buffer, slot.memory, &slot.mapped)) {
       this->emitError("expandWideLines: quad buffer create/map failed");
       slot.size = 0;
@@ -633,7 +634,7 @@ SoVulkanRenderBackend::buildInstancedLineBuffer(VulkanCachedCommand & entry,
     this->deferDestroyBufferMemory(oldBuffer, oldMemory);
   }
   void * mapped = nullptr;
-  if (!this->createMappedBuffer(needed, VK_BUFFER_USAGE_VERTEX_BUFFER_BIT,
+  if (!this->buffers.createMapped(needed, VK_BUFFER_USAGE_VERTEX_BUFFER_BIT,
                                 entry.instancedLineBuffer,
                                 entry.instancedLineMemory, &mapped)) {
     this->emitError(
@@ -718,7 +719,7 @@ SoVulkanRenderBackend::prepareWideLineBuffers(const SoDrawList & drawlist)
       slot.size = 0;
       this->deferDestroyBufferMemory(oldBuffer, oldMemory);
     }
-    if (!this->createMappedBuffer(needed, VK_BUFFER_USAGE_VERTEX_BUFFER_BIT,
+    if (!this->buffers.createMapped(needed, VK_BUFFER_USAGE_VERTEX_BUFFER_BIT,
                                   slot.buffer, slot.memory, &slot.mapped)) {
       this->emitError("prepareWideLineBuffers: quad buffer create/map failed");
       slot.size = 0;
@@ -778,7 +779,7 @@ SoVulkanRenderBackend::expandWideLinesParallel(const SoDrawList & drawlist,
   splitCmds.clear();
   const uint32_t W = this->maxRecordWorkers;
   const bool canSplit = W > 1 && !this->recordWorkers.empty() &&
-    !COIN_VULKAN_ENV_FLAG("FC_VULKAN_WLINE_SERIAL");
+    !SoVulkanConfig::get().raster.wideLineSerial;
   for (int i = 0; i < drawlist.getNumCommands(); ++i) {
     const SoRenderCommand & command = drawlist.getCommand(i);
     if (!isWideLine(command, -1, this->interactionLodActive)) continue;
@@ -1021,7 +1022,7 @@ SoVulkanRenderBackend::expandWideLinesSplit(VulkanCachedCommand & entry,
       slot.size = 0;
       this->deferDestroyBufferMemory(oldBuffer, oldMemory);
     }
-    if (!this->createMappedBuffer(needed, VK_BUFFER_USAGE_VERTEX_BUFFER_BIT,
+    if (!this->buffers.createMapped(needed, VK_BUFFER_USAGE_VERTEX_BUFFER_BIT,
                                   slot.buffer, slot.memory, &slot.mapped)) {
       this->emitError("expandWideLinesSplit: quad buffer create/map failed");
       slot.size = 0;

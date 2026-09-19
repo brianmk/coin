@@ -1,3 +1,4 @@
+// coin-spirv source=rt/ShadowMiss.glsl source-sha256=00e557f46abb23f3319bfd790cba7ef684a0fab1c13c3bb458b535f721e5ba9d generator-sha256=c2b9b4bba4cce7604d816678c21c5cd3b1891e420524402edd2b23dee34adf54
 	// 1116.4.0
 	 #pragma once
 const uint32_t coin_vulkan_rt_shadowmiss_spirv[] = {

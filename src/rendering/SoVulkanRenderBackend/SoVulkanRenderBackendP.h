@@ -50,7 +50,7 @@ namespace CoinVulkanDetail {
   // environment does not change mid-process).
   inline bool vkBackendTraceEnabled()
   {
-    static const bool enabled = SoVulkanShared::envString("FC_VULKAN_TRACE") != nullptr;
+    static const bool enabled = SoVulkanConfig::get().debug.trace;
     return enabled;
   }
 
@@ -484,8 +484,17 @@ constexpr uint32_t VULKAN_VERTEX_STRIDE = 32;
 // so a Voron-class assembly reaches tens of millions of vertices in one
 // command; the old 10M ceiling silently dropped it (no vertex buffer, so the
 // object vanished from the raster pass).  Override with
-// FC_VULKAN_MAX_VERTEX_COUNT for a smaller/larger budget.
+// FC_VULKAN_MAX_VERTEX_COUNT (SoVulkanConfig::raster.maxVertexCount); 0 keeps
+// this compiled default.
 constexpr int MAX_VERTEX_COUNT = 64000000;
+inline int maxVertexCount()
+{
+  static const int budget = [] {
+    const uint32_t configured = SoVulkanConfig::get().raster.maxVertexCount;
+    return configured > 0 ? static_cast<int>(configured) : MAX_VERTEX_COUNT;
+  }();
+  return budget;
+}
 
 // The projection matrix deliberately lives in the per-draw DrawBlock UBO
 // (below), not here: the block must fit VkPhysicalDeviceLimits::
@@ -680,34 +689,6 @@ textureFormatToVk(const int numComponents)
   case 3: return VK_FORMAT_R8G8B8_UNORM;
   case 4:
   default: return VK_FORMAT_R8G8B8A8_UNORM;
-  }
-}
-
-  inline VkFilter
-textureFilterToVk(const SoTextureFilter filter)
-{
-  switch (filter) {
-  case SO_TEXTURE_FILTER_NEAREST:
-  case SO_TEXTURE_FILTER_NEAREST_MIPMAP_NEAREST:
-  case SO_TEXTURE_FILTER_NEAREST_MIPMAP_LINEAR:
-    return VK_FILTER_NEAREST;
-  case SO_TEXTURE_FILTER_LINEAR:
-  case SO_TEXTURE_FILTER_LINEAR_MIPMAP_NEAREST:
-  case SO_TEXTURE_FILTER_LINEAR_MIPMAP_LINEAR:
-  default:
-    return VK_FILTER_LINEAR;
-  }
-}
-
-  inline VkSamplerAddressMode
-textureWrapToVk(const SoTextureWrap wrap)
-{
-  switch (wrap) {
-  case SO_TEXTURE_WRAP_REPEAT: return VK_SAMPLER_ADDRESS_MODE_REPEAT;
-  case SO_TEXTURE_WRAP_CLAMP_TO_EDGE:
-  case SO_TEXTURE_WRAP_CLAMP_TO_BORDER:
-  default:
-    return VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
   }
 }
 

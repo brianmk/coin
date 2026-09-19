@@ -20,6 +20,11 @@ if(COIN_BUILD_VULKAN_RENDERER)
 	list(APPEND COIN_RENDERING_FILES
 		SoVulkanConfig.cpp
 		SoVulkanGpuTimers.cpp
+		SoVulkanBufferFactory.cpp
+		SoVulkanFrameRing.cpp
+		SoVulkanTextureCache.cpp
+		SoVulkanSamplerCache.cpp
+		SoVulkanStagingPool.cpp
 		SoVulkanRenderBackend/SoVulkanRenderBackendCore.cpp
 		SoVulkanRenderBackend/SoVulkanRenderPassCache.cpp
 		SoVulkanRenderBackend/SoVulkanPipelineCache.cpp
@@ -85,6 +90,11 @@ set(COIN_RENDERING_INTERNAL_FILES
 	SoGLRenderBackend.h
 	SoVulkanConfig.h
 	SoVulkanResult.h
+	SoVulkanBufferFactory.h
+	SoVulkanFrameRing.h
+	SoVulkanTextureCache.h
+	SoVulkanSamplerCache.h
+	SoVulkanStagingPool.h
 	SoVulkanRenderBackend.h
 	SoVulkanRenderBackend/SoVulkanRenderBackendP.h
 	SoVulkanRenderBackend/SoVulkanRenderPassCache.h

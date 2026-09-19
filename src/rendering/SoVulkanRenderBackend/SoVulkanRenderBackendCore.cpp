@@ -107,7 +107,7 @@ SoVulkanRenderBackend::setMaxFramesInFlight(const uint32_t count)
       VkBuffer newBuffer = VK_NULL_HANDLE;
       VmaAllocation newMemory = nullptr;
       void * newMapped = nullptr;
-      if (!this->createMappedBuffer(totalBytes,
+      if (!this->buffers.createMapped(totalBytes,
                                     VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT,
                                     newBuffer, newMemory, &newMapped)) {
         this->emitError(
@@ -116,6 +116,29 @@ SoVulkanRenderBackend::setMaxFramesInFlight(const uint32_t count)
       else {
         this->swapLightingBuffer(newBuffer, newMemory, newMapped,
                                  this->uboSlotsPerFrame);
+      }
+    }
+    // The lighting constant ring (set 0) has its own depth = maxFramesInFlight
+    // and must be resized too: updateLightingSetup() computes a per-frame ring
+    // base from the in-flight count, so a stale depth would alias one frame's
+    // slots onto another's.
+    if (this->lightingConstBuffer != VK_NULL_HANDLE) {
+      const VkDeviceSize totalBytes =
+        static_cast<VkDeviceSize>(this->maxFramesInFlight) *
+        kLightingConstSlotsPerFrame * this->lightingConstStride;
+      VkBuffer newBuffer = VK_NULL_HANDLE;
+      VmaAllocation newMemory = nullptr;
+      void * newMapped = nullptr;
+      if (!this->buffers.createMapped(totalBytes,
+                                    VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT,
+                                    newBuffer, newMemory, &newMapped)) {
+        this->emitError(
+          "setMaxFramesInFlight: failed to resize lighting constant UBO");
+      }
+      else {
+        this->lightingConstMaxSlots =
+          this->maxFramesInFlight * kLightingConstSlotsPerFrame;
+        this->swapLightingConstBuffer(newBuffer, newMemory, newMapped);
       }
     }
   }
@@ -181,9 +204,17 @@ SoVulkanRenderBackend::initialize(const SoRenderBackendInitParams & params)
   this->queue = deviceContext->graphicsQueue;
   this->queueFamilyIndex = deviceContext->graphicsQueueFamilyIndex;
   this->allocator = deviceContext->allocator;
+  // The sampler cache borrows the device/allocator; bind it before any texture
+  // (or the white fallback) creates a sampler.
+  this->samplerCache.initialize(this->device, this->allocator);
   if (deviceContext->capsValid) {
     this->hasPipelineCreationFeedback =
       deviceContext->caps.pipelineCreationFeedback;
+    // The caps say whether the embedding created the device with
+    // VK_EXT_nested_command_buffer + nestedCommandBufferRendering.  Without
+    // that the render pass must not use the inline+secondary contents enum;
+    // secondary recording is disabled to match (see recordFrame).
+    this->nestedCommandBufferEnabled = deviceContext->caps.nestedCommandBuffer;
   }
   // Resolve the synchronization2 entry points once for this device.  A null
   // pointer means the extension was not enabled; the shared barrier/submit
@@ -276,6 +307,12 @@ SoVulkanRenderBackend::initialize(const SoRenderBackendInitParams & params)
     this->shutdown();
     return FALSE;
   }
+  // The buffer factory borrows the device/VMA/queue/command-pool; bind it now
+  // that the command pool (used by createDeviceLocal's one-shot transfer)
+  // exists.
+  this->buffers.initialize(this->device, this->vmaAllocator, this->allocator,
+                           this->queue, this->commandPool,
+                           [this](const char * m) { this->emitError(m); });
 
   if (!this->createDescriptorSetLayout()) {
     this->emitError("failed to create Vulkan descriptor set layout");
@@ -307,7 +344,39 @@ SoVulkanRenderBackend::initialize(const SoRenderBackendInitParams & params)
     return FALSE;
   }
 
-  if (!this->createWhiteTexture()) {
+  // Bind the texture cache to the borrowed handles + the backend-owned shared
+  // resources (set-1 descriptor pool, deferred-destruction ring, frame command
+  // buffer).  initialize() creates the white fallback texture.
+  SoVulkanTextureCacheContext texContext;
+  texContext.device = this->device;
+  texContext.vmaAllocator = this->vmaAllocator;
+  texContext.allocator = this->allocator;
+  texContext.queue = this->queue;
+  texContext.commandPool = this->commandPool;
+  texContext.sampledR8 = this->sampledR8;
+  texContext.sampledR8G8 = this->sampledR8G8;
+  texContext.samplerCache = &this->samplerCache;
+  texContext.allocateDescriptorSet =
+    [this](VkImageView view, VkSampler sampler, VkDescriptorSet & set) {
+      return this->allocateTextureDescriptorSet(view, sampler, set);
+    };
+  texContext.freeDescriptorSet =
+    [this](VkDescriptorSet set, VkDescriptorPool pool) {
+      if (set != VK_NULL_HANDLE && pool != VK_NULL_HANDLE) {
+        vkFreeDescriptorSets(this->device, pool, 1, &set);
+      }
+      if (this->descriptorSetCount > 0) --this->descriptorSetCount;
+    };
+  texContext.deferDestroyEntry = [this](VulkanCachedTexture & entry) {
+    this->deferDestroyTextureEntry(entry);
+  };
+  texContext.currentCommandBuffer = [this]() {
+    return this->currentCommandBuffer();
+  };
+  texContext.emitError = [this](const char * message) {
+    this->emitError(message);
+  };
+  if (!this->textureCache.initialize(texContext)) {
     this->emitError("failed to create Vulkan white fallback texture");
     this->shutdown();
     return FALSE;
@@ -574,20 +643,11 @@ SoVulkanRenderBackend::allocateFrameResources()
   if (this->commandPool == VK_NULL_HANDLE) return false;
   if (this->maxFramesInFlight == 0) return false;
 
-  this->frameCommandBuffers.assign(this->maxFramesInFlight, VK_NULL_HANDLE);
-  this->frameFences.assign(this->maxFramesInFlight, VK_NULL_HANDLE);
-  this->frameFencePending.assign(this->maxFramesInFlight, 0);
-
-  VkCommandBufferAllocateInfo ai {};
-  ai.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
-  ai.commandPool = this->commandPool;
-  ai.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
-  ai.commandBufferCount = this->maxFramesInFlight;
-  if (vkAllocateCommandBuffers(this->device, &ai,
-                               this->frameCommandBuffers.data()) !=
-      VK_SUCCESS) {
-    // Drop whatever this call managed to allocate so a caller that continues
-    // (setMaxFramesInFlight) cannot observe a half-populated frame ring.
+  // Primary command buffers + fences.  A failure leaves the ring empty so a
+  // caller that continues (setMaxFramesInFlight) cannot observe a
+  // half-populated frame ring.
+  if (!this->frameRing.allocate(this->device, this->commandPool,
+                                this->allocator, this->maxFramesInFlight)) {
     this->releaseFrameResources();
     return false;
   }
@@ -636,16 +696,6 @@ SoVulkanRenderBackend::allocateFrameResources()
       return false;
     }
   }
-
-  VkFenceCreateInfo fi {};
-  fi.sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO;
-  for (VkFence & fence : this->frameFences) {
-    if (vkCreateFence(this->device, &fi, this->allocator, &fence) !=
-        VK_SUCCESS) {
-      this->releaseFrameResources();
-      return false;
-    }
-  }
   return true;
 }
 
@@ -654,12 +704,7 @@ SoVulkanRenderBackend::releaseFrameResources()
 {
   // The caller must have made the queue idle (shutdown waits) or have waited
   // the pending fences (setMaxFramesInFlight) before this runs.
-  for (VkCommandBuffer buffer : this->frameCommandBuffers) {
-    if (buffer != VK_NULL_HANDLE) {
-      vkFreeCommandBuffers(this->device, this->commandPool, 1, &buffer);
-    }
-  }
-  this->frameCommandBuffers.clear();
+  this->frameRing.release(this->device, this->commandPool, this->allocator);
   for (size_t i = 0; i < this->secondaryCommandBuffers.size(); ++i) {
     VkCommandBuffer & buffer = this->secondaryCommandBuffers[i];
     if (buffer == VK_NULL_HANDLE) continue;
@@ -673,21 +718,13 @@ SoVulkanRenderBackend::releaseFrameResources()
   this->secondaryCommandBuffers.clear();
   this->workerRecordContexts.clear();
   this->recordJobs.clear();
-  for (VkFence fence : this->frameFences) {
-    if (fence != VK_NULL_HANDLE) {
-      vkDestroyFence(this->device, fence, this->allocator);
-    }
-  }
-  this->frameFences.clear();
-  this->frameFencePending.clear();
 }
 
 VkCommandBuffer
 SoVulkanRenderBackend::currentCommandBuffer()
 {
-  if (this->frameCommandBuffers.empty()) return VK_NULL_HANDLE;
-  return this->frameCommandBuffers[this->uboFrameIndex %
-                                   this->frameCommandBuffers.size()];
+  if (this->frameRing.empty()) return VK_NULL_HANDLE;
+  return this->frameRing.buffer(this->uboFrameIndex % this->frameRing.count());
 }
 
 VkCommandBuffer
@@ -730,16 +767,7 @@ SoVulkanRenderBackend::waitForInFlightFrames()
   // Called from growLightingUbo() and setMaxFramesInFlight(), both of which
   // must rewrite/teardown resources bound in submitted command buffers, so
   // this is a deliberately rare, synchronized event.
-  std::vector<VkFence> pending;
-  for (size_t i = 0; i < this->frameFences.size(); ++i) {
-    if (i < this->frameFencePending.size() && this->frameFencePending[i] &&
-        this->frameFences[i] != VK_NULL_HANDLE) {
-      pending.push_back(this->frameFences[i]);
-    }
-  }
-  if (pending.empty()) return;
-  vkWaitForFences(this->device, static_cast<uint32_t>(pending.size()),
-                  pending.data(), VK_TRUE, UINT64_MAX);
+  this->frameRing.waitAll(this->device);
 }
 
 bool
@@ -880,7 +908,7 @@ SoVulkanRenderBackend::createLightingUniformBuffer()
   const VkDeviceSize totalBytes =
     static_cast<VkDeviceSize>(this->maxFramesInFlight) *
     static_cast<VkDeviceSize>(this->uboSlotsPerFrame) * this->uboSlotStride;
-  if (!this->createMappedBuffer(totalBytes, VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT,
+  if (!this->buffers.createMapped(totalBytes, VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT,
                                 this->lightingBuffer, this->lightingMemory,
                                 &this->lightingMapped)) {
     this->emitError("createLightingUniformBuffer: buffer create/map failed");
@@ -912,16 +940,15 @@ SoVulkanRenderBackend::createLightingConstBuffer()
     1, deviceProps.limits.minUniformBufferOffsetAlignment);
   this->lightingConstStride =
     (sizeof(VulkanLightingUbo) + alignment - 1) / alignment * alignment;
-  // Fixed 8-frame ring with 8 unique-handle slots per frame.  This is
-  // independent of maxFramesInFlight (which can change after init in
-  // initSwapChainResources) so no resize path is needed; it is safe as long
-  // as the in-flight frame count stays <= 8 (QVulkanWindow swapchains are
-  // 2-3 images, +1 margin).
-  this->lightingConstMaxSlots = 8u * 8u;
+  // One ring half per in-flight frame, kLightingConstSlotsPerFrame unique-
+  // handle slots in each.  The depth tracks maxFramesInFlight (resized by
+  // swapLightingConstBuffer() when the embedding changes it after init).
+  this->lightingConstMaxSlots =
+    this->maxFramesInFlight * kLightingConstSlotsPerFrame;
   const VkDeviceSize totalBytes =
     static_cast<VkDeviceSize>(this->lightingConstMaxSlots) *
     this->lightingConstStride;
-  if (!this->createMappedBuffer(totalBytes, VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT,
+  if (!this->buffers.createMapped(totalBytes, VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT,
                                 this->lightingConstBuffer,
                                 this->lightingConstMemory,
                                 &this->lightingConstMapped)) {
@@ -979,7 +1006,7 @@ SoVulkanRenderBackend::growLightingUbo(const uint32_t minSlots)
   const VkDeviceSize totalBytes =
     static_cast<VkDeviceSize>(this->maxFramesInFlight) *
     static_cast<VkDeviceSize>(slots) * this->uboSlotStride;
-  if (!this->createMappedBuffer(totalBytes, VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT,
+  if (!this->buffers.createMapped(totalBytes, VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT,
                                 newBuffer, newMemory, &newMapped)) {
     this->emitError("growLightingUbo: failed to allocate larger UBO");
     return false;
@@ -1028,7 +1055,7 @@ SoVulkanRenderBackend::swapLightingBuffer(VkBuffer newBuffer,
   // vector and turns those earlier pointers into dangling memory, so
   // vkUpdateDescriptorSets would read a garbage VkBuffer handle and fault in
   // the driver.  The max set count is the white set plus one per texture.
-  const size_t maxSets = this->textureCache.size() + 1;
+  const size_t maxSets = this->textureCache.entries().size() + 1;
   writes.reserve(maxSets);
   bufferInfos.reserve(maxSets);
   const auto collect = [&](const VkDescriptorSet set) {
@@ -1048,14 +1075,52 @@ SoVulkanRenderBackend::swapLightingBuffer(VkBuffer newBuffer,
     write.pBufferInfo = &bufferInfos.back();
     writes.push_back(write);
   };
-  collect(this->whiteDescriptorSet);
-  for (const VulkanCachedTexture & tex : this->textureCache) {
+  collect(this->textureCache.whiteDescriptorSet());
+  for (const VulkanCachedTexture & tex : this->textureCache.entries()) {
     collect(tex.descriptorSet);
   }
   if (!writes.empty()) {
     vkUpdateDescriptorSets(this->device,
                            static_cast<uint32_t>(writes.size()), writes.data(),
                            0, nullptr);
+  }
+  return true;
+}
+
+bool
+SoVulkanRenderBackend::swapLightingConstBuffer(VkBuffer newBuffer,
+                                               VmaAllocation newMemory,
+                                               void * newMapped)
+{
+  const VkBuffer oldBuffer = this->lightingConstBuffer;
+  const VmaAllocation oldMemory = this->lightingConstMemory;
+  this->lightingConstBuffer = newBuffer;
+  this->lightingConstMemory = newMemory;
+  this->lightingConstMapped = newMapped;
+
+  // The old buffer may still be referenced by a pending frame; release it
+  // through the deferred ring like the draw ring does.
+  this->deferDestroyBufferMemory(oldBuffer, oldMemory);
+
+  // The set-0 descriptor captured the old buffer handle at allocation time.
+  // Rewriting a set that an already-submitted command buffer binds is a spec
+  // violation, so drain in-flight submissions first; this only runs on an
+  // in-flight-count change, so the stall is acceptable.
+  this->waitForInFlightFrames();
+  if (this->lightingDescriptorSet != VK_NULL_HANDLE) {
+    VkDescriptorBufferInfo info {};
+    info.buffer = this->lightingConstBuffer;
+    info.offset = 0;
+    info.range = this->lightingConstStride;
+    VkWriteDescriptorSet write {};
+    write.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+    write.dstSet = this->lightingDescriptorSet;
+    write.dstBinding = 0;
+    write.dstArrayElement = 0;
+    write.descriptorCount = 1;
+    write.descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC;
+    write.pBufferInfo = &info;
+    vkUpdateDescriptorSets(this->device, 1, &write, 0, nullptr);
   }
   return true;
 }
@@ -1082,28 +1147,26 @@ SoVulkanRenderBackend::beginFrame()
   // last used maxFramesInFlight frames ago; its fence covers that
   // submission, so the slot's UBO ring half, command buffer, and deferred
   // resources are all safe to reuse.  The external path never signals these
-  // fences (the caller owns submission), so frameFencePending stays false
+  // fences (the caller owns submission), so the ring's pending flag stays false
   // there and no wait occurs -- external correctness rests on the caller
   // honoring setMaxFramesInFlight().
   this->uboFrameIndex++;
   const uint32_t slot = this->uboFrameIndex % this->maxFramesInFlight;
-  if (slot < this->frameFencePending.size() &&
-      this->frameFencePending[slot] &&
-      this->frameFences[slot] != VK_NULL_HANDLE) {
+  const VkFence slotFence = this->frameRing.fence(slot);
+  if (this->frameRing.pending(slot) && slotFence != VK_NULL_HANDLE) {
     // A failed wait (e.g. VK_ERROR_DEVICE_LOST) must not be swallowed: the
     // slot's command buffer/resources may still be in flight, so leave the
     // pending flag set and report the fault rather than reusing them silently.
-    const VkResult waitRes = vkWaitForFences(
-      this->device, 1, &this->frameFences[slot], VK_TRUE, UINT64_MAX);
+    const VkResult waitRes =
+      vkWaitForFences(this->device, 1, &slotFence, VK_TRUE, UINT64_MAX);
     if (waitRes != VK_SUCCESS) {
       this->emitError("beginFrame: vkWaitForFences failed on frame slot");
     }
-    else if (vkResetFences(this->device, 1, &this->frameFences[slot]) !=
-             VK_SUCCESS) {
+    else if (vkResetFences(this->device, 1, &slotFence) != VK_SUCCESS) {
       this->emitError("beginFrame: vkResetFences failed on frame slot");
     }
     else {
-      this->frameFencePending[slot] = 0;
+      this->frameRing.setPending(slot, false);
     }
   }
   // Dynamic state is per-recording: the previous frame's command buffer (the
@@ -1271,91 +1334,6 @@ SoVulkanRenderBackend::deferDestroyTextureEntry(VulkanCachedTexture & entry)
     }
   });
   entry = VulkanCachedTexture();
-}
-
-bool
-SoVulkanRenderBackend::createWhiteTexture()
-{
-  const uint8_t white = 255;
-  const uint32_t extent = 1;
-
-  VkImageCreateInfo ci {};
-  ci.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
-  ci.imageType = VK_IMAGE_TYPE_2D;
-  ci.format = VK_FORMAT_R8G8B8A8_UNORM;
-  ci.extent = {extent, extent, 1};
-  ci.mipLevels = 1;
-  ci.arrayLayers = 1;
-  ci.samples = VK_SAMPLE_COUNT_1_BIT;
-  ci.tiling = VK_IMAGE_TILING_OPTIMAL;
-  ci.usage = VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
-  ci.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
-  ci.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
-  VmaAllocationCreateInfo allocInfo {};
-  allocInfo.usage = VMA_MEMORY_USAGE_AUTO;
-  allocInfo.requiredFlags = VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT;
-  if (vmaCreateImage(this->vmaAllocator, &ci, &allocInfo, &this->whiteImage,
-                     &this->whiteImageAllocation, nullptr) != VK_SUCCESS) {
-    this->emitError("createWhiteTexture: vmaCreateImage failed");
-    return false;
-  }
-
-  VkBuffer staging = VK_NULL_HANDLE;
-  VmaAllocation stagingMemory = nullptr;
-  if (!this->createBuffer(4, VK_BUFFER_USAGE_TRANSFER_SRC_BIT, staging,
-                          stagingMemory, &white)) {
-    return false;
-  }
-
-  // One-shot upload: stage buffer -> image (white 1x1), transitioning the image
-  // UNDEFINED -> TRANSFER_DST -> SHADER_READ_ONLY.  The shared helper waits for
-  // the queue to go idle so the staging buffer below is safe to destroy.
-  if (!SoVulkanShared::withOneShotSubmit(
-        this->device, this->queue, this->commandPool, this->allocator,
-        [this, staging](VkCommandBuffer uploadBuffer) {
-          SoVulkanShared::imageTransition(
-            uploadBuffer, this->whiteImage,
-            VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
-            0, VK_ACCESS_TRANSFER_WRITE_BIT,
-            VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT);
-          VkBufferImageCopy region {};
-          region.imageSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
-          region.imageSubresource.layerCount = 1;
-          region.imageExtent = {extent, extent, 1};
-          vkCmdCopyBufferToImage(uploadBuffer, staging, this->whiteImage,
-                                 VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &region);
-          SoVulkanShared::imageTransition(
-            uploadBuffer, this->whiteImage,
-            VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
-            VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
-            VK_ACCESS_TRANSFER_WRITE_BIT, VK_ACCESS_SHADER_READ_BIT,
-            VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT);
-        })) {
-    this->emitError("createWhiteTexture: one-shot upload failed");
-    vmaDestroyBuffer(this->vmaAllocator, staging, stagingMemory);
-    return false;
-  }
-  vmaDestroyBuffer(this->vmaAllocator, staging, stagingMemory);
-
-  this->whiteImageView =
-    createImageView(this->device, this->whiteImage, VK_FORMAT_R8G8B8A8_UNORM,
-                    VK_IMAGE_ASPECT_COLOR_BIT, this->allocator);
-  if (this->whiteImageView == VK_NULL_HANDLE) {
-    return false;
-  }
-
-  SoTextureData fallback;
-  fallback.minFilter = SO_TEXTURE_FILTER_NEAREST;
-  fallback.magFilter = SO_TEXTURE_FILTER_NEAREST;
-  fallback.wrapS = SO_TEXTURE_WRAP_CLAMP_TO_EDGE;
-  fallback.wrapT = SO_TEXTURE_WRAP_CLAMP_TO_EDGE;
-  if (!this->createSampler(fallback.minFilter, fallback.magFilter,
-                           fallback.wrapS, fallback.wrapT, this->whiteSampler)) {
-    return false;
-  }
-  const bool allocated = this->allocateTextureDescriptorSet(
-    this->whiteImageView, this->whiteSampler, this->whiteDescriptorSet);
-  return allocated;
 }
 
 bool
@@ -1560,7 +1538,7 @@ SoVulkanRenderBackend::createSubPixelCullPipeline()
 bool
 SoVulkanRenderBackend::createBackgroundResources()
 {
-  if (SoVulkanShared::envFlagEnabled("FC_VULKAN_BREADCRUMBS")) {
+  if (SoVulkanConfig::get().debug.breadcrumbs) {
     fprintf(stderr, "[VK-TRACE] SoVulkanRenderBackend::createBackgroundResources enter\n");
   }
   if (!this->createShaderModule(coin_vulkan_background_vertex_spirv,

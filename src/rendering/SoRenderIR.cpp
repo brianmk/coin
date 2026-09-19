@@ -1,6 +1,7 @@
 // src/rendering/SoRenderIR.cpp
 
 #include "rendering/SoRenderIRP.h"
+#include "rendering/SoVulkanConfig.h"
 
 #include <Inventor/C/tidbits.h>
 #include <Inventor/elements/SoDepthBufferElement.h>
@@ -379,7 +380,7 @@ SoDrawList::restrikeLighting(const SbMatrix & prevView, const SbMatrix & newView
 namespace {
 bool lightFreshDbgEnabled()
 {
-  static const bool enabled = std::getenv("FC_VULKAN_LIGHTFRESH_DBG") != nullptr;
+  static const bool enabled = SoVulkanConfig::get().debug.lightFreshDebug;
   return enabled;
 }
 void lightFreshDbgMat(const char * name, const SbMatrix & m)

@@ -56,8 +56,7 @@ double vkBackendRenderNowMs()
 // [RTDBG] lines.  Cached: the environment does not change mid-process.
 bool vkBackendFrameTimingEnabled()
 {
-  static const bool enabled =
-    SoVulkanShared::envFlagEnabled("FC_VULKAN_FRAME_TIMING");
+  static const bool enabled = SoVulkanConfig::get().debug.frameTiming;
   return enabled;
 }
 
@@ -216,17 +215,9 @@ SoVulkanRenderBackend::shutdown()
   // The queue is idle, so every deferred resource is safe to release now.
   this->flushAllPendingDestroys();
 
-  // Release uploads abandoned by a frame that aborted between the cache
-  // update and the flush/finalize step.  Their copies were never recorded,
-  // so synchronous destruction is safe here.  The staged pixels live in the
-  // shared staging pool, so there is no per-upload staging to free.
-  for (const PendingTextureUpload & upload : this->pendingUploads) {
-    if (upload.index < this->textureCache.size()) {
-      this->destroyTextureEntry(this->textureCache[upload.index]);
-    }
-  }
-  this->pendingUploads.clear();
-
+  // Uploads abandoned by an aborted frame are just entries in the texture
+  // cache; textureCache.destroy() below releases them (and the staging pool)
+  // synchronously now that the queue is idle.
   this->invalidateCache();
   this->destroyAllGeometryBlocks();
   // invalidateCache()/destroyAllGeometryBlocks() release their cached command
@@ -334,38 +325,13 @@ SoVulkanRenderBackend::shutdown()
   }
   this->lightingConstMapped = nullptr;
   this->lightingDescriptorSet = VK_NULL_HANDLE;
-  if (this->stagingPoolBuffer != VK_NULL_HANDLE) {
-    // vmaDestroyBuffer releases the buffer, its memory and the persistent host
-    // mapping together.
-    vmaDestroyBuffer(this->vmaAllocator, this->stagingPoolBuffer,
-                     this->stagingPoolAllocation);
-    this->stagingPoolBuffer = VK_NULL_HANDLE;
-    this->stagingPoolAllocation = nullptr;
-    this->stagingPoolMapped = nullptr;
-  }
-  this->stagingPoolCapacity = 0;
-  this->stagingPoolCursor = 0;
-  for (auto & kv : this->samplerCache) {
-    if (kv.second != VK_NULL_HANDLE) {
-      vkDestroySampler(this->device, kv.second, this->allocator);
-    }
-  }
-  this->samplerCache.clear();
-  if (this->whiteSampler != VK_NULL_HANDLE) {
-    vkDestroySampler(this->device, this->whiteSampler, this->allocator);
-    this->whiteSampler = VK_NULL_HANDLE;
-  }
-  if (this->whiteImageView != VK_NULL_HANDLE) {
-    vkDestroyImageView(this->device, this->whiteImageView, this->allocator);
-    this->whiteImageView = VK_NULL_HANDLE;
-  }
-  if (this->whiteImage != VK_NULL_HANDLE) {
-    vmaDestroyImage(this->vmaAllocator, this->whiteImage,
-                    this->whiteImageAllocation);
-    this->whiteImage = VK_NULL_HANDLE;
-    this->whiteImageAllocation = nullptr;
-  }
-  this->whiteDescriptorSet = VK_NULL_HANDLE;
+  // Release the texture cache (entries, staging pool, white fallback) while
+  // the shared descriptor pools are still valid; destroyEntry() frees each
+  // entry's set back to its pool.
+  this->textureCache.destroy();
+  // Every sampler (including the white fallback's) is owned by the sampler
+  // cache; release them once the texture cache has been emptied.
+  this->samplerCache.destroyAll();
   for (VkDescriptorPool pool : this->descriptorPools) {
     if (pool != VK_NULL_HANDLE) {
       vkDestroyDescriptorPool(this->device, pool, this->allocator);
@@ -489,9 +455,9 @@ SoVulkanRenderBackend::prepareExternalFrame(
     this->emitError("failed to reserve lighting UBO slots");
     return nullptr;
   }
-  // Changed textures are now staged in pendingUploads; the caller's
+  // Changed textures are now staged in the texture cache; the caller's
   // beginExternalPrepass() records the copies into its transient command
-  // buffer (or falls back to flushPendingTextureUploadsExternal() when that
+  // buffer (or falls back to SoVulkanTextureCache::flushExternal() when that
   // buffer cannot be allocated).  No flush here: it would need its own
   // submission and queue drain, and the caller already submits the pre-pass.
   return target;
@@ -517,7 +483,7 @@ SoVulkanRenderBackend::renderInternal(const SoDrawList & drawlist,
                  "overlaysOnly=%d cmds=%d",
                  static_cast<int>(overlaysOnly), drawlist.getNumCommands());
 
-  if (COIN_VULKAN_ENV_FLAG("FC_VULKAN_BLACK_DEBUG")) {
+  if (SoVulkanConfig::get().debug.blackDebug) {
     static int blackFrame = 0;
     logBlackFrameStats(drawlist, params, blackFrame++,
                        overlaysOnly ? 1 : 0);
@@ -554,7 +520,7 @@ SoVulkanRenderBackend::renderInternal(const SoDrawList & drawlist,
   // pipeline cache warm.  On the full-target-clear fast path (FC_VULKAN_RP_CLEAR)
   // the color/depth attachments are cleared via their loadOp at pass begin,
   // which is cheaper than a separate vkCmdClearAttachments region clear.
-  const bool wantRpClear = COIN_VULKAN_ENV_FLAG("FC_VULKAN_RP_CLEAR");
+  const bool wantRpClear = SoVulkanConfig::get().raster.rpClear;
   const bool fullTargetClear =
     wantRpClear && this->isFullTargetClear(params, *target);
   const bool clearWindow = (params.flags & SO_PARAM_CLEAR_WINDOW) != 0;
@@ -631,10 +597,10 @@ SoVulkanRenderBackend::renderInternal(const SoDrawList & drawlist,
   // must already exist.  Staging buffers are released through the deferred
   // ring once the slot fence signals.
   this->gpuTimers.beginScope(this->currentCommandBuffer(), "textureUploads");
-  if (!this->recordPendingTextureUploads()) {
+  if (!this->textureCache.recordPending()) {
     this->emitError("failed to record texture uploads");
   }
-  this->finalizePendingTextureUploads();
+  this->textureCache.finalizePending();
   this->gpuTimers.endScope(this->currentCommandBuffer());
 
   VkRenderPassBeginInfo rpbi {};
@@ -663,15 +629,18 @@ SoVulkanRenderBackend::renderInternal(const SoDrawList & drawlist,
   rpbi.clearValueCount = clearValueCount;
   rpbi.pClearValues = clearValueCount ? clearValues : nullptr;
 
-  // INLINE_AND_SECONDARY: the opaque pass replays a secondary command buffer
-  // (M1c/M1d) inside this pass, so plain INLINE contents would be a spec
-  // violation (VUID-vkCmdExecuteCommands-contents-09680) and would also stop
-  // the primary's dynamic state (viewport/scissor) from being inherited by the
-  // secondary.  The inline+secondary contents enum comes from
-  // VK_EXT_nested_command_buffer; devices without it would need the fully
-  // inline fallback (canUseSecondary == false) instead.
-  vkCmdBeginRenderPass(this->currentCommandBuffer(), &rpbi,
-                       VK_SUBPASS_CONTENTS_INLINE_AND_SECONDARY_COMMAND_BUFFERS_EXT);
+  // INLINE_AND_SECONDARY lets the opaque pass replay a secondary command
+  // buffer (M1c/M1d) and still record inline commands in the same subpass.
+  // That contents enum comes from VK_EXT_nested_command_buffer, so it is only
+  // legal when the embedding created the device with the extension +
+  // nestedCommandBufferRendering (recorded in nestedCommandBufferEnabled);
+  // otherwise fall back to plain INLINE, which forbids
+  // vkCmdExecuteCommands() -- recordFrame() disables secondary recording to
+  // match.
+  const VkSubpassContents subpassContents = this->nestedCommandBufferEnabled
+    ? VK_SUBPASS_CONTENTS_INLINE_AND_SECONDARY_COMMAND_BUFFERS_EXT
+    : VK_SUBPASS_CONTENTS_INLINE;
+  vkCmdBeginRenderPass(this->currentCommandBuffer(), &rpbi, subpassContents);
   SoVulkanDebugUtils::beginLabel(this->currentCommandBuffer(),
                                  overlaysOnly ? "overlay pass" : "opaque pass",
                                  0.9f, 0.6f, 0.2f);
@@ -745,7 +714,7 @@ SoVulkanRenderBackend::renderExternal(const SoDrawList & drawlist,
 {
   const long externalBcStart = vkBackendRenderBreadcrumbEnabled() ? vkBackendRenderNowUs() : 0;
 
-  if (COIN_VULKAN_ENV_FLAG("FC_VULKAN_BLACK_DEBUG"))
+  if (SoVulkanConfig::get().debug.blackDebug)
     fprintf(stderr, "[BLACK] renderExternal ENTER frame=%d cmds=%d\n",
             this->uboFrameIndex, drawlist.getNumCommands());
 
@@ -781,13 +750,13 @@ SoVulkanRenderBackend::renderExternal(const SoDrawList & drawlist,
   // full-detail draw.
   VkCommandBuffer prepass = this->beginExternalPrepass(
     drawlist, params, /*lod*/ true, wantCpuTiming ? &timing : nullptr);
-  if (prepass == VK_NULL_HANDLE && !this->pendingUploads.empty()) {
+  if (prepass == VK_NULL_HANDLE && this->textureCache.hasPendingUploads()) {
     // The transient buffer could not carry the copies (allocation/begin/end
     // failure).  Fall back to the legacy one-shot upload so the textures still
     // land this frame; a failure there leaves the entries unstamped and the
     // next frame retries.
     const SoVulkan::Result uploadResult =
-      this->flushPendingTextureUploadsExternal();
+      this->textureCache.flushExternal();
     if (!uploadResult.isOk()) {
       SoDebugError::postWarning("SoVulkanRenderBackend::renderExternal",
                                 "one-shot texture upload fallback failed: %s",
@@ -832,7 +801,7 @@ SoVulkanRenderBackend::renderExternalOverlay(const SoDrawList & drawlist,
                                              VkCommandBuffer commandBuffer,
                                              VkRenderPass renderPass)
 {
-  if (COIN_VULKAN_ENV_FLAG("FC_VULKAN_BLACK_DEBUG"))
+  if (SoVulkanConfig::get().debug.blackDebug)
     fprintf(stderr, "[BLACK] renderExternalOverlay ENTER frame=%d cmds=%d\n",
             this->uboFrameIndex, drawlist.getNumCommands());
 
@@ -851,9 +820,9 @@ SoVulkanRenderBackend::renderExternalOverlay(const SoDrawList & drawlist,
   // transient buffer cannot be allocated.
   VkCommandBuffer prepass = this->beginExternalPrepass(
     drawlist, params, /*lod*/ false, wantCpuTiming ? &timing : nullptr);
-  if (prepass == VK_NULL_HANDLE && !this->pendingUploads.empty()) {
+  if (prepass == VK_NULL_HANDLE && this->textureCache.hasPendingUploads()) {
     const SoVulkan::Result uploadResult =
-      this->flushPendingTextureUploadsExternal();
+      this->textureCache.flushExternal();
     if (!uploadResult.isOk()) {
       SoDebugError::postWarning("SoVulkanRenderBackend::renderExternalOverlay",
                                 "one-shot texture upload fallback failed: %s",
@@ -1161,7 +1130,7 @@ SoVulkanRenderBackend::recordSecondaryChunk(VulkanRecordContext & ctx,
   vkBackendTrace(this->uboFrameIndex, "recordSecondaryChunk.enter",
                  "secondary=%p items=%zu",
                  reinterpret_cast<const void *>(secondary), items.size());
-  if (COIN_VULKAN_ENV_FLAG("FC_VULKAN_BACKEND_DEBUG")) {
+  if (SoVulkanConfig::get().debug.backendDebug) {
     fprintf(stderr, "[SEC] begin chunk items=%zu secondary=%p frame=%u\n",
             items.size(), (const void*)secondary, this->uboFrameIndex);
   }
@@ -1221,11 +1190,11 @@ SoVulkanRenderBackend::recordFrame(const SoDrawList & drawlist,
   // parallel; the command-buffer recording itself stays single-threaded.
   this->prepareWideLineBuffers(drawlist);
   this->expandWideLinesParallel(drawlist, params);
-  if (COIN_VULKAN_ENV_FLAG("FC_VULKAN_MATRIX_DUMP")) {
+  if (SoVulkanConfig::get().debug.matrixDump) {
     s_debugFrame++;
     s_dumpCmdCount = 0;
   }
-  if (COIN_VULKAN_ENV_FLAG("FC_VULKAN_BLACK_DEBUG")) {
+  if (SoVulkanConfig::get().debug.blackDebug) {
     static int blackFrame = 0;
     logBlackFrameStats(drawlist, params, blackFrame++, -1);
   }
@@ -1242,11 +1211,11 @@ SoVulkanRenderBackend::recordFrame(const SoDrawList & drawlist,
   // setPointsOverlay()/setTessellationOverlay()/setEdgeColor().  Environment
   // variables act as a diagnostic fallback for the command line.
   const bool wireframeOverlay =
-    this->wireframeOverlay || COIN_VULKAN_ENV_FLAG("FC_VULKAN_WIREFRAME");
+    this->wireframeOverlay || SoVulkanConfig::get().raster.wireframe;
   const bool pointsOverlay =
-    this->pointsOverlay || COIN_VULKAN_ENV_FLAG("FC_VULKAN_POINTS");
+    this->pointsOverlay || SoVulkanConfig::get().raster.points;
   const bool tessellationOverlay =
-    this->tessellationOverlay || COIN_VULKAN_ENV_FLAG("FC_VULKAN_TESS");
+    this->tessellationOverlay || SoVulkanConfig::get().raster.tessellation;
   float overlayColor[4] = {
     this->edgeColor[0], this->edgeColor[1], this->edgeColor[2],
     this->edgeColor[3]
@@ -1258,7 +1227,8 @@ SoVulkanRenderBackend::recordFrame(const SoDrawList & drawlist,
   struct EdgeColorOverride { bool present; float rgb[3]; };
   static const EdgeColorOverride edgeOverride = []() {
     EdgeColorOverride o{false, {0.0f, 0.0f, 0.0f}};
-    const char * hex = SoVulkanShared::envString("FC_VULKAN_EDGE_COLOR");
+    const std::string & edge = SoVulkanConfig::get().raster.edgeColor;
+    const char * hex = edge.empty() ? nullptr : edge.c_str();
     if (hex) {
       unsigned int value = 0;
       if (sscanf(hex, "%x", &value) == 1) {
@@ -1281,7 +1251,7 @@ SoVulkanRenderBackend::recordFrame(const SoDrawList & drawlist,
   const int wireframeFillMode = wireframeOverlay
     ? SoDrawStyleElement::LINES
     : (pointsOverlay ? SoDrawStyleElement::POINTS : -1);
-  if (COIN_VULKAN_ENV_FLAG("FC_VULKAN_BACKEND_DEBUG")) {
+  if (SoVulkanConfig::get().debug.backendDebug) {
     static int overlayLog = 0;
     if (overlayLog++ < 3) {
       fprintf(stderr,
@@ -1324,12 +1294,13 @@ SoVulkanRenderBackend::recordFrame(const SoDrawList & drawlist,
   // while that interaction is investigated.
   const bool externalPass = renderPass != this->renderPasses.currentRenderPass();
   const bool canUseSecondary =
+    this->nestedCommandBufferEnabled &&
     !this->secondaryCommandBuffers.empty() &&
     inheritFramebuffer != VK_NULL_HANDLE &&
     (!externalPass || SoVulkanConfig::get().concurrency.externalSecondary);
   const bool debugFlags =
-    COIN_VULKAN_ENV_FLAG("FC_VULKAN_MATRIX_DUMP") ||
-    COIN_VULKAN_ENV_FLAG("FC_VULKAN_BLACK_DEBUG");
+    SoVulkanConfig::get().debug.matrixDump ||
+    SoVulkanConfig::get().debug.blackDebug;
 
   // Count the render-order-independent opaque items that live in a secondary.
   uint64_t secondaryItemCount = 0;
@@ -1383,7 +1354,7 @@ SoVulkanRenderBackend::recordFrame(const SoDrawList & drawlist,
     // longest-first for load balance), record each into its own worker
     // secondary in parallel, then replay all in order followed by the inline
     // painter-order / overlay / annotation items.
-    if (COIN_VULKAN_ENV_FLAG("FC_VULKAN_BACKEND_DEBUG")) {
+    if (SoVulkanConfig::get().debug.backendDebug) {
       static int parLog = 0;
       if (parLog++ < 3) {
         fprintf(stderr,

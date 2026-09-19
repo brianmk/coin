@@ -12,6 +12,7 @@
 //   - beginCommandBuffer()/endAndSubmit()
 
 #include "rendering/SoVulkanRenderBackend.h"
+#include "rendering/SoVulkanConfig.h"
 #include "rendering/SoVulkanRenderBackend/SoVulkanRenderBackendP.h"
 
 #include <Inventor/elements/SoDrawStyleElement.h>
@@ -150,7 +151,7 @@ SoVulkanRenderBackend::applyViewport(const SoRenderParams & params,
   const SbVec2s & origin = params.viewport.getViewportOriginPixels();
   const SbVec2s & size = params.viewport.getViewportSizePixels();
 
-  if (COIN_VULKAN_ENV_FLAG("FC_VULKAN_MATRIX_DUMP") && s_debugFrame > 0
+  if (SoVulkanConfig::get().debug.matrixDump && s_debugFrame > 0
       && (s_debugFrame % 100 == 0)) {
     fprintf(stderr,
             "[VPRT] frame=%d origin=(%d,%d) size=(%d,%d) target=(%u,%u)\n",
@@ -382,8 +383,12 @@ SoVulkanRenderBackend::updateLightingSetup(const SoDrawList & drawlist)
     return false;
   }
 
-  // Ring base for this frame (fixed 8-frame ring, 8 slots per frame).
-  const uint32_t frameBase = (this->uboFrameIndex % 8u) * 8u;
+  // Ring base for this frame.  The ring depth tracks maxFramesInFlight (see
+  // createLightingConstBuffer/swapLightingConstBuffer), so use it here too;
+  // a hard-coded depth would alias frames once the embedding asks for more.
+  const uint32_t frameBase =
+    (this->uboFrameIndex % this->maxFramesInFlight) *
+    kLightingConstSlotsPerFrame;
 
   static const SoLightingData emptyLighting;
   uint32_t occupiedSlots = 0;
@@ -414,7 +419,8 @@ SoVulkanRenderBackend::updateLightingSetup(const SoDrawList & drawlist)
   // like the IR setups below (fillLightingBlock applies the eye transform).
   VkDeviceSize sceneLightOffset = 0;
   if (!this->sceneLighting.lights.empty()) {
-    const uint32_t slot = std::min(occupiedSlots, 7u);
+    const uint32_t slot =
+      std::min(occupiedSlots, kLightingConstSlotsPerFrame - 1u);
     const VkDeviceSize offset =
       static_cast<VkDeviceSize>(frameBase + slot) * this->lightingConstStride;
     VulkanLightingUbo * u = reinterpret_cast<VulkanLightingUbo *>(
@@ -439,9 +445,10 @@ SoVulkanRenderBackend::updateLightingSetup(const SoDrawList & drawlist)
     const SoLightingData * lighting = drawlist.getLighting(handle);
     if (!lighting) lighting = &emptyLighting;
 
-    // Clamp to the per-frame slot budget (8); beyond that reuse the last
-    // slot (degraded but never out of bounds).
-    const uint32_t slot = std::min(occupiedSlots, 7u);
+    // Clamp to the per-frame slot budget; beyond that reuse the last slot
+    // (degraded but never out of bounds).
+    const uint32_t slot =
+      std::min(occupiedSlots, kLightingConstSlotsPerFrame - 1u);
     const VkDeviceSize offset =
       static_cast<VkDeviceSize>(frameBase + slot) * this->lightingConstStride;
     VulkanLightingUbo * u = reinterpret_cast<VulkanLightingUbo *>(
@@ -569,9 +576,9 @@ SoVulkanRenderBackend::bindDrawDescriptors(const SoRenderCommand & command,
   // (per-draw UBO + texture, dynamic offset).  Lighting is the same for every
   // command sharing a handle, so its block was written once per handle by
   // updateLightingSetup() and is merely referenced here.
-  VkDescriptorSet textureSet = this->resolveTextureSet(command);
+  VkDescriptorSet textureSet = this->textureCache.resolve(command);
   if (textureSet == VK_NULL_HANDLE) {
-    textureSet = this->whiteDescriptorSet;
+    textureSet = this->textureCache.whiteDescriptorSet();
   }
   // Cache the lighting dynamic offset per handle: a frame's retained commands
   // almost always share ONE handle, so only the first draw of a new handle
@@ -630,7 +637,7 @@ SoVulkanRenderBackend::recordDrawCommand(const SoDrawList & drawlist,
                  reinterpret_cast<const void *>(&command),
                  static_cast<int>(command.pass), ctx.uboCmdIndex);
   if (!command.geometry.positions || command.geometry.vertexCount == 0) {
-    if (COIN_VULKAN_ENV_FLAG("FC_VULKAN_BACKEND_DEBUG")) {
+    if (SoVulkanConfig::get().debug.backendDebug) {
       fprintf(stderr, "[VKBE] cmd %p pass=%d skip: no positions/verts\n",
               (const void*)&command, static_cast<int>(command.pass));
     }
@@ -638,13 +645,13 @@ SoVulkanRenderBackend::recordDrawCommand(const SoDrawList & drawlist,
   }
   const auto found = this->commandToCache.find(&command);
   if (found == this->commandToCache.end()) {
-    if (COIN_VULKAN_ENV_FLAG("FC_VULKAN_BACKEND_DEBUG")) {
+    if (SoVulkanConfig::get().debug.backendDebug) {
       fprintf(stderr, "[VKBE] cmd %p pass=%d skip: no gpu cache entry\n",
               (const void*)&command, static_cast<int>(command.pass));
     }
     return;
   }
-  if (COIN_VULKAN_ENV_FLAG("FC_VULKAN_BACKEND_DEBUG") &&
+  if (SoVulkanConfig::get().debug.backendDebug &&
       (command.geometry.topology == SO_TOPOLOGY_LINES ||
        command.geometry.topology == SO_TOPOLOGY_LINE_STRIP ||
        command.geometry.topology == SO_TOPOLOGY_POINTS)) {
@@ -666,7 +673,7 @@ SoVulkanRenderBackend::recordDrawCommand(const SoDrawList & drawlist,
   }
   VulkanCachedCommand & entry = this->gpuCache[found->second];
   if (entry.vertexBuffer == VK_NULL_HANDLE) {
-    if (COIN_VULKAN_ENV_FLAG("FC_VULKAN_BACKEND_DEBUG")) {
+    if (SoVulkanConfig::get().debug.backendDebug) {
       fprintf(stderr, "[VKBE] cmd %p pass=%d skip: vertexBuffer null\n",
               (const void*)&command, static_cast<int>(command.pass));
     }
@@ -695,7 +702,7 @@ SoVulkanRenderBackend::recordDrawCommand(const SoDrawList & drawlist,
   if (!this->getOrCreatePipeline(command, target, pass, pipeline, transparent,
                                  fillModeOverride, overlayPass, &entry) ||
       pipeline == VK_NULL_HANDLE) {
-    if (COIN_VULKAN_ENV_FLAG("FC_VULKAN_BACKEND_DEBUG")) {
+    if (SoVulkanConfig::get().debug.backendDebug) {
       fprintf(stderr, "[VKBE] cmd %p pass=%d skip: pipeline creation failed "
                       "(transparent=%d fillOverride=%d overlay=%d)\n",
               (const void*)&command, static_cast<int>(command.pass),
@@ -703,7 +710,7 @@ SoVulkanRenderBackend::recordDrawCommand(const SoDrawList & drawlist,
     }
     return;
   }
-  if (COIN_VULKAN_ENV_FLAG("FC_VULKAN_BACKEND_DEBUG")) {
+  if (SoVulkanConfig::get().debug.backendDebug) {
     static int drawn = 0;
     static int logged = 0;
     drawn++;
@@ -793,7 +800,7 @@ SoVulkanRenderBackend::recordDrawCommand(const SoDrawList & drawlist,
                                uniformColorOverride != nullptr,
                                &projValue[0][0]);
   vkBackendTrace(this->uboFrameIndex, "draw.uboWrite", "slot=%u", slotIndex);
-  if (COIN_VULKAN_ENV_FLAG("FC_VULKAN_OVERLAY_CAM_DEBUG")
+  if (SoVulkanConfig::get().debug.overlayCamDebug
       && command.pass == SO_RENDERPASS_OVERLAY
       && command.state.raster.scissorEnabled
       && command.state.raster.scissorWidth > 800) {
@@ -857,7 +864,7 @@ SoVulkanRenderBackend::recordDrawCommand(const SoDrawList & drawlist,
                         VK_SHADER_STAGE_FRAGMENT_BIT,
                       0, sizeof(push), &push);
 
-  if (COIN_VULKAN_ENV_FLAG("FC_VULKAN_BACKEND_DEBUG") &&
+  if (SoVulkanConfig::get().debug.backendDebug &&
       (command.geometry.topology == SO_TOPOLOGY_LINES ||
        command.geometry.topology == SO_TOPOLOGY_LINE_STRIP ||
        command.geometry.topology == SO_TOPOLOGY_POINTS ||
@@ -886,7 +893,7 @@ SoVulkanRenderBackend::recordDrawCommand(const SoDrawList & drawlist,
             static_cast<unsigned>(command.geometry.vertexCount));
   }
 
-  if (COIN_VULKAN_ENV_FLAG("FC_VULKAN_MATRIX_DUMP") && s_debugFrame > 0
+  if (SoVulkanConfig::get().debug.matrixDump && s_debugFrame > 0
       && (s_debugFrame % 100 == 0) && s_dumpCmdCount < 12) {
     s_dumpCmdCount++;
     SbMat mm;
@@ -1003,7 +1010,7 @@ SoVulkanRenderBackend::recordDrawCommand(const SoDrawList & drawlist,
   }
   else if (useWideLine) {
     static int wldrawDiag = 0;
-    if (COIN_VULKAN_ENV_FLAG("FC_VULKAN_BACKEND_DEBUG") && wldrawDiag++ < 40) {
+    if (SoVulkanConfig::get().debug.backendDebug && wldrawDiag++ < 40) {
       fprintf(stderr, "[WLINE2] DRAW cmd=%p wideLineVertexCount=%u pass=%d\n",
               (const void*)&command, entry.wideLineVertexCount,
               static_cast<int>(command.pass));
@@ -1197,7 +1204,7 @@ SoVulkanRenderBackend::endAndSubmit()
   si.commandBufferCount = 1;
   si.pCommandBuffers = &cmd;
   const uint32_t slot = this->uboFrameIndex % this->maxFramesInFlight;
-  const VkFence fence = this->frameFences[slot];
+  const VkFence fence = this->frameRing.fence(slot);
   const VkResult submitRc = vkQueueSubmit(this->queue, 1, &si, fence);
   vkBackendTrace(this->uboFrameIndex, "endAndSubmit.submitRc", "rc=%d",
                  static_cast<int>(submitRc));
@@ -1207,9 +1214,9 @@ SoVulkanRenderBackend::endAndSubmit()
     // submitting nothing and relying on the next frame's failure path, but
     // mark the slot as not pending so the wait is skipped; a submission
     // failure (typically device loss) leaves the backend unusable anyway.
-    this->frameFencePending[slot] = 0;
+    this->frameRing.setPending(slot, false);
     return false;
   }
-  this->frameFencePending[slot] = 1;
+  this->frameRing.setPending(slot, true);
   return true;
 }
