@@ -144,8 +144,6 @@ Config load()
     SoVulkanShared::envSet("FC_VULKAN_AS_COMPACT");
   c.rayTracing.sbtPipeline = SoVulkanShared::envFlagEnabled("FC_VULKAN_RT_SBT");
 
-  c.memoryPool.enabled =
-    SoVulkanShared::envFlagEnabled("FC_VULKAN_MEM_POOL", false);
   c.concurrency.parallelRecord =
     SoVulkanShared::envFlagEnabled("FC_VULKAN_PARALLEL_RECORD", false);
   if (SoVulkanShared::envSet("FC_VULKAN_RECORD_WORKERS")) {
@@ -256,9 +254,8 @@ void dump()
     std::snprintf(sWorkerCap, sizeof(sWorkerCap), "-");
   }
   std::fprintf(stderr,
-               "[VKCONFIG] memPool=%d parallel=%d workerCap=%s extSec=%d "
+               "[VKCONFIG] parallel=%d workerCap=%s extSec=%d "
                "asyncCompute=%d wlineCpu=%d\n",
-               c.memoryPool.enabled ? 1 : 0,
                c.concurrency.parallelRecord ? 1 : 0,
                sWorkerCap,
                c.concurrency.externalSecondary ? 1 : 0,

@@ -7,7 +7,14 @@
 
 #include "rendering/SoVulkanShared.h"
 #include "rendering/SoVulkanResult.h"
-#include "rendering/SoVulkanRenderBackend/SoVulkanMemPool.h"
+// Vulkan Memory Allocator handles.  Only the opaque handle types are needed in
+// this header; the full API lives in third_party/vma/vk_mem_alloc.h, included
+// by the .cpp files that allocate.  VK_DEFINE_HANDLE produces the same typedef
+// VMA does, so either include order is safe.
+#ifndef AMD_VULKAN_MEMORY_ALLOCATOR_H
+VK_DEFINE_HANDLE(VmaAllocator)
+VK_DEFINE_HANDLE(VmaAllocation)
+#endif
 #include "rendering/SoVulkanRenderBackend/SoVulkanPipelineCache.h"
 #include "rendering/SoVulkanRenderBackend/SoVulkanRecordContext.h"
 #include "rendering/SoVulkanRenderBackend/SoVulkanRenderPassCache.h"
@@ -180,14 +187,10 @@ struct VulkanCachedCommand {
 /*! \brief Cached GPU texture for one retained command's SoTextureData. */
 struct VulkanCachedTexture {
   VkImage image = VK_NULL_HANDLE;
-  VkDeviceMemory memory = VK_NULL_HANDLE;
-  // Offset of `memory` into the sub-allocator block it came from (0 when the
-  // memory is a standalone vkAllocateMemory -- the legacy path).  Needed to
-  // return the range when FC_VULKAN_MEM_POOL is enabled.
-  VkDeviceSize memoryOffset = 0;
-  // Size of the `memory` range (the sub-allocated block size / allocation
-  // size).  Tracked so releaseMemory() returns exactly what was allocated.
-  VkDeviceSize memorySize = 0;
+  // Backing device memory, owned by the VMA allocator.  The image and its
+  // allocation are created and destroyed together (vmaCreateImage /
+  // vmaDestroyImage); no separate VkDeviceMemory handle is kept.
+  VmaAllocation allocation = nullptr;
   VkImageView view = VK_NULL_HANDLE;
   VkSampler sampler = VK_NULL_HANDLE;
   VkDescriptorSet descriptorSet = VK_NULL_HANDLE;
@@ -570,17 +573,6 @@ private:
                                     VkDescriptorSet & set);
   bool ensureDescriptorPoolSpace();
   VkDescriptorSet resolveTextureSet(const SoRenderCommand & command);
-  // Release a texture image or staging buffer's device memory back to the
-  // sub-allocator when enabled (FC_VULKAN_MEM_POOL), else vkFreeMemory as the
-  // legacy path.  The caller must have recorded the offset (from a pool alloc)
-  // into the entry/staging record — when the pool is disabled the memory is a
-  // standalone allocation and offset is 0.  Destroying the VkBuffer/VkImage
-  // for the pool case is the caller's responsibility (the memory block outlives
-  // the buffer/image); this helper only returns the memory.
-  void releaseMemory(VkDeviceMemory memory, VkDeviceSize size,
-                     VkDeviceSize offset);
-  // True when sub-allocating transient texture memory (FC_VULKAN_MEM_POOL).
-  bool usingMemPool() const { return this->memPool != nullptr; }
 
   // --- Render recording ---------------------------------------------------
   // Every record* helper below takes the VulkanRecordContext it records
@@ -906,22 +898,19 @@ private:
   void releaseFrameResources();
 
   // --- Owned device ------------------------------------------------------
+  VkInstance instance = VK_NULL_HANDLE;
   VkPhysicalDevice physicalDevice = VK_NULL_HANDLE;
   VkDevice device = VK_NULL_HANDLE;
   VkQueue queue = VK_NULL_HANDLE;
   uint32_t queueFamilyIndex = 0;
   const VkAllocationCallbacks * allocator = nullptr;
+  // Vulkan Memory Allocator, created in initialize() and destroyed at
+  // shutdown().  Owns the texture-image device memory.
+  VmaAllocator vmaAllocator = nullptr;
   // Cached physical-device memory-properties picker (shared helper); bound to
   // physicalDevice in initialize().  Replaces the old per-backend
   // deviceMemoryProperties + deviceMemoryPropertiesValid cache.
   SoVulkanShared::MemoryProperties memProps;
-
-  // Sub-allocator for the high-churn transient resources (texture image memory
-  // and texture staging buffers), so each upload does not vkAllocateMemory /
-  // vkFreeMemory against the driver (slow, and counts against
-  // maxMemoryAllocationCount).  Enabled by FC_VULKAN_MEM_POOL (off by default);
-  // when disabled the legacy per-resource allocate path is used.
-  std::unique_ptr<SoVulkanMemPool> memPool;
 
   // --- Device capabilities (probed once in initialize()) -----------------
   // VkPhysicalDeviceFeatures::fillModeNonSolid gates the wireframe/points
@@ -1160,7 +1149,7 @@ private:
   // Texture binding (set 0, binding 1).  A 1x1 white fallback texture is
   // bound whenever a command carries no embedded SoTextureData.
   VkImage whiteImage = VK_NULL_HANDLE;
-  VkDeviceMemory whiteImageMemory = VK_NULL_HANDLE;
+  VmaAllocation whiteImageAllocation = nullptr;
   VkImageView whiteImageView = VK_NULL_HANDLE;
   VkSampler whiteSampler = VK_NULL_HANDLE;
   VkDescriptorSet whiteDescriptorSet = VK_NULL_HANDLE;

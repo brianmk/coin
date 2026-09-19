@@ -111,12 +111,6 @@ struct RayTracing {
   bool sbtPipeline = false;
 };
 
-// Device-memory sub-allocator (raster backend).
-struct MemoryPool {
-  //! FC_VULKAN_MEM_POOL; default off (legacy vkAllocateMemory path).
-  bool enabled = false;
-};
-
 // Command recording / queue concurrency.
 struct Concurrency {
   //! Parallel command recording.  FC_VULKAN_PARALLEL_RECORD; default off.
@@ -164,7 +158,6 @@ struct Config {
   PathTracing pathTracing;
   AccelerationStructures accelerationStructures;
   RayTracing rayTracing;
-  MemoryPool memoryPool;
   Concurrency concurrency;
   Raster raster;
   Diagnostics diagnostics;

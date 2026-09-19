@@ -19,6 +19,8 @@
 #include "rendering/SoVulkanConfig.h"
 #include "rendering/SoVulkanDebugUtils.h"
 
+#include "vk_mem_alloc.h"
+
 #include <Inventor/elements/SoDrawStyleElement.h>
 #include <Inventor/errors/SoDebugError.h>
 
@@ -159,6 +161,7 @@ SoVulkanRenderBackend::initialize(const SoRenderBackendInitParams & params)
     return FALSE;
   }
 
+  this->instance = deviceContext->instance;
   this->physicalDevice = deviceContext->physicalDevice;
   this->device = deviceContext->device;
   this->queue = deviceContext->graphicsQueue;
@@ -179,11 +182,20 @@ SoVulkanRenderBackend::initialize(const SoRenderBackendInitParams & params)
     this->deferDestroy(std::move(fn));
   });
 
-  // Opt-in device-memory sub-allocator (FC_VULKAN_MEM_POOL).  Default off so
-  // the behaviour is byte-for-byte the legacy path unless explicitly enabled.
-  if (SoVulkanConfig::get().memoryPool.enabled) {
-    this->memPool = std::make_unique<SoVulkanMemPool>(
-      this->device, this->allocator);
+  // Vulkan Memory Allocator: owns the texture-image device memory.  The
+  // allocator sub-allocates from large blocks, so per-texture creation does
+  // not hit the driver (and maxMemoryAllocationCount) once per upload.
+  {
+    VmaAllocatorCreateInfo allocatorInfo {};
+    allocatorInfo.physicalDevice = this->physicalDevice;
+    allocatorInfo.device = this->device;
+    allocatorInfo.instance = this->instance;
+    allocatorInfo.vulkanApiVersion = VK_API_VERSION_1_2;
+    allocatorInfo.pAllocationCallbacks = this->allocator;
+    if (vmaCreateAllocator(&allocatorInfo, &this->vmaAllocator) != VK_SUCCESS) {
+      this->emitError("SoVulkanRenderBackend: vmaCreateAllocator failed");
+      return FALSE;
+    }
   }
 
   // Worker count for the persistent record pool.  The pool is also used by the
@@ -1188,29 +1200,24 @@ SoVulkanRenderBackend::deferDestroyTextureEntry(VulkanCachedTexture & entry)
     entry = VulkanCachedTexture();
     return;
   }
-  VkDevice device = this->device;
+  const VkDevice device = this->device;
   const VkAllocationCallbacks * allocator = this->allocator;
+  const VmaAllocator vmaAllocator = this->vmaAllocator;
   const VkImage image = entry.image;
-  const VkDeviceMemory memory = entry.memory;
-  const VkDeviceSize imageSize = entry.memorySize;
-  const VkDeviceSize memoryOffset = entry.memoryOffset;
+  const VmaAllocation allocation = entry.allocation;
   const VkImageView view = entry.view;
   // The sampler is shared (samplerCache), so it is NOT destroyed here; it is
-  // released once at shutdown() after the texture cache has been emptied.
-  // Capture `this` so the memory is returned to the sub-allocator (when
-  // enabled) inside the deferred lambda, by which point the frame's
-  // submission is complete and the range is safe to reuse.
-  SoVulkanRenderBackend * self = this;
-  this->deferDestroy([self, device, allocator, image, memory, imageSize,
-                      memoryOffset, view]() {
+  // released once at shutdown() after the texture cache has been emptied.  The
+  // image and its VMA allocation are freed together, once the frame's
+  // submission is complete (the deferred ring), so no in-flight reference is
+  // aliased.
+  this->deferDestroy([device, allocator, vmaAllocator, image, allocation,
+                      view]() {
     if (view != VK_NULL_HANDLE) {
       vkDestroyImageView(device, view, allocator);
     }
     if (image != VK_NULL_HANDLE) {
-      vkDestroyImage(device, image, allocator);
-    }
-    if (memory != VK_NULL_HANDLE) {
-      self->releaseMemory(memory, imageSize, memoryOffset);
+      vmaDestroyImage(vmaAllocator, image, allocation);
     }
   });
   entry = VulkanCachedTexture();
@@ -1234,28 +1241,14 @@ SoVulkanRenderBackend::createWhiteTexture()
   ci.usage = VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
   ci.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
   ci.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
-  if (vkCreateImage(this->device, &ci, this->allocator, &this->whiteImage) !=
-      VK_SUCCESS) {
+  VmaAllocationCreateInfo allocInfo {};
+  allocInfo.usage = VMA_MEMORY_USAGE_AUTO;
+  allocInfo.requiredFlags = VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT;
+  if (vmaCreateImage(this->vmaAllocator, &ci, &allocInfo, &this->whiteImage,
+                     &this->whiteImageAllocation, nullptr) != VK_SUCCESS) {
+    this->emitError("createWhiteTexture: vmaCreateImage failed");
     return false;
   }
-
-  VkMemoryRequirements requirements;
-  vkGetImageMemoryRequirements(this->device, this->whiteImage, &requirements);
-  uint32_t memoryTypeIndex = 0;
-  if (!this->selectMemoryType(requirements, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT,
-                              memoryTypeIndex)) {
-    this->emitError("createWhiteTexture: no device-local memory type");
-    return false;
-  }
-  VkMemoryAllocateInfo ai {};
-  ai.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
-  ai.allocationSize = requirements.size;
-  ai.memoryTypeIndex = memoryTypeIndex;
-  if (vkAllocateMemory(this->device, &ai, this->allocator,
-                       &this->whiteImageMemory) != VK_SUCCESS) {
-    return false;
-  }
-  vkBindImageMemory(this->device, this->whiteImage, this->whiteImageMemory, 0);
 
   VkBuffer staging = VK_NULL_HANDLE;
   VkDeviceMemory stagingMemory = VK_NULL_HANDLE;

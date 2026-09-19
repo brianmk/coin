@@ -17,6 +17,8 @@
 #include "rendering/SoVulkanConfig.h"
 #include "rendering/SoVulkanDebugUtils.h"
 
+#include "vk_mem_alloc.h"
+
 #include <Inventor/elements/SoDrawStyleElement.h>
 #include <Inventor/errors/SoDebugError.h>
 
@@ -374,12 +376,10 @@ SoVulkanRenderBackend::shutdown()
     this->whiteImageView = VK_NULL_HANDLE;
   }
   if (this->whiteImage != VK_NULL_HANDLE) {
-    vkDestroyImage(this->device, this->whiteImage, this->allocator);
+    vmaDestroyImage(this->vmaAllocator, this->whiteImage,
+                    this->whiteImageAllocation);
     this->whiteImage = VK_NULL_HANDLE;
-  }
-  if (this->whiteImageMemory != VK_NULL_HANDLE) {
-    vkFreeMemory(this->device, this->whiteImageMemory, this->allocator);
-    this->whiteImageMemory = VK_NULL_HANDLE;
+    this->whiteImageAllocation = nullptr;
   }
   this->whiteDescriptorSet = VK_NULL_HANDLE;
   for (VkDescriptorPool pool : this->descriptorPools) {
@@ -414,13 +414,14 @@ SoVulkanRenderBackend::shutdown()
     }
   }
   this->secondaryCommandPools.clear();
-  if (this->memPool) {
+  if (this->vmaAllocator != nullptr) {
     // Queue is idle and every deferred destroy has been flushed, so all
-    // sub-allocated ranges are free and every block can be released.
-    this->memPool->destroyAll();
-    this->memPool.reset();
+    // allocations are free and the allocator (and its blocks) can be released.
+    vmaDestroyAllocator(this->vmaAllocator);
+    this->vmaAllocator = nullptr;
   }
 
+  this->instance = VK_NULL_HANDLE;
   this->physicalDevice = VK_NULL_HANDLE;
   this->device = VK_NULL_HANDLE;
   this->queue = VK_NULL_HANDLE;
