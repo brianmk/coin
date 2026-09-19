@@ -1710,14 +1710,28 @@ SoRTXRenderBackend::createRtxInteropBuffer(size_t bytes,
   // direct field for it).  rtxInteropExportInfo must outlive the pool: VMA
   // stores the pointer, not a copy.
   if (this->rtxInteropPool == VK_NULL_HANDLE) {
-    VmaAllocationCreateInfo poolUsage {};
-    poolUsage.usage = VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE;
+    // Resolve the pool's memory type from the buffer's own requirements.
+    // vmaFindMemoryTypeIndexForBufferInfo() is the obvious call, but it takes
+    // VMA's Vulkan-1.3 vkGetDeviceBufferMemoryRequirements path whenever the
+    // allocator's apiVersion is >= 1.3, and this app never enables the
+    // maintenance4 feature that entry point requires; with a layer in the
+    // chain that resolves to a null driver entry and crashes.  Query the 1.0
+    // requirements of a throw-away buffer instead (no memory is bound to it).
+    VkBuffer probe = VK_NULL_HANDLE;
+    if (vkCreateBuffer(this->device, &ci, this->allocator, &probe) !=
+        VK_SUCCESS) {
+      this->emitError("RTX denoiser: failed to create the CUDA interop "
+                      "memory-type probe buffer");
+      return false;
+    }
+    VkMemoryRequirements req {};
+    vkGetBufferMemoryRequirements(this->device, probe, &req);
+    vkDestroyBuffer(this->device, probe, this->allocator);
     uint32_t memTypeIndex = 0;
-    if (vmaFindMemoryTypeIndexForBufferInfo(this->vmaAllocator, &ci,
-                                            &poolUsage,
-                                            &memTypeIndex) != VK_SUCCESS) {
-      this->emitError("RTX denoiser: no device-local memory type for the "
-                      "exportable CUDA interop buffers");
+    if (!this->memProps.pick(req, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT,
+                             memTypeIndex)) {
+      this->emitError("RTX denoiser: no memory type for the exportable "
+                      "CUDA interop buffers");
       return false;
     }
     this->rtxInteropExportInfo.sType =
