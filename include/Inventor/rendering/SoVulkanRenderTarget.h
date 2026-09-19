@@ -60,6 +60,11 @@ struct SoVulkanDeviceCaps {
   bool dualSrcBlend = false;           //!< SRC1_* blend factors.
   bool timelineSemaphore = false;      //!< Vulkan 1.2 timeline semaphores.
   bool synchronization2 = false;       //!< VK_KHR_synchronization2.
+  //! VK_KHR_synchronization2 is advertised as an extension (as opposed to the
+  //! core Vulkan 1.3 feature).  Only then may it be added to the device
+  //! extension list; the feature itself is requested whenever
+  //! `synchronization2` is set.
+  bool synchronization2Extension = false;
   //! VK_EXT_descriptor_indexing update-after-bind for the descriptor types the
   //! RT backend uses (sampled image, storage image, uniform buffer, storage
   //! buffer).  Lets the backend legally update a descriptor set that an

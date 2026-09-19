@@ -471,14 +471,10 @@ SoVulkanRenderBackend::recordGeometryLodPrepass(VkCommandBuffer cb,
     // first 4 bytes are touched, so the fixed fields stay intact.
     vkCmdFillBuffer(cb, s.indirectBuffer, 0, sizeof(uint32_t), 0);
 
-    VkMemoryBarrier fillBarrier {};
-    fillBarrier.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
-    fillBarrier.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
-    fillBarrier.dstAccessMask =
-      VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT;
-    vkCmdPipelineBarrier(cb, VK_PIPELINE_STAGE_TRANSFER_BIT,
-                         VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, 1,
-                         &fillBarrier, 0, nullptr, 0, nullptr);
+    SoVulkanShared::memoryBarrier(
+      cb, VK_PIPELINE_STAGE_TRANSFER_BIT,
+      VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_ACCESS_TRANSFER_WRITE_BIT,
+      VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT);
 
     SubPixelPush pc {};
     // Same combined transform as the visual vertex shader: the shader applies
@@ -515,16 +511,12 @@ SoVulkanRenderBackend::recordGeometryLodPrepass(VkCommandBuffer cb,
 
   // One barrier after every dispatch: compute writes become visible to the
   // indirect-command read and the index/vertex-input reads of the draws.
-  VkMemoryBarrier drawBarrier {};
-  drawBarrier.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
-  drawBarrier.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
-  drawBarrier.dstAccessMask =
-    VK_ACCESS_INDIRECT_COMMAND_READ_BIT | VK_ACCESS_INDEX_READ_BIT |
-    VK_ACCESS_VERTEX_ATTRIBUTE_READ_BIT;
-  vkCmdPipelineBarrier(
+  SoVulkanShared::memoryBarrier(
     cb, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
     VK_PIPELINE_STAGE_DRAW_INDIRECT_BIT | VK_PIPELINE_STAGE_VERTEX_INPUT_BIT,
-    0, 1, &drawBarrier, 0, nullptr, 0, nullptr);
+    VK_ACCESS_SHADER_WRITE_BIT,
+    VK_ACCESS_INDIRECT_COMMAND_READ_BIT | VK_ACCESS_INDEX_READ_BIT |
+      VK_ACCESS_VERTEX_ATTRIBUTE_READ_BIT);
 
   if (debug) {
     fprintf(stderr, "[GEOMLOD] prepass slot=%u compacted=%u skipped=%u "

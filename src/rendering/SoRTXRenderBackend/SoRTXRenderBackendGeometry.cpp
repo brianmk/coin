@@ -1241,14 +1241,11 @@ SoRTXRenderBackend::blasBuildOrRefit(RTXCachedGeometry & entry,
     indexCopy.size = indexBytes;
     vkCmdCopyBuffer(cmd, indexStaging, entry.indexBuffer, 1, &indexCopy);
   }
-  VkMemoryBarrier copyBarrier {};
-  copyBarrier.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
-  copyBarrier.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
-  copyBarrier.dstAccessMask =
-    VK_ACCESS_ACCELERATION_STRUCTURE_READ_BIT_KHR;
-  vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_TRANSFER_BIT,
-                       VK_PIPELINE_STAGE_ACCELERATION_STRUCTURE_BUILD_BIT_KHR,
-                       0, 1, &copyBarrier, 0, nullptr, 0, nullptr);
+  SoVulkanShared::memoryBarrier(
+    cmd, VK_PIPELINE_STAGE_TRANSFER_BIT,
+    VK_PIPELINE_STAGE_ACCELERATION_STRUCTURE_BUILD_BIT_KHR,
+    VK_ACCESS_TRANSFER_WRITE_BIT,
+    VK_ACCESS_ACCELERATION_STRUCTURE_READ_BIT_KHR);
 
   // The staging buffers are referenced by the copy commands recorded above;
   // destroying them now would invalidate this command buffer.  Defer the
@@ -1379,14 +1376,11 @@ SoRTXRenderBackend::blasBuildOrRefit(RTXCachedGeometry & entry,
   const VkAccelerationStructureBuildRangeInfoKHR * rangeInfos[] = {&rangeInfo};
   vkCmdBuildAccelerationStructuresKHR(cmd, 1, &buildInfo, rangeInfos);
 
-  VkMemoryBarrier blasBarrier {};
-  blasBarrier.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
-  blasBarrier.srcAccessMask = VK_ACCESS_ACCELERATION_STRUCTURE_WRITE_BIT_KHR;
-  blasBarrier.dstAccessMask = VK_ACCESS_ACCELERATION_STRUCTURE_READ_BIT_KHR;
-  vkCmdPipelineBarrier(cmd,
-                       VK_PIPELINE_STAGE_ACCELERATION_STRUCTURE_BUILD_BIT_KHR,
-                       VK_PIPELINE_STAGE_ACCELERATION_STRUCTURE_BUILD_BIT_KHR,
-                       0, 1, &blasBarrier, 0, nullptr, 0, nullptr);
+  SoVulkanShared::memoryBarrier(
+    cmd, VK_PIPELINE_STAGE_ACCELERATION_STRUCTURE_BUILD_BIT_KHR,
+    VK_PIPELINE_STAGE_ACCELERATION_STRUCTURE_BUILD_BIT_KHR,
+    VK_ACCESS_ACCELERATION_STRUCTURE_WRITE_BIT_KHR,
+    VK_ACCESS_ACCELERATION_STRUCTURE_READ_BIT_KHR);
 
   if (refit) {
     entry.refitPending = false;

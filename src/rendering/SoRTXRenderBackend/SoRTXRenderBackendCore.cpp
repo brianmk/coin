@@ -523,6 +523,21 @@ SoRTXRenderBackend::initialize(const SoRenderBackendInitParams & params)
   this->allocator = deviceContext->allocator;
   this->memProps.setDevice(this->physicalDevice);
 
+  // Resolve the synchronization2 entry points once for this device.  A null
+  // pointer means the extension was not enabled; the shared barrier/submit
+  // helpers then fall back to the legacy entry points.
+  {
+    SoVulkanShared::Sync2Dispatch & sync2 = SoVulkanShared::sync2Dispatch();
+    sync2.cmdPipelineBarrier2 =
+      SoVulkanShared::loadDispatch<PFN_vkCmdPipelineBarrier2KHR>(
+        vkGetDeviceProcAddr(this->device, "vkCmdPipelineBarrier2KHR"));
+    sync2.queueSubmit2 = SoVulkanShared::loadDispatch<PFN_vkQueueSubmit2KHR>(
+      vkGetDeviceProcAddr(this->device, "vkQueueSubmit2KHR"));
+    this->emitLog(sync2.cmdPipelineBarrier2 != nullptr
+                    ? "synchronization2: enabled"
+                    : "synchronization2: unavailable (legacy barriers)");
+  }
+
   // Create the VMA allocator before any buffer/image allocation.  The
   // buffer-device-address flag is required because the BLAS/TLAS and SBT
   // buffers expose VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT; VMA then adds

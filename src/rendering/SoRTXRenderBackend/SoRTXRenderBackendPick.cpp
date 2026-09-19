@@ -314,14 +314,11 @@ SoRTXRenderBackend::pickRay(const float origin[3], const float direction[3],
   vkCmdDispatch(this->pickCommandBuffer, 1, 1, 1);
 
   // Make the shader's write visible to the host read after the fence wait.
-  VkMemoryBarrier mb {};
-  mb.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
-  mb.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
-  mb.dstAccessMask = VK_ACCESS_HOST_READ_BIT;
-  vkCmdPipelineBarrier(this->pickCommandBuffer,
-                       VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
-                       VK_PIPELINE_STAGE_HOST_BIT, 0, 1, &mb, 0, nullptr, 0,
-                       nullptr);
+  SoVulkanShared::memoryBarrier(this->pickCommandBuffer,
+                                VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                                VK_PIPELINE_STAGE_HOST_BIT,
+                                VK_ACCESS_SHADER_WRITE_BIT,
+                                VK_ACCESS_HOST_READ_BIT);
 
   if (vkEndCommandBuffer(this->pickCommandBuffer) != VK_SUCCESS) {
     return false;

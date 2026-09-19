@@ -591,14 +591,12 @@ SoRTXRenderBackend::recordDenoiseReadback(VkCommandBuffer cmd)
   // denoiser kernel (OptiX) is imported over the same device memory, so the
   // G-buffers are copied device-to-device and no host staging is involved.
   if (this->denoiseKind == DenoiseRtx && this->rtxInteropReady) {
-    VkMemoryBarrier before {};
-    before.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
-    before.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
-    before.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
-    vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_RAY_TRACING_SHADER_BIT_KHR |
-                              VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
-                         VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 1, &before, 0,
-                         nullptr, 0, nullptr);
+    SoVulkanShared::memoryBarrier(
+      cmd,
+      VK_PIPELINE_STAGE_RAY_TRACING_SHADER_BIT_KHR |
+        VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+      VK_PIPELINE_STAGE_TRANSFER_BIT, VK_ACCESS_SHADER_WRITE_BIT,
+      VK_ACCESS_TRANSFER_READ_BIT);
 
     if (this->accumBuffer != VK_NULL_HANDLE && this->rtxColorVk != VK_NULL_HANDLE) {
       VkBufferCopy c0 {0, 0, stride};
@@ -619,14 +617,10 @@ SoRTXRenderBackend::recordDenoiseReadback(VkCommandBuffer cmd)
 
     // Make the copies visible to the CUDA driver (COMPUTE stage) after the
     // Vulkan queue waits idle.
-    VkMemoryBarrier afterStaging {};
-    afterStaging.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
-    afterStaging.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
-    afterStaging.dstAccessMask = VK_ACCESS_SHADER_READ_BIT |
-                                 VK_ACCESS_SHADER_WRITE_BIT;
-    vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_TRANSFER_BIT,
-                         VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, 1,
-                         &afterStaging, 0, nullptr, 0, nullptr);
+    SoVulkanShared::memoryBarrier(
+      cmd, VK_PIPELINE_STAGE_TRANSFER_BIT,
+      VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_ACCESS_TRANSFER_WRITE_BIT,
+      VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT);
     this->oidnReadbackPending = TRUE;
     return;
   }
@@ -639,14 +633,12 @@ SoRTXRenderBackend::recordDenoiseReadback(VkCommandBuffer cmd)
   if (this->denoiseColorBuf == VK_NULL_HANDLE) return;
   if (this->accumBuffer == VK_NULL_HANDLE) return;
 
-  VkMemoryBarrier before {};
-  before.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
-  before.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
-  before.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
-  vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_RAY_TRACING_SHADER_BIT_KHR |
-                            VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
-                       VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 1, &before, 0,
-                       nullptr, 0, nullptr);
+  SoVulkanShared::memoryBarrier(
+    cmd,
+    VK_PIPELINE_STAGE_RAY_TRACING_SHADER_BIT_KHR |
+      VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+    VK_PIPELINE_STAGE_TRANSFER_BIT, VK_ACCESS_SHADER_WRITE_BIT,
+    VK_ACCESS_TRANSFER_READ_BIT);
 
   // color (accum average), albedo, normal, motion.  The position buffer is not
   // needed: the present shader's denoised-alpha test uses the averaged color's
@@ -693,15 +685,12 @@ SoRTXRenderBackend::recordDenoiseReadback(VkCommandBuffer cmd)
 
     // The G-buffers were written by the raygen/compute tracer earlier in this
     // command buffer; make the writes visible to this compute dispatch.
-    VkMemoryBarrier gpuBefore {};
-    gpuBefore.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
-    gpuBefore.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
-    gpuBefore.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
-    vkCmdPipelineBarrier(cmd,
-                         VK_PIPELINE_STAGE_RAY_TRACING_SHADER_BIT_KHR |
-                           VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
-                         VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, 1,
-                         &gpuBefore, 0, nullptr, 0, nullptr);
+    SoVulkanShared::memoryBarrier(
+      cmd,
+      VK_PIPELINE_STAGE_RAY_TRACING_SHADER_BIT_KHR |
+        VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+      VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_ACCESS_SHADER_WRITE_BIT,
+      VK_ACCESS_SHADER_READ_BIT);
 
     vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE,
                       this->denoiseDownsamplePipeline);
@@ -715,13 +704,10 @@ SoRTXRenderBackend::recordDenoiseReadback(VkCommandBuffer cmd)
     // Make the working-set writes visible to the host (the worker reads them
     // from the HOST_COHERENT staging block).
 
-    VkMemoryBarrier gpuAfter {};
-    gpuAfter.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
-    gpuAfter.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
-    gpuAfter.dstAccessMask = VK_ACCESS_HOST_READ_BIT | VK_ACCESS_HOST_WRITE_BIT;
-    vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
-                         VK_PIPELINE_STAGE_HOST_BIT, 0, 1, &gpuAfter, 0,
-                         nullptr, 0, nullptr);
+    SoVulkanShared::memoryBarrier(
+      cmd, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_HOST_BIT,
+      VK_ACCESS_SHADER_WRITE_BIT,
+      VK_ACCESS_HOST_READ_BIT | VK_ACCESS_HOST_WRITE_BIT);
     // The worker must NOT re-apply the normalize/downsample the GPU did.
     this->oidnGpuPrepared = true;
   }
@@ -742,13 +728,10 @@ SoRTXRenderBackend::recordDenoiseReadback(VkCommandBuffer cmd)
       vkCmdCopyBuffer(cmd, this->motionBuffer, this->denoiseColorBuf, 1, &cM);
     }
 
-    VkMemoryBarrier afterStaging {};
-    afterStaging.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
-    afterStaging.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
-    afterStaging.dstAccessMask = VK_ACCESS_HOST_READ_BIT | VK_ACCESS_HOST_WRITE_BIT;
-    vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_TRANSFER_BIT,
-                         VK_PIPELINE_STAGE_HOST_BIT, 0, 1, &afterStaging, 0,
-                         nullptr, 0, nullptr);
+    SoVulkanShared::memoryBarrier(
+      cmd, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_HOST_BIT,
+      VK_ACCESS_TRANSFER_WRITE_BIT,
+      VK_ACCESS_HOST_READ_BIT | VK_ACCESS_HOST_WRITE_BIT);
   }
   this->oidnReadbackPending = TRUE;
 }
@@ -790,23 +773,16 @@ SoRTXRenderBackend::updateDenoise()
       // the staging is HOST_COHERENT so the worker's writes are visible here.
       VkCommandBuffer cmd = this->beginTransientCommandBuffer();
       if (cmd != VK_NULL_HANDLE) {
-        VkMemoryBarrier hostBar {};
-        hostBar.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
-        hostBar.srcAccessMask = VK_ACCESS_HOST_WRITE_BIT;
-        hostBar.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
-        vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_HOST_BIT,
-                             VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 1, &hostBar, 0,
-                             nullptr, 0, nullptr);
+        SoVulkanShared::memoryBarrier(
+          cmd, VK_PIPELINE_STAGE_HOST_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT,
+          VK_ACCESS_HOST_WRITE_BIT, VK_ACCESS_TRANSFER_READ_BIT);
         VkBufferCopy cOut {outOffset, 0, outStride};
         vkCmdCopyBuffer(cmd, this->denoiseOutBuf, this->denoisedBuffer, 1,
                         &cOut);
-        VkMemoryBarrier outBar {};
-        outBar.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
-        outBar.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
-        outBar.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
-        vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_TRANSFER_BIT,
-                             VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, 0, 1,
-                             &outBar, 0, nullptr, 0, nullptr);
+        SoVulkanShared::memoryBarrier(
+          cmd, VK_PIPELINE_STAGE_TRANSFER_BIT,
+          VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
+          VK_ACCESS_TRANSFER_WRITE_BIT, VK_ACCESS_SHADER_READ_BIT);
         vkEndCommandBuffer(cmd);
         // Run the denoiser-output copy on the compute queue when the async
         // path is available, so the graphics queue stays free (see
@@ -948,23 +924,17 @@ SoRTXRenderBackend::updateDenoise()
       this->convergeAfterDenoise();
       return;
     }
-    VkMemoryBarrier hostBar {};
-    hostBar.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
-    hostBar.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
-    hostBar.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
-    vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
-                         VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 1, &hostBar, 0,
-                         nullptr, 0, nullptr);
+    SoVulkanShared::memoryBarrier(
+      cmd, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+      VK_PIPELINE_STAGE_TRANSFER_BIT, VK_ACCESS_SHADER_WRITE_BIT,
+      VK_ACCESS_TRANSFER_READ_BIT);
     const VkDeviceSize stride = static_cast<VkDeviceSize>(w) * h * 16;
     VkBufferCopy cOut {0, 0, stride};
     vkCmdCopyBuffer(cmd, this->rtxOutputVk, this->denoisedBuffer, 1, &cOut);
-    VkMemoryBarrier outBar {};
-    outBar.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
-    outBar.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
-    outBar.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
-    vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_TRANSFER_BIT,
-                         VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, 0, 1,
-                         &outBar, 0, nullptr, 0, nullptr);
+    SoVulkanShared::memoryBarrier(
+      cmd, VK_PIPELINE_STAGE_TRANSFER_BIT,
+      VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, VK_ACCESS_TRANSFER_WRITE_BIT,
+      VK_ACCESS_SHADER_READ_BIT);
     vkEndCommandBuffer(cmd);
     VkSubmitInfo si {};
     si.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
@@ -1965,13 +1935,9 @@ submitRtxSemaphoreBarrier(VkDevice device, VkCommandPool pool, VkQueue queue,
   bi.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
   bool ok = vkBeginCommandBuffer(cmd, &bi) == VK_SUCCESS;
   if (ok) {
-    VkMemoryBarrier noOp {};
-    noOp.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
-    noOp.srcAccessMask = 0;
-    noOp.dstAccessMask = 0;
-    vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
-                         VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, 0, 1, &noOp, 0,
-                         nullptr, 0, nullptr);
+    SoVulkanShared::memoryBarrier(
+      cmd, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
+      VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, 0, 0);
     ok = vkEndCommandBuffer(cmd) == VK_SUCCESS;
   }
   if (ok) {

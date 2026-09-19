@@ -386,29 +386,22 @@ SoRTXRenderBackend::updatePathTracingState(const SoDrawList & /*drawlist*/,
     if (this->sumSqHistoryBuffer != VK_NULL_HANDLE) {
       vkCmdFillBuffer(cmd, this->sumSqHistoryBuffer, 0, VK_WHOLE_SIZE, 0);
     }
-    VkMemoryBarrier fillBarrier {};
-    fillBarrier.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
-    fillBarrier.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
-    fillBarrier.dstAccessMask = VK_ACCESS_SHADER_WRITE_BIT |
-      VK_ACCESS_SHADER_READ_BIT;
-    vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_TRANSFER_BIT,
-                         VK_PIPELINE_STAGE_RAY_TRACING_SHADER_BIT_KHR |
-                           VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
-                         0, 1, &fillBarrier, 0, nullptr, 0, nullptr);
+    SoVulkanShared::memoryBarrier(
+      cmd, VK_PIPELINE_STAGE_TRANSFER_BIT,
+      VK_PIPELINE_STAGE_RAY_TRACING_SHADER_BIT_KHR |
+        VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+      VK_ACCESS_TRANSFER_WRITE_BIT,
+      VK_ACCESS_SHADER_WRITE_BIT | VK_ACCESS_SHADER_READ_BIT);
   }
   // The active-pixel counter is per-frame: zero it before every traced
   // frame (the host reads it back after the submission's queue wait).
   if (this->ptEnabled && this->activeCounterBuffer != VK_NULL_HANDLE) {
     vkCmdFillBuffer(cmd, this->activeCounterBuffer, 0, VK_WHOLE_SIZE, 0);
     // Make the fill visible to the compute tracer's atomics.
-    VkMemoryBarrier counterBarrier {};
-    counterBarrier.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
-    counterBarrier.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
-    counterBarrier.dstAccessMask = VK_ACCESS_SHADER_WRITE_BIT |
-      VK_ACCESS_SHADER_READ_BIT;
-    vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_TRANSFER_BIT,
-                         VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, 1,
-                         &counterBarrier, 0, nullptr, 0, nullptr);
+    SoVulkanShared::memoryBarrier(
+      cmd, VK_PIPELINE_STAGE_TRANSFER_BIT,
+      VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_ACCESS_TRANSFER_WRITE_BIT,
+      VK_ACCESS_SHADER_WRITE_BIT | VK_ACCESS_SHADER_READ_BIT);
   }
 }
 
@@ -511,24 +504,14 @@ SoRTXRenderBackend::recordAccelerationStructures(
   // subpass self-dependency, so layout transitions cannot be recorded
   // inside it).
   if (this->storageImageNeedsLayoutInit && this->storageImage != VK_NULL_HANDLE) {
-    VkImageMemoryBarrier imageBarrier {};
-    imageBarrier.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
-    imageBarrier.oldLayout = VK_IMAGE_LAYOUT_UNDEFINED;
-    imageBarrier.newLayout = VK_IMAGE_LAYOUT_GENERAL;
-    imageBarrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-    imageBarrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-    imageBarrier.image = this->storageImage;
-    imageBarrier.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
-    imageBarrier.subresourceRange.levelCount = 1;
-    imageBarrier.subresourceRange.layerCount = 1;
-    imageBarrier.srcAccessMask = 0;
-    imageBarrier.dstAccessMask = VK_ACCESS_SHADER_WRITE_BIT |
-      VK_ACCESS_SHADER_READ_BIT;
-    vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
-                         VK_PIPELINE_STAGE_RAY_TRACING_SHADER_BIT_KHR |
-                           VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT |
-                           VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
-                         0, 0, nullptr, 0, nullptr, 1, &imageBarrier);
+    SoVulkanShared::imageTransition(
+      cmd, this->storageImage, VK_IMAGE_LAYOUT_UNDEFINED,
+      VK_IMAGE_LAYOUT_GENERAL, 0,
+      VK_ACCESS_SHADER_WRITE_BIT | VK_ACCESS_SHADER_READ_BIT,
+      VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
+      VK_PIPELINE_STAGE_RAY_TRACING_SHADER_BIT_KHR |
+        VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT |
+        VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT);
     this->storageImageNeedsLayoutInit = false;
   }
 
@@ -672,15 +655,12 @@ SoRTXRenderBackend::recordAccelerationStructures(
     // Barrier: BLAS/TLAS builds -> ray tracing shaders.  Recorded here, still
     // outside the render pass (acceleration-structure builds and buffer copies
     // are not allowed inside one).
-    VkMemoryBarrier asBarrier {};
-    asBarrier.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
-    asBarrier.srcAccessMask = VK_ACCESS_ACCELERATION_STRUCTURE_WRITE_BIT_KHR;
-    asBarrier.dstAccessMask = VK_ACCESS_ACCELERATION_STRUCTURE_READ_BIT_KHR;
-    vkCmdPipelineBarrier(cmd,
-                         VK_PIPELINE_STAGE_ACCELERATION_STRUCTURE_BUILD_BIT_KHR,
-                         VK_PIPELINE_STAGE_RAY_TRACING_SHADER_BIT_KHR |
-                           VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
-                         0, 1, &asBarrier, 0, nullptr, 0, nullptr);
+    SoVulkanShared::memoryBarrier(
+      cmd, VK_PIPELINE_STAGE_ACCELERATION_STRUCTURE_BUILD_BIT_KHR,
+      VK_PIPELINE_STAGE_RAY_TRACING_SHADER_BIT_KHR |
+        VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+      VK_ACCESS_ACCELERATION_STRUCTURE_WRITE_BIT_KHR,
+      VK_ACCESS_ACCELERATION_STRUCTURE_READ_BIT_KHR);
   }
 
   // --- Frame uniform data (host-visible; no barrier needed) --------------
@@ -940,15 +920,12 @@ SoRTXRenderBackend::recordAccelerationStructures(
                   (this->storageHeight + 7) / 8, 1);
   }
 
-  VkMemoryBarrier traceBarrier {};
-  traceBarrier.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
-  traceBarrier.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
-  traceBarrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
-  vkCmdPipelineBarrier(cmd,
-                       VK_PIPELINE_STAGE_RAY_TRACING_SHADER_BIT_KHR |
-                         VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
-                       VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, 0, 1,
-                       &traceBarrier, 0, nullptr, 0, nullptr);
+  SoVulkanShared::memoryBarrier(
+    cmd,
+    VK_PIPELINE_STAGE_RAY_TRACING_SHADER_BIT_KHR |
+      VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+    VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, VK_ACCESS_SHADER_WRITE_BIT,
+    VK_ACCESS_SHADER_READ_BIT);
 
   // Denoiser readback: only on the target frame that reached the sample count
   // (ptDenoisePending).  Every other accumulating frame presents the in-shader

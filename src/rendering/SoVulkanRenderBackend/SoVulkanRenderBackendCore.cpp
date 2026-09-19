@@ -173,6 +173,21 @@ SoVulkanRenderBackend::initialize(const SoRenderBackendInitParams & params)
   }
   this->memProps.setDevice(this->physicalDevice);
 
+  // Resolve the synchronization2 entry points once for this device.  A null
+  // pointer means the extension was not enabled; the shared barrier/submit
+  // helpers then fall back to the legacy entry points.
+  {
+    SoVulkanShared::Sync2Dispatch & sync2 = SoVulkanShared::sync2Dispatch();
+    sync2.cmdPipelineBarrier2 =
+      SoVulkanShared::loadDispatch<PFN_vkCmdPipelineBarrier2KHR>(
+        vkGetDeviceProcAddr(this->device, "vkCmdPipelineBarrier2KHR"));
+    sync2.queueSubmit2 = SoVulkanShared::loadDispatch<PFN_vkQueueSubmit2KHR>(
+      vkGetDeviceProcAddr(this->device, "vkQueueSubmit2KHR"));
+    this->emitLog(sync2.cmdPipelineBarrier2 != nullptr
+                    ? "synchronization2: enabled"
+                    : "synchronization2: unavailable (legacy barriers)");
+  }
+
   // Bind the render-pass/framebuffer cache to this device and hook its
   // deferred resource release into the frame ring: an old framebuffer is
   // destroyed a few frames after the submission that referenced it completes,
