@@ -88,6 +88,7 @@ SoVulkanGpuTimers::beginScope(VkCommandBuffer commandBuffer, const char * name)
   this->scopeNames[slot][this->scopeCount] = name;
   vkCmdWriteTimestamp(commandBuffer, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
                       this->queryPool, base + this->scopeCount * 2);
+  ++this->scopeCount;
 }
 
 void
@@ -102,7 +103,6 @@ SoVulkanGpuTimers::endScope(VkCommandBuffer commandBuffer)
   vkCmdWriteTimestamp(commandBuffer, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT,
                       this->queryPool,
                       base + (this->scopeCount - 1) * 2 + 1);
-  ++this->scopeCount;
 }
 
 void
@@ -119,7 +119,10 @@ SoVulkanGpuTimers::endFrame()
   // After advancing, ringIndex is the oldest slot: its submission has had
   // kRingFrames-1 frames to complete, so the results are normally ready.
   const uint32_t readSlot = this->ringIndex;
-  const uint32_t count = this->slotScopeCount[readSlot];
+  uint32_t count = this->slotScopeCount[readSlot];
+  if (count > kMaxScopesPerFrame) {
+    count = kMaxScopesPerFrame;
+  }
   if (count == 0) {
     return;
   }
