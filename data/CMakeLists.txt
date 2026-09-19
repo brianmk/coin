@@ -182,6 +182,9 @@ if(COIN_BUILD_VULKAN_RENDERER)
       data/shaders/vulkan/rt/PresentFragment.glsl frag)
     coin_embed_vulkan_spirv(vulkan_rt_denoisedownsample
       data/shaders/vulkan/rt/DenoiseDownsample.glsl comp)
+    # Single-ray GPU pick for the RTX viewport (Vulkan/RTX only).
+    coin_embed_vulkan_spirv(vulkan_rt_pick
+      data/shaders/vulkan/rt/Pick.glsl comp)
 
     add_custom_target(coin_regenerate_vulkan_spirv
       DEPENDS ${COIN_VULKAN_SPIRV_REGENERATE_TARGETS}
@@ -199,7 +202,8 @@ if(COIN_BUILD_VULKAN_RENDERER)
       ShadowClosestHit.spv.h
       PresentVertex.spv.h
       PresentFragment.spv.h
-      DenoiseDownsample.spv.h)
+      DenoiseDownsample.spv.h
+      Pick.spv.h)
     set(COIN_RT_SPIRV_COPY_COMMANDS)
     foreach(_rt_spv ${COIN_RT_SPIRV_FILES})
       list(APPEND COIN_RT_SPIRV_COPY_COMMANDS

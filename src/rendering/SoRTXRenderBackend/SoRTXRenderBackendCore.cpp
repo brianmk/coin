@@ -572,6 +572,8 @@ SoRTXRenderBackend::initialize(const SoRenderBackendInitParams & params)
     this->hasNvCluster = deviceContext->caps.nvCluster;
     this->hasNvPartitioned = deviceContext->caps.nvPartitioned;
     this->hasNvLinearSweptSpheres = deviceContext->caps.nvLinearSweptSpheres;
+    this->hasUpdateAfterBind =
+      deviceContext->caps.descriptorIndexingUpdateAfterBind;
   }
   else {
     uint32_t extCount = 0;
@@ -596,6 +598,17 @@ SoRTXRenderBackend::initialize(const SoRenderBackendInitParams & params)
       hasExt("VK_NV_partitioned_acceleration_structure");
     this->hasNvLinearSweptSpheres =
       hasExt("VK_NV_ray_tracing_linear_swept_spheres");
+    VkPhysicalDeviceDescriptorIndexingFeatures di {};
+    di.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DESCRIPTOR_INDEXING_FEATURES;
+    VkPhysicalDeviceFeatures2 f2 {};
+    f2.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2;
+    f2.pNext = &di;
+    vkGetPhysicalDeviceFeatures2(this->physicalDevice, &f2);
+    this->hasUpdateAfterBind =
+      di.descriptorBindingSampledImageUpdateAfterBind &&
+      di.descriptorBindingStorageImageUpdateAfterBind &&
+      di.descriptorBindingUniformBufferUpdateAfterBind &&
+      di.descriptorBindingStorageBufferUpdateAfterBind;
   }
   char capsBuf[192];
   std::snprintf(
@@ -844,6 +857,24 @@ SoRTXRenderBackend::releaseTransientCommandBuffer()
   }
 }
 
+void
+SoRTXRenderBackend::setMaxFramesInFlight(uint32_t count)
+{
+  uint32_t size = count < 2u ? 2u : count;
+  if (size > RTX_MAX_FRAMES_IN_FLIGHT) {
+    size = RTX_MAX_FRAMES_IN_FLIGHT;
+  }
+  if (size == this->descriptorRingSize) {
+    return;
+  }
+  this->descriptorRingSize = size;
+  if (this->descriptorSetIndex >= size) {
+    this->descriptorSetIndex = 0;
+  }
+  // Extra ring slots are allocated lazily by updateDescriptors(); slots beyond
+  // the new size stay allocated but are simply never bound again.
+}
+
 // --- Lifecycle ------------------------------------------------------------
 
 void
@@ -859,6 +890,9 @@ SoRTXRenderBackend::shutdown()
 
   this->invalidateCache();
   this->freePendingStagingDestroys();
+
+  // GPU-pick resources (Vulkan/RTX only): no-op unless a pick ever ran.
+  this->destroyPickResources();
 
   if (this->tlas != VK_NULL_HANDLE) {
     vkDestroyAccelerationStructureKHR(this->device, this->tlas,
@@ -1159,17 +1193,15 @@ SoRTXRenderBackend::shutdown()
   this->releaseTransientCommandBuffer();
   this->offscreenColorImage = VK_NULL_HANDLE;
   this->offscreenColorView = VK_NULL_HANDLE;
-  this->rtDescriptorSets[0] = VK_NULL_HANDLE;
-  this->rtDescriptorSets[1] = VK_NULL_HANDLE;
-  this->presentDescriptorSets[0] = VK_NULL_HANDLE;
-  this->presentDescriptorSets[1] = VK_NULL_HANDLE;
-  // The sets are invalid until updateDescriptors() rewrites them in the next
-  // engine generation; descriptorSetIndex is intentionally NOT reset here, so
-  // the first (possibly non-dirty) frame must repopulate its torn set.
-  this->rtSetValid[0] = false;
-  this->rtSetValid[1] = false;
-  this->presentSetValid[0] = false;
-  this->presentSetValid[1] = false;
+  for (uint32_t i = 0; i < RTX_MAX_FRAMES_IN_FLIGHT; ++i) {
+    this->rtDescriptorSets[i] = VK_NULL_HANDLE;
+    this->presentDescriptorSets[i] = VK_NULL_HANDLE;
+    // The sets are invalid until updateDescriptors() rewrites them in the next
+    // engine generation; descriptorSetIndex is intentionally NOT reset here, so
+    // the first (possibly non-dirty) frame must repopulate its torn set.
+    this->rtSetValid[i] = false;
+    this->presentSetValid[i] = false;
+  }
 
   this->instance = VK_NULL_HANDLE;
   this->physicalDevice = VK_NULL_HANDLE;

@@ -60,6 +60,13 @@ struct SoVulkanDeviceCaps {
   bool dualSrcBlend = false;           //!< SRC1_* blend factors.
   bool timelineSemaphore = false;      //!< Vulkan 1.2 timeline semaphores.
   bool synchronization2 = false;       //!< VK_KHR_synchronization2.
+  //! VK_EXT_descriptor_indexing update-after-bind for the descriptor types the
+  //! RT backend uses (sampled image, storage image, uniform buffer, storage
+  //! buffer).  Lets the backend legally update a descriptor set that an
+  //! in-flight command buffer still references, which the double-buffered
+  //! frame ring cannot always guarantee
+  //! (VUID-vkUpdateDescriptorSets-None-03047).
+  bool descriptorIndexingUpdateAfterBind = false;
 };
 
 /*!

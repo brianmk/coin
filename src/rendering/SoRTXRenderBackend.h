@@ -371,6 +371,59 @@ public:
                         VkCommandBuffer commandBuffer,
                         VkRenderPass renderPass);
 
+  /*!
+    \brief One GPU ray-query pick result (see pickRay()).
+
+    \a commandIndex is the TLAS instance custom index, which buildTlas() sets
+    to the draw-list command index; the host resolves it to the originating
+    SoShape through the per-frame SoRenderCommand::userData snapshot
+    (pickCommandInfo).  \a primitiveId is the triangle index within that
+    command's BLAS, which maps back to a sub-element (for a SoBrepFaceSet,
+    partIndex maps the triangle to its topological face).
+
+    This is a Vulkan/RTX-only facility.  The GL renderer keeps the CPU
+    SoRayPickAction path unchanged.
+  */
+  struct RTPickHit {
+    bool hit = false;
+    float t = -1.0f;
+    float worldPos[3] = {0.0f, 0.0f, 0.0f};
+    uint32_t commandIndex = 0;
+    uint32_t primitiveId = 0;
+    // Producer identity resolved from the command index through
+    // pickCommandInfo: the originating SoShape (SoRenderCommand::userData)
+    // and that command's primitive offset within the source shape.  userData
+    // is null when the command index is out of range.
+    const void * userData = nullptr;
+    uint32_t primitiveOffset = 0;
+  };
+
+  /*!
+    \brief Cast one world-space ray against the current TLAS and return the
+    closest triangle hit.
+
+    Synchronous, and intended to be called from the GUI thread (the same thread
+    that drives startNextFrame()), so it never races a frame submission.
+    Returns false when the backend cannot pick: not initialized, no TLAS built
+    yet, or the pick resources could not be created.  The caller then keeps the
+    CPU picking path.
+  */
+  bool pickRay(const float origin[3], const float direction[3], float tMax,
+               RTPickHit & out);
+
+  /*!
+    \brief Size the descriptor ring to the embedding's frames-in-flight count.
+
+    The caller (SoVulkanRenderManager, fed by the Vulkan viewport) passes the
+    swapchain image count plus a margin.  A slot is then only rewritten after
+    that many frames, i.e. after the caller-owned command buffer that last
+    bound it has completed, which is what makes updating a descriptor set that
+    a previous frame used legal (VUID-vkUpdateDescriptorSets-None-03047).
+    Values below 2 are clamped to 2; values above RTX_MAX_FRAMES_IN_FLIGHT are
+    clamped to that.
+  */
+  void setMaxFramesInFlight(uint32_t count);
+
 private:
   // --- Initialization helpers -------------------------------------------
   bool createDescriptorSetLayout();
@@ -512,6 +565,12 @@ private:
   // only records what the created device actually advertises so the shader /
   // builder paths can be selected at run time without querying every frame.
   bool hasPositionFetch = false;
+  //! True when the device has (and the embedding enabled) descriptor-indexing
+  //! update-after-bind.  The descriptor set layouts then carry
+  //! VK_DESCRIPTOR_BINDING_UPDATE_AFTER_BIND_BIT so a set may be rewritten
+  //! while an in-flight command buffer still references it
+  //! (VUID-vkUpdateDescriptorSets-None-03047).
+  bool hasUpdateAfterBind = false;
   bool hasOpacityMicromap = false;
   bool hasNvCluster = false;
   bool hasNvPartitioned = false;
@@ -523,6 +582,26 @@ private:
   // frame; the caller submits and waits the buffer every frame.
   VkCommandPool transientPool = VK_NULL_HANDLE;
   VkCommandBuffer transientCommandBuffer = VK_NULL_HANDLE;
+
+  // --- GPU pick (Vulkan/RTX only) ----------------------------------------
+  // A single-ray ray-query against the TLAS for viewport hover/selection.
+  // Resources are created lazily on the first pickRay() call and torn down in
+  // shutdown().  Deliberately separate from the path tracer's pipeline and
+  // descriptor sets so the render path is not perturbed at all.
+  bool createPickResources();
+  void destroyPickResources();
+  VkShaderModule pickModule = VK_NULL_HANDLE;
+  VkDescriptorSetLayout pickSetLayout = VK_NULL_HANDLE;
+  VkPipelineLayout pickPipelineLayout = VK_NULL_HANDLE;
+  VkPipeline pickPipeline = VK_NULL_HANDLE;
+  VkDescriptorSet pickDescriptorSet = VK_NULL_HANDLE;
+  VkBuffer pickResultBuffer = VK_NULL_HANDLE;
+  VkDeviceMemory pickResultMemory = VK_NULL_HANDLE;
+  void * pickResultMapped = nullptr;
+  VkCommandPool pickCommandPool = VK_NULL_HANDLE;
+  VkCommandBuffer pickCommandBuffer = VK_NULL_HANDLE;
+  VkFence pickFence = VK_NULL_HANDLE;
+  bool pickResourcesReady = false;
 
   // --- RT pipeline resources ---------------------------------------------
   // The tracer has two dispatch modes:
@@ -540,27 +619,35 @@ private:
   VkDescriptorSetLayout presentSetLayout = VK_NULL_HANDLE;
   VkDescriptorSetLayout denoiseDownsampleSetLayout = VK_NULL_HANDLE;
   VkDescriptorPool descriptorPool = VK_NULL_HANDLE;
-  // Double-buffered descriptor sets: one frame's sets are bound while the
-  // previous frame's submission may still be pending, so each frame updates
-  // the inactive pair (VUID-vkUpdateDescriptorSets-None-03047).
-  VkDescriptorSet rtDescriptorSets[2] = {VK_NULL_HANDLE, VK_NULL_HANDLE};
-  VkDescriptorSet presentDescriptorSets[2] = {VK_NULL_HANDLE, VK_NULL_HANDLE};
+  // Descriptor ring: one pair (RT + present) per frame in flight.  The set
+  // bound by a caller-owned command buffer must not be updated while that
+  // command buffer is still pending (VUID-vkUpdateDescriptorSets-None-03047),
+  // and the embedding can keep more than two frames in flight (QVulkanWindow
+  // keeps up to its swapchain image count).  setMaxFramesInFlight() sizes the
+  // ring accordingly; the index advances every frame and the current slot is
+  // always rewritten before it is bound, so the slot reused at frame N was
+  // last bound at frame N-ringSize (>= frames in flight -> complete).
+  static constexpr uint32_t RTX_MAX_FRAMES_IN_FLIGHT = 8;
+  VkDescriptorSet rtDescriptorSets[RTX_MAX_FRAMES_IN_FLIGHT] = {};
+  VkDescriptorSet presentDescriptorSets[RTX_MAX_FRAMES_IN_FLIGHT] = {};
   VkDescriptorSet denoiseDownsampleDescriptorSet = VK_NULL_HANDLE;
   //! Whether denoiseDownsampleDescriptorSet currently holds the valid staging/
   //! G-buffer bindings (reset on teardown so a stale set is never dispatched).
   bool denoiseDownsampleValid = false;
   uint32_t descriptorSetIndex = 0;
+  //! Number of ring slots actually in use (>= 2, <= RTX_MAX_FRAMES_IN_FLIGHT).
+  //! Set by setMaxFramesInFlight(); the embedding passes swapchain image count
+  //! + 1 so a slot is always free when its turn comes around.
+  uint32_t descriptorRingSize = 2;
   // Whether rtDescriptorSets[i] / presentDescriptorSets[i] hold bindings that
   // updateDescriptors() actually wrote in the current engine generation.  The
-  // sets are populated only on an asDirty frame (a camera-only frame reuses the
-  // last-populated set), and they are torn down (-> NULL) on resource teardown
-  // while descriptorSetIndex carries over.  A fresh set that a non-dirty frame
-  // then binds has NEVER been written -> VUID-vkCmdDispatch-None-08114 (and,
-  // on the present set, the same class of undefined sample).  These flags make
-  // that hazard explicit so recordAccelerationStructures can repopulate a torn
-  // set before it is bound.
-  bool rtSetValid[2] = {false, false};
-  bool presentSetValid[2] = {false, false};
+  // sets are torn down (-> NULL) on resource teardown while descriptorSetIndex
+  // carries over.  A fresh set that is then bound has NEVER been written ->
+  // VUID-vkCmdDispatch-None-08114 (and, on the present set, the same class of
+  // undefined sample).  These flags make that hazard explicit so
+  // recordAccelerationStructures can repopulate a torn set before it is bound.
+  bool rtSetValid[RTX_MAX_FRAMES_IN_FLIGHT] = {};
+  bool presentSetValid[RTX_MAX_FRAMES_IN_FLIGHT] = {};
 
   VkPipelineLayout rtPipelineLayout = VK_NULL_HANDLE;
   VkPipelineLayout presentPipelineLayout = VK_NULL_HANDLE;
@@ -806,6 +893,18 @@ private:
   // Reusable per-frame instance collection (grown on demand) instead of a
   // fresh heap allocation inside buildTlas() every frame.
   std::vector<VkAccelerationStructureInstanceKHR> instanceScratch;
+  // Per-command producer identity captured when the TLAS is built, indexed by
+  // the TLAS instanceCustomIndex (buildTlas sets it to the draw-list command
+  // index).  A ray-query pick returns that index plus a primitive id; mapping
+  // them back to a scene node and sub-element needs the originating
+  // SoShape (SoRenderCommand::userData) and the command's primitiveOffset,
+  // which the per-frame draw list does not preserve after the frame ends.
+  // Vulkan/RTX only; the GL renderer and raster Vulkan path never read it.
+  struct RTPickCommandInfo {
+    const void * userData = nullptr;
+    uint32_t primitiveOffset = 0;
+  };
+  std::vector<RTPickCommandInfo> pickCommandInfo;
   VkBuffer scratchBuffer = VK_NULL_HANDLE;
   VkDeviceMemory scratchMemory = VK_NULL_HANDLE;
   VkDeviceSize scratchSize = 0;

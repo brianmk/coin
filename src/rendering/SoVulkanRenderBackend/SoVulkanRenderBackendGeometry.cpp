@@ -376,7 +376,7 @@ SoVulkanRenderBackend::createBufferDeviceLocal(VkDeviceSize size,
   // records the copy + barrier, submits, and drains the queue before returning.
   const bool ok = SoVulkanShared::withOneShotSubmit(
     this->device, this->queue, this->commandPool, this->allocator,
-    [this, staging, buffer, size](VkCommandBuffer transfer) {
+    [staging, buffer, size](VkCommandBuffer transfer) {
       VkBufferCopy copy {};
       copy.size = size;
       vkCmdCopyBuffer(transfer, staging, buffer, 1, &copy);
@@ -577,6 +577,18 @@ SoVulkanRenderBackend::destroyCacheEntry(VulkanCachedCommand & entry)
     slot.destroy(this->device, this->allocator);
   }
   entry.wideLineBuffers.clear();
+  // GPU-instanced wide-line endpoint buffer.  The deferred destroy path
+  // (deferDestroyCacheEntry) already released this; the synchronous path used
+  // by invalidateCache() must too, or every instanced line command leaks its
+  // buffer + memory past vkDestroyDevice (VUID-vkDestroyDevice-device-05137).
+  if (entry.instancedLineBuffer != VK_NULL_HANDLE) {
+    vkDestroyBuffer(this->device, entry.instancedLineBuffer, this->allocator);
+    entry.instancedLineBuffer = VK_NULL_HANDLE;
+  }
+  if (entry.instancedLineMemory != VK_NULL_HANDLE) {
+    vkFreeMemory(this->device, entry.instancedLineMemory, this->allocator);
+    entry.instancedLineMemory = VK_NULL_HANDLE;
+  }
   this->destroySubPixelResources(entry);
   entry = VulkanCachedCommand();
 }

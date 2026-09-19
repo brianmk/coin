@@ -51,6 +51,13 @@ layout(location = 6) in vec4 a_iModelRow2;
 layout(location = 7) in vec4 a_iModelRow3;
 
 layout(location = 0) out vec4 v_color;
+// Declared for interface compatibility with WideLineFragment.glsl, which always
+// reads location 1.  The instanced path is only used for non-stippled lines
+// (stippled lines stay on the serial CPU-expansion path because their
+// per-vertex distance is order-dependent), so the fragment's stipple branch
+// (u_lineParams.x > 0) is never taken here.  Still write a meaningful
+// per-segment screen distance so the varying is not undefined.
+layout(location = 1) out float v_lineDistance;
 
 // Same triangle order as the CPU producer: corners [0]=p0+off, [1]=p0-off,
 // [2]=p1+off, [3]=p1-off.
@@ -59,6 +66,7 @@ const int kTriOrder[6] = int[](0, 1, 2, 2, 1, 3);
 void main()
 {
     const float kNearEps = 1.0e-5;
+    v_lineDistance = 0.0;
 
     mat4 model = mat4(a_iModelRow0, a_iModelRow1, a_iModelRow2, a_iModelRow3);
     mat4 mvp = pc.u_proj * draw.u_view * model;
@@ -115,6 +123,12 @@ void main()
     int corner = kTriOrder[gl_VertexIndex];
     bool endpoint1 = corner >= 2;
     float sign = ((corner & 1) == 0) ? 1.0 : -1.0;
+    // Per-segment screen distance (pixels): 0 at the p0 corners, the segment
+    // length at the p1 corners, linearly interpolated across the quad.
+    v_lineDistance = endpoint1
+        ? length(d * vec2(max(pc.u_lineGeom.y, 1.0),
+                          max(pc.u_lineGeom.z, 1.0)) * 0.5)
+        : 0.0;
     vec4 base = endpoint1 ? cB : cA;
     float w = base.w;
     // The offset is scaled by w so the perspective divide yields a constant

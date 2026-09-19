@@ -221,6 +221,13 @@ SoVulkanRenderBackend::shutdown()
 
   this->invalidateCache();
   this->destroyAllGeometryBlocks();
+  // invalidateCache()/destroyAllGeometryBlocks() release their cached command
+  // buffers (vertex/index/instanced-line/sub-pixel) through deferDestroy(),
+  // because a frame may still have referenced them when they were evicted.
+  // The queue is idle here, so flush that batch now; without it those buffers
+  // and their device memory leak past vkDestroyDevice
+  // (VUID-vkDestroyDevice-device-05137).
+  this->flushAllPendingDestroys();
 
   // Persist the driver's blob and destroy every cached pipeline + the
   // VkPipelineCache handle (see SoVulkanPipelineCache).
@@ -1065,7 +1072,7 @@ SoVulkanRenderBackend::buildWorkItems(const SoDrawList & drawlist,
 
   // M1d: when the opaque pass is recorded in parallel, pre-resolve every
   // recordToSecondary item's pipeline here (single-threaded).  getOrCreatePipeline()
-  // mutates the shared pipelineCache/gpuCache on its cold path, so warming each
+  // mutates the shared pipeline store/gpuCache on its cold path, so warming each
   // key ahead of the dispatch means the parallel recorders only hit the read-only
   // warm fast path and never race on the cache.  Opaque items use the default
   // (non-transparent, no fill-mode override, not an overlay) recording state.

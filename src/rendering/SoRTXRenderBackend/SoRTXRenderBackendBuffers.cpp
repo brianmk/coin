@@ -568,29 +568,24 @@ SoRTXRenderBackend::createPathTracingBuffers(uint32_t width, uint32_t height)
     this->ptHistoryValid = FALSE;
     this->ptReprojectFrame = FALSE;
 
-    const VkDescriptorSet descriptorSets[] = {
-      this->rtDescriptorSets[0], this->rtDescriptorSets[1],
-      this->presentDescriptorSets[0], this->presentDescriptorSets[1]
-    };
-    size_t descriptorSetCount = 0;
-    while (descriptorSetCount < sizeof(descriptorSets) /
-                                  sizeof(descriptorSets[0]) &&
-           descriptorSets[descriptorSetCount] != VK_NULL_HANDLE) {
-      ++descriptorSetCount;
+    VkDescriptorSet descriptorSets[RTX_MAX_FRAMES_IN_FLIGHT * 2];
+    uint32_t descriptorSetCount = 0;
+    for (uint32_t i = 0; i < this->descriptorRingSize; ++i) {
+      if (this->rtDescriptorSets[i] != VK_NULL_HANDLE) {
+        descriptorSets[descriptorSetCount++] = this->rtDescriptorSets[i];
+        this->rtDescriptorSets[i] = VK_NULL_HANDLE;
+        this->rtSetValid[i] = false;
+      }
+      if (this->presentDescriptorSets[i] != VK_NULL_HANDLE) {
+        descriptorSets[descriptorSetCount++] = this->presentDescriptorSets[i];
+        this->presentDescriptorSets[i] = VK_NULL_HANDLE;
+        this->presentSetValid[i] = false;
+      }
     }
     if (this->descriptorPool != VK_NULL_HANDLE && descriptorSetCount > 0) {
       vkFreeDescriptorSets(this->device, this->descriptorPool,
-                           static_cast<uint32_t>(descriptorSetCount),
-                           descriptorSets);
+                           descriptorSetCount, descriptorSets);
     }
-    this->rtDescriptorSets[0] = VK_NULL_HANDLE;
-    this->rtDescriptorSets[1] = VK_NULL_HANDLE;
-    this->presentDescriptorSets[0] = VK_NULL_HANDLE;
-    this->presentDescriptorSets[1] = VK_NULL_HANDLE;
-    this->rtSetValid[0] = false;
-    this->rtSetValid[1] = false;
-    this->presentSetValid[0] = false;
-    this->presentSetValid[1] = false;
     if (!this->updateDescriptors()) {
       this->emitError(
         "createPathTracingBuffers: failed to refresh descriptors after "

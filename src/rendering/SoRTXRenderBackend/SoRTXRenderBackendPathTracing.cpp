@@ -628,13 +628,18 @@ SoRTXRenderBackend::recordAccelerationStructures(
         || (this->ptInteractionLod && this->statTlasCulled > 0));
   this->tlasCullRebuildPending = false;
 
+  // Advance the descriptor ring every frame.  The slot repopulated below is
+  // then the one bound ringSize frames ago, and the ring is sized to the
+  // embedding's frames-in-flight count (setMaxFramesInFlight), so the
+  // caller-owned command buffer that last bound it has completed -- updating
+  // it is legal (VUID-vkUpdateDescriptorSets-None-03047).  A dirty-only
+  // advance could not guarantee that: the set touched on a dirty frame might
+  // still be bound by an in-flight caller frame.
+  this->descriptorSetIndex =
+    (this->descriptorSetIndex + 1) % this->descriptorRingSize;
+
+  bool asRebuilt = false;
   if (this->asDirty || cullRebuild) {
-    // Alternate the descriptor pair so the set we (re)populate below is not
-    // the one the previous, still-in-flight submission bound.  On non-dirty
-    // frames the index is left untouched so the trace keeps binding the set
-    // that was last populated -- the root cause of the alternate-frame black
-    // flash was tracing through a set that had never been updated.
-    this->descriptorSetIndex = (this->descriptorSetIndex + 1) & 1u;
     if (this->asDirty) {
       // Emissive-triangle pool for NEE.  Rebuilt only when the AS is dirty so
       // the baked object-to-world transforms stay fresh on transform-only
@@ -652,39 +657,21 @@ SoRTXRenderBackend::recordAccelerationStructures(
       this->emitError("recordAccelerationStructures: failed to build TLAS");
       return false;
     }
-    if (!this->updateDescriptors()) {
-      this->emitError("recordAccelerationStructures: descriptor update failed");
-      return false;
-    }
+    asRebuilt = true;
+  }
 
+  // Repopulate the current ring slot every frame (the index just moved).  This
+  // also covers the post-teardown case where a fresh, never-written set would
+  // otherwise be bound -> VUID-vkCmdDispatch-None-08114.
+  if (!this->updateDescriptors()) {
+    this->emitError("recordAccelerationStructures: descriptor update failed");
+    return false;
+  }
+
+  if (asRebuilt) {
     // Barrier: BLAS/TLAS builds -> ray tracing shaders.  Recorded here, still
     // outside the render pass (acceleration-structure builds and buffer copies
     // are not allowed inside one).
-    VkMemoryBarrier asBarrier {};
-    asBarrier.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
-    asBarrier.srcAccessMask = VK_ACCESS_ACCELERATION_STRUCTURE_WRITE_BIT_KHR;
-    asBarrier.dstAccessMask = VK_ACCESS_ACCELERATION_STRUCTURE_READ_BIT_KHR;
-    vkCmdPipelineBarrier(cmd,
-                         VK_PIPELINE_STAGE_ACCELERATION_STRUCTURE_BUILD_BIT_KHR,
-                         VK_PIPELINE_STAGE_RAY_TRACING_SHADER_BIT_KHR |
-                           VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
-                         0, 1, &asBarrier, 0, nullptr, 0, nullptr);
-  }
-
-  // Guard the descriptor-validity invariant.  The trace phase below binds
-  // rtDescriptorSets[descriptorSetIndex]; that set is written only inside the
-  // asDirty block above, and a camera-only (non-dirty) frame reuses the
-  // last-written set.  A resource teardown (device lost / re-init) resets the
-  // sets to NULL while descriptorSetIndex carries over, so the first frame of
-  // the new generation can be non-dirty and bind a freshly (re)allocated but
-  // never-written set -> VUID-vkCmdDispatch-None-08114.  The torn set cannot be
-  // referenced by an in-flight submission, so repopulating it here (still
-  // outside the render pass) is legal and closes that window.
-  if (this->tlas != VK_NULL_HANDLE && !this->rtSetValid[this->descriptorSetIndex]) {
-    if (!this->updateDescriptors()) {
-      this->emitError("recordAccelerationStructures: descriptor update failed");
-      return false;
-    }
     VkMemoryBarrier asBarrier {};
     asBarrier.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
     asBarrier.srcAccessMask = VK_ACCESS_ACCELERATION_STRUCTURE_WRITE_BIT_KHR;

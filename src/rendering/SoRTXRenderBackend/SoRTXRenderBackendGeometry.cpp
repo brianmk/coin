@@ -1497,6 +1497,19 @@ SoRTXRenderBackend::buildTlas(const SoDrawList & drawlist,
     this->instanceScratch;
   instances.clear();
 
+  // Snapshot the producer identity for every draw-list command index so a
+  // later ray-query pick can resolve a hit after this frame's draw list is
+  // gone.  instanceCustomIndex is the command index (see the instance fill
+  // below), so this vector is indexed directly by it.  Vulkan/RTX only: the
+  // GL renderer and raster Vulkan path never build a TLAS and never read this.
+  this->pickCommandInfo.resize(static_cast<size_t>(drawlist.getNumCommands()));
+  for (int i = 0; i < drawlist.getNumCommands(); ++i) {
+    const SoRenderCommand & command = drawlist.getCommand(i);
+    RTPickCommandInfo & info = this->pickCommandInfo[static_cast<size_t>(i)];
+    info.userData = command.userData;
+    info.primitiveOffset = command.geometry.primitiveOffset;
+  }
+
   // Instance culling (frustum + sub-pixel).  Dropping off-screen instances
   // and instances whose projected footprint is below FC_VULKAN_TLAS_PIX
   // pixels grades the TLAS traversal cost for a CAD viewport dominated by

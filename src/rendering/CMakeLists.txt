@@ -37,6 +37,7 @@ if(COIN_BUILD_VULKAN_RENDERER)
 		SoRTXRenderBackend/SoRTXRenderBackendBuffers.cpp
 		SoRTXRenderBackend/SoRTXRenderBackendPathTracing.cpp
 		SoRTXRenderBackend/SoRTXRenderBackendDenoise.cpp
+		SoRTXRenderBackend/SoRTXRenderBackendPick.cpp
 	)
 endif()
 

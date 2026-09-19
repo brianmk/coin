@@ -451,6 +451,9 @@ public:
   SbBool backendInitialized = FALSE;
   SbBool rtxBackendInitialized = FALSE;
   SbBool rayTracing = FALSE;
+  // Frames in flight requested by the embedding (setMaxFramesInFlight).  Stored
+  // so the lazily-created RT backend gets it at initialize() time.
+  uint32_t maxFramesInFlight = 2;
   // Persistent pipeline-cache path set by the embedding application before
   // initialize(); forwarded to the backend there (see setPipelineCachePath()).
   std::string pipelineCachePath;
@@ -971,6 +974,9 @@ SoVulkanRenderManager::ensureRayTracing(void)
   SoRenderBackendInitParams params;
   params.userData = this->pimpl->initContext;
   if (this->pimpl->rtxBackend.initialize(params)) {
+    // Apply the frames-in-flight count stored before the RT backend existed.
+    this->pimpl->rtxBackend.setMaxFramesInFlight(
+      this->pimpl->maxFramesInFlight);
     this->pimpl->rtxBackendInitialized = TRUE;
     return TRUE;
   }
@@ -980,7 +986,14 @@ SoVulkanRenderManager::ensureRayTracing(void)
 void
 SoVulkanRenderManager::setMaxFramesInFlight(uint32_t count)
 {
+  this->pimpl->maxFramesInFlight = count;
   this->pimpl->backend.setMaxFramesInFlight(count);
+  // The RT backend may not be built yet (path tracing is enabled lazily); the
+  // stored count is applied in ensureRayTracing().  Forward immediately when it
+  // is already up so a swapchain resize takes effect at once.
+  if (this->pimpl->rtxBackendInitialized) {
+    this->pimpl->rtxBackend.setMaxFramesInFlight(count);
+  }
 }
 
 void
@@ -2547,6 +2560,31 @@ SoVulkanRenderManager::getRayTracingBackend(void) const
 {
   return this->pimpl->rtxBackendInitialized ? &this->pimpl->rtxBackend
                                             : nullptr;
+}
+
+bool
+SoVulkanRenderManager::pickRay(const float origin[3], const float direction[3],
+                               float tMax, VulkanPickHit & out) const
+{
+  out = VulkanPickHit {};
+  SoRTXRenderBackend * rtx = this->getRayTracingBackend();
+  if (!rtx) {
+    return false;
+  }
+  SoRTXRenderBackend::RTPickHit hit;
+  if (!rtx->pickRay(origin, direction, tMax, hit)) {
+    return false;
+  }
+  out.hit = hit.hit;
+  out.t = hit.t;
+  out.worldPos[0] = hit.worldPos[0];
+  out.worldPos[1] = hit.worldPos[1];
+  out.worldPos[2] = hit.worldPos[2];
+  out.commandIndex = hit.commandIndex;
+  out.primitiveId = hit.primitiveId;
+  out.userData = hit.userData;
+  out.primitiveOffset = hit.primitiveOffset;
+  return true;
 }
 
 uint32_t

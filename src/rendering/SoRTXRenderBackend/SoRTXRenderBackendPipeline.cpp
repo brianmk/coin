@@ -116,10 +116,44 @@ SoRTXRenderBackend::createDescriptorSetLayout()
   bindings[15].stageFlags = VK_SHADER_STAGE_RAYGEN_BIT_KHR |
     VK_SHADER_STAGE_COMPUTE_BIT;
 
+  // UPDATE_AFTER_BIND binding flags when the device supports (and the
+  // embedding enabled) descriptor indexing: every binding here is rewritten
+  // while a caller-owned frame may still reference the set, which is otherwise
+  // illegal (VUID-vkUpdateDescriptorSets-None-03047).  The backing storage is
+  // reused across the three layout creations below; vkCreateDescriptorSetLayout
+  // consumes it synchronously.
+  std::vector<VkDescriptorBindingFlags> bindingFlags;
+  VkDescriptorSetLayoutBindingFlagsCreateInfo flagsCI {};
+  const auto attachBindingFlags =
+    [this, &bindingFlags, &flagsCI](VkDescriptorSetLayoutCreateInfo & layoutCI,
+                                    uint32_t count) {
+      if (!this->hasUpdateAfterBind) {
+        return;
+      }
+      bindingFlags.assign(count, VK_DESCRIPTOR_BINDING_UPDATE_AFTER_BIND_BIT);
+      flagsCI.sType =
+        VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_BINDING_FLAGS_CREATE_INFO;
+      flagsCI.bindingCount = count;
+      flagsCI.pBindingFlags = bindingFlags.data();
+      layoutCI.pNext = &flagsCI;
+      // Required whenever any binding carries UPDATE_AFTER_BIND
+      // (VUID-VkDescriptorSetLayoutCreateInfo-flags-03000).
+      layoutCI.flags |=
+        VK_DESCRIPTOR_SET_LAYOUT_CREATE_UPDATE_AFTER_BIND_POOL_BIT;
+    };
+
   VkDescriptorSetLayoutCreateInfo ci {};
   ci.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
   ci.bindingCount = 16;
   ci.pBindings = bindings;
+  attachBindingFlags(ci, 16);
+  if (this->hasUpdateAfterBind) {
+    // Binding 0 is the TLAS: acceleration-structure update-after-bind is a
+    // separate feature (VkPhysicalDeviceAccelerationStructureFeaturesKHR) that
+    // is not requested, so it must not carry the flag
+    // (VUID-VkDescriptorSetLayoutBindingFlagsCreateInfo-descriptorBindingAccelerationStructureUpdateAfterBind-03570).
+    bindingFlags[0] = 0;
+  }
   if (vkCreateDescriptorSetLayout(this->device, &ci, this->allocator,
                                   &this->rtSetLayout) != VK_SUCCESS) {
     return false;
@@ -152,6 +186,7 @@ SoRTXRenderBackend::createDescriptorSetLayout()
   pci.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
   pci.bindingCount = 6;
   pci.pBindings = presentBindings;
+  attachBindingFlags(pci, 6);
   if (vkCreateDescriptorSetLayout(this->device, &pci, this->allocator,
                                   &this->presentSetLayout) != VK_SUCCESS) {
     return false;
@@ -177,6 +212,17 @@ SoRTXRenderBackend::createDenoiseDownsampleSetLayout()
   ci.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
   ci.bindingCount = 5;
   ci.pBindings = bindings;
+  std::vector<VkDescriptorBindingFlags> bindingFlags;
+  VkDescriptorSetLayoutBindingFlagsCreateInfo flagsCI {};
+  if (this->hasUpdateAfterBind) {
+    bindingFlags.assign(5, VK_DESCRIPTOR_BINDING_UPDATE_AFTER_BIND_BIT);
+    flagsCI.sType =
+      VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_BINDING_FLAGS_CREATE_INFO;
+    flagsCI.bindingCount = 5;
+    flagsCI.pBindingFlags = bindingFlags.data();
+    ci.pNext = &flagsCI;
+    ci.flags |= VK_DESCRIPTOR_SET_LAYOUT_CREATE_UPDATE_AFTER_BIND_POOL_BIT;
+  }
   return vkCreateDescriptorSetLayout(this->device, &ci, this->allocator,
                                      &this->denoiseDownsampleSetLayout) ==
     VK_SUCCESS;
@@ -185,21 +231,34 @@ SoRTXRenderBackend::createDenoiseDownsampleSetLayout()
 bool
 SoRTXRenderBackend::createDescriptorPool()
 {
+  // Sized for a full RTX_MAX_FRAMES_IN_FLIGHT ring (one RT + one present set
+  // per slot) plus the denoise-downsample and GPU-pick sets.  The ring is
+  // normally only a few slots (swapchain image count + 1); the pool is
+  // over-provisioned so setMaxFramesInFlight() never has to recreate it.
+  const uint32_t ring = RTX_MAX_FRAMES_IN_FLIGHT;
   VkDescriptorPoolSize sizes[5] {};
   sizes[0].type = VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR;
-  sizes[0].descriptorCount = 2;
+  // One per RT set plus the single GPU-pick set.
+  sizes[0].descriptorCount = ring + 1;
   sizes[1].type = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
-  sizes[1].descriptorCount = 2;
+  // One per RT set (storage image) and one per present set (sampled image).
+  sizes[1].descriptorCount = ring * 2;
   sizes[2].type = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-  sizes[2].descriptorCount = 2;
+  sizes[2].descriptorCount = ring;
   sizes[3].type = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
-  sizes[3].descriptorCount = 2;
+  sizes[3].descriptorCount = ring * 2;
   sizes[4].type = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
-  sizes[4].descriptorCount = 64;
+  sizes[4].descriptorCount = ring * 24 + 16;
 
   VkDescriptorPoolCreateInfo ci {};
   ci.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
-  ci.maxSets = 5;
+  // Required when any set allocated from this pool carries the
+  // UPDATE_AFTER_BIND binding flag (see createDescriptorSetLayout).
+  ci.flags = this->hasUpdateAfterBind
+    ? VK_DESCRIPTOR_POOL_CREATE_UPDATE_AFTER_BIND_BIT
+    : 0;
+  // ring RT sets + ring present sets + 1 denoise set + 1 GPU-pick set.
+  ci.maxSets = ring * 2 + 2;
   ci.poolSizeCount = 5;
   ci.pPoolSizes = sizes;
   return vkCreateDescriptorPool(this->device, &ci, this->allocator,
@@ -295,9 +354,9 @@ SoRTXRenderBackend::createFrameBuffer()
 bool
 SoRTXRenderBackend::updateDescriptors()
 {
-  // Allocate the double-buffered pairs once (the layouts differ, so two
-  // allocations of two sets each).
-  for (int pair = 0; pair < 2; ++pair) {
+  // Allocate the ring slots once (the layouts differ, so one allocation per
+  // slot per layout).
+  for (uint32_t pair = 0; pair < this->descriptorRingSize; ++pair) {
     if (this->rtDescriptorSets[pair] != VK_NULL_HANDLE) continue;
     VkDescriptorSetLayout layout = this->rtSetLayout;
     VkDescriptorSetAllocateInfo ai {};
@@ -311,7 +370,7 @@ SoRTXRenderBackend::updateDescriptors()
       return false;
     }
   }
-  for (int pair = 0; pair < 2; ++pair) {
+  for (uint32_t pair = 0; pair < this->descriptorRingSize; ++pair) {
     if (this->presentDescriptorSets[pair] != VK_NULL_HANDLE) continue;
     VkDescriptorSetLayout layout = this->presentSetLayout;
     VkDescriptorSetAllocateInfo ai {};
