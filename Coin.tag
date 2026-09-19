@@ -30785,6 +30785,13 @@
     </member>
     <member kind="variable">
       <type>uint32_t</type>
+      <name>primitiveOffset</name>
+      <anchorfile>structSoGeometryDesc.html</anchorfile>
+      <anchor>a264444f043370b5629368153e044d19b</anchor>
+      <arglist></arglist>
+    </member>
+    <member kind="variable">
+      <type>uint32_t</type>
       <name>texcoordStride</name>
       <anchorfile>structSoGeometryDesc.html</anchorfile>
       <anchor>a6aa31b6c3c8a3f58a92251482043347c</anchor>

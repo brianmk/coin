@@ -168,6 +168,9 @@ std::shared_ptr&lt; <a class="el" href="classSbList.html">const</a> std::vector&
 <tr class="memitem:a0e1b460fb8760b84c0e1953ce29488b0" id="r_a0e1b460fb8760b84c0e1953ce29488b0"><td class="memItemLeft" align="right" valign="top"><a id="a0e1b460fb8760b84c0e1953ce29488b0" name="a0e1b460fb8760b84c0e1953ce29488b0"></a>
 <a class="el" href="classSbList.html">const</a> float *&#160;</td><td class="memItemRight" valign="bottom"><b>positions</b> = <a class="el" href="classSbList.html">nullptr</a></td></tr>
 <tr class="separator:a0e1b460fb8760b84c0e1953ce29488b0"><td class="memSeparator" colspan="2">&#160;</td></tr>
+<tr class="memitem:a264444f043370b5629368153e044d19b" id="r_a264444f043370b5629368153e044d19b"><td class="memItemLeft" align="right" valign="top">uint32_t&#160;</td><td class="memItemRight" valign="bottom"><a class="el" href="#a264444f043370b5629368153e044d19b">primitiveOffset</a> = 0</td></tr>
+<tr class="memdesc:a264444f043370b5629368153e044d19b"><td class="mdescLeft">&#160;</td><td class="mdescRight">Lifetime owners for the borrowed streams above.  <br /></td></tr>
+<tr class="separator:a264444f043370b5629368153e044d19b"><td class="memSeparator" colspan="2">&#160;</td></tr>
 <tr class="memitem:af1a0f9d95cd86a4725b663eaa3aa7f81" id="r_af1a0f9d95cd86a4725b663eaa3aa7f81"><td class="memItemLeft" align="right" valign="top"><a id="af1a0f9d95cd86a4725b663eaa3aa7f81" name="af1a0f9d95cd86a4725b663eaa3aa7f81"></a>
 bool&#160;</td><td class="memItemRight" valign="bottom"><b>retained</b> = <a class="el" href="classSbList.html">false</a></td></tr>
 <tr class="separator:af1a0f9d95cd86a4725b663eaa3aa7f81"><td class="memSeparator" colspan="2">&#160;</td></tr>
@@ -213,6 +216,23 @@ uint32_t&#160;</td><td class="memItemRight" valign="bottom"><b>vertexStride</b> 
 
 </div>
 </div>
+<a id="a264444f043370b5629368153e044d19b" name="a264444f043370b5629368153e044d19b"></a>
+<h2 class="memtitle"><span class="permalink"><a href="#a264444f043370b5629368153e044d19b">&#9670;&#160;</a></span>primitiveOffset</h2>
+
+<div class="memitem">
+<div class="memproto">
+      <table class="memname">
+        <tr>
+          <td class="memname">uint32_t SoGeometryDesc::primitiveOffset = 0</td>
+        </tr>
+      </table>
+</div><div class="memdoc">
+
+<p>Lifetime owners for the borrowed streams above. </p>
+<p>When set, this command co-owns the storage its raw pointers refer to (the pointers may be offsets into these buffers), so the storage outlives the command even if the producer (e.g. a shape's retained tessellation cache, which is invalidated on any field change via <a class="el" href="classSoShape.html#a3104db270c9361decc2dbd2f4737a176">SoShape::notify()</a>) releases its own reference before this command is re-emitted or replaced. Without these owners a retained drawlist command can hold a dangling pointer to a freed-and-reused chunk and read garbage (a false geometry change). Leave null for per-frame arena storage that is only valid for the frame. </p>
+
+</div>
+</div>
 <a id="a6aa31b6c3c8a3f58a92251482043347c" name="a6aa31b6c3c8a3f58a92251482043347c"></a>
 <h2 class="memtitle"><span class="permalink"><a href="#a6aa31b6c3c8a3f58a92251482043347c">&#9670;&#160;</a></span>texcoordStride</h2>
 
@@ -226,7 +246,7 @@ uint32_t&#160;</td><td class="memItemRight" valign="bottom"><b>vertexStride</b> 
 </div><div class="memdoc">
 
 <p>Texture-coordinate stride in bytes. </p>
-<p>Lifetime owners for the borrowed streams above. When set, this command co-owns the storage its raw pointers refer to (the pointers may be offsets into these buffers), so the storage outlives the command even if the producer (e.g. a shape's retained tessellation cache, which is invalidated on any field change via <a class="el" href="classSoShape.html#a3104db270c9361decc2dbd2f4737a176">SoShape::notify()</a>) releases its own reference before this command is re-emitted or replaced. Without these owners a retained drawlist command can hold a dangling pointer to a freed-and-reused chunk and read garbage (a false geometry change). Leave null for per-frame arena storage that is only valid for the frame. </p>
+<p>Index of this command's first primitive within the source shape's primitive stream. A shape whose material changes partway is split into several contiguous commands (see soshape_emit_ir_commands); each carries the offset so a backend can map a per-command primitive id back to a global primitive index (e.g. a SoBrepFaceSet face via partIndex). Zero when the command covers the shape from its start. </p>
 
 </div>
 </div>
@@ -239,7 +259,7 @@ uint32_t&#160;</td><td class="memItemRight" valign="bottom"><b>vertexStride</b> 
 <div id="nav-path" class="navpath"><!-- id is needed for treeview function! -->
   <ul>
     <li class="navelem"><a class="el" href="structSoGeometryDesc.html">SoGeometryDesc</a></li>
-    <li class="footer">Generated on Sat Sep 19 2026 00:32:46 for Coin by <a href="https://www.doxygen.org/index.html"><img class="footer" src="doxygen.svg" width="104" height="31" alt="doxygen"/></a> 1.10.0 </li>
+    <li class="footer">Generated on Sat Sep 19 2026 21:50:04 for Coin by <a href="https://www.doxygen.org/index.html"><img class="footer" src="doxygen.svg" width="104" height="31" alt="doxygen"/></a> 1.10.0 </li>
   </ul>
 </div>
 </body>

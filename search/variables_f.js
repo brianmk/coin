@@ -28,11 +28,12 @@ var searchData=
   ['precision_25',['precision',['../classSoShadowGroup.html#a13a263d9169beb50117fbe7decf4da3b',1,'SoShadowGroup']]],
   ['prevmotionmatrix_26',['prevMotionMatrix',['../classSoRotateSphericalDragger.html#aaca0e39d554e98d2227101c98fc749a2',1,'SoRotateSphericalDragger']]],
   ['prevworldhitpt_27',['prevWorldHitPt',['../classSoRotateSphericalDragger.html#a5e75bf09769317d1bc22c3c748c0bd73',1,'SoRotateSphericalDragger']]],
-  ['priority_28',['priority',['../classSoVRMLSound.html#a115c4570fa081acb7f2474cbbde42b10',1,'SoVRMLSound']]],
-  ['profiles_29',['profiles',['../classSoProfileElement.html#a7ca3481263badeed2a8efa4570706d8e',1,'SoProfileElement']]],
-  ['projdir_30',['projDir',['../classSbViewVolume.html#a3d66037590e6ad2f2ba8d8e63cb72e02',1,'SbViewVolume']]],
-  ['projectionmatrix_31',['projectionMatrix',['../classSoProjectionMatrixElement.html#a37d2e096e2a1d907b134aa14a6b33ac7',1,'SoProjectionMatrixElement']]],
-  ['projpoint_32',['projPoint',['../classSbViewVolume.html#ab473472322064d5b790a0361fc31ec00',1,'SbViewVolume']]],
-  ['proxy_33',['proxy',['../classSoVRMLCollision.html#a6b1a5b50585a58d512fa8b83dd36091e',1,'SoVRMLCollision']]],
-  ['ptinsidefunc_34',['ptinsidefunc',['../structSbOctTreeFuncs.html#a5450fad1a556bcb0788817e5a39fc16e',1,'SbOctTreeFuncs']]]
+  ['primitiveoffset_28',['primitiveOffset',['../structSoGeometryDesc.html#a264444f043370b5629368153e044d19b',1,'SoGeometryDesc']]],
+  ['priority_29',['priority',['../classSoVRMLSound.html#a115c4570fa081acb7f2474cbbde42b10',1,'SoVRMLSound']]],
+  ['profiles_30',['profiles',['../classSoProfileElement.html#a7ca3481263badeed2a8efa4570706d8e',1,'SoProfileElement']]],
+  ['projdir_31',['projDir',['../classSbViewVolume.html#a3d66037590e6ad2f2ba8d8e63cb72e02',1,'SbViewVolume']]],
+  ['projectionmatrix_32',['projectionMatrix',['../classSoProjectionMatrixElement.html#a37d2e096e2a1d907b134aa14a6b33ac7',1,'SoProjectionMatrixElement']]],
+  ['projpoint_33',['projPoint',['../classSbViewVolume.html#ab473472322064d5b790a0361fc31ec00',1,'SbViewVolume']]],
+  ['proxy_34',['proxy',['../classSoVRMLCollision.html#a6b1a5b50585a58d512fa8b83dd36091e',1,'SoVRMLCollision']]],
+  ['ptinsidefunc_35',['ptinsidefunc',['../structSbOctTreeFuncs.html#a5450fad1a556bcb0788817e5a39fc16e',1,'SbOctTreeFuncs']]]
 ];

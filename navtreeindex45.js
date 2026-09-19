@@ -1,14 +1,14 @@
 var NAVTREEINDEX45 =
 {
-"functions.html":[5,3,0,0],
 "functions.html":[5,3,0],
+"functions.html":[5,3,0,0],
 "functions_b.html":[5,3,0,1],
 "functions_c.html":[5,3,0,2],
 "functions_d.html":[5,3,0,3],
 "functions_e.html":[5,3,0,4],
 "functions_enum.html":[5,3,4],
-"functions_eval.html":[5,3,5],
 "functions_eval.html":[5,3,5,0],
+"functions_eval.html":[5,3,5],
 "functions_eval_b.html":[5,3,5,1],
 "functions_eval_c.html":[5,3,5,2],
 "functions_eval_d.html":[5,3,5,3],
@@ -79,8 +79,8 @@ var NAVTREEINDEX45 =
 "functions_type.html":[5,3,3],
 "functions_u.html":[5,3,0,20],
 "functions_v.html":[5,3,0,21],
-"functions_vars.html":[5,3,2,0],
 "functions_vars.html":[5,3,2],
+"functions_vars.html":[5,3,2,0],
 "functions_vars_b.html":[5,3,2,1],
 "functions_vars_c.html":[5,3,2,2],
 "functions_vars_d.html":[5,3,2,3],
@@ -212,9 +212,10 @@ var NAVTREEINDEX45 =
 "structSoDepthState.html":[5,0,257],
 "structSoGLLazyElement_1_1GLState.html":[3,6,38,0],
 "structSoGeometryDesc.html":[5,0,310],
-"structSoGeometryDesc.html#a6aa31b6c3c8a3f58a92251482043347c":[5,0,310,1],
+"structSoGeometryDesc.html#a264444f043370b5629368153e044d19b":[5,0,310,1],
+"structSoGeometryDesc.html#a6aa31b6c3c8a3f58a92251482043347c":[5,0,310,2],
 "structSoGeometryDesc.html#a939d714bc14c15a890c5e7a64f62c658":[5,0,310,0],
-"structSoGeometryDesc.html#abed333772fcc8671958e3e23d9ee4205":[5,0,310,2],
+"structSoGeometryDesc.html#abed333772fcc8671958e3e23d9ee4205":[5,0,310,3],
 "structSoIntersectingPrimitive.html":[5,0,383],
 "structSoLazyElement_1_1CoinState.html":[3,6,60,0],
 "structSoLightData.html":[5,0,395],
@@ -248,6 +249,5 @@ var NAVTREEINDEX45 =
 "sync_8h_source.html":[6,0,1,0,3,3,9],
 "thread_8h_source.html":[6,0,1,0,3,3,10],
 "tidbits_8h_source.html":[6,0,1,0,3,5],
-"time_8h_source.html":[6,0,1,0,3,0,6],
-"topics.html":[3]
+"time_8h_source.html":[6,0,1,0,3,0,6]
 };
