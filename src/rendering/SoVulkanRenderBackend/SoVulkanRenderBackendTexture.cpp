@@ -410,8 +410,12 @@ SoVulkanRenderBackend::recordPendingTextureUploads()
 {
   // Own-queue path: record the copies into the frame command buffer, ahead
   // of the render pass that samples them.  No separate submit is needed, so
-  // no extra queue drain per frame.
-  this->recordPendingTextureUploadsInto(this->currentCommandBuffer());
+  // no extra queue drain per frame.  A null command buffer means the frame
+  // ring could not be allocated; report it so the caller's error branch is
+  // not dead.
+  VkCommandBuffer cmd = this->currentCommandBuffer();
+  if (cmd == VK_NULL_HANDLE) return false;
+  this->recordPendingTextureUploadsInto(cmd);
   return true;
 }
 
@@ -422,12 +426,15 @@ SoVulkanRenderBackend::finalizePendingTextureUploads()
   // draws recorded below), stamp the content identity, and defer the staging
   // buffers to the frame's deferred-destruction batch.  Staging buffers are
   // referenced by the just-recorded submission, so they are released only
-  // after the slot fence signals.
+  // after the slot fence signals.  Record the finalized indices so the
+  // external pre-pass can un-stamp them if its submit fails.
+  this->finalizedTextureIndices.clear();
   for (const PendingTextureUpload & upload : this->pendingUploads) {
     if (upload.index >= this->textureCache.size()) continue;
     VulkanCachedTexture & texEntry = this->textureCache[upload.index];
     if (this->finalizeTexture(texEntry, *upload.texture)) {
       stampTextureContent(texEntry, *upload.texture);
+      this->finalizedTextureIndices.push_back(upload.index);
     }
     else {
       // The entry's image is referenced by the recorded copies, so the

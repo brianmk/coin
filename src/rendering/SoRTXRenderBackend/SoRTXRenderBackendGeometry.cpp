@@ -183,7 +183,7 @@ SoRTXRenderBackend::ensurePoolCapacity(VkDeviceSize bytes,
   return true;
 }
 
-void
+bool
 SoRTXRenderBackend::buildNeePool(const SoDrawList & drawlist)
 {
   // Full per-frame rebuild: 8 vec4 per entry (v0+v1+v2+color+mat4 xform).
@@ -216,7 +216,10 @@ SoRTXRenderBackend::buildNeePool(const SoDrawList & drawlist)
       static_cast<VkDeviceSize>(triangleCount) * 8 * 4 * sizeof(float);
     if (!this->ensureNeePoolCapacity(this->neePoolUsed + bytes)) {
       this->emitError("buildNeePool: pool allocation failed");
-      return;
+      // Publish an empty pool so the trace phase does not consume the
+      // half-populated records written before the failure.
+      this->neePoolCount = 0;
+      return false;
     }
     entry.neePoolOffset = static_cast<uint32_t>(this->neePoolUsed /
                                                 (8 * 4 * sizeof(float)));
@@ -277,6 +280,7 @@ SoRTXRenderBackend::buildNeePool(const SoDrawList & drawlist)
             this->rtNeeEnabled ? 1 : 0, this->rtMisEnabled ? 1 : 0,
             e[28], e[29], e[30]);
   }
+  return true;
 }
 
 // --- Geometry cache -------------------------------------------------------
@@ -682,27 +686,6 @@ SoRTXRenderBackend::updateGeometryCache(const SoDrawList & drawlist)
       continue;
     }
 
-    // TEMP breadcrumb: per-frame pointer/thread/retained trace for the probe
-    // box so we can see whether the geometry pointer is stable across frames
-    // and on which thread updateGeometryCache reads it.
-    if (SoVulkanConfig::get().rtxDebug.rtGeo &&
-        geometry.indexCount == 0 &&
-        (geometry.vertexCount == 36 || geometry.vertexCount == 6)) {
-      const float * tp = geometry.positions;
-      const float * tm = &command.modelMatrix[0][0];
-      fprintf(stderr,
-              "[GCR] FR fr=%u tid=%llx cmd=%p pos=%p ret=%d pass=%d "
-              "v0=(%.3f,%.3f,%.3f) m00=%.3f m11=%.3f m22=%.3f "
-              "t=(%.3f,%.3f,%.3f)\n",
-              frame,
-              static_cast<unsigned long long>(std::hash<std::thread::id>{}(std::this_thread::get_id())),
-              static_cast<const void *>(&command),
-              static_cast<const void *>(tp),
-              geometry.retained ? 1 : 0,
-              static_cast<int>(command.pass),
-              tp[0], tp[1], tp[2],
-              tm[0], tm[5], tm[10], tm[12], tm[13], tm[14]);
-    }
     // A singular (degenerate) model matrix means the command collapses to a
     // point or line -- e.g. the view's hidden anchor cube, which FreeCAD
     // hides by scaling it to (0,0,0) (see View3DInventorViewer::construct*).
@@ -1100,7 +1083,17 @@ SoRTXRenderBackend::blasBuildOrRefit(RTXCachedGeometry & entry,
   // triangle-normal pool; append this command's normals (the material
   // records pick up the offset afterwards in updateMaterials()).  Refits
   // append a fresh record too: moved vertices change the per-corner normals.
-  this->appendTriangleNormals(command, entry);
+  // A zero return with a non-empty mesh means the pool allocation failed: do
+  // not build a BLAS whose normals would be missing.
+  {
+    const uint32_t normalTriangles =
+      indexed ? entry.indexCount / 3 : entry.vertexCount / 3;
+    if (normalTriangles > 0 &&
+        this->appendTriangleNormals(command, entry) == 0) {
+      this->emitError("blasBuildOrRefit: triangle-normal pool allocation failed");
+      return false;
+    }
+  }
 
   // Gather the position-only vertices and the object-space bounds.
   std::vector<float> positions(static_cast<size_t>(entry.vertexCount) * 3);

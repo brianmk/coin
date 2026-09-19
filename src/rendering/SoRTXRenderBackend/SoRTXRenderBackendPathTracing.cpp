@@ -628,8 +628,13 @@ SoRTXRenderBackend::recordAccelerationStructures(
       // the baked object-to-world transforms stay fresh on transform-only
       // edits (which refit BLASes instead of rebuilding geometry).  Runs
       // before updateMaterials(), which carries the pool offsets into the
-      // RTMaterial records.
-      this->buildNeePool(drawlist);
+      // RTMaterial records.  A failed (partial) pool aborts the AS phase
+      // rather than tracing with missing emitter records.
+      if (!this->buildNeePool(drawlist)) {
+        this->emitError(
+          "recordAccelerationStructures: failed to build NEE pool");
+        return false;
+      }
       this->updateMaterials(drawlist);
     }
 

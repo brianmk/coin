@@ -554,6 +554,12 @@ SoRTXRenderBackend::initialize(const SoRenderBackendInitParams & params)
     return FALSE;
   }
 
+  // Mark the backend initialized as soon as the VMA allocator exists so that
+  // any early failure below (the ray tracing KHR entry-point resolution, the
+  // create*() calls) runs the full null-tolerant shutdown() cleanup instead of
+  // leaking the allocator and every handle created so far.
+  this->setInitialized(TRUE);
+
   // The async-compute queue requested at device creation (see the widget's
   // setQueueCreateInfoModifier).  probeComputeQueue() retrieves the handle
   // from this family + queue index.  UINT32_MAX family = none requested.
@@ -569,7 +575,6 @@ SoRTXRenderBackend::initialize(const SoRenderBackendInitParams & params)
   VkPhysicalDeviceProperties devProps {};
   vkGetPhysicalDeviceProperties(this->physicalDevice, &devProps);
   this->deviceVendorID = devProps.vendorID;
-  this->deviceID = devProps.deviceID;
   this->deviceIsNvidia = (devProps.vendorID == 0x10DE /* NVIDIA */);
 
   // Query the device UUID (Vulkan 1.1 VkPhysicalDeviceIDProperties) so the
@@ -597,43 +602,16 @@ SoRTXRenderBackend::initialize(const SoRenderBackendInitParams & params)
 
   // Capability flags: prefer the embedding application's probe (passed via
   // SoVulkanDeviceContext::caps) so the extension-name list lives in exactly
-  // one place; only enumerate the device when the application supplied no
-  // caps (offscreen/test contexts).  The features themselves must have been
+  // one place; only query the device when the application supplied no caps
+  // (offscreen/test contexts).  The features themselves must have been
   // requested by the embedding app when the device was created.
   if (deviceContext->capsValid) {
-    this->hasPositionFetch = deviceContext->caps.positionFetch;
-    this->hasOpacityMicromap = deviceContext->caps.opacityMicromap;
-    this->hasNvCluster = deviceContext->caps.nvCluster;
-    this->hasNvPartitioned = deviceContext->caps.nvPartitioned;
-    this->hasNvLinearSweptSpheres = deviceContext->caps.nvLinearSweptSpheres;
     this->hasUpdateAfterBind =
       deviceContext->caps.descriptorIndexingUpdateAfterBind;
     this->hasPipelineCreationFeedback =
       deviceContext->caps.pipelineCreationFeedback;
   }
   else {
-    uint32_t extCount = 0;
-    vkEnumerateDeviceExtensionProperties(this->physicalDevice, nullptr,
-                                         &extCount, nullptr);
-    std::vector<VkExtensionProperties> exts(extCount);
-    if (extCount > 0) {
-      vkEnumerateDeviceExtensionProperties(this->physicalDevice, nullptr,
-                                           &extCount, exts.data());
-    }
-    const auto hasExt = [&exts](const char * name) {
-      for (const auto & e : exts) {
-        if (std::strcmp(e.extensionName, name) == 0) return true;
-      }
-      return false;
-    };
-    this->hasPositionFetch =
-      hasExt("VK_KHR_ray_tracing_position_fetch");
-    this->hasOpacityMicromap = hasExt("VK_EXT_opacity_micromap");
-    this->hasNvCluster = hasExt("VK_NV_cluster_acceleration_structure");
-    this->hasNvPartitioned =
-      hasExt("VK_NV_partitioned_acceleration_structure");
-    this->hasNvLinearSweptSpheres =
-      hasExt("VK_NV_ray_tracing_linear_swept_spheres");
     VkPhysicalDeviceDescriptorIndexingFeatures di {};
     di.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DESCRIPTOR_INDEXING_FEATURES;
     VkPhysicalDeviceFeatures2 f2 {};
@@ -646,15 +624,6 @@ SoRTXRenderBackend::initialize(const SoRenderBackendInitParams & params)
       di.descriptorBindingUniformBufferUpdateAfterBind &&
       di.descriptorBindingStorageBufferUpdateAfterBind;
   }
-  char capsBuf[192];
-  std::snprintf(
-    capsBuf, sizeof(capsBuf),
-    "[RTDBG] caps positionFetch=%d opacityMicromap=%d "
-    "nvCluster=%d nvPartitioned=%d nvLinearSweptSpheres=%d",
-    this->hasPositionFetch ? 1 : 0, this->hasOpacityMicromap ? 1 : 0,
-    this->hasNvCluster ? 1 : 0, this->hasNvPartitioned ? 1 : 0,
-    this->hasNvLinearSweptSpheres ? 1 : 0);
-  fprintf(stderr, "%s\n", capsBuf);
 
   // The system loader only exports core entry points; resolve the ray
   // tracing KHR functions per-device.  Failing here means the device is
@@ -722,11 +691,10 @@ SoRTXRenderBackend::initialize(const SoRenderBackendInitParams & params)
   this->useSbtPipeline =
     SoVulkanConfig::get().rayTracing.sbtPipeline ? TRUE : FALSE;
 
-  // All entry points are resolved from here on.  Mark the backend
-  // initialized before creating resources so that a failure in any
-  // create*() below runs the full (null-tolerant) shutdown() cleanup
-  // instead of leaking every handle created so far.
-  this->setInitialized(TRUE);
+  // All entry points are resolved from here on.  The backend was already
+  // marked initialized right after the VMA allocator was created, so a
+  // failure in any create*() below runs the full (null-tolerant) shutdown()
+  // cleanup instead of leaking every handle created so far.
 
   // Query the pipeline properties needed for the SBT record layout, plus the
   // acceleration-structure properties for the scratch buffer alignment
@@ -832,7 +800,6 @@ SoRTXRenderBackend::initialize(const SoRenderBackendInitParams & params)
     this->ptTemporalEnabled = *pt.temporal ? TRUE : FALSE;
   }
 
-  this->setInitialized(TRUE);
   this->emitLog("initialized (Vulkan ray tracing)");
   return TRUE;
 }
@@ -1046,9 +1013,6 @@ SoRTXRenderBackend::shutdown()
   }
   this->ptHistoryValid = FALSE;
   this->ptReprojectFrame = FALSE;
-  if (this->positionMemory != VK_NULL_HANDLE) {
-    this->positionMemory = VK_NULL_HANDLE;
-  }
   this->ptBufferWidth = 0;
   this->ptBufferHeight = 0;
   this->ptAccumulating = FALSE;
