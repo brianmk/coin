@@ -197,23 +197,32 @@ SoVulkanRenderBackend::ensureStagingPoolSize(VkDeviceSize required)
   newCapacity = std::max<VkDeviceSize>(newCapacity, 256u * 1024u);
 
   VkBuffer newBuffer = VK_NULL_HANDLE;
-  VkDeviceMemory newMemory = VK_NULL_HANDLE;
-  if (!SoVulkanShared::createBufferAllocated(
-        this->device, this->allocator, newCapacity,
-        VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
-        VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
-        /*deviceAddress*/ false,
-        [this](const VkMemoryRequirements & req, VkMemoryPropertyFlags desired,
-               uint32_t & memoryTypeIndex) {
-          return this->selectMemoryType(req, desired, memoryTypeIndex);
-        }, newBuffer, newMemory)) {
+  VmaAllocation newAllocation = nullptr;
+  VkBufferCreateInfo bci {};
+  bci.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
+  bci.size = newCapacity;
+  bci.usage = VK_BUFFER_USAGE_TRANSFER_SRC_BIT;
+  bci.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+  VmaAllocationCreateInfo allocInfo {};
+  allocInfo.usage = VMA_MEMORY_USAGE_AUTO;
+  allocInfo.requiredFlags = VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT |
+                            VK_MEMORY_PROPERTY_HOST_COHERENT_BIT;
+  // Ask VMA for the persistent host mapping up front: the staging pool is
+  // written every frame, so a one-time map (no per-upload vkMapMemory) is the
+  // whole point.  VMA_MEMORY_USAGE_AUTO requires an explicit host-access flag
+  // whenever MAPPED is requested.
+  allocInfo.flags = VMA_ALLOCATION_CREATE_MAPPED_BIT |
+                    VMA_ALLOCATION_CREATE_HOST_ACCESS_SEQUENTIAL_WRITE_BIT;
+  VmaAllocationInfo allocationInfo {};
+  if (vmaCreateBuffer(this->vmaAllocator, &bci, &allocInfo, &newBuffer,
+                      &newAllocation, &allocationInfo) != VK_SUCCESS) {
     return false;
   }
-  void * newMapped = nullptr;
-  if (vkMapMemory(this->device, newMemory, 0, newCapacity, 0, &newMapped) !=
-      VK_SUCCESS) {
-    vkDestroyBuffer(this->device, newBuffer, this->allocator);
-    vkFreeMemory(this->device, newMemory, this->allocator);
+  void * newMapped = allocationInfo.pMappedData;
+  if (newMapped == nullptr) {
+    // Should not happen with VMA_ALLOCATION_CREATE_MAPPED_BIT on host-visible
+    // memory, but do not leave a half-built pool behind.
+    vmaDestroyBuffer(this->vmaAllocator, newBuffer, newAllocation);
     return false;
   }
   // Preserve any bytes already staged in the old buffer (uploads prepared
@@ -224,14 +233,11 @@ SoVulkanRenderBackend::ensureStagingPoolSize(VkDeviceSize required)
                 static_cast<size_t>(this->stagingPoolCursor));
   }
   if (this->stagingPoolBuffer != VK_NULL_HANDLE) {
-    if (this->stagingPoolMapped != nullptr) {
-      vkUnmapMemory(this->device, this->stagingPoolMemory);
-    }
-    vkDestroyBuffer(this->device, this->stagingPoolBuffer, this->allocator);
-    vkFreeMemory(this->device, this->stagingPoolMemory, this->allocator);
+    vmaDestroyBuffer(this->vmaAllocator, this->stagingPoolBuffer,
+                     this->stagingPoolAllocation);
   }
   this->stagingPoolBuffer = newBuffer;
-  this->stagingPoolMemory = newMemory;
+  this->stagingPoolAllocation = newAllocation;
   this->stagingPoolMapped = newMapped;
   this->stagingPoolCapacity = newCapacity;
   SoVulkanDebugUtils::nameObject(

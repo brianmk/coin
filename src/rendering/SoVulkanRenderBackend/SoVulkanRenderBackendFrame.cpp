@@ -347,17 +347,14 @@ SoVulkanRenderBackend::shutdown()
     this->lightingConstMemory = VK_NULL_HANDLE;
   }
   this->lightingDescriptorSet = VK_NULL_HANDLE;
-  if (this->stagingPoolMapped != nullptr) {
-    vkUnmapMemory(this->device, this->stagingPoolMemory);
-    this->stagingPoolMapped = nullptr;
-  }
   if (this->stagingPoolBuffer != VK_NULL_HANDLE) {
-    vkDestroyBuffer(this->device, this->stagingPoolBuffer, this->allocator);
+    // vmaDestroyBuffer releases the buffer, its memory and the persistent host
+    // mapping together.
+    vmaDestroyBuffer(this->vmaAllocator, this->stagingPoolBuffer,
+                     this->stagingPoolAllocation);
     this->stagingPoolBuffer = VK_NULL_HANDLE;
-  }
-  if (this->stagingPoolMemory != VK_NULL_HANDLE) {
-    vkFreeMemory(this->device, this->stagingPoolMemory, this->allocator);
-    this->stagingPoolMemory = VK_NULL_HANDLE;
+    this->stagingPoolAllocation = nullptr;
+    this->stagingPoolMapped = nullptr;
   }
   this->stagingPoolCapacity = 0;
   this->stagingPoolCursor = 0;

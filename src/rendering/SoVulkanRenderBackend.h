@@ -1138,7 +1138,7 @@ private:
   // the staged pixel data, so a failure at any point leaves one buffer to
   // clean up rather than N per-upload allocations to chase.
   VkBuffer stagingPoolBuffer = VK_NULL_HANDLE;
-  VkDeviceMemory stagingPoolMemory = VK_NULL_HANDLE;
+  VmaAllocation stagingPoolAllocation = nullptr;
   void * stagingPoolMapped = nullptr;
   VkDeviceSize stagingPoolCapacity = 0;
   // Running byte cursor into stagingPoolBuffer for the current frame's
