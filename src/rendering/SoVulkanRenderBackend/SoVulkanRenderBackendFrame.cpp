@@ -496,9 +496,7 @@ SoVulkanRenderBackend::prepareExternalFrame(
   this->updateGeometryCache(drawlist, overlaysOnly,
                             params.geometryContentUnchanged);
   if (wantCpuTiming) {
-    const double t1 = SoVulkanShared::steadyNowMs();
-    timing->geomMs = t1 - t0;
-    t0 = t1;
+    timing->geomMs = SoVulkanShared::steadyNowMs() - t0;
   }
   // The composite path never goes through recordFrame(), so it must reserve
   // the lighting slots its overlay/residual draws consume here; otherwise the
@@ -508,18 +506,11 @@ SoVulkanRenderBackend::prepareExternalFrame(
     this->emitError("failed to reserve lighting UBO slots");
     return nullptr;
   }
-  const SoVulkan::Result uploadResult =
-    this->flushPendingTextureUploadsExternal();
-  if (!uploadResult.isOk()) {
-    char msg[256];
-    std::snprintf(msg, sizeof(msg), "%s: %s", caller,
-                  uploadResult.message().c_str());
-    this->emitError(msg);
-    return nullptr;
-  }
-  if (wantCpuTiming) {
-    timing->texMs = SoVulkanShared::steadyNowMs() - t0;
-  }
+  // Changed textures are now staged in pendingUploads; the caller's
+  // beginExternalPrepass() records the copies into its transient command
+  // buffer (or falls back to flushPendingTextureUploadsExternal() when that
+  // buffer cannot be allocated).  No flush here: it would need its own
+  // submission and queue drain, and the caller already submits the pre-pass.
   return target;
 }
 
@@ -772,14 +763,30 @@ SoVulkanRenderBackend::renderExternal(const SoDrawList & drawlist,
     return FALSE;
   }
 
-  // GPU geometry-LOD pre-pass.  Vulkan forbids compute inside a render pass
-  // and the caller has already begun its pass, so the sub-pixel compaction is
-  // recorded into a transient command buffer here, before recordFrame(), so
-  // the draw path sees the compacted slots; it is submitted below, after the
-  // frame is recorded.  Recording before and submitting after overlaps the
-  // CPU frame recording with the previous GPU frame.  Non-fatal on failure:
-  // the full-detail draw recorded below is always valid.
-  VkCommandBuffer lodBuffer = this->beginExternalGeometryLod(drawlist, params);
+  // External pre-pass.  Vulkan forbids transfer and compute inside a render
+  // pass and the caller has already begun its pass, so the pending texture
+  // copies and the sub-pixel compaction dispatches are recorded into one
+  // transient command buffer here, before recordFrame(), so the draw path sees
+  // the finalized textures and the compacted slots; it is submitted below,
+  // after the frame is recorded.  Recording before and submitting after
+  // overlaps the CPU frame recording with the previous GPU frame.  Non-fatal
+  // on failure: the caller falls back to the one-shot texture upload and the
+  // full-detail draw.
+  VkCommandBuffer prepass = this->beginExternalPrepass(
+    drawlist, params, /*lod*/ true, wantCpuTiming ? &timing : nullptr);
+  if (prepass == VK_NULL_HANDLE && !this->pendingUploads.empty()) {
+    // The transient buffer could not carry the copies (allocation/begin/end
+    // failure).  Fall back to the legacy one-shot upload so the textures still
+    // land this frame; a failure there leaves the entries unstamped and the
+    // next frame retries.
+    const SoVulkan::Result uploadResult =
+      this->flushPendingTextureUploadsExternal();
+    if (!uploadResult.isOk()) {
+      SoDebugError::postWarning("SoVulkanRenderBackend::renderExternal",
+                                "one-shot texture upload fallback failed: %s",
+                                uploadResult.message().c_str());
+    }
+  }
 
   const double recordT0 = wantCpuTiming ? vkBackendRenderNowMs() : 0.0;
   const long recordBcStart = vkBackendRenderBreadcrumbEnabled() ? vkBackendRenderNowUs() : 0;
@@ -790,23 +797,21 @@ SoVulkanRenderBackend::renderExternal(const SoDrawList & drawlist,
   this->recordContext.buffer = VK_NULL_HANDLE;
   const double recordEnd = wantCpuTiming ? vkBackendRenderNowMs() : 0.0;
 
-  // Submit the pre-pass and wait so the compacted writes are visible before
-  // the caller submits its pass.  Only the LOD dispatch is on the critical
-  // path now; the frame recording above overlapped the previous GPU frame.
-  const double lodT0 = wantCpuTiming ? vkBackendRenderNowMs() : 0.0;
-  this->submitExternalGeometryLod(lodBuffer);
-  if (wantCpuTiming) {
-    timing.lodMs = vkBackendRenderNowMs() - lodT0;
-  }
+  // Submit the pre-pass and wait so the copies and the compacted writes are
+  // visible before the caller submits its pass.  Only the pre-pass is on the
+  // critical path now; the frame recording above overlapped the previous GPU
+  // frame.
+  this->submitExternalPrepass(prepass, wantCpuTiming ? &timing : nullptr);
 
   if (wantCpuTiming) {
     const double recordMs = recordEnd - recordT0;
+    const double lodMs = timing.lodRecordMs + timing.lodMs;
     const double totalMs = recordMs + timing.texMs + timing.geomMs +
-                           timing.setupMs + timing.lodMs;
+                           timing.setupMs + lodMs;
     std::fprintf(stderr,
                  "[RTDBG] cpuTimingRaster mode=full setup=%.2f geom=%.2f "
                  "tex=%.2f lod=%.2f record=%.2f total=%.2f\n",
-                 timing.setupMs, timing.geomMs, timing.texMs, timing.lodMs,
+                 timing.setupMs, timing.geomMs, timing.texMs, lodMs,
                  recordMs, totalMs);
     std::fflush(stderr);
   }
@@ -832,6 +837,23 @@ SoVulkanRenderBackend::renderExternalOverlay(const SoDrawList & drawlist,
     wantCpuTiming ? &timing : nullptr);
   if (target == nullptr) return FALSE;
 
+  // The composite path is a raster overlay inside the caller's (RT) pass, so
+  // it has no geometry-LOD pre-pass; it still routes any pending texture
+  // copies through the transient pre-pass, because transfer commands cannot
+  // be recorded inside the pass.  Fall back to the one-shot upload when the
+  // transient buffer cannot be allocated.
+  VkCommandBuffer prepass = this->beginExternalPrepass(
+    drawlist, params, /*lod*/ false, wantCpuTiming ? &timing : nullptr);
+  if (prepass == VK_NULL_HANDLE && !this->pendingUploads.empty()) {
+    const SoVulkan::Result uploadResult =
+      this->flushPendingTextureUploadsExternal();
+    if (!uploadResult.isOk()) {
+      SoDebugError::postWarning("SoVulkanRenderBackend::renderExternalOverlay",
+                                "one-shot texture upload fallback failed: %s",
+                                uploadResult.message().c_str());
+    }
+  }
+
   const double recordT0 = wantCpuTiming ? vkBackendRenderNowMs() : 0.0;
   this->recordContext.buffer = commandBuffer;
   this->recordTracedComposite(drawlist, params, *target, renderPass,
@@ -839,10 +861,12 @@ SoVulkanRenderBackend::renderExternalOverlay(const SoDrawList & drawlist,
   this->recordOverlayBlock(drawlist, params, *target, renderPass,
                            this->recordContext);
   this->recordContext.buffer = VK_NULL_HANDLE;
+  const double recordEnd = wantCpuTiming ? vkBackendRenderNowMs() : 0.0;
+  this->submitExternalPrepass(prepass, wantCpuTiming ? &timing : nullptr);
   if (wantCpuTiming) {
-    const double recordMs = vkBackendRenderNowMs() - recordT0;
+    const double recordMs = recordEnd - recordT0;
     const double totalMs = recordMs + timing.texMs + timing.geomMs +
-                           timing.setupMs;
+                           timing.setupMs + timing.lodMs;
     std::fprintf(stderr,
                  "[RTDBG] cpuTimingRaster mode=overlay setup=%.2f geom=%.2f "
                  "tex=%.2f record=%.2f total=%.2f\n",
