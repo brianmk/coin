@@ -308,6 +308,16 @@ public:
     the render pass, create a framebuffer, or submit to the queue.  It is used
     by embedding surfaces such as QVulkanWindow whose command buffer and render
     pass lifecycle are managed by the window system.
+
+    The per-frame setup, the pending texture uploads and the GPU geometry-LOD
+    pre-pass are handled internally, so this is the single external entry
+    point: the caller never coordinates a separate prepare step.  Because
+    Vulkan forbids transfer and compute commands inside a render pass, the
+    pre-pass is recorded into a backend-owned transient command buffer before
+    the frame draws and submitted after them (see beginExternalPrepass()/
+    submitExternalPrepass()), so the caller's pass sees the uploaded textures
+    and the compacted geometry, and the CPU recording overlaps the previous
+    GPU frame.
   */
   SbBool renderExternal(const SoDrawList & drawlist,
                         const SoRenderParams & params,
@@ -339,25 +349,6 @@ public:
   */
   SbBool renderOverlaysOnly(const SoDrawList & drawlist,
                             const SoRenderParams & params);
-
-  /*!
-    \brief Prepare an external frame and record the GPU geometry-LOD pre-pass.
-
-    Runs the per-frame setup (beginFrame, geometry cache update, lighting
-    setup, texture flush) and then records the sub-pixel compaction compute
-    dispatches for the frame into \a commandBuffer.  Vulkan forbids compute
-    inside a render pass, so the caller MUST invoke this before
-    vkCmdBeginRenderPass and then call renderExternal() with the same
-    drawlist/params; renderExternal() detects the prepared frame and skips the
-    setup it already performed.  A no-op when geometry LOD is inactive.
-
-    Returns Ok when the frame is prepared (or geometry LOD is not applicable),
-    and a failure Result with a reason otherwise.  A failure is non-fatal: the
-    caller can still record the full-detail frame via renderExternal().
-  */
-  SoVulkan::Result prepareExternalGeometryLod(const SoDrawList & drawlist,
-                                              const SoRenderParams & params,
-                                              VkCommandBuffer commandBuffer);
 
   /*!
     \brief Declare how many recorded frames the caller may keep in flight.
@@ -594,8 +585,18 @@ private:
                            VkDeviceSize stagingOffset);
   bool finalizeTexture(VulkanCachedTexture & entry,
                        const SoTextureData & texture);
+  // Record the pending staging -> image copies into \a commandBuffer (which
+  // must not be inside a render pass) and finalize the host-side resources
+  // (view, sampler, descriptor set, content stamp) so the draw path can bind
+  // them.  Shared by the own-queue path (the frame command buffer) and the
+  // external pre-pass (a transient command buffer); both callers then submit
+  // the buffer that carries the copies.
+  void recordPendingTextureUploadsInto(VkCommandBuffer commandBuffer);
   bool recordPendingTextureUploads();
   void finalizePendingTextureUploads();
+  // Legacy one-shot fallback for the external path: submits the copies in a
+  // dedicated command buffer and drains the queue.  Only used when the
+  // external pre-pass could not allocate its transient command buffer.
   SoVulkan::Result flushPendingTextureUploadsExternal();
   bool createSampler(SoTextureFilter minFilter, SoTextureFilter magFilter,
                      SoTextureWrap wrapS, SoTextureWrap wrapT,
@@ -724,6 +725,48 @@ private:
   void recordGeometryLodPrepass(VkCommandBuffer cb,
                                 const SoDrawList & drawlist,
                                 const SoRenderParams & params);
+  // True when the geometry-LOD pre-pass would record anything this frame:
+  // interaction LOD (or the verification override) is engaged, the feature is
+  // enabled and the compaction pipeline exists.  Split out so the external
+  // pre-pass can decide whether it needs a transient command buffer at all.
+  bool externalGeometryLodActive(const SoRenderParams & params) const;
+
+  // Timing breakdown of one external frame, filled by prepareExternalFrame()
+  // and the pre-pass helpers for the [RTDBG] cpuTimingRaster line.
+  struct ExternalFrameTiming {
+    double setupMs = 0.0;
+    double geomMs = 0.0;
+    // Texture copies + host-side finalize recorded into the pre-pass.
+    double texMs = 0.0;
+    // Geometry-LOD compaction dispatches recorded into the pre-pass.
+    double lodRecordMs = 0.0;
+    // Pre-pass submit + host wait (the transient submit's queue drain).
+    double lodMs = 0.0;
+  };
+
+  // Run the external pre-pass for a frame whose caller owns (and has already
+  // begun) its render pass.  Vulkan forbids transfer and compute commands
+  // inside a render pass, so both the pending texture copies (buffer -> image)
+  // and -- when \a lod and externalGeometryLodActive() hold -- the sub-pixel
+  // compaction dispatches are recorded into a backend-owned transient command
+  // buffer.  Recording happens before recordFrame() so the draw path sees the
+  // finalized textures and the compacted slots; the buffer is submitted by
+  // submitExternalPrepass() after recordFrame(), which overlaps the CPU frame
+  // recording with the previous GPU frame instead of stalling before it.
+  //
+  // Returns VK_NULL_HANDLE when there is nothing to record, or when the
+  // transient buffer could not be prepared.  When it returns null while
+  // texture uploads were pending, the caller must fall back to
+  // flushPendingTextureUploadsExternal() so the textures still upload.
+  VkCommandBuffer beginExternalPrepass(const SoDrawList & drawlist,
+                                       const SoRenderParams & params,
+                                       bool lod,
+                                       ExternalFrameTiming * timing);
+  // Submit the transient buffer from beginExternalPrepass() and wait for it to
+  // complete, so the copies and the compacted writes are visible before the
+  // caller submits its pass.  Frees the buffer.  No-op on VK_NULL_HANDLE.
+  void submitExternalPrepass(VkCommandBuffer commandBuffer,
+                             ExternalFrameTiming * timing);
 
   // Resolve the projection a command's wide-line quads must use (its own for a
   // self-camera overlay, else the frame projection), matching
@@ -812,17 +855,13 @@ private:
 
   // Shared prologue of renderExternal()/renderExternalOverlay(): validate the
   // common preconditions and target, advance the frame (matrices, frame
-  // boundary, lighting setup, geometry cache) and flush pending texture
-  // uploads.  Returns the validated target, or nullptr after emitting the
-  // caller-specific error.  `reserveCompositeSlots` reserves the
-  // countCompositeCommands() lighting slots the overlay path needs (the full
-  // path reserves inside recordFrame()).  A non-null `timing` receives the
-  // setup/geom/tex sub-phase durations for the [RTDBG] line.
-  struct ExternalFrameTiming {
-    double setupMs = 0.0;
-    double geomMs = 0.0;
-    double texMs = 0.0;
-  };
+  // boundary, lighting setup, geometry cache) and stage any changed textures
+  // into pendingUploads (consumed by the caller's pre-pass).  Returns the
+  // validated target, or nullptr after emitting the caller-specific error.
+  // `reserveCompositeSlots` reserves the countCompositeCommands() lighting
+  // slots the overlay path needs (the full path reserves inside recordFrame()).
+  // A non-null `timing` receives the setup/geom sub-phase durations for the
+  // [RTDBG] line (tex/lod are filled by beginExternalPrepass()).
   const SoVulkanRenderTarget * prepareExternalFrame(
       const SoDrawList & drawlist, const SoRenderParams & params,
       VkCommandBuffer commandBuffer, VkRenderPass renderPass,
@@ -1130,14 +1169,15 @@ private:
 
   // Texture uploads gathered during updateGeometryCache().  On the own-queue
   // path they are recorded into the frame command buffer (no separate
-  // submit); on the external path they are flushed through one transient
-  // submission.  Indices are re-resolved from the command pointers after
-  // cache eviction compacts the texture cache.
+  // submit); on the external path they are recorded into the transient
+  // pre-pass command buffer (beginExternalPrepass), which the caller submits
+  // once alongside the geometry-LOD dispatches.  Indices are re-resolved from
+  // the command pointers after cache eviction compacts the texture cache.
   std::vector<PendingTextureUpload> pendingUploads;
 
-  // Persistent host-visible staging buffer used to coalesce the external
-  // texture-upload flush (flushPendingTextureUploadsExternal) into a single
-  // buffer write + one submit, instead of allocating a fresh transient staging
+  // Persistent host-visible staging buffer that coalesces every pending
+  // texture upload of a frame into one buffer write (and, on the external
+  // fallback, one submit), instead of allocating a fresh transient staging
   // buffer per pending upload per frame.  Grows on demand and is reused across
   // frames; released at shutdown().  Its mapped pointer is the single owner of
   // the staged pixel data, so a failure at any point leaves one buffer to
@@ -1188,10 +1228,6 @@ private:
   // the pre-pass must skip the command (the descriptor update would otherwise
   // be invalid) and the full draw is used.  0 means "unknown / do not guard".
   uint64_t subPixelMaxStorageRange = 0;
-  // Set by prepareExternalGeometryLod() and consumed by the next
-  // prepareExternalFrame() call, so the external path performs its per-frame
-  // setup exactly once (before the caller's render pass begins).
-  bool externalFramePrepared = false;
 
   // Background gradient resources (no descriptor sets; push constants only).
   VkShaderModule backgroundVertexModule = VK_NULL_HANDLE;

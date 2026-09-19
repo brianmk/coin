@@ -227,30 +227,17 @@ public:
     render pass, create a framebuffer, or submit to the queue.  The caller
     must already be inside a render pass on \a commandBuffer with \a renderPass
     and a compatible framebuffer, and owns submission/presentation.
+
+    The per-frame setup and the GPU geometry-LOD pre-pass are handled inside
+    the backend, so this is the only external frame call: there is no separate
+    prepare step to coordinate.  The backend records the compute pre-pass into
+    a transient command buffer submitted before the caller's pass.
   */
   SbBool renderExternal(SbBool clearwindow,
                         SbBool clearzbuffer,
                         VkCommandBuffer commandBuffer,
                         VkRenderPass renderPass,
                         VkFramebuffer framebuffer);
-
-  /*!
-    \brief Prepare the next renderExternal() frame before the caller begins its
-    render pass, recording the GPU geometry-LOD pre-pass into \a commandBuffer.
-
-    Vulkan forbids compute inside a render pass, so the raster backend's
-    sub-pixel compaction dispatches cannot be recorded once the caller has
-    begun its pass.  The caller must invoke this first (with the same
-    clearwindow/clearzbuffer it will pass to renderExternal()), then begin the
-    render pass, then call renderExternal().  renderExternal() detects the
-    prepared frame and skips the setup already performed here.
-
-    A no-op (returns TRUE) in ray-tracing mode, where the RT backend owns its
-    own command buffers.  Returns FALSE only when frame preparation failed.
-  */
-  SbBool prepareExternalFrame(SbBool clearwindow,
-                              SbBool clearzbuffer,
-                              VkCommandBuffer commandBuffer);
 
   /*!
     \brief Select the ray-tracing backend for the next render() calls.

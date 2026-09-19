@@ -5,8 +5,9 @@
 //   - createSampler()
 //   - prepare/record/finalize staging-to-image uploads for changed textures
 //     (prepareTextureUpload, recordTextureUpload, finalizeTexture,
-//     recordPendingTextureUploads, finalizePendingTextureUploads)
-//   - flushPendingTextureUploadsExternal() on the external-command-buffer path
+//     recordPendingTextureUploadsInto, finalizePendingTextureUploads)
+//   - flushPendingTextureUploadsExternal() as the one-shot fallback used only
+//     when the external pre-pass cannot allocate its transient command buffer
 //   - ensureDescriptorPoolSpace(): grow the descriptor pool
 //   - allocateTextureDescriptorSet() / resolveTextureSet(): bind the
 //     descriptor set a draw uses
@@ -434,19 +435,30 @@ SoVulkanRenderBackend::finalizeTexture(VulkanCachedTexture & entry,
   return true;
 }
 
+void
+SoVulkanRenderBackend::recordPendingTextureUploadsInto(VkCommandBuffer commandBuffer)
+{
+  // Record the copies into the caller's command buffer (which must not be
+  // inside a render pass).  The caller owns submission, so it is responsible
+  // for ordering them ahead of the draws that sample the images: the
+  // own-queue path records both into the same frame command buffer, and the
+  // external pre-pass submits its transient buffer (and waits) before the
+  // caller submits its pass.
+  for (const PendingTextureUpload & upload : this->pendingUploads) {
+    if (upload.index >= this->textureCache.size()) continue;
+    this->recordTextureUpload(commandBuffer, this->textureCache[upload.index],
+                              *upload.texture, this->stagingPoolBuffer,
+                              upload.stagingOffset);
+  }
+}
+
 bool
 SoVulkanRenderBackend::recordPendingTextureUploads()
 {
   // Own-queue path: record the copies into the frame command buffer, ahead
   // of the render pass that samples them.  No separate submit is needed, so
   // no extra queue drain per frame.
-  for (const PendingTextureUpload & upload : this->pendingUploads) {
-    if (upload.index >= this->textureCache.size()) continue;
-    this->recordTextureUpload(this->currentCommandBuffer(),
-                              this->textureCache[upload.index],
-                              *upload.texture, this->stagingPoolBuffer,
-                              upload.stagingOffset);
-  }
+  this->recordPendingTextureUploadsInto(this->currentCommandBuffer());
   return true;
 }
 
@@ -480,13 +492,16 @@ SoVulkanRenderBackend::flushPendingTextureUploadsExternal()
 {
   if (this->pendingUploads.empty()) return SoVulkan::Result::ok();
 
-  // External path: the caller owns the frame command buffer and is already
-  // inside a render pass, so the copies cannot be merged into it.  All
-  // pending uploads were staged into the single shared staging pool buffer
-  // at their recording offsets, so one submit copies every pending texture.
-  // The wait also retires any in-flight frames submitted by the external
-  // caller, which keeps the staging pool free for reuse even when the caller
-  // pipelines more frames than maxFramesInFlight.
+  // One-shot fallback for the external path, used only when
+  // beginExternalPrepass() could not allocate its transient command buffer
+  // (the normal external path records the copies into that buffer instead, so
+  // it pays no extra submission).  The caller owns the frame command buffer
+  // and is already inside a render pass, so the copies cannot be merged into
+  // it.  All pending uploads were staged into the single shared staging pool
+  // buffer at their recording offsets, so one submit copies every pending
+  // texture.  The wait also retires any in-flight frames submitted by the
+  // external caller, which keeps the staging pool free for reuse even when
+  // the caller pipelines more frames than maxFramesInFlight.
   if (!SoVulkanShared::withOneShotSubmit(
         this->device, this->queue, this->commandPool, this->allocator,
         [this](VkCommandBuffer uploadBuffer) {

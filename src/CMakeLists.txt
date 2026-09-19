@@ -411,9 +411,12 @@ if(COIN_INSTALL)
   install(FILES ${PROJECT_SOURCE_DIR}/include/SoWinEnterScope.h ${PROJECT_SOURCE_DIR}/include/SoWinLeaveScope.h ${PROJECT_SOURCE_DIR}/include/SoDebug.h DESTINATION ${CMAKE_INSTALL_INCLUDEDIR} COMPONENT development)
 
   # Keep Coin's vendored Khronos snapshot under the Coin namespace so it
-  # cannot shadow a platform or application-owned GL/KHR header tree.
+  # cannot shadow a platform or application-owned GL/KHR header tree. Install
+  # the build-tree copy of glcorearb.h: it is the namespaced variant whose
+  # platform include was rewritten to sit beside khrplatform.h, so installed
+  # consumers do not need a KHR/ directory on their include path.
   install(FILES
-    ${PROJECT_SOURCE_DIR}/src/glue/khronos/GL/glcorearb.h
+    ${COIN_KHRONOS_INCLUDE_DIR}/glcorearb.h
     DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}/Inventor/system/khronos
     COMPONENT development)
   install(FILES

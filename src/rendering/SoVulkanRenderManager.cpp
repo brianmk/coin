@@ -470,14 +470,6 @@ public:
                              SoDrawList *& drawlist,
                              SoRenderParams & params);
 
-  // Frame prepared by prepareExternalFrame() (manager) and consumed by the
-  // next renderExternal().  The geometry-LOD pre-pass must be recorded before
-  // the caller begins its render pass, so the draw list and params are built
-  // there and reused here instead of being rebuilt inside the pass.
-  bool preparedFrameValid = false;
-  SoDrawList * preparedDrawlist = nullptr;
-  SoRenderParams preparedParams;
-
   // Dump the [CLIP] diagnostic trace (env-gated by FC_VULKAN_CLIP_DEBUG;
   // FC_VULKAN_CLIP_VERBOSE adds the per-25-frame verbose lines).  Extracted
   // from prepareRenderParams() so the per-frame hot path stays readable; the
@@ -1222,45 +1214,6 @@ SoVulkanRenderManager::render(SbBool clearwindow, SbBool clearzbuffer)
 }
 
 SbBool
-SoVulkanRenderManager::prepareExternalFrame(SbBool clearwindow,
-                                            SbBool clearzbuffer,
-                                            VkCommandBuffer commandBuffer)
-{
-  // Ray tracing owns its own command buffers and has no raster geometry-LOD
-  // pre-pass; renderExternal() then prepares the frame normally.
-  if (this->getRayTracingActive()) return TRUE;
-
-  SoRenderParams params;
-  SoDrawList * drawlist = nullptr;
-  if (!this->pimpl->prepareRenderParams(clearwindow, clearzbuffer, drawlist,
-                                        params)) {
-    return FALSE;
-  }
-  params.frame = ++this->pimpl->frameOrdinal;
-  this->pimpl->preparedDrawlist = drawlist;
-  this->pimpl->preparedParams = params;
-  this->pimpl->preparedFrameValid = true;
-
-  if (SoVulkanShared::envFlagEnabled("FC_VULKAN_BACKEND_DEBUG")) {
-    fprintf(stderr, "[GEOMPREP] cmds=%d lod=%d\n", drawlist->getNumCommands(),
-            params.interactionLod == TRUE ? 1 : 0);
-  }
-
-  const SoVulkan::Result lodResult =
-    this->pimpl->backend.prepareExternalGeometryLod(*drawlist, params,
-                                                    commandBuffer);
-  if (!lodResult.isOk()) {
-    // Non-fatal: renderExternal() still records the frame, just without the
-    // geometry-LOD pre-pass (the full-detail draw is always valid).  The
-    // reason travels in the Result instead of being reconstructed from a log.
-    SoDebugError::postWarning("SoVulkanRenderManager::prepareExternalFrame",
-                              "geometry-LOD pre-pass failed: %s",
-                              lodResult.message().c_str());
-  }
-  return TRUE;
-}
-
-SbBool
 SoVulkanRenderManager::renderExternal(SbBool clearwindow,
                                       SbBool clearzbuffer,
                                       VkCommandBuffer commandBuffer,
@@ -1270,21 +1223,11 @@ SoVulkanRenderManager::renderExternal(SbBool clearwindow,
   const long renderBcStart = vkRenderBreadcrumbEnabled() ? vkRenderBreadcrumbNowUs() : 0;
   SoRenderParams params;
   SoDrawList * drawlist = nullptr;
-  if (this->pimpl->preparedFrameValid) {
-    // prepareExternalFrame() already built the draw list/params and ran the
-    // frame setup + geometry-LOD pre-pass before the caller's render pass.
-    drawlist = this->pimpl->preparedDrawlist;
-    params = this->pimpl->preparedParams;
-    this->pimpl->preparedFrameValid = false;
-    this->pimpl->preparedDrawlist = nullptr;
-  }
-  else if (!this->pimpl->prepareRenderParams(clearwindow, clearzbuffer,
-                                             drawlist, params)) {
+  if (!this->pimpl->prepareRenderParams(clearwindow, clearzbuffer,
+                                        drawlist, params)) {
     return FALSE;
   }
-  else {
-    params.frame = ++this->pimpl->frameOrdinal;
-  }
+  params.frame = ++this->pimpl->frameOrdinal;
   if (renderBcStart) {
     vkRenderBreadcrumbSince(renderBcStart, 5000, "renderExternal prepareRenderParams end");
   }
