@@ -47,28 +47,28 @@ struct Functions {
   PFN_vkSetDebugUtilsObjectNameEXT setName = nullptr;
   PFN_vkCmdBeginDebugUtilsLabelEXT beginLabel = nullptr;
   PFN_vkCmdEndDebugUtilsLabelEXT endLabel = nullptr;
-  PFN_vkCmdInsertDebugUtilsLabelEXT insertLabel = nullptr;
 };
 
 inline const Functions &
 functions()
 {
-  static const Functions fns = [] {
-    Functions f;
+  // Resolve once, but only once the device is available.  The previous one-shot
+  // static cached whatever deviceRef() held on the first call, so a call before
+  // setDevice() latched an all-null table and disabled debug utils permanently.
+  static Functions fns {};
+  static bool resolved = false;
+  if (!resolved) {
     const VkDevice device = deviceRef();
-    if (device == VK_NULL_HANDLE) {
-      return f;
+    if (device != VK_NULL_HANDLE) {
+      fns.setName = reinterpret_cast<PFN_vkSetDebugUtilsObjectNameEXT>(
+        vkGetDeviceProcAddr(device, "vkSetDebugUtilsObjectNameEXT"));
+      fns.beginLabel = reinterpret_cast<PFN_vkCmdBeginDebugUtilsLabelEXT>(
+        vkGetDeviceProcAddr(device, "vkCmdBeginDebugUtilsLabelEXT"));
+      fns.endLabel = reinterpret_cast<PFN_vkCmdEndDebugUtilsLabelEXT>(
+        vkGetDeviceProcAddr(device, "vkCmdEndDebugUtilsLabelEXT"));
+      resolved = true;
     }
-    f.setName = reinterpret_cast<PFN_vkSetDebugUtilsObjectNameEXT>(
-      vkGetDeviceProcAddr(device, "vkSetDebugUtilsObjectNameEXT"));
-    f.beginLabel = reinterpret_cast<PFN_vkCmdBeginDebugUtilsLabelEXT>(
-      vkGetDeviceProcAddr(device, "vkCmdBeginDebugUtilsLabelEXT"));
-    f.endLabel = reinterpret_cast<PFN_vkCmdEndDebugUtilsLabelEXT>(
-      vkGetDeviceProcAddr(device, "vkCmdEndDebugUtilsLabelEXT"));
-    f.insertLabel = reinterpret_cast<PFN_vkCmdInsertDebugUtilsLabelEXT>(
-      vkGetDeviceProcAddr(device, "vkCmdInsertDebugUtilsLabelEXT"));
-    return f;
-  }();
+  }
   return fns;
 }
 
