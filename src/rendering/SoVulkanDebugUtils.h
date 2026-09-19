@@ -47,7 +47,6 @@ struct Functions {
   PFN_vkSetDebugUtilsObjectNameEXT setName = nullptr;
   PFN_vkCmdBeginDebugUtilsLabelEXT beginLabel = nullptr;
   PFN_vkCmdEndDebugUtilsLabelEXT endLabel = nullptr;
-  PFN_vkCmdInsertDebugUtilsLabelEXT insertLabel = nullptr;
 };
 
 inline const Functions &
@@ -65,8 +64,6 @@ functions()
       vkGetDeviceProcAddr(device, "vkCmdBeginDebugUtilsLabelEXT"));
     f.endLabel = reinterpret_cast<PFN_vkCmdEndDebugUtilsLabelEXT>(
       vkGetDeviceProcAddr(device, "vkCmdEndDebugUtilsLabelEXT"));
-    f.insertLabel = reinterpret_cast<PFN_vkCmdInsertDebugUtilsLabelEXT>(
-      vkGetDeviceProcAddr(device, "vkCmdInsertDebugUtilsLabelEXT"));
     return f;
   }();
   return fns;

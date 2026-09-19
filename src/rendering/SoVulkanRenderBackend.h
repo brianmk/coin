@@ -705,8 +705,11 @@ private:
                                        ExternalFrameTiming * timing);
   // Submit the transient buffer from beginExternalPrepass() and wait for it to
   // complete, so the copies and the compacted writes are visible before the
-  // caller submits its pass.  Frees the buffer.  No-op on VK_NULL_HANDLE.
-  void submitExternalPrepass(VkCommandBuffer commandBuffer,
+  // caller submits its pass.  Frees the buffer.  No-op (returns true) on
+  // VK_NULL_HANDLE.  Returns false when the submit or the host wait failed; the
+  // finalized texture entries are then un-stamped so the next frame re-uploads
+  // them instead of sampling never-uploaded images forever.
+  bool submitExternalPrepass(VkCommandBuffer commandBuffer,
                              ExternalFrameTiming * timing);
 
   // Resolve the projection a command's wide-line quads must use (its own for a
@@ -887,10 +890,6 @@ private:
   // Vulkan Memory Allocator, created in initialize() and destroyed at
   // shutdown().  Owns the texture-image device memory.
   VmaAllocator vmaAllocator = nullptr;
-  // Cached physical-device memory-properties picker (shared helper); bound to
-  // physicalDevice in initialize().  Replaces the old per-backend
-  // deviceMemoryProperties + deviceMemoryPropertiesValid cache.
-  SoVulkanShared::MemoryProperties memProps;
 
   // --- Device capabilities (probed once in initialize()) -----------------
   // VkPhysicalDeviceFeatures::fillModeNonSolid gates the wireframe/points
@@ -1109,6 +1108,12 @@ private:
   // once alongside the geometry-LOD dispatches.  Indices are re-resolved from
   // the command pointers after cache eviction compacts the texture cache.
   std::vector<PendingTextureUpload> pendingUploads;
+
+  // Texture-cache indices finalized (and content-stamped) by the last
+  // finalizePendingTextureUploads() call.  The external pre-pass uses this to
+  // un-stamp them if its submit fails, so the copies are retried next frame
+  // rather than the draws sampling never-uploaded images.
+  std::vector<size_t> finalizedTextureIndices;
 
   // Persistent host-visible staging buffer that coalesces every pending
   // texture upload of a frame into one buffer write (and, on the external

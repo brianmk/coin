@@ -465,7 +465,7 @@ SoRTXRenderBackend::createDenoiseBackend()
   return true;
 }
 
-void
+bool
 SoRTXRenderBackend::submitDenoiseCopy(VkCommandBuffer cmd)
 {
   const bool async = SoVulkanConfig::get().concurrency.asyncCompute &&
@@ -496,18 +496,24 @@ SoRTXRenderBackend::submitDenoiseCopy(VkCommandBuffer cmd)
       si.signalSemaphoreCount = 1;
       si.pSignalSemaphores = &sem;
       si.pNext = &tls;
-      vkQueueSubmit(q, 1, &si, VK_NULL_HANDLE);
+      if (vkQueueSubmit(q, 1, &si, VK_NULL_HANDLE) != VK_SUCCESS) {
+        this->emitError("denoise copy: vkQueueSubmit failed (async timeline)");
+        return false;
+      }
       VkSemaphoreWaitInfo wi {};
       wi.sType = VK_STRUCTURE_TYPE_SEMAPHORE_WAIT_INFO;
       wi.semaphoreCount = 1;
       wi.pSemaphores = &this->asyncComputeTimeline;
       wi.pValues = &value;
-      vkWaitSemaphores(this->device, &wi, UINT64_MAX);
+      if (vkWaitSemaphores(this->device, &wi, UINT64_MAX) != VK_SUCCESS) {
+        this->emitError("denoise copy: vkWaitSemaphores failed");
+        return false;
+      }
       if (SoVulkanConfig::get().rtxDebug.asyncComputeTiming) {
         fprintf(stderr, "[ASYNC] compute copy signalled timeline value=%llu\n",
                 static_cast<unsigned long long>(value));
       }
-      return;
+      return true;
     }
     // Timeline semaphore unavailable: block on a fence (the graphics queue is
     // still left free); a missing fence falls back to a blocking submit.
@@ -517,17 +523,40 @@ SoRTXRenderBackend::submitDenoiseCopy(VkCommandBuffer cmd)
     if (vkCreateFence(this->device, &fci, this->allocator, &fence) !=
           VK_SUCCESS ||
         fence == VK_NULL_HANDLE) {
-      vkQueueSubmit(q, 1, &si, VK_NULL_HANDLE);
-      vkQueueWaitIdle(q);
-      return;
+      if (vkQueueSubmit(q, 1, &si, VK_NULL_HANDLE) != VK_SUCCESS) {
+        this->emitError("denoise copy: vkQueueSubmit failed (blocking fallback)");
+        return false;
+      }
+      if (vkQueueWaitIdle(q) != VK_SUCCESS) {
+        this->emitError("denoise copy: vkQueueWaitIdle failed");
+        return false;
+      }
+      return true;
     }
-    vkQueueSubmit(q, 1, &si, fence);
-    vkWaitForFences(this->device, 1, &fence, VK_TRUE, UINT64_MAX);
+    if (vkQueueSubmit(q, 1, &si, fence) != VK_SUCCESS) {
+      this->emitError("denoise copy: vkQueueSubmit failed (async fence)");
+      vkDestroyFence(this->device, fence, this->allocator);
+      return false;
+    }
+    const VkResult waitRes =
+      vkWaitForFences(this->device, 1, &fence, VK_TRUE, UINT64_MAX);
     vkDestroyFence(this->device, fence, this->allocator);
+    if (waitRes != VK_SUCCESS) {
+      this->emitError("denoise copy: vkWaitForFences failed");
+      return false;
+    }
+    return true;
   }
   else {
-    vkQueueSubmit(q, 1, &si, VK_NULL_HANDLE);
-    vkQueueWaitIdle(q);
+    if (vkQueueSubmit(q, 1, &si, VK_NULL_HANDLE) != VK_SUCCESS) {
+      this->emitError("denoise copy: vkQueueSubmit failed");
+      return false;
+    }
+    if (vkQueueWaitIdle(q) != VK_SUCCESS) {
+      this->emitError("denoise copy: vkQueueWaitIdle failed");
+      return false;
+    }
+    return true;
   }
 }
 
@@ -764,8 +793,19 @@ SoRTXRenderBackend::updateDenoise()
     if (this->oidnWorker.joinable()) {
       this->oidnWorker.join();
     }
+    const bool workerFailed = this->oidnWorkerFailed;
     this->oidnWorkerDone = FALSE;
     this->oidnWorkerRunning = FALSE;
+    this->oidnWorkerFailed = FALSE;
+    if (workerFailed) {
+      // The worker reported an OIDN error, so the staging output region is
+      // black/invalid.  Do not copy it into the present buffer or publish it
+      // as a denoised result; converge on the raw/edge-stopped image instead.
+      // The error was already logged once by the worker.
+      this->denoiseResultReady = FALSE;
+      this->convergeAfterDenoise();
+      return;
+    }
     if (w > 0 && h > 0 && this->denoiseOutBuf != VK_NULL_HANDLE) {
       // Copy the denoiser output back to the device-local denoisedBuffer
       // (present binding 5) on a one-shot command buffer, then publish the
@@ -783,12 +823,22 @@ SoRTXRenderBackend::updateDenoise()
           cmd, VK_PIPELINE_STAGE_TRANSFER_BIT,
           VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
           VK_ACCESS_TRANSFER_WRITE_BIT, VK_ACCESS_SHADER_READ_BIT);
-        vkEndCommandBuffer(cmd);
+        if (vkEndCommandBuffer(cmd) != VK_SUCCESS) {
+          this->emitError("denoise copy: vkEndCommandBuffer failed");
+          this->denoiseResultReady = FALSE;
+          this->convergeAfterDenoise();
+          return;
+        }
         // Run the denoiser-output copy on the compute queue when the async
         // path is available, so the graphics queue stays free (see
-        // submitDenoiseCopy()).
-        this->submitDenoiseCopy(cmd);
-        this->denoiseResultReady = TRUE;
+        // submitDenoiseCopy()).  A failed submit/wait means the device-local
+        // denoisedBuffer was not written, so do not publish a result.
+        const bool copyOk = this->submitDenoiseCopy(cmd);
+        this->denoiseResultReady = copyOk ? TRUE : FALSE;
+        if (!copyOk) {
+          this->convergeAfterDenoise();
+          return;
+        }
 
         if (COIN_VULKAN_ENV_FLAG("FC_VULKAN_BLACK_DEBUG")) {
           float * dbg = static_cast<float *>(this->denoiseStagingPtr);
@@ -1027,6 +1077,7 @@ SoRTXRenderBackend::updateDenoise()
       this->oidnReadbackPending = FALSE;
       this->oidnWorkerRunning = TRUE;
       this->oidnWorkerDone = FALSE;
+      this->oidnWorkerFailed = FALSE;
       if (this->oidnWorker.joinable()) {
         this->oidnWorker.join();
       }
@@ -1136,13 +1187,15 @@ SoRTXRenderBackend::updateDenoise()
         // written before the render thread reads them.
         oidnSyncDevice(this->oidnDevice);
         // OIDN can fail silently and leave the output region black (e.g. an
-        // unsupported input image format).  Surface the first such failure as
-        // a warning; the worker is a background thread so this cannot corrupt
-        // the render state, and the in-shader edge-stopped mean still shows.
-        if (SoVulkanConfig::get().rtxDebug.denoiserDebug) {
+        // unsupported input image format).  Always probe the error state --
+        // oidnGetDeviceError() clears it, so this must run before the optional
+        // debug print -- and record a failure so the render thread rejects the
+        // black result instead of publishing it as a successful denoise.
+        {
           const char * omsg = nullptr;
           const OIDNError oerr = oidnGetDeviceError(this->oidnDevice, &omsg);
           if (oerr != OIDN_ERROR_NONE) {
+            this->oidnWorkerFailed = TRUE;
             fprintf(stderr, "[DENOISE] OIDN error %d: %s\n",
                     static_cast<int>(oerr), omsg ? omsg : "(null)");
           }
@@ -1223,6 +1276,7 @@ SoRTXRenderBackend::releaseDenoiseStaging()
   }
   this->oidnWorkerRunning = FALSE;
   this->oidnWorkerDone = FALSE;
+  this->oidnWorkerFailed = FALSE;
 #endif
   if (this->denoiseColorBuf != VK_NULL_HANDLE) {
     const VkBuffer buf = this->denoiseColorBuf;

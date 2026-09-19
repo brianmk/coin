@@ -612,29 +612,42 @@ SoVulkanRenderBackend::beginExternalPrepass(const SoDrawList & drawlist,
   return cb;
 }
 
-void
+bool
 SoVulkanRenderBackend::submitExternalPrepass(VkCommandBuffer commandBuffer,
                                              ExternalFrameTiming * timing)
 {
-  if (commandBuffer == VK_NULL_HANDLE) return;
+  if (commandBuffer == VK_NULL_HANDLE) return true;
   const double submitT0 = timing ? SoVulkanShared::steadyNowMs() : 0.0;
   VkSubmitInfo submit {};
   submit.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
   submit.commandBufferCount = 1;
   submit.pCommandBuffers = &commandBuffer;
-  const bool ok =
+  const bool submitted =
     vkQueueSubmit(this->queue, 1, &submit, VK_NULL_HANDLE) == VK_SUCCESS;
   // Host wait: the copies and the compacted writes must be complete and
   // visible before the caller submits its pass, and the caller's submission is
   // out of reach, so no semaphore can be threaded through it.  The queue
   // drains here; because the frame was already recorded above, only the
   // pre-pass itself is on the critical path.
-  vkQueueWaitIdle(this->queue);
+  const bool waited = vkQueueWaitIdle(this->queue) == VK_SUCCESS;
   vkFreeCommandBuffers(this->device, this->commandPool, 1, &commandBuffer);
   if (timing) timing->lodMs = SoVulkanShared::steadyNowMs() - submitT0;
-  if (!ok) {
+  if (!submitted || !waited) {
+    // The copies in the transient buffer never completed, so the texture
+    // entries finalizePendingTextureUploads() stamped still hold their
+    // (empty) images.  Un-stamp them so prepareGeometryTextures() re-prepares
+    // the upload on the next frame instead of sampling the empty image
+    // forever.  The already-recorded frame cannot be repaired.
+    for (const size_t index : this->finalizedTextureIndices) {
+      if (index < this->textureCache.size()) {
+        this->textureCache[index].pixelsKey = nullptr;
+      }
+    }
     SoDebugError::postWarning("SoVulkanRenderBackend::submitExternalPrepass",
-                              "external pre-pass transient submit failed; "
-                              "falling back to the full-detail draw");
+                              "external pre-pass transient submit%s failed; "
+                              "texture uploads will be retried next frame",
+                              submitted ? " wait" : "");
   }
+  this->finalizedTextureIndices.clear();
+  return submitted && waited;
 }
