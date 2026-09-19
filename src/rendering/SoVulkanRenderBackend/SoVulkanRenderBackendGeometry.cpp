@@ -762,6 +762,17 @@ SoVulkanRenderBackend::updateGeometryCache(const SoDrawList & drawlist,
 
   const uint32_t generation = drawlist.getGeneration();
 
+  // Overlay-composite mode (ray tracing active): the sweep must release the
+  // traced triangle commands this backend no longer visits, but the draw-list
+  // generation cannot key that sweep -- on a replayed (camera-only) frame the
+  // retained list is not cleared, so the generation does not change and the
+  // stale triangle entries would survive.  Use a dedicated epoch bumped once
+  // per composite pass instead, stamped on every entry this pass visits.
+  const bool compositeSweep = overlaysOnly && this->overlayCompositeMode;
+  if (compositeSweep) {
+    ++this->overlayCompositeEpoch;
+  }
+
   this->needsGeometryScratch.assign(
     static_cast<size_t>(std::max(0, drawlist.getNumCommands())), 0);
   // Start this frame's texture staging at the front of the shared staging
@@ -888,6 +899,9 @@ SoVulkanRenderBackend::updateGeometryCache(const SoDrawList & drawlist,
     }
     entry.commandKey = &command;
     entry.cacheGeneration = generation;
+    if (compositeSweep) {
+      entry.compositeEpoch = this->overlayCompositeEpoch;
+    }
 
     const SoTextureData & texture = command.material.texture;
     if (texture.pixels && texture.width > 0 && texture.height > 0) {
@@ -947,15 +961,24 @@ SoVulkanRenderBackend::updateGeometryCache(const SoDrawList & drawlist,
   // identity, so rebuild the pointer maps from the stored commandKey.
   // Destruction is deferred: a pending frame may still reference the
   // evicted buffers/images.
-  // Overlay-only renders skip the sweep: their traversal deliberately
-  // visits only overlay commands, so a sweep here would evict the entire
-  // scene cache and force a full re-upload on the next full render.
-  if (!overlaysOnly) {
+  //
+  // A transient overlay-only render skips the sweep: its traversal
+  // deliberately visits only overlay commands, so a sweep would evict the
+  // entire scene cache and force a full re-upload on the next full render.
+  // In overlay-composite mode (ray tracing active, so this backend never
+  // performs a full render again) the sweep DOES run: it releases the traced
+  // triangle geometry the RT backend already owns, instead of holding a
+  // second resident copy for the lifetime of the RT session.
+  if (!overlaysOnly || this->overlayCompositeMode) {
+    // `stale` decides whether an entry is dropped.  A full render and a
+    // transient overlay render key on the draw-list generation; an
+    // overlay-composite pass keys on the composite epoch (see above) because
+    // the retained list's generation does not advance on replayed frames.
     const auto evictStale = [&](auto & cache, auto destroyEntry,
-                                auto & indexMap) {
+                                auto & indexMap, auto stale) {
       bool anyStale = false;
       for (size_t idx = 0; idx < cache.size(); ++idx) {
-        if (cache[idx].cacheGeneration != generation) {
+        if (stale(cache[idx])) {
           destroyEntry(cache[idx]);
           anyStale = true;
         }
@@ -963,7 +986,7 @@ SoVulkanRenderBackend::updateGeometryCache(const SoDrawList & drawlist,
       if (!anyStale) return;
       size_t write = 0;
       for (size_t idx = 0; idx < cache.size(); ++idx) {
-        if (cache[idx].cacheGeneration == generation) {
+        if (!stale(cache[idx])) {
           if (write != idx) cache[write] = std::move(cache[idx]);
           ++write;
         }
@@ -974,16 +997,37 @@ SoVulkanRenderBackend::updateGeometryCache(const SoDrawList & drawlist,
         indexMap[cache[idx].commandKey] = idx;
       }
     };
-    evictStale(this->gpuCache,
-               [this](VulkanCachedCommand & entry) {
-                 this->deferDestroyCacheEntry(entry);
-               },
-               this->commandToCache);
+    if (compositeSweep) {
+      // Release every traced triangle entry the composite pass did not visit
+      // (only overlays and the non-triangle residue are stamped this pass), so
+      // the RT backend's own copy is the only resident one.
+      evictStale(this->gpuCache,
+                 [this](VulkanCachedCommand & entry) {
+                   this->deferDestroyCacheEntry(entry);
+                 },
+                 this->commandToCache,
+                 [this](const VulkanCachedCommand & entry) {
+                   return entry.compositeEpoch != this->overlayCompositeEpoch;
+                 });
+    }
+    else {
+      evictStale(this->gpuCache,
+                 [this](VulkanCachedCommand & entry) {
+                   this->deferDestroyCacheEntry(entry);
+                 },
+                 this->commandToCache,
+                 [generation](const VulkanCachedCommand & entry) {
+                   return entry.cacheGeneration != generation;
+                 });
+    }
     evictStale(this->textureCache,
                [this](VulkanCachedTexture & entry) {
                  this->deferDestroyTextureEntry(entry);
                },
-               this->commandToTexture);
+               this->commandToTexture,
+               [generation](const VulkanCachedTexture & entry) {
+                 return entry.cacheGeneration != generation;
+               });
 
     // Eviction compacts the texture cache and reindexes it, so the upload
     // indices captured above are stale.  Re-resolve each pending upload

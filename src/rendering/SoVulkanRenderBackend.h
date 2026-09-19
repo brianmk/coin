@@ -153,6 +153,12 @@ struct VulkanCachedCommand {
   uint32_t texcoordStride = 0;
   uint32_t normalCount = 0;
   uint32_t cacheGeneration = 0;
+  // Visit stamp for the overlay-composite sweep.  While ray tracing owns the
+  // scene, overlays-only frames cannot key eviction on the draw-list
+  // generation (a replayed retained list never advances it), so this epoch --
+  // bumped once per composite pass -- marks the entries the pass visited;
+  // everything else (the traced triangle commands) is released.
+  uint32_t compositeEpoch = 0;
   // Content hash of the uploaded streams: pointer identity alone cannot
   // detect in-place edits (the per-frame arena hands out the same pointers
   // for unchanged layouts), which would otherwise serve stale geometry.
@@ -270,6 +276,22 @@ public:
   */
   SbBool renderOverlaysOnly(const SoDrawList & drawlist,
                             const SoRenderParams & params);
+
+  /*!
+    \brief Declare that this backend only composites overlays and residual
+    geometry on top of a ray-traced frame.
+
+    While ray tracing is active the manager drives this backend through
+    renderExternalOverlay()/renderOverlaysOnly() only; the RT backend owns the
+    scene's triangle geometry.  In that state updateGeometryCache() runs its
+    stale-entry sweep on overlays-only frames too, evicting the traced triangle
+    commands this backend no longer visits, so the scene meshes are not held
+    resident a second time alongside the RT backend's copy.  The manager sets
+    this while ray tracing is active and clears it when it is not; it must stay
+    false for a backend that also performs full raster renders, whose cache has
+    to survive an interleaved overlay pass.
+  */
+  void setOverlayCompositeMode(SbBool enabled);
 
   /*!
     \brief Declare how many recorded frames the caller may keep in flight.
@@ -1234,6 +1256,17 @@ private:
   std::unordered_map<const SoRenderCommand *, size_t> commandToCache;
   std::vector<VulkanCachedTexture> textureCache;
   std::unordered_map<const SoRenderCommand *, size_t> commandToTexture;
+
+  // True while this backend is used only to composite overlays/residual
+  // geometry over a ray-traced frame (set by setOverlayCompositeMode()).  Lets
+  // updateGeometryCache() sweep stale entries on overlays-only frames so the
+  // traced triangle geometry the RT backend owns is not kept resident here as
+  // well.
+  bool overlayCompositeMode = false;
+  // Monotonic visit stamp for the overlay-composite sweep (see
+  // VulkanCachedCommand::compositeEpoch).  Bumped once per overlays-only pass
+  // while overlayCompositeMode is set.
+  uint32_t overlayCompositeEpoch = 0;
 
   // Reusable batch-key bucket map for recordFrame()'s opaque batching pass.
   // Previously a fresh std::unordered_map per frame; reused via clear() so an

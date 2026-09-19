@@ -1204,7 +1204,12 @@ SoVulkanRenderManager::render(SbBool clearwindow, SbBool clearzbuffer)
     return FALSE;
   }
   params.frame = ++this->pimpl->frameOrdinal;
-  if (this->getRayTracingActive()) {
+  const bool rtActive = this->getRayTracingActive();
+  // While ray tracing owns the scene triangles, the raster backend only draws
+  // overlays/residue; tell it so its geometry sweep releases the traced meshes
+  // instead of keeping a second resident copy.
+  this->pimpl->backend.setOverlayCompositeMode(rtActive);
+  if (rtActive) {
     if (!this->pimpl->rtxBackend.render(*drawlist, params)) {
       SoDebugError::postWarning("SoVulkanRenderManager::render",
                                 "RT backend render failed (%d draw commands)",
@@ -1249,7 +1254,11 @@ SoVulkanRenderManager::renderExternal(SbBool clearwindow,
     vkRenderBreadcrumbSince(renderBcStart, 5000, "renderExternal prepareRenderParams end");
   }
   const long backendBcStart = vkRenderBreadcrumbEnabled() ? vkRenderBreadcrumbNowUs() : 0;
-  if (this->getRayTracingActive()) {
+  const bool rtActive = this->getRayTracingActive();
+  // See render(): in RT mode the raster backend only composites, so its sweep
+  // may release the traced triangle geometry the RT backend owns.
+  this->pimpl->backend.setOverlayCompositeMode(rtActive);
+  if (rtActive) {
     if (!this->pimpl->rtxBackend.renderExternal(*drawlist, params,
                                                 commandBuffer, renderPass)) {
       SoDebugError::postWarning("SoVulkanRenderManager::renderExternal",

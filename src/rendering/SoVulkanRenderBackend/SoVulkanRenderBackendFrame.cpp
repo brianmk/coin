@@ -714,6 +714,12 @@ SoVulkanRenderBackend::renderOverlaysOnly(const SoDrawList & drawlist,
   return this->renderInternal(drawlist, params, true);
 }
 
+void
+SoVulkanRenderBackend::setOverlayCompositeMode(SbBool enabled)
+{
+  this->overlayCompositeMode = enabled != FALSE;
+}
+
 SbBool
 SoVulkanRenderBackend::renderExternal(const SoDrawList & drawlist,
                                       const SoRenderParams & params,
