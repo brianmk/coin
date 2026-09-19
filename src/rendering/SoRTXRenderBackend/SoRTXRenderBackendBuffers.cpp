@@ -16,6 +16,8 @@
 #include <rendering/SoVulkanDebugUtils.h>
 #include <rendering/SoVulkanShared.h>
 
+#include "vk_mem_alloc.h"
+
 using namespace SoRTXBackend;
 
 uint32_t
@@ -31,16 +33,26 @@ bool
 SoRTXRenderBackend::createDeviceLocalBuffer(VkDeviceSize size,
                                             VkBufferUsageFlags usage,
                                             VkBuffer & buffer,
-                                            VkDeviceMemory & memory)
+                                            VmaAllocation & memory)
 {
-  return SoVulkanShared::createBufferAllocated(
-    this->device, this->allocator, size, usage,
-    VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT,
-    (usage & VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT) != 0,
-    [this](const VkMemoryRequirements & req, VkMemoryPropertyFlags desired,
-           uint32_t & memoryTypeIndex) {
-      return this->memProps.pick(req, desired, memoryTypeIndex);
-    }, buffer, memory);
+  buffer = VK_NULL_HANDLE;
+  memory = nullptr;
+  VkBufferCreateInfo bci {};
+  bci.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
+  bci.size = size;
+  bci.usage = usage;
+  bci.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+  VmaAllocationCreateInfo allocInfo {};
+  allocInfo.usage = VMA_MEMORY_USAGE_AUTO;
+  allocInfo.requiredFlags = VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT;
+  VmaAllocationInfo allocationInfo {};
+  if (vmaCreateBuffer(this->vmaAllocator, &bci, &allocInfo, &buffer, &memory,
+                      &allocationInfo) != VK_SUCCESS) {
+    buffer = VK_NULL_HANDLE;
+    memory = nullptr;
+    return false;
+  }
+  return true;
 }
 
 // Host-visible + host-coherent buffer (frame UBO, material buffer, instances,
@@ -49,16 +61,38 @@ bool
 SoRTXRenderBackend::createHostVisibleBuffer(VkDeviceSize size,
                                             VkBufferUsageFlags usage,
                                             VkBuffer & buffer,
-                                            VkDeviceMemory & memory)
+                                            VmaAllocation & memory,
+                                            void ** mapped)
 {
-  return SoVulkanShared::createBufferAllocated(
-    this->device, this->allocator, size, usage,
-    VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
-    (usage & VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT) != 0,
-    [this](const VkMemoryRequirements & req, VkMemoryPropertyFlags desired,
-           uint32_t & memoryTypeIndex) {
-      return this->memProps.pick(req, desired, memoryTypeIndex);
-    }, buffer, memory);
+  buffer = VK_NULL_HANDLE;
+  memory = nullptr;
+  if (mapped) *mapped = nullptr;
+  VkBufferCreateInfo bci {};
+  bci.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
+  bci.size = size;
+  bci.usage = usage;
+  bci.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+  VmaAllocationCreateInfo allocInfo {};
+  allocInfo.usage = VMA_MEMORY_USAGE_AUTO;
+  allocInfo.requiredFlags = VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT |
+                            VK_MEMORY_PROPERTY_HOST_COHERENT_BIT;
+  // Host-visible RTX buffers are written (and some read back) through a
+  // persistent map.  VMA_MEMORY_USAGE_AUTO requires an explicit host-access
+  // flag; VMA forbids combining SEQUENTIAL_WRITE with RANDOM, and RANDOM
+  // already covers the sequential-write case.  MAPPED establishes the
+  // persistent mapping as part of the allocation, so callers must not call
+  // vmaMapMemory (VMA asserts if a user mapping outlives the allocation).
+  allocInfo.flags = VMA_ALLOCATION_CREATE_HOST_ACCESS_RANDOM_BIT |
+                    VMA_ALLOCATION_CREATE_MAPPED_BIT;
+  VmaAllocationInfo allocationInfo {};
+  if (vmaCreateBuffer(this->vmaAllocator, &bci, &allocInfo, &buffer, &memory,
+                      &allocationInfo) != VK_SUCCESS) {
+    buffer = VK_NULL_HANDLE;
+    memory = nullptr;
+    return false;
+  }
+  if (mapped) *mapped = allocationInfo.pMappedData;
+  return true;
 }
 
 VkDeviceAddress
@@ -132,15 +166,15 @@ SoRTXRenderBackend::createStorageImage(uint32_t width, uint32_t height)
     const VkAllocationCallbacks * allocator = this->allocator;
     const VkImage image = this->storageImage;
     const VkImageView view = this->storageImageView;
-    const VkDeviceMemory memory = this->storageImageMemory;
-    this->deferDestroy([device, allocator, image, view, memory]() {
+    const VmaAllocation memory = this->storageImageMemory;
+    VmaAllocator vma = this->vmaAllocator;
+    this->deferDestroy([vma, device, allocator, image, view, memory]() {
       vkDestroyImageView(device, view, allocator);
-      vkDestroyImage(device, image, allocator);
-      vkFreeMemory(device, memory, allocator);
+      vmaDestroyImage(vma, image, memory);
     });
     this->storageImage = VK_NULL_HANDLE;
     this->storageImageView = VK_NULL_HANDLE;
-    this->storageImageMemory = VK_NULL_HANDLE;
+    this->storageImageMemory = nullptr;
   }
   this->storageWidth = width;
   this->storageHeight = height;
@@ -164,30 +198,19 @@ SoRTXRenderBackend::createStorageImage(uint32_t width, uint32_t height)
              VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT;
   ci.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
   ci.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
-  if (vkCreateImage(this->device, &ci, this->allocator,
-                    &this->storageImage) != VK_SUCCESS) {
-    this->storageWidth = 0;
-    this->storageHeight = 0;
-    return false;
-  }
-
-  VkMemoryRequirements requirements;
-  vkGetImageMemoryRequirements(this->device, this->storageImage, &requirements);
-  VkMemoryAllocateInfo ai {};
-  ai.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
-  ai.allocationSize = requirements.size;
-  ai.memoryTypeIndex = this->pickMemoryType(
-    requirements, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
-  if (vkAllocateMemory(this->device, &ai, this->allocator,
-                       &this->storageImageMemory) != VK_SUCCESS) {
-    vkDestroyImage(this->device, this->storageImage, this->allocator);
+  VmaAllocationCreateInfo allocInfo {};
+  allocInfo.usage = VMA_MEMORY_USAGE_AUTO;
+  allocInfo.requiredFlags = VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT;
+  VmaAllocationInfo allocationInfo {};
+  if (vmaCreateImage(this->vmaAllocator, &ci, &allocInfo, &this->storageImage,
+                     &this->storageImageMemory,
+                     &allocationInfo) != VK_SUCCESS) {
     this->storageImage = VK_NULL_HANDLE;
+    this->storageImageMemory = nullptr;
     this->storageWidth = 0;
     this->storageHeight = 0;
     return false;
   }
-  vkBindImageMemory(this->device, this->storageImage, this->storageImageMemory,
-                    0);
 
   VkImageViewCreateInfo vci {};
   vci.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
@@ -199,10 +222,10 @@ SoRTXRenderBackend::createStorageImage(uint32_t width, uint32_t height)
   vci.subresourceRange.levelCount = 1;
   if (vkCreateImageView(this->device, &vci, this->allocator,
                         &this->storageImageView) != VK_SUCCESS) {
-    vkDestroyImage(this->device, this->storageImage, this->allocator);
-    vkFreeMemory(this->device, this->storageImageMemory, this->allocator);
+    vmaDestroyImage(this->vmaAllocator, this->storageImage,
+                    this->storageImageMemory);
     this->storageImage = VK_NULL_HANDLE;
-    this->storageImageMemory = VK_NULL_HANDLE;
+    this->storageImageMemory = nullptr;
     this->storageWidth = 0;
     this->storageHeight = 0;
     return false;
@@ -245,11 +268,11 @@ SoRTXRenderBackend::createStorageImage(uint32_t width, uint32_t height)
     // from scratch instead of early-outing on the cached dimensions with a
     // null sampler.
     vkDestroyImageView(this->device, this->storageImageView, this->allocator);
-    vkDestroyImage(this->device, this->storageImage, this->allocator);
-    vkFreeMemory(this->device, this->storageImageMemory, this->allocator);
+    vmaDestroyImage(this->vmaAllocator, this->storageImage,
+                    this->storageImageMemory);
     this->storageImageView = VK_NULL_HANDLE;
     this->storageImage = VK_NULL_HANDLE;
-    this->storageImageMemory = VK_NULL_HANDLE;
+    this->storageImageMemory = nullptr;
     this->storageWidth = 0;
     this->storageHeight = 0;
     return false;
@@ -275,69 +298,59 @@ SoRTXRenderBackend::createPathTracingBuffers(uint32_t width, uint32_t height)
   // Release the old buffers (deferred: the previous frame's submission may
   // still be executing); new ones are sized to the current viewport.
   if (this->accumBuffer != VK_NULL_HANDLE) {
-    VkDevice device = this->device;
-    const VkAllocationCallbacks * allocator = this->allocator;
+    VmaAllocator vma = this->vmaAllocator;
     const VkBuffer accum = this->accumBuffer;
-    const VkDeviceMemory accumMem = this->accumMemory;
+    const VmaAllocation accumMem = this->accumMemory;
     const VkBuffer normal = this->normalBuffer;
-    const VkDeviceMemory normalMem = this->normalMemory;
+    const VmaAllocation normalMem = this->normalMemory;
     const VkBuffer position = this->positionBuffer;
-    const VkDeviceMemory positionMem = this->positionMemory;
+    const VmaAllocation positionMem = this->positionMemory;
     const VkBuffer sumSq = this->sumSqBuffer;
-    const VkDeviceMemory sumSqMem = this->sumSqMemory;
+    const VmaAllocation sumSqMem = this->sumSqMemory;
     const VkBuffer counter = this->activeCounterBuffer;
-    const VkDeviceMemory counterMem = this->activeCounterMemory;
+    const VmaAllocation counterMem = this->activeCounterMemory;
     const VkBuffer accumHist = this->accumHistoryBuffer;
-    const VkDeviceMemory accumHistMem = this->accumHistoryMemory;
+    const VmaAllocation accumHistMem = this->accumHistoryMemory;
     const VkBuffer sumSqHist = this->sumSqHistoryBuffer;
-    const VkDeviceMemory sumSqHistMem = this->sumSqHistoryMemory;
+    const VmaAllocation sumSqHistMem = this->sumSqHistoryMemory;
     const VkBuffer posHist = this->positionHistoryBuffer;
-    const VkDeviceMemory posHistMem = this->positionHistoryMemory;
+    const VmaAllocation posHistMem = this->positionHistoryMemory;
     const VkBuffer motion = this->motionBuffer;
-    const VkDeviceMemory motionMem = this->motionMemory;
-    this->deferDestroy([device, allocator, accum, accumMem, normal,
+    const VmaAllocation motionMem = this->motionMemory;
+    this->deferDestroy([vma, accum, accumMem, normal,
                         normalMem, position, positionMem, sumSq, sumSqMem,
                         counter, counterMem, accumHist, accumHistMem,
                         sumSqHist, sumSqHistMem, posHist, posHistMem,
                         motion, motionMem]() {
-      vkDestroyBuffer(device, accum, allocator);
-      vkFreeMemory(device, accumMem, allocator);
-      vkDestroyBuffer(device, normal, allocator);
-      vkFreeMemory(device, normalMem, allocator);
-      vkDestroyBuffer(device, position, allocator);
-      vkFreeMemory(device, positionMem, allocator);
-      vkDestroyBuffer(device, sumSq, allocator);
-      vkFreeMemory(device, sumSqMem, allocator);
-      vkDestroyBuffer(device, counter, allocator);
-      vkFreeMemory(device, counterMem, allocator);
-      vkDestroyBuffer(device, accumHist, allocator);
-      vkFreeMemory(device, accumHistMem, allocator);
-      vkDestroyBuffer(device, sumSqHist, allocator);
-      vkFreeMemory(device, sumSqHistMem, allocator);
-      vkDestroyBuffer(device, posHist, allocator);
-      vkFreeMemory(device, posHistMem, allocator);
-      vkDestroyBuffer(device, motion, allocator);
-      vkFreeMemory(device, motionMem, allocator);
+      vmaDestroyBuffer(vma, accum, accumMem);
+      vmaDestroyBuffer(vma, normal, normalMem);
+      vmaDestroyBuffer(vma, position, positionMem);
+      vmaDestroyBuffer(vma, sumSq, sumSqMem);
+      vmaDestroyBuffer(vma, counter, counterMem);
+      vmaDestroyBuffer(vma, accumHist, accumHistMem);
+      vmaDestroyBuffer(vma, sumSqHist, sumSqHistMem);
+      vmaDestroyBuffer(vma, posHist, posHistMem);
+      vmaDestroyBuffer(vma, motion, motionMem);
     });
     this->accumBuffer = VK_NULL_HANDLE;
-    this->accumMemory = VK_NULL_HANDLE;
+    this->accumMemory = nullptr;
     this->normalBuffer = VK_NULL_HANDLE;
-    this->normalMemory = VK_NULL_HANDLE;
+    this->normalMemory = nullptr;
     this->positionBuffer = VK_NULL_HANDLE;
-    this->positionMemory = VK_NULL_HANDLE;
+    this->positionMemory = nullptr;
     this->sumSqBuffer = VK_NULL_HANDLE;
-    this->sumSqMemory = VK_NULL_HANDLE;
+    this->sumSqMemory = nullptr;
     this->activeCounterBuffer = VK_NULL_HANDLE;
-    this->activeCounterMemory = VK_NULL_HANDLE;
+    this->activeCounterMemory = nullptr;
     this->activeCounterMapped = nullptr;
     this->accumHistoryBuffer = VK_NULL_HANDLE;
-    this->accumHistoryMemory = VK_NULL_HANDLE;
+    this->accumHistoryMemory = nullptr;
     this->sumSqHistoryBuffer = VK_NULL_HANDLE;
-    this->sumSqHistoryMemory = VK_NULL_HANDLE;
+    this->sumSqHistoryMemory = nullptr;
     this->positionHistoryBuffer = VK_NULL_HANDLE;
-    this->positionHistoryMemory = VK_NULL_HANDLE;
+    this->positionHistoryMemory = nullptr;
     this->motionBuffer = VK_NULL_HANDLE;
-    this->motionMemory = VK_NULL_HANDLE;
+    this->motionMemory = nullptr;
     this->ptHistoryValid = FALSE;
     this->ptReprojectFrame = FALSE;
   }
@@ -366,8 +379,7 @@ SoRTXRenderBackend::createPathTracingBuffers(uint32_t width, uint32_t height)
                                      this->normalMemory)) {
     // Unwind the partial success so a retry starts clean (and the handles
     // do not survive a subsequent early-out with inconsistent widths).
-    vkDestroyBuffer(this->device, this->accumBuffer, this->allocator);
-    vkFreeMemory(this->device, this->accumMemory, this->allocator);
+    vmaDestroyBuffer(this->vmaAllocator, this->accumBuffer, this->accumMemory);
     this->accumBuffer = VK_NULL_HANDLE;
     this->accumMemory = VK_NULL_HANDLE;
     this->ptBufferWidth = 0;
@@ -376,10 +388,8 @@ SoRTXRenderBackend::createPathTracingBuffers(uint32_t width, uint32_t height)
   }
   if (!this->createDeviceLocalBuffer(bytes, usage, this->positionBuffer,
                                      this->positionMemory)) {
-    vkDestroyBuffer(this->device, this->normalBuffer, this->allocator);
-    vkFreeMemory(this->device, this->normalMemory, this->allocator);
-    vkDestroyBuffer(this->device, this->accumBuffer, this->allocator);
-    vkFreeMemory(this->device, this->accumMemory, this->allocator);
+    vmaDestroyBuffer(this->vmaAllocator, this->normalBuffer, this->normalMemory);
+    vmaDestroyBuffer(this->vmaAllocator, this->accumBuffer, this->accumMemory);
     this->normalBuffer = VK_NULL_HANDLE;
     this->normalMemory = VK_NULL_HANDLE;
     this->accumBuffer = VK_NULL_HANDLE;
@@ -392,12 +402,9 @@ SoRTXRenderBackend::createPathTracingBuffers(uint32_t width, uint32_t height)
   // denoiser readback (same TRANSFER_SRC as the other guides).
   if (!this->createDeviceLocalBuffer(bytes, usage, this->motionBuffer,
                                      this->motionMemory)) {
-    vkDestroyBuffer(this->device, this->positionBuffer, this->allocator);
-    vkFreeMemory(this->device, this->positionMemory, this->allocator);
-    vkDestroyBuffer(this->device, this->normalBuffer, this->allocator);
-    vkFreeMemory(this->device, this->normalMemory, this->allocator);
-    vkDestroyBuffer(this->device, this->accumBuffer, this->allocator);
-    vkFreeMemory(this->device, this->accumMemory, this->allocator);
+    vmaDestroyBuffer(this->vmaAllocator, this->positionBuffer, this->positionMemory);
+    vmaDestroyBuffer(this->vmaAllocator, this->normalBuffer, this->normalMemory);
+    vmaDestroyBuffer(this->vmaAllocator, this->accumBuffer, this->accumMemory);
     this->positionBuffer = VK_NULL_HANDLE;
     this->positionMemory = VK_NULL_HANDLE;
     this->normalBuffer = VK_NULL_HANDLE;
@@ -415,14 +422,10 @@ SoRTXRenderBackend::createPathTracingBuffers(uint32_t width, uint32_t height)
   // the buffer comfortably above any minimum-alignment requirement).
   if (!this->createDeviceLocalBuffer(bytes, accumUsage, this->sumSqBuffer,
                                      this->sumSqMemory)) {
-    vkDestroyBuffer(this->device, this->positionBuffer, this->allocator);
-    vkFreeMemory(this->device, this->positionMemory, this->allocator);
-    vkDestroyBuffer(this->device, this->normalBuffer, this->allocator);
-    vkFreeMemory(this->device, this->normalMemory, this->allocator);
-    vkDestroyBuffer(this->device, this->accumBuffer, this->allocator);
-    vkFreeMemory(this->device, this->accumMemory, this->allocator);
-    vkDestroyBuffer(this->device, this->motionBuffer, this->allocator);
-    vkFreeMemory(this->device, this->motionMemory, this->allocator);
+    vmaDestroyBuffer(this->vmaAllocator, this->positionBuffer, this->positionMemory);
+    vmaDestroyBuffer(this->vmaAllocator, this->normalBuffer, this->normalMemory);
+    vmaDestroyBuffer(this->vmaAllocator, this->accumBuffer, this->accumMemory);
+    vmaDestroyBuffer(this->vmaAllocator, this->motionBuffer, this->motionMemory);
     this->positionBuffer = VK_NULL_HANDLE;
     this->positionMemory = VK_NULL_HANDLE;
     this->normalBuffer = VK_NULL_HANDLE;
@@ -438,15 +441,12 @@ SoRTXRenderBackend::createPathTracingBuffers(uint32_t width, uint32_t height)
   if (!this->createHostVisibleBuffer(
         16, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT |
               VK_BUFFER_USAGE_TRANSFER_DST_BIT,
-        this->activeCounterBuffer, this->activeCounterMemory)) {
-    vkDestroyBuffer(this->device, this->sumSqBuffer, this->allocator);
-    vkFreeMemory(this->device, this->sumSqMemory, this->allocator);
-    vkDestroyBuffer(this->device, this->positionBuffer, this->allocator);
-    vkFreeMemory(this->device, this->positionMemory, this->allocator);
-    vkDestroyBuffer(this->device, this->normalBuffer, this->allocator);
-    vkFreeMemory(this->device, this->normalMemory, this->allocator);
-    vkDestroyBuffer(this->device, this->accumBuffer, this->allocator);
-    vkFreeMemory(this->device, this->accumMemory, this->allocator);
+        this->activeCounterBuffer, this->activeCounterMemory,
+        &this->activeCounterMapped)) {
+    vmaDestroyBuffer(this->vmaAllocator, this->sumSqBuffer, this->sumSqMemory);
+    vmaDestroyBuffer(this->vmaAllocator, this->positionBuffer, this->positionMemory);
+    vmaDestroyBuffer(this->vmaAllocator, this->normalBuffer, this->normalMemory);
+    vmaDestroyBuffer(this->vmaAllocator, this->accumBuffer, this->accumMemory);
     this->sumSqBuffer = VK_NULL_HANDLE;
     this->sumSqMemory = VK_NULL_HANDLE;
     this->positionBuffer = VK_NULL_HANDLE;
@@ -458,11 +458,6 @@ SoRTXRenderBackend::createPathTracingBuffers(uint32_t width, uint32_t height)
     this->ptBufferWidth = 0;
     this->ptBufferHeight = 0;
     return false;
-  }
-  if (vkMapMemory(this->device, this->activeCounterMemory, 0,
-                  VK_WHOLE_SIZE, 0, &this->activeCounterMapped) !=
-      VK_SUCCESS) {
-    this->activeCounterMapped = nullptr;
   }
   // Temporal reprojection history.  The accumulation and sums-of-squares
   // history buffers also carry TRANSFER_DST: after a swap they can become
@@ -476,24 +471,15 @@ SoRTXRenderBackend::createPathTracingBuffers(uint32_t width, uint32_t height)
       !this->createDeviceLocalBuffer(bytes, usage,
                                      this->positionHistoryBuffer,
                                      this->positionHistoryMemory)) {
-    vkDestroyBuffer(this->device, this->accumHistoryBuffer, this->allocator);
-    vkFreeMemory(this->device, this->accumHistoryMemory, this->allocator);
-    vkDestroyBuffer(this->device, this->sumSqHistoryBuffer, this->allocator);
-    vkFreeMemory(this->device, this->sumSqHistoryMemory, this->allocator);
-    vkDestroyBuffer(this->device, this->positionHistoryBuffer, this->allocator);
-    vkFreeMemory(this->device, this->positionHistoryMemory, this->allocator);
-    vkDestroyBuffer(this->device, this->activeCounterBuffer, this->allocator);
-    vkFreeMemory(this->device, this->activeCounterMemory, this->allocator);
-    vkDestroyBuffer(this->device, this->sumSqBuffer, this->allocator);
-    vkFreeMemory(this->device, this->sumSqMemory, this->allocator);
-    vkDestroyBuffer(this->device, this->positionBuffer, this->allocator);
-    vkFreeMemory(this->device, this->positionMemory, this->allocator);
-    vkDestroyBuffer(this->device, this->normalBuffer, this->allocator);
-    vkFreeMemory(this->device, this->normalMemory, this->allocator);
-    vkDestroyBuffer(this->device, this->motionBuffer, this->allocator);
-    vkFreeMemory(this->device, this->motionMemory, this->allocator);
-    vkDestroyBuffer(this->device, this->accumBuffer, this->allocator);
-    vkFreeMemory(this->device, this->accumMemory, this->allocator);
+    vmaDestroyBuffer(this->vmaAllocator, this->accumHistoryBuffer, this->accumHistoryMemory);
+    vmaDestroyBuffer(this->vmaAllocator, this->sumSqHistoryBuffer, this->sumSqHistoryMemory);
+    vmaDestroyBuffer(this->vmaAllocator, this->positionHistoryBuffer, this->positionHistoryMemory);
+    vmaDestroyBuffer(this->vmaAllocator, this->activeCounterBuffer, this->activeCounterMemory);
+    vmaDestroyBuffer(this->vmaAllocator, this->sumSqBuffer, this->sumSqMemory);
+    vmaDestroyBuffer(this->vmaAllocator, this->positionBuffer, this->positionMemory);
+    vmaDestroyBuffer(this->vmaAllocator, this->normalBuffer, this->normalMemory);
+    vmaDestroyBuffer(this->vmaAllocator, this->motionBuffer, this->motionMemory);
+    vmaDestroyBuffer(this->vmaAllocator, this->accumBuffer, this->accumMemory);
     this->accumHistoryBuffer = VK_NULL_HANDLE;
     this->accumHistoryMemory = VK_NULL_HANDLE;
     this->sumSqHistoryBuffer = VK_NULL_HANDLE;
@@ -550,17 +536,14 @@ SoRTXRenderBackend::createPathTracingBuffers(uint32_t width, uint32_t height)
     this->destroyDenoiser();
 
     if (this->activeCounterMapped != nullptr) {
-      vkUnmapMemory(this->device, this->activeCounterMemory);
+      vmaUnmapMemory(this->vmaAllocator, this->activeCounterMemory);
       this->activeCounterMapped = nullptr;
     }
-    auto freeBuffer = [this](VkBuffer & buffer, VkDeviceMemory & memory) {
+    auto freeBuffer = [this](VkBuffer & buffer, VmaAllocation & memory) {
       if (buffer != VK_NULL_HANDLE) {
-        vkDestroyBuffer(this->device, buffer, this->allocator);
+        vmaDestroyBuffer(this->vmaAllocator, buffer, memory);
         buffer = VK_NULL_HANDLE;
-      }
-      if (memory != VK_NULL_HANDLE) {
-        vkFreeMemory(this->device, memory, this->allocator);
-        memory = VK_NULL_HANDLE;
+        memory = nullptr;
       }
     };
     freeBuffer(this->accumBuffer, this->accumMemory);

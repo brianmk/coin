@@ -24,6 +24,8 @@
 #include "rendering/vulkan/rt/DenoiseDownsample.spv.h"
 #include <rendering/SoRTXRenderBackend/SoRTXRenderBackendP.h>
 
+#include "vk_mem_alloc.h"
+
 using namespace SoRTXBackend;
 
 namespace {
@@ -366,26 +368,17 @@ SoRTXRenderBackend::createFrameBuffer()
   if (this->frameBuffer == VK_NULL_HANDLE) {
     if (!this->createHostVisibleBuffer(
           sizeof(RTXFrameBlock), VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT,
-          this->frameBuffer, this->frameMemory)) {
-      return false;
-    }
-    if (vkMapMemory(this->device, this->frameMemory, 0,
-                    sizeof(RTXFrameBlock), 0, &this->frameMapped) !=
-        VK_SUCCESS) {
+          this->frameBuffer, this->frameMemory, &this->frameMapped)) {
       return false;
     }
   }
   // Compact present frame block: world->view (mat4) followed by view->clip
   // (mat4), exactly matching the PresentFrame std140 block in
   // PresentFragment.glsl (two mat4, offsets 0 and 64).
-  if (!this->createHostVisibleBuffer(
-        2 * sizeof(float) * 16, VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT,
-        this->presentFrameBuffer, this->presentFrameMemory)) {
-    return false;
-  }
-  return vkMapMemory(this->device, this->presentFrameMemory, 0,
-                     2 * sizeof(float) * 16, 0, &this->presentFrameMapped) ==
-    VK_SUCCESS;
+  return this->createHostVisibleBuffer(
+    2 * sizeof(float) * 16, VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT,
+    this->presentFrameBuffer, this->presentFrameMemory,
+    &this->presentFrameMapped);
 }
 
 bool
@@ -1020,8 +1013,7 @@ SoRTXRenderBackend::createShaderBindingTable()
     return false;
   }
   void * mapped = nullptr;
-  if (vkMapMemory(this->device, this->sbtMemory, 0, tableSize, 0,
-                  &mapped) != VK_SUCCESS) {
+  if (vmaMapMemory(this->vmaAllocator, this->sbtMemory, &mapped) != VK_SUCCESS) {
     return false;
   }
   const VkDeviceAddress rawBase = this->getDeviceAddress(this->sbtBuffer);
@@ -1034,7 +1026,7 @@ SoRTXRenderBackend::createShaderBindingTable()
                 handles.data() + static_cast<size_t>(i) * handleSize,
                 handleSize);
   }
-  vkUnmapMemory(this->device, this->sbtMemory);
+  vmaUnmapMemory(this->vmaAllocator, this->sbtMemory);
 
   // Strided device-address regions handed to vkCmdTraceRaysKHR.
   const VkDeviceSize stride = this->sbtRecordSize;

@@ -17,6 +17,8 @@
 #include <string>
 #include <rendering/SoRTXRenderBackend/SoRTXRenderBackendP.h>
 
+#include "vk_mem_alloc.h"
+
 using namespace SoRTXBackend;
 
 // Wall-clock milliseconds for the FC_VULKAN_FRAME_TIMING breakdown.
@@ -521,6 +523,22 @@ SoRTXRenderBackend::initialize(const SoRenderBackendInitParams & params)
   this->allocator = deviceContext->allocator;
   this->memProps.setDevice(this->physicalDevice);
 
+  // Create the VMA allocator before any buffer/image allocation.  The
+  // buffer-device-address flag is required because the BLAS/TLAS and SBT
+  // buffers expose VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT; VMA then adds
+  // VK_MEMORY_ALLOCATE_DEVICE_ADDRESS_BIT to the backing allocation.
+  VmaAllocatorCreateInfo allocatorInfo {};
+  allocatorInfo.physicalDevice = this->physicalDevice;
+  allocatorInfo.device = this->device;
+  allocatorInfo.instance = this->instance;
+  allocatorInfo.vulkanApiVersion = deviceContext->apiVersion;
+  allocatorInfo.pAllocationCallbacks = this->allocator;
+  allocatorInfo.flags = VMA_ALLOCATOR_CREATE_BUFFER_DEVICE_ADDRESS_BIT;
+  if (vmaCreateAllocator(&allocatorInfo, &this->vmaAllocator) != VK_SUCCESS) {
+    this->emitError("SoRTXRenderBackend: vmaCreateAllocator failed");
+    return FALSE;
+  }
+
   // The async-compute queue requested at device creation (see the widget's
   // setQueueCreateInfoModifier).  probeComputeQueue() retrieves the handle
   // from this family + queue index.  UINT32_MAX family = none requested.
@@ -907,128 +925,113 @@ SoRTXRenderBackend::shutdown()
     this->tlas = VK_NULL_HANDLE;
   }
   if (this->tlasBuffer != VK_NULL_HANDLE) {
-    vkDestroyBuffer(this->device, this->tlasBuffer, this->allocator);
+    vmaDestroyBuffer(this->vmaAllocator, this->tlasBuffer, this->tlasMemory);
     this->tlasBuffer = VK_NULL_HANDLE;
   }
   if (this->tlasMemory != VK_NULL_HANDLE) {
-    vkFreeMemory(this->device, this->tlasMemory, this->allocator);
     this->tlasMemory = VK_NULL_HANDLE;
   }
   if (this->instanceBuffer != VK_NULL_HANDLE) {
-    vkDestroyBuffer(this->device, this->instanceBuffer, this->allocator);
+    vmaDestroyBuffer(this->vmaAllocator, this->instanceBuffer, this->instanceMemory);
     this->instanceBuffer = VK_NULL_HANDLE;
   }
   if (this->instanceMemory != VK_NULL_HANDLE) {
-    vkFreeMemory(this->device, this->instanceMemory, this->allocator);
     this->instanceMemory = VK_NULL_HANDLE;
   }
   this->instanceBufferCapacity = 0;
   this->tlasSize = 0;
   if (this->scratchBuffer != VK_NULL_HANDLE) {
-    vkDestroyBuffer(this->device, this->scratchBuffer, this->allocator);
+    vmaDestroyBuffer(this->vmaAllocator, this->scratchBuffer, this->scratchMemory);
     this->scratchBuffer = VK_NULL_HANDLE;
   }
   if (this->scratchMemory != VK_NULL_HANDLE) {
-    vkFreeMemory(this->device, this->scratchMemory, this->allocator);
     this->scratchMemory = VK_NULL_HANDLE;
   }
   this->scratchSize = 0;
   this->scratchAddress = 0;
   if (this->storageImage != VK_NULL_HANDLE) {
     vkDestroyImageView(this->device, this->storageImageView, this->allocator);
-    vkDestroyImage(this->device, this->storageImage, this->allocator);
-    vkFreeMemory(this->device, this->storageImageMemory, this->allocator);
+    vmaDestroyImage(this->vmaAllocator, this->storageImage,
+                    this->storageImageMemory);
     this->storageImage = VK_NULL_HANDLE;
     this->storageImageView = VK_NULL_HANDLE;
-    this->storageImageMemory = VK_NULL_HANDLE;
+    this->storageImageMemory = nullptr;
   }
   if (this->presentSampler != VK_NULL_HANDLE) {
     vkDestroySampler(this->device, this->presentSampler, this->allocator);
     this->presentSampler = VK_NULL_HANDLE;
   }
   if (this->accumBuffer != VK_NULL_HANDLE) {
-    vkDestroyBuffer(this->device, this->accumBuffer, this->allocator);
+    vmaDestroyBuffer(this->vmaAllocator, this->accumBuffer, this->accumMemory);
     this->accumBuffer = VK_NULL_HANDLE;
   }
   if (this->accumMemory != VK_NULL_HANDLE) {
-    vkFreeMemory(this->device, this->accumMemory, this->allocator);
     this->accumMemory = VK_NULL_HANDLE;
   }
   if (this->normalBuffer != VK_NULL_HANDLE) {
-    vkDestroyBuffer(this->device, this->normalBuffer, this->allocator);
+    vmaDestroyBuffer(this->vmaAllocator, this->normalBuffer, this->normalMemory);
     this->normalBuffer = VK_NULL_HANDLE;
   }
   if (this->normalMemory != VK_NULL_HANDLE) {
-    vkFreeMemory(this->device, this->normalMemory, this->allocator);
     this->normalMemory = VK_NULL_HANDLE;
   }
   if (this->positionBuffer != VK_NULL_HANDLE) {
-    vkDestroyBuffer(this->device, this->positionBuffer, this->allocator);
+    vmaDestroyBuffer(this->vmaAllocator, this->positionBuffer, this->positionMemory);
     this->positionBuffer = VK_NULL_HANDLE;
   }
   if (this->positionMemory != VK_NULL_HANDLE) {
-    vkFreeMemory(this->device, this->positionMemory, this->allocator);
     this->positionMemory = VK_NULL_HANDLE;
   }
   if (this->sumSqBuffer != VK_NULL_HANDLE) {
-    vkDestroyBuffer(this->device, this->sumSqBuffer, this->allocator);
+    vmaDestroyBuffer(this->vmaAllocator, this->sumSqBuffer, this->sumSqMemory);
     this->sumSqBuffer = VK_NULL_HANDLE;
   }
   if (this->sumSqMemory != VK_NULL_HANDLE) {
-    vkFreeMemory(this->device, this->sumSqMemory, this->allocator);
     this->sumSqMemory = VK_NULL_HANDLE;
   }
   if (this->activeCounterBuffer != VK_NULL_HANDLE) {
-    if (this->activeCounterMapped != nullptr) {
-      vkUnmapMemory(this->device, this->activeCounterMemory);
-      this->activeCounterMapped = nullptr;
-    }
-    vkDestroyBuffer(this->device, this->activeCounterBuffer, this->allocator);
+    // The persistent mapping comes from VMA_ALLOCATION_CREATE_MAPPED_BIT, so
+    // there is no vmaMapMemory to balance before vmaDestroyBuffer.
+    this->activeCounterMapped = nullptr;
+    vmaDestroyBuffer(this->vmaAllocator, this->activeCounterBuffer, this->activeCounterMemory);
     this->activeCounterBuffer = VK_NULL_HANDLE;
   }
   if (this->activeCounterMemory != VK_NULL_HANDLE) {
-    vkFreeMemory(this->device, this->activeCounterMemory, this->allocator);
     this->activeCounterMemory = VK_NULL_HANDLE;
   }
   if (this->accumHistoryBuffer != VK_NULL_HANDLE) {
-    vkDestroyBuffer(this->device, this->accumHistoryBuffer, this->allocator);
+    vmaDestroyBuffer(this->vmaAllocator, this->accumHistoryBuffer, this->accumHistoryMemory);
     this->accumHistoryBuffer = VK_NULL_HANDLE;
   }
   if (this->accumHistoryMemory != VK_NULL_HANDLE) {
-    vkFreeMemory(this->device, this->accumHistoryMemory, this->allocator);
     this->accumHistoryMemory = VK_NULL_HANDLE;
   }
   if (this->sumSqHistoryBuffer != VK_NULL_HANDLE) {
-    vkDestroyBuffer(this->device, this->sumSqHistoryBuffer, this->allocator);
+    vmaDestroyBuffer(this->vmaAllocator, this->sumSqHistoryBuffer, this->sumSqHistoryMemory);
     this->sumSqHistoryBuffer = VK_NULL_HANDLE;
   }
   if (this->sumSqHistoryMemory != VK_NULL_HANDLE) {
-    vkFreeMemory(this->device, this->sumSqHistoryMemory, this->allocator);
     this->sumSqHistoryMemory = VK_NULL_HANDLE;
   }
   if (this->positionHistoryBuffer != VK_NULL_HANDLE) {
-    vkDestroyBuffer(this->device, this->positionHistoryBuffer,
-                    this->allocator);
+    vmaDestroyBuffer(this->vmaAllocator, this->positionHistoryBuffer, this->positionHistoryMemory);
     this->positionHistoryBuffer = VK_NULL_HANDLE;
   }
   if (this->positionHistoryMemory != VK_NULL_HANDLE) {
-    vkFreeMemory(this->device, this->positionHistoryMemory, this->allocator);
     this->positionHistoryMemory = VK_NULL_HANDLE;
   }
   // The screen-space motion-vector G-buffer (read by the denoiser readback)
   // is part of the same PT buffer pool, so it must be destroyed here too.
   if (this->motionBuffer != VK_NULL_HANDLE) {
-    vkDestroyBuffer(this->device, this->motionBuffer, this->allocator);
+    vmaDestroyBuffer(this->vmaAllocator, this->motionBuffer, this->motionMemory);
     this->motionBuffer = VK_NULL_HANDLE;
   }
   if (this->motionMemory != VK_NULL_HANDLE) {
-    vkFreeMemory(this->device, this->motionMemory, this->allocator);
     this->motionMemory = VK_NULL_HANDLE;
   }
   this->ptHistoryValid = FALSE;
   this->ptReprojectFrame = FALSE;
   if (this->positionMemory != VK_NULL_HANDLE) {
-    vkFreeMemory(this->device, this->positionMemory, this->allocator);
     this->positionMemory = VK_NULL_HANDLE;
   }
   this->ptBufferWidth = 0;
@@ -1039,8 +1042,7 @@ SoRTXRenderBackend::shutdown()
   this->flushPendingDestroys();
   this->flushPendingDestroys();
   if (this->materialBuffer != VK_NULL_HANDLE) {
-    vkDestroyBuffer(this->device, this->materialBuffer, this->allocator);
-    vkFreeMemory(this->device, this->materialMemory, this->allocator);
+    vmaDestroyBuffer(this->vmaAllocator, this->materialBuffer, this->materialMemory);
     this->materialBuffer = VK_NULL_HANDLE;
     this->materialMemory = VK_NULL_HANDLE;
     this->materialMapped = nullptr;
@@ -1048,15 +1050,13 @@ SoRTXRenderBackend::shutdown()
   this->materialCount = 0;
   this->materialBufferBytes = 0;
   if (this->frameBuffer != VK_NULL_HANDLE) {
-    vkDestroyBuffer(this->device, this->frameBuffer, this->allocator);
-    vkFreeMemory(this->device, this->frameMemory, this->allocator);
+    vmaDestroyBuffer(this->vmaAllocator, this->frameBuffer, this->frameMemory);
     this->frameBuffer = VK_NULL_HANDLE;
     this->frameMemory = VK_NULL_HANDLE;
     this->frameMapped = nullptr;
   }
   if (this->presentFrameBuffer != VK_NULL_HANDLE) {
-    vkDestroyBuffer(this->device, this->presentFrameBuffer, this->allocator);
-    vkFreeMemory(this->device, this->presentFrameMemory, this->allocator);
+    vmaDestroyBuffer(this->vmaAllocator, this->presentFrameBuffer, this->presentFrameMemory);
     this->presentFrameBuffer = VK_NULL_HANDLE;
     this->presentFrameMemory = VK_NULL_HANDLE;
     this->presentFrameMapped = nullptr;
@@ -1139,29 +1139,26 @@ SoRTXRenderBackend::shutdown()
     this->shadowClosestHitModule = VK_NULL_HANDLE;
   }
   if (this->sbtBuffer != VK_NULL_HANDLE) {
-    vkDestroyBuffer(this->device, this->sbtBuffer, this->allocator);
+    vmaDestroyBuffer(this->vmaAllocator, this->sbtBuffer, this->sbtMemory);
     this->sbtBuffer = VK_NULL_HANDLE;
   }
   if (this->sbtMemory != VK_NULL_HANDLE) {
-    vkFreeMemory(this->device, this->sbtMemory, this->allocator);
     this->sbtMemory = VK_NULL_HANDLE;
   }
   this->sbtRecordSize = 32;
   this->sbtBaseOffset = 0;
   if (this->normalPoolBuffer != VK_NULL_HANDLE) {
     this->normalPoolMapped = nullptr;
-    vkDestroyBuffer(this->device, this->normalPoolBuffer, this->allocator);
+    vmaDestroyBuffer(this->vmaAllocator, this->normalPoolBuffer, this->normalPoolMemory);
     this->normalPoolBuffer = VK_NULL_HANDLE;
-    vkFreeMemory(this->device, this->normalPoolMemory, this->allocator);
     this->normalPoolMemory = VK_NULL_HANDLE;
   }
   this->normalPoolCapacity = 0;
   this->normalPoolUsed = 0;
   if (this->neePoolBuffer != VK_NULL_HANDLE) {
     this->neePoolMapped = nullptr;
-    vkDestroyBuffer(this->device, this->neePoolBuffer, this->allocator);
+    vmaDestroyBuffer(this->vmaAllocator, this->neePoolBuffer, this->neePoolMemory);
     this->neePoolBuffer = VK_NULL_HANDLE;
-    vkFreeMemory(this->device, this->neePoolMemory, this->allocator);
     this->neePoolMemory = VK_NULL_HANDLE;
   }
   this->neePoolCapacity = 0;
@@ -1208,6 +1205,13 @@ SoRTXRenderBackend::shutdown()
     // the first (possibly non-dirty) frame must repopulate its torn set.
     this->rtSetValid[i] = false;
     this->presentSetValid[i] = false;
+  }
+
+  // Every VMA-backed buffer/image has been released above; drop the allocator
+  // last so any missed allocation is reported by VMA rather than leaking.
+  if (this->vmaAllocator != nullptr) {
+    vmaDestroyAllocator(this->vmaAllocator);
+    this->vmaAllocator = nullptr;
   }
 
   this->instance = VK_NULL_HANDLE;

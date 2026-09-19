@@ -10,6 +10,8 @@
 #include <cstdint>
 #include <cstring>
 
+#include "vk_mem_alloc.h"
+
 #include "rendering/vulkan/rt/Pick.spv.h"
 
 namespace {
@@ -127,13 +129,8 @@ SoRTXRenderBackend::createPickResources()
 
   if (!this->createHostVisibleBuffer(
         sizeof(PickHitGpu), VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
-        this->pickResultBuffer, this->pickResultMemory)) {
-    this->destroyPickResources();
-    return false;
-  }
-  if (vkMapMemory(this->device, this->pickResultMemory, 0, sizeof(PickHitGpu),
-                  0, &this->pickResultMapped) != VK_SUCCESS) {
-    this->pickResultMapped = nullptr;
+        this->pickResultBuffer, this->pickResultMemory,
+        &this->pickResultMapped)) {
     this->destroyPickResources();
     return false;
   }
@@ -189,16 +186,14 @@ void
 SoRTXRenderBackend::destroyPickResources()
 {
   if (this->device != VK_NULL_HANDLE) {
-    if (this->pickResultMapped) {
-      vkUnmapMemory(this->device, this->pickResultMemory);
-      this->pickResultMapped = nullptr;
-    }
+    // The persistent mapping comes from VMA_ALLOCATION_CREATE_MAPPED_BIT, so
+    // there is no vmaMapMemory to balance before vmaDestroyBuffer.
+    this->pickResultMapped = nullptr;
     if (this->pickResultBuffer != VK_NULL_HANDLE) {
-      vkDestroyBuffer(this->device, this->pickResultBuffer, this->allocator);
+      vmaDestroyBuffer(this->vmaAllocator, this->pickResultBuffer, this->pickResultMemory);
       this->pickResultBuffer = VK_NULL_HANDLE;
     }
     if (this->pickResultMemory != VK_NULL_HANDLE) {
-      vkFreeMemory(this->device, this->pickResultMemory, this->allocator);
       this->pickResultMemory = VK_NULL_HANDLE;
     }
     if (this->pickFence != VK_NULL_HANDLE) {

@@ -24,6 +24,8 @@
 #include "rendering/vulkan/rt/PresentFragment.spv.h"
 #include <rendering/SoRTXRenderBackend/SoRTXRenderBackendP.h>
 
+#include "vk_mem_alloc.h"
+
 using namespace SoRTXBackend;
 
 bool
@@ -134,7 +136,7 @@ SoRTXRenderBackend::ensureNeePoolCapacity(VkDeviceSize bytes)
 bool
 SoRTXRenderBackend::ensurePoolCapacity(VkDeviceSize bytes,
                                        VkBuffer & poolBuffer,
-                                       VkDeviceMemory & poolMemory,
+                                       VmaAllocation & poolMemory,
                                        void *& poolMapped,
                                        VkDeviceSize & poolCapacity,
                                        VkDeviceSize & poolUsed,
@@ -148,17 +150,11 @@ SoRTXRenderBackend::ensurePoolCapacity(VkDeviceSize bytes,
     newCapacity *= 2;
   }
   VkBuffer newBuffer = VK_NULL_HANDLE;
-  VkDeviceMemory newMemory = VK_NULL_HANDLE;
+  VmaAllocation newMemory = nullptr;
   void * newMapped = nullptr;
   if (!this->createHostVisibleBuffer(
         newCapacity, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
-        newBuffer, newMemory)) {
-    return false;
-  }
-  if (vkMapMemory(this->device, newMemory, 0, newCapacity, 0,
-                  &newMapped) != VK_SUCCESS) {
-    vkDestroyBuffer(this->device, newBuffer, this->allocator);
-    vkFreeMemory(this->device, newMemory, this->allocator);
+        newBuffer, newMemory, &newMapped)) {
     return false;
   }
   if (poolBuffer != VK_NULL_HANDLE) {
@@ -168,10 +164,9 @@ SoRTXRenderBackend::ensurePoolCapacity(VkDeviceSize bytes,
     // clobbered memory (they would all read the last-written object's
     // normals -- the source of the per-wedge cap artifacts).
     std::memcpy(newMapped, poolMapped, poolUsed);
-    vkDestroyBuffer(this->device, poolBuffer, this->allocator);
+    vmaDestroyBuffer(this->vmaAllocator, poolBuffer, poolMemory);
     poolBuffer = VK_NULL_HANDLE;
-    vkFreeMemory(this->device, poolMemory, this->allocator);
-    poolMemory = VK_NULL_HANDLE;
+    poolMemory = nullptr;
     poolMapped = nullptr;
   }
   else {
@@ -309,28 +304,20 @@ SoRTXRenderBackend::destroyCacheEntry(RTXCachedGeometry & entry)
     entry.blas = VK_NULL_HANDLE;
   }
   if (entry.blasBuffer != VK_NULL_HANDLE) {
-    vkDestroyBuffer(this->device, entry.blasBuffer, this->allocator);
+    vmaDestroyBuffer(this->vmaAllocator, entry.blasBuffer, entry.blasMemory);
     entry.blasBuffer = VK_NULL_HANDLE;
-  }
-  if (entry.blasMemory != VK_NULL_HANDLE) {
-    vkFreeMemory(this->device, entry.blasMemory, this->allocator);
-    entry.blasMemory = VK_NULL_HANDLE;
+    entry.blasMemory = nullptr;
   }
   if (entry.vertexBuffer != VK_NULL_HANDLE) {
-    vkDestroyBuffer(this->device, entry.vertexBuffer, this->allocator);
+    vmaDestroyBuffer(this->vmaAllocator, entry.vertexBuffer,
+                     entry.vertexMemory);
     entry.vertexBuffer = VK_NULL_HANDLE;
-  }
-  if (entry.vertexMemory != VK_NULL_HANDLE) {
-    vkFreeMemory(this->device, entry.vertexMemory, this->allocator);
-    entry.vertexMemory = VK_NULL_HANDLE;
+    entry.vertexMemory = nullptr;
   }
   if (entry.indexBuffer != VK_NULL_HANDLE) {
-    vkDestroyBuffer(this->device, entry.indexBuffer, this->allocator);
+    vmaDestroyBuffer(this->vmaAllocator, entry.indexBuffer, entry.indexMemory);
     entry.indexBuffer = VK_NULL_HANDLE;
-  }
-  if (entry.indexMemory != VK_NULL_HANDLE) {
-    vkFreeMemory(this->device, entry.indexMemory, this->allocator);
-    entry.indexMemory = VK_NULL_HANDLE;
+    entry.indexMemory = nullptr;
   }
   entry = RTXCachedGeometry();
 }
@@ -345,38 +332,30 @@ SoRTXRenderBackend::deferDestroyCacheEntry(RTXCachedGeometry & entry)
   }
   VkDevice device = this->device;
   const VkAllocationCallbacks * allocator = this->allocator;
+  VmaAllocator vma = this->vmaAllocator;
   const PFN_vkDestroyAccelerationStructureKHR vkDestroyAS =
     this->vkDestroyAccelerationStructureKHR;
   const VkAccelerationStructureKHR blas = entry.blas;
   const VkBuffer blasBuffer = entry.blasBuffer;
-  const VkDeviceMemory blasMemory = entry.blasMemory;
+  const VmaAllocation blasMemory = entry.blasMemory;
   const VkBuffer vertexBuffer = entry.vertexBuffer;
-  const VkDeviceMemory vertexMemory = entry.vertexMemory;
+  const VmaAllocation vertexMemory = entry.vertexMemory;
   const VkBuffer indexBuffer = entry.indexBuffer;
-  const VkDeviceMemory indexMemory = entry.indexMemory;
-  this->deferDestroy([device, allocator, vkDestroyAS, blas, blasBuffer,
+  const VmaAllocation indexMemory = entry.indexMemory;
+  this->deferDestroy([device, allocator, vma, vkDestroyAS, blas, blasBuffer,
                       blasMemory, vertexBuffer, vertexMemory, indexBuffer,
                       indexMemory]() {
     if (blas != VK_NULL_HANDLE) {
       vkDestroyAS(device, blas, allocator);
     }
     if (blasBuffer != VK_NULL_HANDLE) {
-      vkDestroyBuffer(device, blasBuffer, allocator);
-    }
-    if (blasMemory != VK_NULL_HANDLE) {
-      vkFreeMemory(device, blasMemory, allocator);
+      vmaDestroyBuffer(vma, blasBuffer, blasMemory);
     }
     if (indexBuffer != VK_NULL_HANDLE) {
-      vkDestroyBuffer(device, indexBuffer, allocator);
-    }
-    if (indexMemory != VK_NULL_HANDLE) {
-      vkFreeMemory(device, indexMemory, allocator);
+      vmaDestroyBuffer(vma, indexBuffer, indexMemory);
     }
     if (vertexBuffer != VK_NULL_HANDLE) {
-      vkDestroyBuffer(device, vertexBuffer, allocator);
-    }
-    if (vertexMemory != VK_NULL_HANDLE) {
-      vkFreeMemory(device, vertexMemory, allocator);
+      vmaDestroyBuffer(vma, vertexBuffer, vertexMemory);
     }
   });
   entry = RTXCachedGeometry();
@@ -387,10 +366,7 @@ SoRTXRenderBackend::freePendingStagingDestroys()
 {
   for (const auto & entry : this->pendingStagingDestroys) {
     if (entry.first != VK_NULL_HANDLE) {
-      vkDestroyBuffer(this->device, entry.first, this->allocator);
-    }
-    if (entry.second != VK_NULL_HANDLE) {
-      vkFreeMemory(this->device, entry.second, this->allocator);
+      vmaDestroyBuffer(this->vmaAllocator, entry.first, entry.second);
     }
   }
   this->pendingStagingDestroys.clear();
@@ -489,7 +465,7 @@ SoRTXRenderBackend::compactBlas(RTXCachedGeometry & entry)
   }
 
   VkBuffer cBuf = VK_NULL_HANDLE;
-  VkDeviceMemory cMem = VK_NULL_HANDLE;
+  VmaAllocation cMem = nullptr;
   if (!this->createDeviceLocalBuffer(
         compactSize,
         VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_STORAGE_BIT_KHR |
@@ -506,8 +482,7 @@ SoRTXRenderBackend::compactBlas(RTXCachedGeometry & entry)
   if (vkCreateAccelerationStructureKHR(this->device, &asCI, this->allocator,
                                        &cAs) != VK_SUCCESS ||
       cAs == VK_NULL_HANDLE) {
-    vkDestroyBuffer(this->device, cBuf, this->allocator);
-    vkFreeMemory(this->device, cMem, this->allocator);
+    vmaDestroyBuffer(this->vmaAllocator, cBuf, cMem);
     return false;
   }
 
@@ -536,8 +511,7 @@ SoRTXRenderBackend::compactBlas(RTXCachedGeometry & entry)
 
   if (!ok) {
     vkDestroyAccelerationStructureKHR(this->device, cAs, this->allocator);
-    vkDestroyBuffer(this->device, cBuf, this->allocator);
-    vkFreeMemory(this->device, cMem, this->allocator);
+    vmaDestroyBuffer(this->vmaAllocator, cBuf, cMem);
     return false;
   }
 
@@ -545,7 +519,7 @@ SoRTXRenderBackend::compactBlas(RTXCachedGeometry & entry)
   // reference the old address until the frame that used it completes).
   VkAccelerationStructureKHR oldAs = entry.blas;
   VkBuffer oldBuf = entry.blasBuffer;
-  VkDeviceMemory oldMem = entry.blasMemory;
+  VmaAllocation oldMem = entry.blasMemory;
   entry.blas = cAs;
   entry.blasBuffer = cBuf;
   entry.blasMemory = cMem;
@@ -574,17 +548,16 @@ SoRTXRenderBackend::compactBlas(RTXCachedGeometry & entry)
   }
   VkDevice device = this->device;
   const VkAllocationCallbacks * alloc = this->allocator;
+  VmaAllocator vma = this->vmaAllocator;
   const PFN_vkDestroyAccelerationStructureKHR vkDestroyAS =
     this->vkDestroyAccelerationStructureKHR;
-  this->deferDestroy([device, alloc, vkDestroyAS, oldAs, oldBuf, oldMem]() {
+  this->deferDestroy([device, alloc, vma, vkDestroyAS, oldAs, oldBuf,
+                      oldMem]() {
     if (oldAs != VK_NULL_HANDLE) {
       vkDestroyAS(device, oldAs, alloc);
     }
     if (oldBuf != VK_NULL_HANDLE) {
-      vkDestroyBuffer(device, oldBuf, alloc);
-    }
-    if (oldMem != VK_NULL_HANDLE) {
-      vkFreeMemory(device, oldMem, alloc);
+      vmaDestroyBuffer(vma, oldBuf, oldMem);
     }
   });
   return true;
@@ -1220,49 +1193,44 @@ SoRTXRenderBackend::blasBuildOrRefit(RTXCachedGeometry & entry,
   }
 
   VkBuffer staging = VK_NULL_HANDLE;
-  VkDeviceMemory stagingMemory = VK_NULL_HANDLE;
+  VmaAllocation stagingMemory = nullptr;
   if (!this->createHostVisibleBuffer(vertexBytes,
                                      VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
                                      staging, stagingMemory)) {
     return false;
   }
   void * mapped = nullptr;
-  if (vkMapMemory(this->device, stagingMemory, 0, vertexBytes, 0, &mapped) !=
-        VK_SUCCESS ||
+  if (vmaMapMemory(this->vmaAllocator, stagingMemory, &mapped) != VK_SUCCESS ||
       mapped == nullptr) {
     this->emitError(
-      (std::string(tag) + ": vkMapMemory (vertex staging) failed").c_str());
-    vkDestroyBuffer(this->device, staging, this->allocator);
-    vkFreeMemory(this->device, stagingMemory, this->allocator);
+      (std::string(tag) + ": vmaMapMemory (vertex staging) failed").c_str());
+    vmaDestroyBuffer(this->vmaAllocator, staging, stagingMemory);
     return false;
   }
   std::memcpy(mapped, vertexSrc, static_cast<size_t>(vertexBytes));
-  vkUnmapMemory(this->device, stagingMemory);
+  vmaUnmapMemory(this->vmaAllocator, stagingMemory);
 
   VkBuffer indexStaging = VK_NULL_HANDLE;
-  VkDeviceMemory indexStagingMemory = VK_NULL_HANDLE;
+  VmaAllocation indexStagingMemory = nullptr;
   if (indexed && !refit) {
     if (!this->createHostVisibleBuffer(indexBytes,
                                        VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
                                        indexStaging, indexStagingMemory)) {
-      vkDestroyBuffer(this->device, staging, this->allocator);
-      vkFreeMemory(this->device, stagingMemory, this->allocator);
+      vmaDestroyBuffer(this->vmaAllocator, staging, stagingMemory);
       return false;
     }
     void * imapped = nullptr;
-    if (vkMapMemory(this->device, indexStagingMemory, 0, indexBytes, 0,
-                    &imapped) != VK_SUCCESS ||
+    if (vmaMapMemory(this->vmaAllocator, indexStagingMemory, &imapped) !=
+          VK_SUCCESS ||
         imapped == nullptr) {
       this->emitError(
-        (std::string(tag) + ": vkMapMemory (index staging) failed").c_str());
-      vkDestroyBuffer(this->device, staging, this->allocator);
-      vkFreeMemory(this->device, stagingMemory, this->allocator);
-      vkDestroyBuffer(this->device, indexStaging, this->allocator);
-      vkFreeMemory(this->device, indexStagingMemory, this->allocator);
+        (std::string(tag) + ": vmaMapMemory (index staging) failed").c_str());
+      vmaDestroyBuffer(this->vmaAllocator, staging, stagingMemory);
+      vmaDestroyBuffer(this->vmaAllocator, indexStaging, indexStagingMemory);
       return false;
     }
     std::memcpy(imapped, geometry.indices, static_cast<size_t>(indexBytes));
-    vkUnmapMemory(this->device, indexStagingMemory);
+    vmaUnmapMemory(this->vmaAllocator, indexStagingMemory);
   }
 
   VkBufferCopy vertexCopy {};
@@ -1689,16 +1657,14 @@ SoRTXRenderBackend::buildTlas(const SoDrawList & drawlist,
         this->instanceBufferCapacity < instances.size()) {
       if (this->instanceBuffer != VK_NULL_HANDLE) {
         // Defer: a pending frame may still read the old instance buffer.
-        VkDevice device = this->device;
-        const VkAllocationCallbacks * allocator = this->allocator;
+        VmaAllocator vma = this->vmaAllocator;
         const VkBuffer buffer = this->instanceBuffer;
-        const VkDeviceMemory memory = this->instanceMemory;
-        this->deferDestroy([device, allocator, buffer, memory]() {
-          vkDestroyBuffer(device, buffer, allocator);
-          vkFreeMemory(device, memory, allocator);
+        const VmaAllocation memory = this->instanceMemory;
+        this->deferDestroy([vma, buffer, memory]() {
+          vmaDestroyBuffer(vma, buffer, memory);
         });
         this->instanceBuffer = VK_NULL_HANDLE;
-        this->instanceMemory = VK_NULL_HANDLE;
+        this->instanceMemory = nullptr;
       }
       if (!this->createHostVisibleBuffer(
             instanceBytes,
@@ -1710,12 +1676,11 @@ SoRTXRenderBackend::buildTlas(const SoDrawList & drawlist,
       this->instanceBufferCapacity = static_cast<uint32_t>(instances.size());
     }
     void * mapped = nullptr;
-    if (vkMapMemory(this->device, this->instanceMemory, 0, instanceBytes, 0,
-                    &mapped) != VK_SUCCESS) {
+    if (vmaMapMemory(this->vmaAllocator, this->instanceMemory, &mapped) != VK_SUCCESS) {
       return false;
     }
     std::memcpy(mapped, instances.data(), static_cast<size_t>(instanceBytes));
-    vkUnmapMemory(this->device, this->instanceMemory);
+    vmaUnmapMemory(this->vmaAllocator, this->instanceMemory);
   }
 
   // TLAS build sizes.
@@ -1762,8 +1727,7 @@ SoRTXRenderBackend::buildTlas(const SoDrawList & drawlist,
     if (this->tlas != VK_NULL_HANDLE) {
       vkDestroyAccelerationStructureKHR(this->device, this->tlas,
                                         this->allocator);
-      vkDestroyBuffer(this->device, this->tlasBuffer, this->allocator);
-      vkFreeMemory(this->device, this->tlasMemory, this->allocator);
+      vmaDestroyBuffer(this->vmaAllocator, this->tlasBuffer, this->tlasMemory);
       this->tlas = VK_NULL_HANDLE;
       this->tlasBuffer = VK_NULL_HANDLE;
       this->tlasMemory = VK_NULL_HANDLE;
@@ -1847,28 +1811,21 @@ SoRTXRenderBackend::updateMaterials(const SoDrawList & drawlist)
       bytes > this->materialBufferBytes) {
     if (this->materialBuffer != VK_NULL_HANDLE) {
       // Defer: a pending frame may still read the old material buffer.
-      VkDevice device = this->device;
-      const VkAllocationCallbacks * allocator = this->allocator;
+      VmaAllocator vma = this->vmaAllocator;
       const VkBuffer buffer = this->materialBuffer;
-      const VkDeviceMemory memory = this->materialMemory;
-      this->deferDestroy([device, allocator, buffer, memory]() {
-        vkUnmapMemory(device, memory);
-        vkDestroyBuffer(device, buffer, allocator);
-        vkFreeMemory(device, memory, allocator);
+      const VmaAllocation memory = this->materialMemory;
+      this->deferDestroy([vma, buffer, memory]() {
+        vmaDestroyBuffer(vma, buffer, memory);
       });
       this->materialBuffer = VK_NULL_HANDLE;
-      this->materialMemory = VK_NULL_HANDLE;
+      this->materialMemory = nullptr;
       this->materialMapped = nullptr;
     }
     if (!this->createHostVisibleBuffer(
           bytes, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
-          this->materialBuffer, this->materialMemory)) {
+          this->materialBuffer, this->materialMemory,
+          &this->materialMapped)) {
       this->emitError("updateMaterials: failed to create material buffer");
-      return;
-    }
-    if (vkMapMemory(this->device, this->materialMemory, 0, bytes, 0,
-                    &this->materialMapped) != VK_SUCCESS) {
-      this->materialMapped = nullptr;
       return;
     }
     this->materialBufferBytes = bytes;

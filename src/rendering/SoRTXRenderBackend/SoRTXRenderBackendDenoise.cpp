@@ -30,6 +30,8 @@
 #include <string>
 #include <rendering/SoRTXRenderBackend/SoRTXRenderBackendP.h>
 
+#include "vk_mem_alloc.h"
+
 #if COIN_BUILD_RTX_DENOISER
 // The OptiX function table lives in exactly this TU.
 #include <optix_function_table_definition.h>
@@ -292,7 +294,8 @@ SoRTXRenderBackend::createDenoiseBackend()
           totalBytes, VK_BUFFER_USAGE_TRANSFER_DST_BIT |
             VK_BUFFER_USAGE_TRANSFER_SRC_BIT |
             VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
-          this->denoiseColorBuf, this->denoiseColorMem)) {
+          this->denoiseColorBuf, this->denoiseColorMem,
+          &this->denoiseStagingPtr)) {
       // The host-visible staging block is the constrained allocation (several
       // image-sized regions at viewport resolution); if the driver cannot back
       // it, degrade gracefully rather than failing the whole path-tracing
@@ -319,12 +322,6 @@ SoRTXRenderBackend::createDenoiseBackend()
       this->denoiseGuideMem = this->denoiseColorMem;
       this->denoiseMotionMem = this->denoiseColorMem;
       this->denoiseOutMem = this->denoiseColorMem;
-      if (vkMapMemory(this->device, this->denoiseColorMem, 0, totalBytes, 0,
-                      &this->denoiseStagingPtr) != VK_SUCCESS) {
-        this->denoiseStagingPtr = nullptr;
-        this->emitError("failed to map denoiser staging buffer; disabling denoiser");
-        stagingFailed = true;
-      }
     }
   }
 
@@ -1259,32 +1256,28 @@ SoRTXRenderBackend::releaseDenoiseStaging()
 #endif
   if (this->denoiseColorBuf != VK_NULL_HANDLE) {
     const VkBuffer buf = this->denoiseColorBuf;
-    const VkDeviceMemory mem = this->denoiseColorMem;
-    if (this->denoiseStagingPtr) {
-      vkUnmapMemory(this->device, mem);
-      this->denoiseStagingPtr = nullptr;
-    }
+    const VmaAllocation mem = this->denoiseColorMem;
+    // The staging pointer is VMA's persistent mapping
+    // (VMA_ALLOCATION_CREATE_MAPPED_BIT), so there is no vmaMapMemory to
+    // balance before vmaDestroyBuffer.
+    this->denoiseStagingPtr = nullptr;
     // denoiseColorBuf is the single allocation; the alias handles do not
     // own it.
     this->denoiseColorBuf = VK_NULL_HANDLE;
-    this->denoiseColorMem = VK_NULL_HANDLE;
+    this->denoiseColorMem = nullptr;
     this->denoiseAlbedoBuf = VK_NULL_HANDLE;
     this->denoiseNormalBuf = VK_NULL_HANDLE;
     this->denoiseGuideBuf = VK_NULL_HANDLE;
     this->denoiseMotionBuf = VK_NULL_HANDLE;
     this->denoiseOutBuf = VK_NULL_HANDLE;
-    this->denoiseAlbedoMem = VK_NULL_HANDLE;
-    this->denoiseNormalMem = VK_NULL_HANDLE;
-    this->denoiseGuideMem = VK_NULL_HANDLE;
-    this->denoiseMotionMem = VK_NULL_HANDLE;
-    this->denoiseOutMem = VK_NULL_HANDLE;
-    this->deferDestroy([this, buf, mem]() {
-      if (buf != VK_NULL_HANDLE) {
-        vkDestroyBuffer(this->device, buf, this->allocator);
-      }
-      if (mem != VK_NULL_HANDLE) {
-        vkFreeMemory(this->device, mem, this->allocator);
-      }
+    this->denoiseAlbedoMem = nullptr;
+    this->denoiseNormalMem = nullptr;
+    this->denoiseGuideMem = nullptr;
+    this->denoiseMotionMem = nullptr;
+    this->denoiseOutMem = nullptr;
+    VmaAllocator vma = this->vmaAllocator;
+    this->deferDestroy([vma, buf, mem]() {
+      vmaDestroyBuffer(vma, buf, mem);
     });
   }
   // The device-local denoised output and albedo G-buffer are kept across a
@@ -1306,30 +1299,22 @@ SoRTXRenderBackend::destroyDenoiser()
   // valid); the whole backend is going away here so it is safe.
   if (this->denoisedBuffer != VK_NULL_HANDLE) {
     const VkBuffer buf = this->denoisedBuffer;
-    const VkDeviceMemory mem = this->denoisedMemory;
+    const VmaAllocation mem = this->denoisedMemory;
     this->denoisedBuffer = VK_NULL_HANDLE;
-    this->denoisedMemory = VK_NULL_HANDLE;
-    this->deferDestroy([this, buf, mem]() {
-      if (buf != VK_NULL_HANDLE) {
-        vkDestroyBuffer(this->device, buf, this->allocator);
-      }
-      if (mem != VK_NULL_HANDLE) {
-        vkFreeMemory(this->device, mem, this->allocator);
-      }
+    this->denoisedMemory = nullptr;
+    VmaAllocator vma = this->vmaAllocator;
+    this->deferDestroy([vma, buf, mem]() {
+      vmaDestroyBuffer(vma, buf, mem);
     });
   }
   if (this->albedoBuffer != VK_NULL_HANDLE) {
     const VkBuffer buf = this->albedoBuffer;
-    const VkDeviceMemory mem = this->albedoMemory;
+    const VmaAllocation mem = this->albedoMemory;
     this->albedoBuffer = VK_NULL_HANDLE;
-    this->albedoMemory = VK_NULL_HANDLE;
-    this->deferDestroy([this, buf, mem]() {
-      if (buf != VK_NULL_HANDLE) {
-        vkDestroyBuffer(this->device, buf, this->allocator);
-      }
-      if (mem != VK_NULL_HANDLE) {
-        vkFreeMemory(this->device, mem, this->allocator);
-      }
+    this->albedoMemory = nullptr;
+    VmaAllocator vma = this->vmaAllocator;
+    this->deferDestroy([vma, buf, mem]() {
+      vmaDestroyBuffer(vma, buf, mem);
     });
   }
 
