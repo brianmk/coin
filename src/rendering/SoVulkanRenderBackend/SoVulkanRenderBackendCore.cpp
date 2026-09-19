@@ -91,7 +91,7 @@ SoVulkanRenderBackend::setMaxFramesInFlight(const uint32_t count)
         static_cast<VkDeviceSize>(this->maxFramesInFlight) *
         this->uboSlotsPerFrame * this->uboSlotStride;
       VkBuffer newBuffer = VK_NULL_HANDLE;
-      VkDeviceMemory newMemory = VK_NULL_HANDLE;
+      VmaAllocation newMemory = nullptr;
       void * newMapped = nullptr;
       if (!this->createMappedBuffer(totalBytes,
                                     VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT,
@@ -938,7 +938,7 @@ SoVulkanRenderBackend::growLightingUbo(const uint32_t minSlots)
   if (slots <= this->uboSlotsPerFrame) return true;
 
   VkBuffer newBuffer = VK_NULL_HANDLE;
-  VkDeviceMemory newMemory = VK_NULL_HANDLE;
+  VmaAllocation newMemory = nullptr;
   void * newMapped = nullptr;
   const VkDeviceSize totalBytes =
     static_cast<VkDeviceSize>(this->maxFramesInFlight) *
@@ -954,12 +954,12 @@ SoVulkanRenderBackend::growLightingUbo(const uint32_t minSlots)
 
 bool
 SoVulkanRenderBackend::swapLightingBuffer(VkBuffer newBuffer,
-                                          VkDeviceMemory newMemory,
+                                          VmaAllocation newMemory,
                                           void * newMapped,
                                           const uint32_t newSlotsPerFrame)
 {
   const VkBuffer oldBuffer = this->lightingBuffer;
-  const VkDeviceMemory oldMemory = this->lightingMemory;
+  const VmaAllocation oldMemory = this->lightingMemory;
   this->lightingBuffer = newBuffer;
   this->lightingMemory = newMemory;
   this->lightingMapped = newMapped;
@@ -1119,89 +1119,63 @@ SoVulkanRenderBackend::deferDestroyCacheEntry(VulkanCachedCommand & entry)
     std::vector<VulkanCachedCommand::VulkanSubPixelSlot> subPixel =
       std::move(entry.subPixelSlots);
     const VkBuffer instancedLineBuffer = entry.instancedLineBuffer;
-    const VkDeviceMemory instancedLineMemory = entry.instancedLineMemory;
-    VkDevice device = this->device;
-    const VkAllocationCallbacks * allocator = this->allocator;
-    this->deferDestroy([device, allocator, wideLine, subPixel, instancedLineBuffer,
+    const VmaAllocation instancedLineMemory = entry.instancedLineMemory;
+    VmaAllocator vma = this->vmaAllocator;
+    this->deferDestroy([vma, wideLine, subPixel, instancedLineBuffer,
                         instancedLineMemory]() mutable {
       for (VulkanCachedCommand::VulkanWideLineBuffer & slot : wideLine) {
-        slot.destroy(device, allocator);
+        slot.destroy(vma);
       }
       for (VulkanCachedCommand::VulkanSubPixelSlot & slot : subPixel) {
         if (slot.indexBuffer != VK_NULL_HANDLE) {
-          vkDestroyBuffer(device, slot.indexBuffer, allocator);
-        }
-        if (slot.indexMemory != VK_NULL_HANDLE) {
-          vkFreeMemory(device, slot.indexMemory, allocator);
+          vmaDestroyBuffer(vma, slot.indexBuffer, slot.indexMemory);
         }
         if (slot.indirectBuffer != VK_NULL_HANDLE) {
-          vkDestroyBuffer(device, slot.indirectBuffer, allocator);
-        }
-        if (slot.indirectMemory != VK_NULL_HANDLE) {
-          vkFreeMemory(device, slot.indirectMemory, allocator);
+          vmaDestroyBuffer(vma, slot.indirectBuffer, slot.indirectMemory);
         }
       }
       if (instancedLineBuffer != VK_NULL_HANDLE) {
-        vkDestroyBuffer(device, instancedLineBuffer, allocator);
-      }
-      if (instancedLineMemory != VK_NULL_HANDLE) {
-        vkFreeMemory(device, instancedLineMemory, allocator);
+        vmaDestroyBuffer(vma, instancedLineBuffer, instancedLineMemory);
       }
     });
     this->deferReleaseGeometryBlock(sharedBlockId);
     entry = VulkanCachedCommand();
     return;
   }
-  VkDevice device = this->device;
-  const VkAllocationCallbacks * allocator = this->allocator;
+  VmaAllocator vma = this->vmaAllocator;
   const VkBuffer vertexBuffer = entry.vertexBuffer;
-  const VkDeviceMemory vertexMemory = entry.vertexMemory;
+  const VmaAllocation vertexMemory = entry.vertexMemory;
   const VkBuffer indexBuffer = entry.indexBuffer;
-  const VkDeviceMemory indexMemory = entry.indexMemory;
+  const VmaAllocation indexMemory = entry.indexMemory;
   const VkBuffer instancedLineBuffer = entry.instancedLineBuffer;
-  const VkDeviceMemory instancedLineMemory = entry.instancedLineMemory;
+  const VmaAllocation instancedLineMemory = entry.instancedLineMemory;
   std::vector<VulkanCachedCommand::VulkanWideLineBuffer> wideLine =
     std::move(entry.wideLineBuffers);
   std::vector<VulkanCachedCommand::VulkanSubPixelSlot> subPixel =
     std::move(entry.subPixelSlots);
   this->deferDestroy(
-    [device, allocator, vertexBuffer, vertexMemory, indexBuffer,
+    [vma, vertexBuffer, vertexMemory, indexBuffer,
      indexMemory, instancedLineBuffer, instancedLineMemory, wideLine,
      subPixel]() mutable {
       for (VulkanCachedCommand::VulkanWideLineBuffer & slot : wideLine) {
-        slot.destroy(device, allocator);
+        slot.destroy(vma);
       }
       for (VulkanCachedCommand::VulkanSubPixelSlot & slot : subPixel) {
         if (slot.indexBuffer != VK_NULL_HANDLE) {
-          vkDestroyBuffer(device, slot.indexBuffer, allocator);
-        }
-        if (slot.indexMemory != VK_NULL_HANDLE) {
-          vkFreeMemory(device, slot.indexMemory, allocator);
+          vmaDestroyBuffer(vma, slot.indexBuffer, slot.indexMemory);
         }
         if (slot.indirectBuffer != VK_NULL_HANDLE) {
-          vkDestroyBuffer(device, slot.indirectBuffer, allocator);
-        }
-        if (slot.indirectMemory != VK_NULL_HANDLE) {
-          vkFreeMemory(device, slot.indirectMemory, allocator);
+          vmaDestroyBuffer(vma, slot.indirectBuffer, slot.indirectMemory);
         }
       }
       if (instancedLineBuffer != VK_NULL_HANDLE) {
-        vkDestroyBuffer(device, instancedLineBuffer, allocator);
-      }
-      if (instancedLineMemory != VK_NULL_HANDLE) {
-        vkFreeMemory(device, instancedLineMemory, allocator);
+        vmaDestroyBuffer(vma, instancedLineBuffer, instancedLineMemory);
       }
       if (indexBuffer != VK_NULL_HANDLE) {
-        vkDestroyBuffer(device, indexBuffer, allocator);
-      }
-      if (indexMemory != VK_NULL_HANDLE) {
-        vkFreeMemory(device, indexMemory, allocator);
+        vmaDestroyBuffer(vma, indexBuffer, indexMemory);
       }
       if (vertexBuffer != VK_NULL_HANDLE) {
-        vkDestroyBuffer(device, vertexBuffer, allocator);
-      }
-      if (vertexMemory != VK_NULL_HANDLE) {
-        vkFreeMemory(device, vertexMemory, allocator);
+        vmaDestroyBuffer(vma, vertexBuffer, vertexMemory);
       }
     });
   entry = VulkanCachedCommand();
@@ -1280,7 +1254,7 @@ SoVulkanRenderBackend::createWhiteTexture()
   }
 
   VkBuffer staging = VK_NULL_HANDLE;
-  VkDeviceMemory stagingMemory = VK_NULL_HANDLE;
+  VmaAllocation stagingMemory = nullptr;
   if (!this->createBuffer(4, VK_BUFFER_USAGE_TRANSFER_SRC_BIT, staging,
                           stagingMemory, &white)) {
     return false;
@@ -1311,12 +1285,10 @@ SoVulkanRenderBackend::createWhiteTexture()
             VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT);
         })) {
     this->emitError("createWhiteTexture: one-shot upload failed");
-    vkDestroyBuffer(this->device, staging, this->allocator);
-    vkFreeMemory(this->device, stagingMemory, this->allocator);
+    vmaDestroyBuffer(this->vmaAllocator, staging, stagingMemory);
     return false;
   }
-  vkDestroyBuffer(this->device, staging, this->allocator);
-  vkFreeMemory(this->device, stagingMemory, this->allocator);
+  vmaDestroyBuffer(this->vmaAllocator, staging, stagingMemory);
 
   this->whiteImageView =
     createImageView(this->device, this->whiteImage, VK_FORMAT_R8G8B8A8_UNORM,

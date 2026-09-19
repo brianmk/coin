@@ -50,9 +50,9 @@ VK_DEFINE_HANDLE(VmaAllocation)
 */
 struct VulkanCachedCommand {
   VkBuffer vertexBuffer = VK_NULL_HANDLE;
-  VkDeviceMemory vertexMemory = VK_NULL_HANDLE;
+  VmaAllocation vertexMemory = nullptr;
   VkBuffer indexBuffer = VK_NULL_HANDLE;
-  VkDeviceMemory indexMemory = VK_NULL_HANDLE;
+  VmaAllocation indexMemory = nullptr;
   VkDeviceSize vertexOffset = 0;
   VkDeviceSize indexOffset = 0;
   uint32_t sharedBlockId = 0;
@@ -66,7 +66,7 @@ struct VulkanCachedCommand {
   // or quad upload happens for this command.  A null buffer means the build
   // failed (or the command is not eligible) and the CPU expansion is used.
   VkBuffer instancedLineBuffer = VK_NULL_HANDLE;
-  VkDeviceMemory instancedLineMemory = VK_NULL_HANDLE;
+  VmaAllocation instancedLineMemory = nullptr;
   uint32_t instancedLineSegmentCount = 0;
   uint64_t instancedLineHash = 0;
 
@@ -79,9 +79,9 @@ struct VulkanCachedCommand {
   // built lazily by the pre-pass and kept until the geometry content changes.
   struct VulkanSubPixelSlot {
     VkBuffer indexBuffer = VK_NULL_HANDLE;      // compacted indices
-    VkDeviceMemory indexMemory = VK_NULL_HANDLE;
+    VmaAllocation indexMemory = nullptr;
     VkBuffer indirectBuffer = VK_NULL_HANDLE;   // VkDrawIndexedIndirectCommand
-    VkDeviceMemory indirectMemory = VK_NULL_HANDLE;
+    VmaAllocation indirectMemory = nullptr;
     VkDescriptorSet descriptorSet = VK_NULL_HANDLE;
     uint32_t maxIndices = 0;                    // capacity of indexBuffer
     // Frame ordinal this slot was compacted for (0 = not ready).  The draw
@@ -109,7 +109,7 @@ struct VulkanCachedCommand {
   // waits the slot's fence before the slot is reused.
   struct VulkanWideLineBuffer {
     VkBuffer buffer = VK_NULL_HANDLE;
-    VkDeviceMemory memory = VK_NULL_HANDLE;
+    VmaAllocation memory = nullptr;
     //! Persistent host mapping of `memory` (VK_MEMORY_PROPERTY_HOST_VISIBLE |
     //! HOST_COHERENT), established once at (re)creation and kept alive so the
     //! steady-state per-frame update is a plain memcpy instead of a per-command
@@ -129,20 +129,10 @@ struct VulkanCachedCommand {
 
     // Release the slot's buffer + memory and reset it to the empty state.
     // Singular teardown used by both the synchronous and the deferred cache
-    // destroy paths.
-    void destroy(VkDevice device, const VkAllocationCallbacks * allocator)
-    {
-      if (buffer != VK_NULL_HANDLE) {
-        vkDestroyBuffer(device, buffer, allocator);
-        buffer = VK_NULL_HANDLE;
-      }
-      if (memory != VK_NULL_HANDLE) {
-        vkFreeMemory(device, memory, allocator);
-        memory = VK_NULL_HANDLE;
-      }
-      mapped = nullptr;
-      size = 0;
-    }
+    // destroy paths.  Defined out-of-line in SoVulkanRenderBackendGeometry.cpp
+    // because vmaDestroyBuffer needs the full VMA API, which this header
+    // deliberately does not include.
+    void destroy(VmaAllocator allocator);
   };
   std::vector<VulkanWideLineBuffer> wideLineBuffers;
   uint32_t wideLineVertexCount = 0;
@@ -438,7 +428,7 @@ private:
 
   struct VulkanGeometryBlock {
     VkBuffer buffer = VK_NULL_HANDLE;
-    VkDeviceMemory memory = VK_NULL_HANDLE;
+    VmaAllocation memory = nullptr;
     void * mapped = nullptr;
     VkDeviceSize capacity = 0;
     VkDeviceSize used = 0;
@@ -825,10 +815,13 @@ private:
       const SoRenderParams & params) const;
 
   // --- Vulkan resource helpers -------------------------------------------
+  // Create a buffer + VMA allocation and, when `data` is non-null, fill it
+  // through a one-time host mapping.  On failure buffer/allocation are left
+  // null.
   bool createBuffer(VkDeviceSize size,
                     VkBufferUsageFlags usage,
                     VkBuffer & buffer,
-                    VkDeviceMemory & memory,
+                    VmaAllocation & memory,
                     const void * data);
   // Device-local variant of createBuffer() for retained static geometry.
   // Uses a transient staging buffer + one-shot transfer and waits for the
@@ -837,40 +830,27 @@ private:
   bool createBufferDeviceLocal(VkDeviceSize size,
                                VkBufferUsageFlags usage,
                                VkBuffer & buffer,
-                               VkDeviceMemory & memory,
+                               VmaAllocation & memory,
                                const void * data);
-  // Pick a memory type for `requirements` that satisfies `desired` properties
-  // and a compatible memoryTypeBits.  Uses the shared cached
-  // SoVulkanShared::MemoryProperties (memProps) so the memory-type search lives
-  // in one place.  Returns false when no suitable type exists.
-  bool selectMemoryType(const VkMemoryRequirements & requirements,
-                        VkMemoryPropertyFlags desired,
-                        uint32_t & memoryTypeIndex);
-  // Allocate device memory for an already-created `buffer` and bind it.  On
-  // failure `memory` is left null and the caller destroys `buffer`.
-  bool allocateBufferMemory(VkBuffer buffer,
-                            const VkMemoryRequirements & requirements,
-                            VkMemoryPropertyFlags desiredProperties,
-                            VkDeviceMemory & memory);
   // Create a buffer backed by memory with the desired properties.  When
   // `data` is non-null the host-visible contents are filled.  On failure
-  // buffer/memory are left null.
+  // buffer/allocation are left null.
   bool createBufferWithProperties(VkDeviceSize size, VkBufferUsageFlags usage,
                                   VkMemoryPropertyFlags desiredProperties,
-                                  VkBuffer & buffer, VkDeviceMemory & memory,
+                                  VkBuffer & buffer, VmaAllocation & memory,
                                   const void * data = nullptr);
   // Create a HOST_VISIBLE | HOST_COHERENT buffer and establish its persistent
-  // mapping in one step.  On any failure buffer/memory are left null and
+  // mapping in one step.  On any failure buffer/allocation are left null and
   // *mapped null, with nothing allocated.  Used by every per-frame UBO / ring
   // buffer (lighting ring, lighting constant ring, instance-model ring, wide-
   // line quad slots), which all share the same create+map+rollback shape.
   bool createMappedBuffer(VkDeviceSize size, VkBufferUsageFlags usage,
-                          VkBuffer & buffer, VkDeviceMemory & memory,
+                          VkBuffer & buffer, VmaAllocation & memory,
                           void ** mapped);
-  // Defer destruction of a buffer + its memory to the deferred-destruction
+  // Defer destruction of a buffer + its allocation to the deferred-destruction
   // ring (the submission that may still reference it must drain first).  Null
   // handles are ignored, so callers need not pre-check.
-  void deferDestroyBufferMemory(VkBuffer buffer, VkDeviceMemory memory);
+  void deferDestroyBufferMemory(VkBuffer buffer, VmaAllocation memory);
   // Ensure the per-instance model-matrix buffer holds at least `bytes`
   // (HOST_VISIBLE | HOST_COHERENT, persistently mapped).  Recreates + remaps
   // on growth; the old buffer is released through the deferred ring.
@@ -884,7 +864,7 @@ private:
   // vkDestroyBuffer would otherwise race once workers record in parallel.
   bool ensureInstanceModelRingCapacity();
   bool growLightingUbo(uint32_t minSlots);
-  bool swapLightingBuffer(VkBuffer newBuffer, VkDeviceMemory newMemory,
+  bool swapLightingBuffer(VkBuffer newBuffer, VmaAllocation newMemory,
                           void * newMapped, uint32_t newSlotsPerFrame);
   bool prepareLightingSlots(uint32_t neededDraws);
   void beginFrame();
@@ -1046,7 +1026,7 @@ private:
   // in-flight frame keep each draw's uniform data stable until its frame
   // completes.
   VkBuffer lightingBuffer = VK_NULL_HANDLE;
-  VkDeviceMemory lightingMemory = VK_NULL_HANDLE;
+  VmaAllocation lightingMemory = nullptr;
   void * lightingMapped = nullptr;
   VkDeviceSize uboSlotStride = 0;
   uint32_t uboSlotsPerFrame = 0;
@@ -1060,7 +1040,7 @@ private:
   // buffer serves ordinary non-instanced draws.  Grows on demand; freed in
   // shutdown().
   VkBuffer instanceModelBuffer = VK_NULL_HANDLE;
-  VkDeviceMemory instanceModelMemory = VK_NULL_HANDLE;
+  VmaAllocation instanceModelMemory = nullptr;
   void * instanceModelMapped = nullptr;
   VkDeviceSize instanceModelCapacity = 0;
   // Per-frame pre-conversion of the frame camera matrices (double -> float).
@@ -1082,7 +1062,7 @@ private:
   // every draw that shares a handle binds the same slot through its dynamic
   // offset, so the 8-light setup is computed once, not per draw.
   VkBuffer lightingConstBuffer = VK_NULL_HANDLE;
-  VkDeviceMemory lightingConstMemory = VK_NULL_HANDLE;
+  VmaAllocation lightingConstMemory = nullptr;
   void * lightingConstMapped = nullptr;
   VkDeviceSize lightingConstStride = 0;
   uint32_t lightingConstMaxSlots = 0;

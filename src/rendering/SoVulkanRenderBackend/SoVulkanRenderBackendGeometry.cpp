@@ -18,6 +18,8 @@
 #include <Inventor/elements/SoDrawStyleElement.h>
 #include <Inventor/errors/SoDebugError.h>
 
+#include "vk_mem_alloc.h"
+
 #include <algorithm>
 #include <chrono>
 #include <cstddef>
@@ -210,66 +212,56 @@ SoVulkanRenderBackend::findCachedDrawable(
 }
 
 bool
-SoVulkanRenderBackend::selectMemoryType(const VkMemoryRequirements & requirements,
-                                        const VkMemoryPropertyFlags desired,
-                                        uint32_t & memoryTypeIndex)
-{
-  // Exact-match policy (no fallback): the selection loop lives in the shared
-  // SoVulkanShared::MemoryProperties so both backends route memory-type
-  // selection through one implementation; only the policy differs (the RT
-  // backend calls pick() to allow a best-effort fallback).
-  memoryTypeIndex = 0;
-  return this->memProps.pickExact(requirements, desired, memoryTypeIndex);
-}
-
-bool
-SoVulkanRenderBackend::allocateBufferMemory(VkBuffer buffer,
-                                            const VkMemoryRequirements & requirements,
-                                            const VkMemoryPropertyFlags desiredProperties,
-                                            VkDeviceMemory & memory)
-{
-  // Memory-type policy stays with this backend (exact-match, no fallback);
-  // only the allocate+bind boilerplate is shared.
-  return SoVulkanShared::bindBufferMemory(
-    this->device, this->allocator, buffer, requirements, desiredProperties,
-    [this](const VkMemoryRequirements & req, VkMemoryPropertyFlags desired,
-           uint32_t & memoryTypeIndex) {
-      return this->selectMemoryType(req, desired, memoryTypeIndex);
-    }, memory);
-}
-
-bool
 SoVulkanRenderBackend::createBufferWithProperties(const VkDeviceSize size,
                                                   const VkBufferUsageFlags usage,
                                                   const VkMemoryPropertyFlags desiredProperties,
                                                   VkBuffer & buffer,
-                                                  VkDeviceMemory & memory,
+                                                  VmaAllocation & memory,
                                                   const void * data)
 {
   buffer = VK_NULL_HANDLE;
-  memory = VK_NULL_HANDLE;
-  if (!SoVulkanShared::createBufferAllocated(
-        this->device, this->allocator, size, usage, desiredProperties,
-        /*deviceAddress*/ false,
-        [this](const VkMemoryRequirements & req, VkMemoryPropertyFlags desired,
-               uint32_t & memoryTypeIndex) {
-          return this->selectMemoryType(req, desired, memoryTypeIndex);
-        }, buffer, memory)) {
+  memory = nullptr;
+
+  VkBufferCreateInfo bci {};
+  bci.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
+  bci.size = size;
+  bci.usage = usage;
+  bci.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+  VmaAllocationCreateInfo allocInfo {};
+  allocInfo.usage = VMA_MEMORY_USAGE_AUTO;
+  allocInfo.requiredFlags = desiredProperties;
+  if ((desiredProperties & VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT) != 0) {
+    // HOST_VISIBLE memory is either filled once here or written per frame
+    // through a persistent map; declare the sequential-write access VMA wants
+    // and, for the one-time fill, request the mapping up front.
+    allocInfo.flags = VMA_ALLOCATION_CREATE_HOST_ACCESS_SEQUENTIAL_WRITE_BIT;
+    if (data) {
+      allocInfo.flags |= VMA_ALLOCATION_CREATE_MAPPED_BIT;
+    }
+  }
+  VmaAllocationInfo allocationInfo {};
+  if (vmaCreateBuffer(this->vmaAllocator, &bci, &allocInfo, &buffer, &memory,
+                      &allocationInfo) != VK_SUCCESS) {
+    buffer = VK_NULL_HANDLE;
+    memory = nullptr;
     return false;
   }
 
   if (data) {
-    void * mapped = nullptr;
-    if (vkMapMemory(this->device, memory, 0, size, 0, &mapped) != VK_SUCCESS) {
-      this->emitError("createBufferWithProperties: vkMapMemory failed");
-      vkDestroyBuffer(this->device, buffer, this->allocator);
-      vkFreeMemory(this->device, memory, this->allocator);
+    void * mapped = allocationInfo.pMappedData;
+    const bool unmap = (mapped == nullptr);
+    if (unmap &&
+        vmaMapMemory(this->vmaAllocator, memory, &mapped) != VK_SUCCESS) {
+      this->emitError("createBufferWithProperties: vmaMapMemory failed");
+      vmaDestroyBuffer(this->vmaAllocator, buffer, memory);
       buffer = VK_NULL_HANDLE;
-      memory = VK_NULL_HANDLE;
+      memory = nullptr;
       return false;
     }
     std::memcpy(mapped, data, static_cast<size_t>(size));
-    vkUnmapMemory(this->device, memory);
+    if (unmap) {
+      vmaUnmapMemory(this->vmaAllocator, memory);
+    }
   }
   return true;
 }
@@ -278,7 +270,7 @@ bool
 SoVulkanRenderBackend::createBuffer(VkDeviceSize size,
                                     VkBufferUsageFlags usage,
                                     VkBuffer & buffer,
-                                    VkDeviceMemory & memory,
+                                    VmaAllocation & memory,
                                     const void * data)
 {
   return this->createBufferWithProperties(
@@ -291,40 +283,52 @@ bool
 SoVulkanRenderBackend::createMappedBuffer(VkDeviceSize size,
                                           VkBufferUsageFlags usage,
                                           VkBuffer & buffer,
-                                          VkDeviceMemory & memory,
+                                          VmaAllocation & memory,
                                           void ** mapped)
 {
   buffer = VK_NULL_HANDLE;
-  memory = VK_NULL_HANDLE;
+  memory = nullptr;
   if (mapped) *mapped = nullptr;
-  if (!this->createBuffer(size, usage, buffer, memory, nullptr)) {
-    return false;
-  }
-  void * host = nullptr;
-  if (vkMapMemory(this->device, memory, 0, size, 0, &host) != VK_SUCCESS) {
-    vkDestroyBuffer(this->device, buffer, this->allocator);
-    vkFreeMemory(this->device, memory, this->allocator);
+
+  VkBufferCreateInfo bci {};
+  bci.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
+  bci.size = size;
+  bci.usage = usage;
+  bci.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+  VmaAllocationCreateInfo allocInfo {};
+  allocInfo.usage = VMA_MEMORY_USAGE_AUTO;
+  allocInfo.requiredFlags = VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT |
+                            VK_MEMORY_PROPERTY_HOST_COHERENT_BIT;
+  // VMA_MEMORY_USAGE_AUTO requires an explicit host-access flag whenever
+  // MAPPED is requested.
+  allocInfo.flags = VMA_ALLOCATION_CREATE_MAPPED_BIT |
+                    VMA_ALLOCATION_CREATE_HOST_ACCESS_SEQUENTIAL_WRITE_BIT;
+  VmaAllocationInfo allocationInfo {};
+  if (vmaCreateBuffer(this->vmaAllocator, &bci, &allocInfo, &buffer, &memory,
+                      &allocationInfo) != VK_SUCCESS) {
     buffer = VK_NULL_HANDLE;
-    memory = VK_NULL_HANDLE;
+    memory = nullptr;
     return false;
   }
-  if (mapped) *mapped = host;
+  if (allocationInfo.pMappedData == nullptr) {
+    vmaDestroyBuffer(this->vmaAllocator, buffer, memory);
+    buffer = VK_NULL_HANDLE;
+    memory = nullptr;
+    return false;
+  }
+  if (mapped) *mapped = allocationInfo.pMappedData;
   return true;
 }
 
 void
 SoVulkanRenderBackend::deferDestroyBufferMemory(VkBuffer buffer,
-                                                VkDeviceMemory memory)
+                                                VmaAllocation memory)
 {
-  if (buffer == VK_NULL_HANDLE && memory == VK_NULL_HANDLE) return;
-  const VkDevice device = this->device;
-  const VkAllocationCallbacks * allocator = this->allocator;
-  this->deferDestroy([device, allocator, buffer, memory]() {
+  if (buffer == VK_NULL_HANDLE && memory == nullptr) return;
+  const VmaAllocator vma = this->vmaAllocator;
+  this->deferDestroy([vma, buffer, memory]() {
     if (buffer != VK_NULL_HANDLE) {
-      vkDestroyBuffer(device, buffer, allocator);
-    }
-    if (memory != VK_NULL_HANDLE) {
-      vkFreeMemory(device, memory, allocator);
+      vmaDestroyBuffer(vma, buffer, memory);
     }
   });
 }
@@ -333,7 +337,7 @@ bool
 SoVulkanRenderBackend::createBufferDeviceLocal(VkDeviceSize size,
                                                VkBufferUsageFlags usage,
                                                VkBuffer & buffer,
-                                               VkDeviceMemory & memory,
+                                               VmaAllocation & memory,
                                                const void * data)
 {
   // Retained static geometry is read by the GPU every frame, so it belongs in
@@ -345,28 +349,33 @@ SoVulkanRenderBackend::createBufferDeviceLocal(VkDeviceSize size,
   // This is only invoked from the geometry-change path (not steady-state), so
   // the synchronous transfer is acceptable.  On any failure the buffer/memory
   // are left null and the caller falls back to the host-visible createBuffer().
-  if (!SoVulkanShared::createBufferAllocated(
-        this->device, this->allocator, size,
-        usage | VK_BUFFER_USAGE_TRANSFER_DST_BIT,
-        VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT,
-        /*deviceAddress*/ false,
-        [this](const VkMemoryRequirements & req, VkMemoryPropertyFlags desired,
-               uint32_t & memoryTypeIndex) {
-          return this->selectMemoryType(req, desired, memoryTypeIndex);
-        }, buffer, memory)) {
+  buffer = VK_NULL_HANDLE;
+  memory = nullptr;
+  VkBufferCreateInfo bci {};
+  bci.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
+  bci.size = size;
+  bci.usage = usage | VK_BUFFER_USAGE_TRANSFER_DST_BIT;
+  bci.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+  VmaAllocationCreateInfo allocInfo {};
+  allocInfo.usage = VMA_MEMORY_USAGE_AUTO;
+  allocInfo.requiredFlags = VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT;
+  VmaAllocationInfo allocationInfo {};
+  if (vmaCreateBuffer(this->vmaAllocator, &bci, &allocInfo, &buffer, &memory,
+                      &allocationInfo) != VK_SUCCESS) {
+    buffer = VK_NULL_HANDLE;
+    memory = nullptr;
     return false;
   }
 
   if (!data) return true;
 
   VkBuffer staging = VK_NULL_HANDLE;
-  VkDeviceMemory stagingMemory = VK_NULL_HANDLE;
+  VmaAllocation stagingMemory = nullptr;
   if (!this->createBuffer(size, VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
                           staging, stagingMemory, data)) {
-    vkDestroyBuffer(this->device, buffer, this->allocator);
-    vkFreeMemory(this->device, memory, this->allocator);
+    vmaDestroyBuffer(this->vmaAllocator, buffer, memory);
     buffer = VK_NULL_HANDLE;
-    memory = VK_NULL_HANDLE;
+    memory = nullptr;
     return false;
   }
 
@@ -391,17 +400,27 @@ SoVulkanRenderBackend::createBufferDeviceLocal(VkDeviceSize size,
         VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_VERTEX_INPUT_BIT);
     });
 
-  vkDestroyBuffer(this->device, staging, this->allocator);
-  vkFreeMemory(this->device, stagingMemory, this->allocator);
+  vmaDestroyBuffer(this->vmaAllocator, staging, stagingMemory);
 
   if (!ok) {
-    vkDestroyBuffer(this->device, buffer, this->allocator);
-    vkFreeMemory(this->device, memory, this->allocator);
+    vmaDestroyBuffer(this->vmaAllocator, buffer, memory);
     buffer = VK_NULL_HANDLE;
-    memory = VK_NULL_HANDLE;
+    memory = nullptr;
     return false;
   }
   return true;
+}
+
+void
+VulkanCachedCommand::VulkanWideLineBuffer::destroy(VmaAllocator allocator)
+{
+  if (buffer != VK_NULL_HANDLE) {
+    vmaDestroyBuffer(allocator, buffer, memory);
+  }
+  buffer = VK_NULL_HANDLE;
+  memory = nullptr;
+  mapped = nullptr;
+  size = 0;
 }
 
 void
@@ -476,12 +495,10 @@ SoVulkanRenderBackend::uploadGeometry(VulkanCachedCommand & entry,
     if (!indexCreated) {
       this->emitError("uploadGeometry: failed to create index buffer");
       if (entry.vertexBuffer != VK_NULL_HANDLE) {
-        vkDestroyBuffer(this->device, entry.vertexBuffer, this->allocator);
+        vmaDestroyBuffer(this->vmaAllocator, entry.vertexBuffer,
+                         entry.vertexMemory);
         entry.vertexBuffer = VK_NULL_HANDLE;
-      }
-      if (entry.vertexMemory != VK_NULL_HANDLE) {
-        vkFreeMemory(this->device, entry.vertexMemory, this->allocator);
-        entry.vertexMemory = VK_NULL_HANDLE;
+        entry.vertexMemory = nullptr;
       }
       return;
     }
@@ -557,24 +574,20 @@ SoVulkanRenderBackend::destroyCacheEntry(VulkanCachedCommand & entry)
   }
   else {
     if (entry.indexBuffer) {
-      vkDestroyBuffer(this->device, entry.indexBuffer, this->allocator);
+      vmaDestroyBuffer(this->vmaAllocator, entry.indexBuffer,
+                       entry.indexMemory);
       entry.indexBuffer = VK_NULL_HANDLE;
-    }
-    if (entry.indexMemory) {
-      vkFreeMemory(this->device, entry.indexMemory, this->allocator);
-      entry.indexMemory = VK_NULL_HANDLE;
+      entry.indexMemory = nullptr;
     }
     if (entry.vertexBuffer) {
-      vkDestroyBuffer(this->device, entry.vertexBuffer, this->allocator);
+      vmaDestroyBuffer(this->vmaAllocator, entry.vertexBuffer,
+                       entry.vertexMemory);
       entry.vertexBuffer = VK_NULL_HANDLE;
-    }
-    if (entry.vertexMemory) {
-      vkFreeMemory(this->device, entry.vertexMemory, this->allocator);
-      entry.vertexMemory = VK_NULL_HANDLE;
+      entry.vertexMemory = nullptr;
     }
   }
   for (VulkanCachedCommand::VulkanWideLineBuffer & slot : entry.wideLineBuffers) {
-    slot.destroy(this->device, this->allocator);
+    slot.destroy(this->vmaAllocator);
   }
   entry.wideLineBuffers.clear();
   // GPU-instanced wide-line endpoint buffer.  The deferred destroy path
@@ -582,12 +595,10 @@ SoVulkanRenderBackend::destroyCacheEntry(VulkanCachedCommand & entry)
   // by invalidateCache() must too, or every instanced line command leaks its
   // buffer + memory past vkDestroyDevice (VUID-vkDestroyDevice-device-05137).
   if (entry.instancedLineBuffer != VK_NULL_HANDLE) {
-    vkDestroyBuffer(this->device, entry.instancedLineBuffer, this->allocator);
+    vmaDestroyBuffer(this->vmaAllocator, entry.instancedLineBuffer,
+                     entry.instancedLineMemory);
     entry.instancedLineBuffer = VK_NULL_HANDLE;
-  }
-  if (entry.instancedLineMemory != VK_NULL_HANDLE) {
-    vkFreeMemory(this->device, entry.instancedLineMemory, this->allocator);
-    entry.instancedLineMemory = VK_NULL_HANDLE;
+    entry.instancedLineMemory = nullptr;
   }
   this->destroySubPixelResources(entry);
   entry = VulkanCachedCommand();
@@ -612,36 +623,14 @@ SoVulkanRenderBackend::allocateGeometryBlock(VkDeviceSize capacity)
     return 0;
   }
 
-  VkBufferCreateInfo ci {};
-  ci.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
-  ci.size = capacity;
-  ci.usage = VK_BUFFER_USAGE_VERTEX_BUFFER_BIT |
-    VK_BUFFER_USAGE_INDEX_BUFFER_BIT | VK_BUFFER_USAGE_STORAGE_BUFFER_BIT;
-  ci.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
-
   VkBuffer buffer = VK_NULL_HANDLE;
-  if (vkCreateBuffer(this->device, &ci, this->allocator, &buffer) != VK_SUCCESS) {
-    return 0;
-  }
-
-  VkMemoryRequirements requirements {};
-  vkGetBufferMemoryRequirements(this->device, buffer, &requirements);
-
-  VkDeviceMemory memory = VK_NULL_HANDLE;
-  if (!this->allocateBufferMemory(buffer, requirements,
-                                  VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT |
-                                    VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
-                                  memory)) {
-    vkDestroyBuffer(this->device, buffer, this->allocator);
-    return 0;
-  }
-
+  VmaAllocation memory = nullptr;
   void * mapped = nullptr;
-  const VkDeviceSize allocationSize = requirements.size;
-  if (vkMapMemory(this->device, memory, 0, allocationSize, 0, &mapped) != VK_SUCCESS ||
-      mapped == nullptr) {
-    vkDestroyBuffer(this->device, buffer, this->allocator);
-    vkFreeMemory(this->device, memory, this->allocator);
+  if (!this->createMappedBuffer(
+        capacity,
+        VK_BUFFER_USAGE_VERTEX_BUFFER_BIT |
+          VK_BUFFER_USAGE_INDEX_BUFFER_BIT | VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
+        buffer, memory, &mapped)) {
     return 0;
   }
 
@@ -649,7 +638,7 @@ SoVulkanRenderBackend::allocateGeometryBlock(VkDeviceSize capacity)
   block.buffer = buffer;
   block.memory = memory;
   block.mapped = mapped;
-  block.capacity = allocationSize;
+  block.capacity = capacity;
   block.used = 0;
   block.refCount = 0;
   if (!this->freeGeometryBlockIds.empty()) {
@@ -691,18 +680,14 @@ SoVulkanRenderBackend::allocateGeometryArena(uint32_t blockId, VkDeviceSize size
 void
 SoVulkanRenderBackend::releaseGeometryBlockResources(VulkanGeometryBlock & block)
 {
-  if (block.mapped != nullptr) {
-    vkUnmapMemory(this->device, block.memory);
-    block.mapped = nullptr;
-  }
   if (block.buffer != VK_NULL_HANDLE) {
-    vkDestroyBuffer(this->device, block.buffer, this->allocator);
+    // vmaDestroyBuffer releases the buffer, its memory and the persistent host
+    // mapping together, so no explicit vkUnmapMemory is needed.
+    vmaDestroyBuffer(this->vmaAllocator, block.buffer, block.memory);
     block.buffer = VK_NULL_HANDLE;
   }
-  if (block.memory != VK_NULL_HANDLE) {
-    vkFreeMemory(this->device, block.memory, this->allocator);
-    block.memory = VK_NULL_HANDLE;
-  }
+  block.memory = nullptr;
+  block.mapped = nullptr;
   block.capacity = 0;
   block.used = 0;
   block.refCount = 0;

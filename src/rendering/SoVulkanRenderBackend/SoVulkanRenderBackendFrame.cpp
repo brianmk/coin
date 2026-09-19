@@ -309,43 +309,30 @@ SoVulkanRenderBackend::shutdown()
     vkDestroyPipelineLayout(this->device, this->pipelineLayout, this->allocator);
     this->pipelineLayout = VK_NULL_HANDLE;
   }
-  if (this->instanceModelMapped != nullptr) {
-    vkUnmapMemory(this->device, this->instanceModelMemory);
-    this->instanceModelMapped = nullptr;
-  }
   if (this->instanceModelBuffer != VK_NULL_HANDLE) {
-    vkDestroyBuffer(this->device, this->instanceModelBuffer, this->allocator);
+    // vmaDestroyBuffer releases the buffer, its memory and the persistent host
+    // mapping together, so no explicit vkUnmapMemory is needed.
+    vmaDestroyBuffer(this->vmaAllocator, this->instanceModelBuffer,
+                     this->instanceModelMemory);
     this->instanceModelBuffer = VK_NULL_HANDLE;
+    this->instanceModelMemory = nullptr;
   }
-  if (this->instanceModelMemory != VK_NULL_HANDLE) {
-    vkFreeMemory(this->device, this->instanceModelMemory, this->allocator);
-    this->instanceModelMemory = VK_NULL_HANDLE;
-  }
+  this->instanceModelMapped = nullptr;
   this->instanceModelCapacity = 0;
-  if (this->lightingMapped != nullptr) {
-    vkUnmapMemory(this->device, this->lightingMemory);
-    this->lightingMapped = nullptr;
-  }
   if (this->lightingBuffer != VK_NULL_HANDLE) {
-    vkDestroyBuffer(this->device, this->lightingBuffer, this->allocator);
+    vmaDestroyBuffer(this->vmaAllocator, this->lightingBuffer,
+                     this->lightingMemory);
     this->lightingBuffer = VK_NULL_HANDLE;
+    this->lightingMemory = nullptr;
   }
-  if (this->lightingMemory != VK_NULL_HANDLE) {
-    vkFreeMemory(this->device, this->lightingMemory, this->allocator);
-    this->lightingMemory = VK_NULL_HANDLE;
-  }
-  if (this->lightingConstMapped != nullptr) {
-    vkUnmapMemory(this->device, this->lightingConstMemory);
-    this->lightingConstMapped = nullptr;
-  }
+  this->lightingMapped = nullptr;
   if (this->lightingConstBuffer != VK_NULL_HANDLE) {
-    vkDestroyBuffer(this->device, this->lightingConstBuffer, this->allocator);
+    vmaDestroyBuffer(this->vmaAllocator, this->lightingConstBuffer,
+                     this->lightingConstMemory);
     this->lightingConstBuffer = VK_NULL_HANDLE;
+    this->lightingConstMemory = nullptr;
   }
-  if (this->lightingConstMemory != VK_NULL_HANDLE) {
-    vkFreeMemory(this->device, this->lightingConstMemory, this->allocator);
-    this->lightingConstMemory = VK_NULL_HANDLE;
-  }
+  this->lightingConstMapped = nullptr;
   this->lightingDescriptorSet = VK_NULL_HANDLE;
   if (this->stagingPoolBuffer != VK_NULL_HANDLE) {
     // vmaDestroyBuffer releases the buffer, its memory and the persistent host
