@@ -303,16 +303,14 @@ private:
 
 // Memory-type picker for buffer allocation.  Given a resource's memory
 // requirements and the desired property flags it returns the index of a
-// compatible memory type.  Each backend supplies its own policy so the two
-// search modes stay distinct: the raster backend uses exact-match (no fallback)
-// and the RT backend uses best-effort fallback (MemoryProperties::pick).
+// compatible memory type.  The RT backend supplies MemoryProperties::pick as
+// its best-effort policy.
 using MemoryTypePicker =
   std::function<bool(const VkMemoryRequirements &, VkMemoryPropertyFlags, uint32_t &)>;
 
 // Bind memory to an existing buffer after picking its type with `pick`.  Used
 // for buffers whose VkBufferCreateInfo the caller builds itself (e.g. TRANSFER_DST
-// staging, external memory) and for the raster backend's re-usable
-// allocateBufferMemory path.  `requirements` are the buffer's memory
+// staging, external memory).  `requirements` are the buffer's memory
 // requirements (queried by the caller) so the type index is selected against
 // them without a redundant re-query.
 inline bool

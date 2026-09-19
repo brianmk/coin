@@ -71,6 +71,7 @@ SoVulkanRenderBackend::setMaxFramesInFlight(const uint32_t count)
     this->waitForInFlightFrames();
   }
 
+  const uint32_t previousCount = this->maxFramesInFlight;
   this->maxFramesInFlight = count;
   this->pendingDestroys.setBatchCount(count);
 
@@ -79,8 +80,21 @@ SoVulkanRenderBackend::setMaxFramesInFlight(const uint32_t count)
   if (this->isInitialized()) {
     this->releaseFrameResources();
     if (!this->allocateFrameResources()) {
+      // allocateFrameResources() cleaned up its partial allocations and left
+      // the frame ring empty.  Roll back to the previous count and rebuild so
+      // the frame loop still has command buffers/fences to record into; a
+      // rollback that also fails disables the backend rather than letting
+      // beginCommandBuffer() call vkBeginCommandBuffer(VK_NULL_HANDLE).
       this->emitError(
         "setMaxFramesInFlight: failed to reallocate frame resources");
+      this->maxFramesInFlight = previousCount;
+      this->pendingDestroys.setBatchCount(previousCount);
+      if (!this->allocateFrameResources()) {
+        this->emitError(
+          "setMaxFramesInFlight: rollback failed; shutting down backend");
+        this->shutdown();
+        return;
+      }
     }
     // The lighting UBO ring is sized maxFramesInFlight * slotsPerFrame; grow
     // it to match the new in-flight count or the ring-offset math would run
@@ -574,6 +588,9 @@ SoVulkanRenderBackend::allocateFrameResources()
   if (vkAllocateCommandBuffers(this->device, &ai,
                                this->frameCommandBuffers.data()) !=
       VK_SUCCESS) {
+    // Drop whatever this call managed to allocate so a caller that continues
+    // (setMaxFramesInFlight) cannot observe a half-populated frame ring.
+    this->releaseFrameResources();
     return false;
   }
 
@@ -589,6 +606,7 @@ SoVulkanRenderBackend::allocateFrameResources()
   for (uint32_t w = 0; w < this->maxRecordWorkers; ++w) {
     if (w >= this->secondaryCommandPools.size() ||
         this->secondaryCommandPools[w] == VK_NULL_HANDLE) {
+      this->releaseFrameResources();
       return false;
     }
     std::vector<VkCommandBuffer> perWorker(this->maxFramesInFlight,
@@ -600,6 +618,7 @@ SoVulkanRenderBackend::allocateFrameResources()
     sai.commandBufferCount = this->maxFramesInFlight;
     if (vkAllocateCommandBuffers(this->device, &sai, perWorker.data()) !=
         VK_SUCCESS) {
+      this->releaseFrameResources();
       return false;
     }
     for (uint32_t s = 0; s < this->maxFramesInFlight; ++s) {
@@ -614,7 +633,10 @@ SoVulkanRenderBackend::allocateFrameResources()
   // The pool serves both parallel recording and the wide-line expansion
   // pre-pass, so build it whenever there is more than one worker.
   if (this->maxRecordWorkers > 1) {
-    if (!this->buildRecordPool()) return false;
+    if (!this->buildRecordPool()) {
+      this->releaseFrameResources();
+      return false;
+    }
   }
 
   VkFenceCreateInfo fi {};
@@ -622,6 +644,7 @@ SoVulkanRenderBackend::allocateFrameResources()
   for (VkFence & fence : this->frameFences) {
     if (vkCreateFence(this->device, &fi, this->allocator, &fence) !=
         VK_SUCCESS) {
+      this->releaseFrameResources();
       return false;
     }
   }
@@ -1069,10 +1092,21 @@ SoVulkanRenderBackend::beginFrame()
   if (slot < this->frameFencePending.size() &&
       this->frameFencePending[slot] &&
       this->frameFences[slot] != VK_NULL_HANDLE) {
-    vkWaitForFences(this->device, 1, &this->frameFences[slot], VK_TRUE,
-                    UINT64_MAX);
-    vkResetFences(this->device, 1, &this->frameFences[slot]);
-    this->frameFencePending[slot] = 0;
+    // A failed wait (e.g. VK_ERROR_DEVICE_LOST) must not be swallowed: the
+    // slot's command buffer/resources may still be in flight, so leave the
+    // pending flag set and report the fault rather than reusing them silently.
+    const VkResult waitRes = vkWaitForFences(
+      this->device, 1, &this->frameFences[slot], VK_TRUE, UINT64_MAX);
+    if (waitRes != VK_SUCCESS) {
+      this->emitError("beginFrame: vkWaitForFences failed on frame slot");
+    }
+    else if (vkResetFences(this->device, 1, &this->frameFences[slot]) !=
+             VK_SUCCESS) {
+      this->emitError("beginFrame: vkResetFences failed on frame slot");
+    }
+    else {
+      this->frameFencePending[slot] = 0;
+    }
   }
   // Dynamic state is per-recording: the previous frame's command buffer (the
   // other slot) may have left a different pipeline/viewport/scissor bound.
