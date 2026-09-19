@@ -451,6 +451,9 @@ public:
   SbBool backendInitialized = FALSE;
   SbBool rtxBackendInitialized = FALSE;
   SbBool rayTracing = FALSE;
+  // Persistent pipeline-cache path set by the embedding application before
+  // initialize(); forwarded to the backend there (see setPipelineCachePath()).
+  std::string pipelineCachePath;
   // Device context borrowed at initialize(); retained (not owned) so the RT
   // backend can be brought up lazily by ensureRayTracing() after a startup
   // that skipped it.  Cleared in shutdown().
@@ -847,6 +850,9 @@ SoVulkanRenderManager::initialize(SoVulkanDeviceContext * context)
 
   SoRenderBackendInitParams params;
   params.userData = context;
+  // Forward the persistent pipeline-cache path before the backend creates its
+  // VkPipelineCache (createPipelineCache() reads it once, during initialize()).
+  this->pimpl->backend.setPipelineCachePath(this->pimpl->pipelineCachePath);
   if (!this->pimpl->backend.initialize(params)) {
     SoDebugError::postWarning("SoVulkanRenderManager::initialize",
                               "backend initialization failed");
@@ -975,6 +981,17 @@ void
 SoVulkanRenderManager::setMaxFramesInFlight(uint32_t count)
 {
   this->pimpl->backend.setMaxFramesInFlight(count);
+}
+
+void
+SoVulkanRenderManager::setPipelineCachePath(const std::string & path)
+{
+  // Stored and forwarded in initialize(), because createPipelineCache() runs
+  // during the backend's initialize() and reads the path once.  Forwarding
+  // here too covers a caller that sets it on an already-initialized manager
+  // (the next backend initialize(), e.g. after a window reset, picks it up).
+  this->pimpl->pipelineCachePath = path;
+  this->pimpl->backend.setPipelineCachePath(path);
 }
 
 SbBool

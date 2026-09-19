@@ -20,6 +20,7 @@
 #include <functional>
 #include <memory>
 #include <mutex>
+#include <string>
 #include <thread>
 #include <unordered_map>
 #include <utility>
@@ -364,6 +365,20 @@ public:
   void setMaxFramesInFlight(uint32_t count);
 
   /*!
+    \brief Path of a persistent (on-disk) Vulkan pipeline cache.
+
+    When non-empty, initialize() loads the file's bytes as the initial
+    pipeline-cache data and shutdown() writes the driver's cache blob back, so
+    the many lazily-created pipeline variants survive a process restart.  The
+    file is advisory: a missing, corrupt or stale (different device/driver)
+    file is rejected by the implementation and an empty cache is created
+    instead.  The embedding application owns the path and its directory, since
+    Coin has no window-system or user-cache knowledge.  Set it before
+    initialize().
+  */
+  void setPipelineCachePath(const std::string & path);
+
+  /*!
     \brief Configure Vulkan-only display overlays.
 
     These toggle the wireframe/point edge overlays and their color.  They are
@@ -402,6 +417,12 @@ private:
   bool createSubPixelCullPipeline();
   bool createBackgroundResources();
   bool createPipelineCache();
+  // Persistent pipeline-cache file I/O (see setPipelineCachePath()).  Read
+  // returns false when the path is empty or the file is missing/unreadable;
+  // write is a no-op when the path is empty or no cache exists yet.  Both are
+  // only called on the init/shutdown paths.
+  bool readPipelineCacheFile(std::vector<uint8_t> & data) const;
+  void writePipelineCacheFile() const;
   // Wrap a SPIR-V blob in a VkShaderModule.  The three shader-pair creators
   // used to define the same create-module lambda each.
   bool createShaderModule(const uint32_t * code, size_t count,
@@ -1297,6 +1318,9 @@ private:
   // (VK_NULL_HANDLE) the first appearance of each state combination on a
   // frame stutters.  Created once in initialize(), destroyed in shutdown().
   VkPipelineCache pipelineCacheHandle = VK_NULL_HANDLE;
+  // On-disk persistence for pipelineCacheHandle (see setPipelineCachePath()).
+  // Empty when no persistent cache is requested.
+  std::string pipelineCachePath;
 
   // Background pipeline cache: keyed on the render pass and sample count only
   // (the gradient pipeline has no retained per-command state).

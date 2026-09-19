@@ -25,6 +25,7 @@
 #include <Inventor/SbVec2s.h>
 #include <Inventor/SbVec3f.h>
 #include <Inventor/rendering/SoRenderIR.h>
+#include <string>
 #include <vector>
 
 // Pull in Vulkan handle types for renderExternal().  This header is only
@@ -196,6 +197,18 @@ public:
     first render when the caller submits frames concurrently.
   */
   void setMaxFramesInFlight(uint32_t count);
+
+  /*!
+    \brief Path of a persistent (on-disk) Vulkan pipeline cache.
+
+    When non-empty, initialize() loads the file's bytes as the initial
+    pipeline-cache data and shutdown() writes the driver's cache blob back, so
+    the lazily-created pipeline variants survive a process restart.  The
+    embedding application owns the path and must create its directory; a
+    missing, corrupt or stale (different device/driver) file is ignored and an
+    empty cache is created.  Set it before initialize().
+  */
+  void setPipelineCachePath(const std::string & path);
 
   /*!
     \brief Shut down the owned backend while the Vulkan device/queue are
