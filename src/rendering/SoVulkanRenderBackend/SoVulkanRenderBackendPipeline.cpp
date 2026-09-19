@@ -81,7 +81,7 @@ SoVulkanRenderBackend::createGraphicsPipeline(
   ci.subpass = 0;
 
   VkPipeline created = VK_NULL_HANDLE;
-  if (vkCreateGraphicsPipelines(this->device, this->pipelineCacheHandle, 1,
+  if (vkCreateGraphicsPipelines(this->device, this->pipelines.handle(), 1,
                                 &ci, this->allocator, &created) != VK_SUCCESS) {
     return VK_NULL_HANDLE;
   }
@@ -97,9 +97,7 @@ SoVulkanRenderBackend::createBackgroundPipeline(
   BackgroundPipelineKey key;
   key.renderPass = renderPass;
   key.sampleCount = target.sampleCount;
-  const auto found = this->backgroundPipelineCache.find(key);
-  if (found != this->backgroundPipelineCache.end()) {
-    pipeline = found->second;
+  if (this->pipelines.findBackground(key, pipeline)) {
     return pipeline != VK_NULL_HANDLE;
   }
 
@@ -159,11 +157,11 @@ SoVulkanRenderBackend::createBackgroundPipeline(
     blendAttachment);
   if (created == VK_NULL_HANDLE) {
     this->emitError("failed to create Vulkan background pipeline");
-    this->backgroundPipelineCache[key] = VK_NULL_HANDLE;
+    this->pipelines.storeBackground(key, VK_NULL_HANDLE);
     pipeline = VK_NULL_HANDLE;
     return false;
   }
-  this->backgroundPipelineCache[key] = created;
+  this->pipelines.storeBackground(key, created);
   pipeline = created;
   return true;
 }
@@ -355,14 +353,12 @@ SoVulkanRenderBackend::getOrCreatePipeline(const SoRenderCommand & command,
     return pipeline != VK_NULL_HANDLE;
   }
 
-  const auto found = this->pipelineCache.find(key);
-  if (found != this->pipelineCache.end()) {
+  if (this->pipelines.find(key, pipeline)) {
     if (entry) {
       entry->resolvedKey = key;
-      entry->resolvedPipeline = found->second;
+      entry->resolvedPipeline = pipeline;
       entry->hasResolvedPipeline = true;
     }
-    pipeline = found->second;
     return pipeline != VK_NULL_HANDLE;
   }
 
@@ -381,7 +377,7 @@ SoVulkanRenderBackend::getOrCreatePipeline(const SoRenderCommand & command,
     this->emitError(
       "Vulkan backend: the device does not support the fillModeNonSolid "
       "feature; wireframe and point fill modes cannot be rendered");
-    this->pipelineCache[key] = VK_NULL_HANDLE;
+    this->pipelines.store(key, VK_NULL_HANDLE);
     if (entry) {
       entry->resolvedKey = key;
       entry->resolvedPipeline = VK_NULL_HANDLE;
@@ -620,7 +616,7 @@ SoVulkanRenderBackend::getOrCreatePipeline(const SoRenderCommand & command,
     rasterization, target.sampleCount, depthStencil, blendAttachment);
   if (created == VK_NULL_HANDLE) {
     this->emitError("failed to create Vulkan graphics pipeline");
-    this->pipelineCache[key] = VK_NULL_HANDLE;
+    this->pipelines.store(key, VK_NULL_HANDLE);
     if (entry) {
       entry->resolvedKey = key;
       entry->resolvedPipeline = VK_NULL_HANDLE;
@@ -629,7 +625,7 @@ SoVulkanRenderBackend::getOrCreatePipeline(const SoRenderCommand & command,
     pipeline = VK_NULL_HANDLE;
     return false;
   }
-  this->pipelineCache[key] = created;
+  this->pipelines.store(key, created);
   if (entry) {
     entry->resolvedKey = key;
     entry->resolvedPipeline = created;

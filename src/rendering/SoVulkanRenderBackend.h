@@ -8,6 +8,7 @@
 #include "rendering/SoVulkanShared.h"
 #include "rendering/SoVulkanResult.h"
 #include "rendering/SoVulkanRenderBackend/SoVulkanMemPool.h"
+#include "rendering/SoVulkanRenderBackend/SoVulkanPipelineCache.h"
 #include "rendering/SoVulkanRenderBackend/SoVulkanRecordContext.h"
 #include "rendering/SoVulkanRenderBackend/SoVulkanRenderPassCache.h"
 
@@ -26,90 +27,9 @@
 #include <utility>
 #include <vector>
 
-// Shared combine step for the hand-rolled hash functors below.  Keeping one
-// implementation prevents the == operator and the hash from drifting apart.
-static inline size_t hashCombine(size_t hash, size_t value)
-{
-  return hash ^ (value + 0x9e3779b9 + (hash << 6) + (hash >> 2));
-}
-
-/*!
-  \brief Immutable graphics-pipeline identity.
-
-  Pipelines are cached in \c pipelineCache keyed by this struct.  It is
-  defined before VulkanCachedCommand so each cached command can remember the
-  exact key it last resolved to, letting getOrCreatePipeline() skip re-hashing
-  (and the map lookup) for an unchanged command on the steady-state path.
-*/
-struct PipelineKey {
-  VkRenderPass renderPass = VK_NULL_HANDLE;
-  uint8_t topology = 0;
-  uint8_t fillMode = 0;
-  uint8_t cullMode = 0;
-  uint8_t ccwFrontFace = 1;
-  bool depthTestEnable = false;
-  bool depthWriteEnable = false;
-  uint8_t depthFunction = 0;
-  bool depthBiasEnable = false;
-  float depthBiasConstantFactor = 0.0f;
-  float depthBiasSlopeFactor = 0.0f;
-  bool blendEnable = false;
-  uint8_t blendSrcRGB = 0;
-  uint8_t blendDstRGB = 0;
-  uint8_t blendSrcAlpha = 0;
-  uint8_t blendDstAlpha = 0;
-  uint8_t blendEquationRGB = 0;
-  uint8_t blendEquationAlpha = 0;
-  bool stencilEnable = false;
-  uint8_t stencilFunction = 0;
-  uint8_t stencilReference = 0;
-  uint8_t stencilCompareMask = 0xFF;
-  uint8_t stencilWriteMask = 0xFF;
-  uint8_t stencilFailOp = 0;
-  uint8_t stencilZFailOp = 0;
-  uint8_t stencilZPassOp = 0;
-  uint32_t sampleCount = 1;
-  bool wideLine = false;
-  //! GPU-instanced wide-line variant: the same wide-line output, but the
-  //! vertex shader expands the segment on the GPU from an instance-rate
-  //! endpoint buffer instead of drawing the CPU-expanded quads.  Shares the
-  //! fragment module with `wideLine` but needs a distinct pipeline (different
-  //! vertex module and vertex input layout).
-  bool wideLineInstanced = false;
-
-  bool operator==(const PipelineKey & other) const
-  {
-    return renderPass == other.renderPass && topology == other.topology &&
-      fillMode == other.fillMode && cullMode == other.cullMode &&
-      ccwFrontFace == other.ccwFrontFace &&
-      depthTestEnable == other.depthTestEnable &&
-      depthWriteEnable == other.depthWriteEnable &&
-      depthFunction == other.depthFunction &&
-      depthBiasEnable == other.depthBiasEnable &&
-      (!depthBiasEnable ||
-       (depthBiasConstantFactor == other.depthBiasConstantFactor &&
-        depthBiasSlopeFactor == other.depthBiasSlopeFactor)) &&
-      blendEnable == other.blendEnable &&
-      (!blendEnable ||
-       (blendSrcRGB == other.blendSrcRGB &&
-        blendDstRGB == other.blendDstRGB &&
-        blendSrcAlpha == other.blendSrcAlpha &&
-        blendDstAlpha == other.blendDstAlpha &&
-        blendEquationRGB == other.blendEquationRGB &&
-        blendEquationAlpha == other.blendEquationAlpha)) &&
-      stencilEnable == other.stencilEnable &&
-      (!stencilEnable ||
-       (stencilFunction == other.stencilFunction &&
-        stencilReference == other.stencilReference &&
-        stencilCompareMask == other.stencilCompareMask &&
-        stencilWriteMask == other.stencilWriteMask &&
-        stencilFailOp == other.stencilFailOp &&
-        stencilZFailOp == other.stencilZFailOp &&
-        stencilZPassOp == other.stencilZPassOp)) &&
-      sampleCount == other.sampleCount && wideLine == other.wideLine &&
-      wideLineInstanced == other.wideLineInstanced;
-  }
-};
+// PipelineKey / PipelineKeyHash / BackgroundPipelineKey* and the
+// SoVulkanPipelineCache store live in SoVulkanPipelineCache.h (included
+// above); PipelineKey is used by VulkanCachedCommand below.
 
 /*!
   \brief Cached GPU geometry for one retained SoRenderCommand.
@@ -417,12 +337,6 @@ private:
   bool createSubPixelCullPipeline();
   bool createBackgroundResources();
   bool createPipelineCache();
-  // Persistent pipeline-cache file I/O (see setPipelineCachePath()).  Read
-  // returns false when the path is empty or the file is missing/unreadable;
-  // write is a no-op when the path is empty or no cache exists yet.  Both are
-  // only called on the init/shutdown paths.
-  bool readPipelineCacheFile(std::vector<uint8_t> & data) const;
-  void writePipelineCacheFile() const;
   // Wrap a SPIR-V blob in a VkShaderModule.  The three shader-pair creators
   // used to define the same create-module lambda each.
   bool createShaderModule(const uint32_t * code, size_t count,
@@ -1267,84 +1181,11 @@ private:
   // pass/framebuffer without duplicating the cache bookkeeping.
   SoVulkanRenderPassCache renderPasses;
 
-  // Pipeline cache: keyed by the retained state that affects the created
+  // Pipeline store: keyed by the retained state that affects the created
   // pipeline.  Vulkan pipelines are immutable, so every topology/fill/depth/
-  // blend/sample-count combination gets its own entry.  PipelineKey and
-  // PipelineKeyHash are defined near the top of this class so VulkanCachedCommand
-  // can store a resolved key.
-  struct PipelineKeyHash
-  {
-    size_t operator()(const PipelineKey & key) const
-    {
-      size_t hash = std::hash<uintptr_t>()(
-        reinterpret_cast<uintptr_t>(key.renderPass));
-      hash = hashCombine(hash, std::hash<uint32_t>()(key.topology));
-      hash = hashCombine(hash, std::hash<uint32_t>()(key.fillMode));
-      hash = hashCombine(hash, std::hash<uint32_t>()(key.cullMode));
-      hash = hashCombine(hash, std::hash<uint32_t>()(key.ccwFrontFace));
-      hash = hashCombine(hash, std::hash<uint32_t>()(key.depthTestEnable));
-      hash = hashCombine(hash, std::hash<uint32_t>()(key.depthWriteEnable));
-      hash = hashCombine(hash, std::hash<uint32_t>()(key.depthFunction));
-      hash = hashCombine(hash, std::hash<uint32_t>()(key.depthBiasEnable));
-      hash = hashCombine(hash, std::hash<float>()(key.depthBiasConstantFactor));
-      hash = hashCombine(hash, std::hash<float>()(key.depthBiasSlopeFactor));
-      hash = hashCombine(hash, std::hash<uint32_t>()(key.blendEnable));
-      hash = hashCombine(hash, std::hash<uint32_t>()(key.blendSrcRGB));
-      hash = hashCombine(hash, std::hash<uint32_t>()(key.blendDstRGB));
-      hash = hashCombine(hash, std::hash<uint32_t>()(key.blendSrcAlpha));
-      hash = hashCombine(hash, std::hash<uint32_t>()(key.blendDstAlpha));
-      hash = hashCombine(hash, std::hash<uint32_t>()(key.blendEquationRGB));
-      hash = hashCombine(hash, std::hash<uint32_t>()(key.blendEquationAlpha));
-      hash = hashCombine(hash, std::hash<uint32_t>()(key.stencilEnable));
-      hash = hashCombine(hash, std::hash<uint32_t>()(key.stencilFunction));
-      hash = hashCombine(hash, std::hash<uint32_t>()(key.stencilReference));
-      hash = hashCombine(hash, std::hash<uint32_t>()(key.stencilCompareMask));
-      hash = hashCombine(hash, std::hash<uint32_t>()(key.stencilWriteMask));
-      hash = hashCombine(hash, std::hash<uint32_t>()(key.stencilFailOp));
-      hash = hashCombine(hash, std::hash<uint32_t>()(key.stencilZFailOp));
-      hash = hashCombine(hash, std::hash<uint32_t>()(key.stencilZPassOp));
-      hash = hashCombine(hash, std::hash<uint32_t>()(key.sampleCount));
-      hash = hashCombine(hash, std::hash<uint32_t>()(key.wideLine));
-      hash = hashCombine(hash, std::hash<uint32_t>()(key.wideLineInstanced));
-      return hash;
-    }
-  };
-
-  std::unordered_map<PipelineKey, VkPipeline, PipelineKeyHash> pipelineCache;
-
-  // Persistent pipeline cache.  vkCreateGraphicsPipelines() is passed this
-  // handle so the driver can reuse shader/state blobs across the many variant
-  // pipelines the backend creates lazily on the draw path.  Without a cache
-  // (VK_NULL_HANDLE) the first appearance of each state combination on a
-  // frame stutters.  Created once in initialize(), destroyed in shutdown().
-  VkPipelineCache pipelineCacheHandle = VK_NULL_HANDLE;
-  // On-disk persistence for pipelineCacheHandle (see setPipelineCachePath()).
-  // Empty when no persistent cache is requested.
-  std::string pipelineCachePath;
-
-  // Background pipeline cache: keyed on the render pass and sample count only
-  // (the gradient pipeline has no retained per-command state).
-  struct BackgroundPipelineKey {
-    VkRenderPass renderPass = VK_NULL_HANDLE;
-    uint32_t sampleCount = 1;
-    bool operator==(const BackgroundPipelineKey & other) const
-    {
-      return renderPass == other.renderPass &&
-             sampleCount == other.sampleCount;
-    }
-  };
-  struct BackgroundPipelineKeyHash
-  {
-    size_t operator()(const BackgroundPipelineKey & key) const
-    {
-      size_t hash = std::hash<uintptr_t>()(
-        reinterpret_cast<uintptr_t>(key.renderPass));
-      hash = hashCombine(hash, std::hash<uint32_t>()(key.sampleCount));
-      return hash;
-    }
-  };
-  std::unordered_map<BackgroundPipelineKey, VkPipeline,
-                     BackgroundPipelineKeyHash> backgroundPipelineCache;
+  // blend/sample-count combination gets its own entry.  The key types and the
+  // persistent VkPipelineCache handle live in SoVulkanPipelineCache.
+  SoVulkanPipelineCache pipelines;
 
   // The wide-line quad-expansion scratch (clip cache, per-vertex distance,
   // quad vertices) lives in thread_local vectors inside expandWideLines(): the

@@ -222,27 +222,9 @@ SoVulkanRenderBackend::shutdown()
   this->invalidateCache();
   this->destroyAllGeometryBlocks();
 
-  for (auto & entry : this->pipelineCache) {
-    if (entry.second != VK_NULL_HANDLE) {
-      vkDestroyPipeline(this->device, entry.second, this->allocator);
-    }
-  }
-  this->pipelineCache.clear();
-  if (this->pipelineCacheHandle != VK_NULL_HANDLE) {
-    // Persist the driver's blob before the handle dies, so the lazily-built
-    // pipeline variants survive a process restart (see setPipelineCachePath()).
-    this->writePipelineCacheFile();
-    vkDestroyPipelineCache(this->device, this->pipelineCacheHandle,
-                           this->allocator);
-    this->pipelineCacheHandle = VK_NULL_HANDLE;
-  }
-
-  for (auto & entry : this->backgroundPipelineCache) {
-    if (entry.second != VK_NULL_HANDLE) {
-      vkDestroyPipeline(this->device, entry.second, this->allocator);
-    }
-  }
-  this->backgroundPipelineCache.clear();
+  // Persist the driver's blob and destroy every cached pipeline + the
+  // VkPipelineCache handle (see SoVulkanPipelineCache).
+  this->pipelines.shutdown();
 
   // The render-pass/framebuffer cache owns the current pass + framebuffer;
   // releasing it after the deferred destroys flush above (queue is idle).

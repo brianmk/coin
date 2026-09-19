@@ -313,108 +313,19 @@ SoVulkanRenderBackend::initialize(const SoRenderBackendInitParams & params)
 bool
 SoVulkanRenderBackend::createPipelineCache()
 {
-  // Pipelines are created lazily on the draw path (the first time a state
-  // combination is seen).  A persistent cache lets the driver keep the
-  // compiled/reused shader-and-state blobs between those creations, so the
-  // first frames of a scene transition do not stutter on pipeline builds.
-  //
-  // When a path is set, its bytes are the exact blob a previous run's
-  // vkGetPipelineCacheData produced.  That blob carries the cache header and
-  // the physical device's pipelineCacheUUID, so the implementation rejects a
-  // file written for another device/driver; the retry below then creates an
-  // empty cache instead of failing device initialization.
-  std::vector<uint8_t> initialData;
-  const bool haveInitialData = this->readPipelineCacheFile(initialData);
-  VkPipelineCacheCreateInfo ci {};
-  ci.sType = VK_STRUCTURE_TYPE_PIPELINE_CACHE_CREATE_INFO;
-  ci.initialDataSize = haveInitialData ? initialData.size() : 0;
-  ci.pInitialData = haveInitialData ? initialData.data() : nullptr;
-  VkResult result = vkCreatePipelineCache(this->device, &ci, this->allocator,
-                                          &this->pipelineCacheHandle);
-  if (result != VK_SUCCESS && haveInitialData) {
-    // The file was unreadable as a pipeline cache (corrupt, or written for a
-    // different device/driver).  Start empty rather than failing init.
-    char msg[192];
-    std::snprintf(msg, sizeof(msg),
-                  "pipeline cache: rejected %s; starting with an empty cache",
-                  this->pipelineCachePath.c_str());
-    this->emitLog(msg);
-    ci.initialDataSize = 0;
-    ci.pInitialData = nullptr;
-    result = vkCreatePipelineCache(this->device, &ci, this->allocator,
-                                   &this->pipelineCacheHandle);
-  }
-  else if (result == VK_SUCCESS && haveInitialData) {
-    // "supplied", not "loaded": the implementation is free to ignore data it
-    // cannot use (e.g. a stale pipelineCacheUUID) without failing, so the
-    // bytes being accepted does not guarantee the driver reused them.
-    char msg[192];
-    std::snprintf(msg, sizeof(msg), "pipeline cache: supplied %zu bytes from %s",
-                  initialData.size(), this->pipelineCachePath.c_str());
-    this->emitLog(msg);
-  }
-  return result == VK_SUCCESS;
+  // The pipeline store owns the VkPipelineCache handle and its persistence;
+  // bind the device/allocator and route its messages through this backend's
+  // log callback before creating the handle.
+  this->pipelines.setDevice(this->device, this->allocator);
+  this->pipelines.setLogger(
+    [this](const char * message) { this->emitLog(message); });
+  return this->pipelines.initialize();
 }
 
 void
 SoVulkanRenderBackend::setPipelineCachePath(const std::string & path)
 {
-  this->pipelineCachePath = path;
-}
-
-bool
-SoVulkanRenderBackend::readPipelineCacheFile(std::vector<uint8_t> & data) const
-{
-  if (this->pipelineCachePath.empty()) return false;
-  std::ifstream in(this->pipelineCachePath, std::ios::binary | std::ios::ate);
-  if (!in) return false;
-  const std::streamoff size = in.tellg();
-  if (size <= 0) return false;
-  // Bound the read: a corrupt or foreign file must not be slurped wholesale
-  // into memory on the device-init path.
-  if (size > static_cast<std::streamoff>(64u * 1024u * 1024u)) return false;
-  data.resize(static_cast<size_t>(size));
-  in.seekg(0, std::ios::beg);
-  in.read(reinterpret_cast<char *>(data.data()),
-          static_cast<std::streamsize>(data.size()));
-  return in.good() || in.eof();
-}
-
-void
-SoVulkanRenderBackend::writePipelineCacheFile() const
-{
-  if (this->pipelineCachePath.empty() ||
-      this->pipelineCacheHandle == VK_NULL_HANDLE) {
-    return;
-  }
-  size_t size = 0;
-  if (vkGetPipelineCacheData(this->device, this->pipelineCacheHandle, &size,
-                             nullptr) != VK_SUCCESS || size == 0) {
-    return;
-  }
-  std::vector<uint8_t> data(size);
-  if (vkGetPipelineCacheData(this->device, this->pipelineCacheHandle, &size,
-                             data.data()) != VK_SUCCESS) {
-    return;
-  }
-  data.resize(size);
-  // Write a sibling temp file, then swap it in.  std::rename does not replace
-  // an existing file on Windows, so remove the target first; the cache is
-  // advisory, so losing it to a crash mid-swap is harmless.
-  const std::string tmpPath = this->pipelineCachePath + ".tmp";
-  {
-    std::ofstream out(tmpPath, std::ios::binary | std::ios::trunc);
-    if (!out) return;
-    out.write(reinterpret_cast<const char *>(data.data()),
-              static_cast<std::streamsize>(data.size()));
-    if (!out) return;
-  }
-  std::remove(this->pipelineCachePath.c_str());
-  std::rename(tmpPath.c_str(), this->pipelineCachePath.c_str());
-  char msg[192];
-  std::snprintf(msg, sizeof(msg), "pipeline cache: saved %zu bytes to %s",
-                data.size(), this->pipelineCachePath.c_str());
-  this->emitLog(msg);
+  this->pipelines.setPath(path);
 }
 
 bool
@@ -1538,7 +1449,7 @@ SoVulkanRenderBackend::createSubPixelCullPipeline()
   cpci.stage.module = this->subPixelCullModule;
   cpci.stage.pName = "main";
   cpci.layout = this->subPixelPipelineLayout;
-  if (vkCreateComputePipelines(this->device, this->pipelineCacheHandle, 1,
+  if (vkCreateComputePipelines(this->device, this->pipelines.handle(), 1,
                                &cpci, this->allocator,
                                &this->subPixelCullPipeline) != VK_SUCCESS) {
     this->subPixelCullPipeline = VK_NULL_HANDLE;
