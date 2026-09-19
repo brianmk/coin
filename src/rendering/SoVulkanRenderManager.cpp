@@ -451,6 +451,12 @@ public:
   SbBool backendInitialized = FALSE;
   SbBool rtxBackendInitialized = FALSE;
   SbBool rayTracing = FALSE;
+  // Frames in flight requested by the embedding (setMaxFramesInFlight).  Stored
+  // so the lazily-created RT backend gets it at initialize() time.
+  uint32_t maxFramesInFlight = 2;
+  // Persistent pipeline-cache path set by the embedding application before
+  // initialize(); forwarded to the backend there (see setPipelineCachePath()).
+  std::string pipelineCachePath;
   // Device context borrowed at initialize(); retained (not owned) so the RT
   // backend can be brought up lazily by ensureRayTracing() after a startup
   // that skipped it.  Cleared in shutdown().
@@ -847,6 +853,9 @@ SoVulkanRenderManager::initialize(SoVulkanDeviceContext * context)
 
   SoRenderBackendInitParams params;
   params.userData = context;
+  // Forward the persistent pipeline-cache path before the backend creates its
+  // VkPipelineCache (createPipelineCache() reads it once, during initialize()).
+  this->pimpl->backend.setPipelineCachePath(this->pimpl->pipelineCachePath);
   if (!this->pimpl->backend.initialize(params)) {
     SoDebugError::postWarning("SoVulkanRenderManager::initialize",
                               "backend initialization failed");
@@ -965,6 +974,9 @@ SoVulkanRenderManager::ensureRayTracing(void)
   SoRenderBackendInitParams params;
   params.userData = this->pimpl->initContext;
   if (this->pimpl->rtxBackend.initialize(params)) {
+    // Apply the frames-in-flight count stored before the RT backend existed.
+    this->pimpl->rtxBackend.setMaxFramesInFlight(
+      this->pimpl->maxFramesInFlight);
     this->pimpl->rtxBackendInitialized = TRUE;
     return TRUE;
   }
@@ -974,7 +986,25 @@ SoVulkanRenderManager::ensureRayTracing(void)
 void
 SoVulkanRenderManager::setMaxFramesInFlight(uint32_t count)
 {
+  this->pimpl->maxFramesInFlight = count;
   this->pimpl->backend.setMaxFramesInFlight(count);
+  // The RT backend may not be built yet (path tracing is enabled lazily); the
+  // stored count is applied in ensureRayTracing().  Forward immediately when it
+  // is already up so a swapchain resize takes effect at once.
+  if (this->pimpl->rtxBackendInitialized) {
+    this->pimpl->rtxBackend.setMaxFramesInFlight(count);
+  }
+}
+
+void
+SoVulkanRenderManager::setPipelineCachePath(const std::string & path)
+{
+  // Stored and forwarded in initialize(), because createPipelineCache() runs
+  // during the backend's initialize() and reads the path once.  Forwarding
+  // here too covers a caller that sets it on an already-initialized manager
+  // (the next backend initialize(), e.g. after a window reset, picks it up).
+  this->pimpl->pipelineCachePath = path;
+  this->pimpl->backend.setPipelineCachePath(path);
 }
 
 SbBool
@@ -1187,7 +1217,12 @@ SoVulkanRenderManager::render(SbBool clearwindow, SbBool clearzbuffer)
     return FALSE;
   }
   params.frame = ++this->pimpl->frameOrdinal;
-  if (this->getRayTracingActive()) {
+  const bool rtActive = this->getRayTracingActive();
+  // While ray tracing owns the scene triangles, the raster backend only draws
+  // overlays/residue; tell it so its geometry sweep releases the traced meshes
+  // instead of keeping a second resident copy.
+  this->pimpl->backend.setOverlayCompositeMode(rtActive);
+  if (rtActive) {
     if (!this->pimpl->rtxBackend.render(*drawlist, params)) {
       SoDebugError::postWarning("SoVulkanRenderManager::render",
                                 "RT backend render failed (%d draw commands)",
@@ -1232,7 +1267,11 @@ SoVulkanRenderManager::renderExternal(SbBool clearwindow,
     vkRenderBreadcrumbSince(renderBcStart, 5000, "renderExternal prepareRenderParams end");
   }
   const long backendBcStart = vkRenderBreadcrumbEnabled() ? vkRenderBreadcrumbNowUs() : 0;
-  if (this->getRayTracingActive()) {
+  const bool rtActive = this->getRayTracingActive();
+  // See render(): in RT mode the raster backend only composites, so its sweep
+  // may release the traced triangle geometry the RT backend owns.
+  this->pimpl->backend.setOverlayCompositeMode(rtActive);
+  if (rtActive) {
     if (!this->pimpl->rtxBackend.renderExternal(*drawlist, params,
                                                 commandBuffer, renderPass)) {
       SoDebugError::postWarning("SoVulkanRenderManager::renderExternal",
@@ -2521,6 +2560,31 @@ SoVulkanRenderManager::getRayTracingBackend(void) const
 {
   return this->pimpl->rtxBackendInitialized ? &this->pimpl->rtxBackend
                                             : nullptr;
+}
+
+bool
+SoVulkanRenderManager::pickRay(const float origin[3], const float direction[3],
+                               float tMax, VulkanPickHit & out) const
+{
+  out = VulkanPickHit {};
+  SoRTXRenderBackend * rtx = this->getRayTracingBackend();
+  if (!rtx) {
+    return false;
+  }
+  SoRTXRenderBackend::RTPickHit hit;
+  if (!rtx->pickRay(origin, direction, tMax, hit)) {
+    return false;
+  }
+  out.hit = hit.hit;
+  out.t = hit.t;
+  out.worldPos[0] = hit.worldPos[0];
+  out.worldPos[1] = hit.worldPos[1];
+  out.worldPos[2] = hit.worldPos[2];
+  out.commandIndex = hit.commandIndex;
+  out.primitiveId = hit.primitiveId;
+  out.userData = hit.userData;
+  out.primitiveOffset = hit.primitiveOffset;
+  return true;
 }
 
 uint32_t

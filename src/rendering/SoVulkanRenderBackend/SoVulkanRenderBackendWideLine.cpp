@@ -20,6 +20,8 @@
 #include <Inventor/elements/SoDrawStyleElement.h>
 #include <Inventor/errors/SoDebugError.h>
 
+#include "vk_mem_alloc.h"
+
 #include <algorithm>
 #include <condition_variable>
 #include <cstddef>
@@ -91,9 +93,9 @@ SoVulkanRenderBackend::ensureInstanceModelBuffer(VkDeviceSize bytes)
   }
   if (this->instanceModelBuffer != VK_NULL_HANDLE) {
     const VkBuffer oldBuffer = this->instanceModelBuffer;
-    const VkDeviceMemory oldMemory = this->instanceModelMemory;
+    const VmaAllocation oldMemory = this->instanceModelMemory;
     this->instanceModelBuffer = VK_NULL_HANDLE;
-    this->instanceModelMemory = VK_NULL_HANDLE;
+    this->instanceModelMemory = nullptr;
     this->instanceModelMapped = nullptr;
     this->instanceModelCapacity = 0;
     this->deferDestroyBufferMemory(oldBuffer, oldMemory);
@@ -554,11 +556,11 @@ SoVulkanRenderBackend::expandWideLines(VulkanCachedCommand & entry,
   // fence).  Growth defers the old buffer's destruction instead of destroying
   // it synchronously, since a still-executing frame may reference it.
   if (slot.size < needed) {
-    if (slot.buffer != VK_NULL_HANDLE || slot.memory != VK_NULL_HANDLE) {
+    if (slot.buffer != VK_NULL_HANDLE || slot.memory != nullptr) {
       const VkBuffer oldBuffer = slot.buffer;
-      const VkDeviceMemory oldMemory = slot.memory;
+      const VmaAllocation oldMemory = slot.memory;
       slot.buffer = VK_NULL_HANDLE;
-      slot.memory = VK_NULL_HANDLE;
+      slot.memory = nullptr;
       slot.mapped = nullptr;
       slot.size = 0;
       this->deferDestroyBufferMemory(oldBuffer, oldMemory);
@@ -622,11 +624,11 @@ SoVulkanRenderBackend::buildInstancedLineBuffer(VulkanCachedCommand & entry,
   const VkDeviceSize needed =
     static_cast<VkDeviceSize>(segmentCount) * 16u * sizeof(float);
   if (entry.instancedLineBuffer != VK_NULL_HANDLE ||
-      entry.instancedLineMemory != VK_NULL_HANDLE) {
+      entry.instancedLineMemory != nullptr) {
     const VkBuffer oldBuffer = entry.instancedLineBuffer;
-    const VkDeviceMemory oldMemory = entry.instancedLineMemory;
+    const VmaAllocation oldMemory = entry.instancedLineMemory;
     entry.instancedLineBuffer = VK_NULL_HANDLE;
-    entry.instancedLineMemory = VK_NULL_HANDLE;
+    entry.instancedLineMemory = nullptr;
     entry.instancedLineSegmentCount = 0;
     this->deferDestroyBufferMemory(oldBuffer, oldMemory);
   }
@@ -637,7 +639,7 @@ SoVulkanRenderBackend::buildInstancedLineBuffer(VulkanCachedCommand & entry,
     this->emitError(
       "buildInstancedLineBuffer: endpoint buffer create/map failed");
     entry.instancedLineBuffer = VK_NULL_HANDLE;
-    entry.instancedLineMemory = VK_NULL_HANDLE;
+    entry.instancedLineMemory = nullptr;
     return false;
   }
 
@@ -707,11 +709,11 @@ SoVulkanRenderBackend::prepareWideLineBuffers(const SoDrawList & drawlist)
       static_cast<VkDeviceSize>(segmentCount) * 6u * 9u * sizeof(float);
     if (slot.buffer != VK_NULL_HANDLE && slot.size >= needed) continue;
 
-    if (slot.buffer != VK_NULL_HANDLE || slot.memory != VK_NULL_HANDLE) {
+    if (slot.buffer != VK_NULL_HANDLE || slot.memory != nullptr) {
       const VkBuffer oldBuffer = slot.buffer;
-      const VkDeviceMemory oldMemory = slot.memory;
+      const VmaAllocation oldMemory = slot.memory;
       slot.buffer = VK_NULL_HANDLE;
-      slot.memory = VK_NULL_HANDLE;
+      slot.memory = nullptr;
       slot.mapped = nullptr;
       slot.size = 0;
       this->deferDestroyBufferMemory(oldBuffer, oldMemory);
@@ -1010,11 +1012,11 @@ SoVulkanRenderBackend::expandWideLinesSplit(VulkanCachedCommand & entry,
 
   const VkDeviceSize needed = static_cast<VkDeviceSize>(total) * sizeof(float);
   if (slot.size < needed) {
-    if (slot.buffer != VK_NULL_HANDLE || slot.memory != VK_NULL_HANDLE) {
+    if (slot.buffer != VK_NULL_HANDLE || slot.memory != nullptr) {
       const VkBuffer oldBuffer = slot.buffer;
-      const VkDeviceMemory oldMemory = slot.memory;
+      const VmaAllocation oldMemory = slot.memory;
       slot.buffer = VK_NULL_HANDLE;
-      slot.memory = VK_NULL_HANDLE;
+      slot.memory = nullptr;
       slot.mapped = nullptr;
       slot.size = 0;
       this->deferDestroyBufferMemory(oldBuffer, oldMemory);

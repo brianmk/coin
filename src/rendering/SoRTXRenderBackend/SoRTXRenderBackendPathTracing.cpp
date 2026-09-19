@@ -11,6 +11,7 @@
 #include <cmath>
 #include <cstring>
 #include <string>
+#include "rendering/SoVulkanConfig.h"
 #include "rendering/vulkan/rt/PathTrace.spv.h"
 #include "rendering/vulkan/rt/Raygen.spv.h"
 #include "rendering/vulkan/rt/Miss.spv.h"
@@ -307,7 +308,7 @@ SoRTXRenderBackend::updatePathTracingState(const SoDrawList & /*drawlist*/,
   }
   // else: converged idle -- nothing to do until the camera or scene moves.
 
-  if (SoVulkanShared::envString("FC_VULKAN_RT_DEBUG") && this->ptEnabled) {
+  if (SoVulkanConfig::get().rtxDebug.rtDebug && this->ptEnabled) {
     fprintf(stderr,
             "[RTDBG] ptState frame=%u viewChanged=%d sceneChanged=%d "
             "bgChanged=%d latch=%d accum=%d frameIndex=%u idle=%u "
@@ -319,7 +320,7 @@ SoRTXRenderBackend::updatePathTracingState(const SoDrawList & /*drawlist*/,
             this->ptIdleFrames, this->ptReprojectFrame ? 1 : 0);
   }
 
-  if (SoVulkanShared::envString("FC_VULKAN_PT_DEBUG")) {
+  if (SoVulkanConfig::get().rtxDebug.ptDebug) {
     static uint32_t debugFrame = 0;
     if ((debugFrame++ % 30) == 0 || viewChanged || sceneChanged) {
       float maxViewDelta = 0.0f;
@@ -385,29 +386,22 @@ SoRTXRenderBackend::updatePathTracingState(const SoDrawList & /*drawlist*/,
     if (this->sumSqHistoryBuffer != VK_NULL_HANDLE) {
       vkCmdFillBuffer(cmd, this->sumSqHistoryBuffer, 0, VK_WHOLE_SIZE, 0);
     }
-    VkMemoryBarrier fillBarrier {};
-    fillBarrier.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
-    fillBarrier.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
-    fillBarrier.dstAccessMask = VK_ACCESS_SHADER_WRITE_BIT |
-      VK_ACCESS_SHADER_READ_BIT;
-    vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_TRANSFER_BIT,
-                         VK_PIPELINE_STAGE_RAY_TRACING_SHADER_BIT_KHR |
-                           VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
-                         0, 1, &fillBarrier, 0, nullptr, 0, nullptr);
+    SoVulkanShared::memoryBarrier(
+      cmd, VK_PIPELINE_STAGE_TRANSFER_BIT,
+      VK_PIPELINE_STAGE_RAY_TRACING_SHADER_BIT_KHR |
+        VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+      VK_ACCESS_TRANSFER_WRITE_BIT,
+      VK_ACCESS_SHADER_WRITE_BIT | VK_ACCESS_SHADER_READ_BIT);
   }
   // The active-pixel counter is per-frame: zero it before every traced
   // frame (the host reads it back after the submission's queue wait).
   if (this->ptEnabled && this->activeCounterBuffer != VK_NULL_HANDLE) {
     vkCmdFillBuffer(cmd, this->activeCounterBuffer, 0, VK_WHOLE_SIZE, 0);
     // Make the fill visible to the compute tracer's atomics.
-    VkMemoryBarrier counterBarrier {};
-    counterBarrier.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
-    counterBarrier.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
-    counterBarrier.dstAccessMask = VK_ACCESS_SHADER_WRITE_BIT |
-      VK_ACCESS_SHADER_READ_BIT;
-    vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_TRANSFER_BIT,
-                         VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, 1,
-                         &counterBarrier, 0, nullptr, 0, nullptr);
+    SoVulkanShared::memoryBarrier(
+      cmd, VK_PIPELINE_STAGE_TRANSFER_BIT,
+      VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_ACCESS_TRANSFER_WRITE_BIT,
+      VK_ACCESS_SHADER_WRITE_BIT | VK_ACCESS_SHADER_READ_BIT);
   }
 }
 
@@ -455,7 +449,7 @@ SoRTXRenderBackend::updateAdaptiveStats()
   this->ptLastActiveFraction =
     (this->ptEnabled && this->ptAccumulating && total > 0)
       ? static_cast<float>(active) / static_cast<float>(total) : 1.0f;
-  if (SoVulkanShared::envString("FC_VULKAN_RT_DEBUG") && this->ptEnabled) {
+  if (SoVulkanConfig::get().rtxDebug.rtDebug && this->ptEnabled) {
     fprintf(stderr,
             "[RTDBG] adaptive frame=%u active=%u/%llu fraction=%.4f "
             "frameIndex=%u accum=%d self=%p buf=%ux%u reprojected=%u "
@@ -510,24 +504,14 @@ SoRTXRenderBackend::recordAccelerationStructures(
   // subpass self-dependency, so layout transitions cannot be recorded
   // inside it).
   if (this->storageImageNeedsLayoutInit && this->storageImage != VK_NULL_HANDLE) {
-    VkImageMemoryBarrier imageBarrier {};
-    imageBarrier.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
-    imageBarrier.oldLayout = VK_IMAGE_LAYOUT_UNDEFINED;
-    imageBarrier.newLayout = VK_IMAGE_LAYOUT_GENERAL;
-    imageBarrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-    imageBarrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-    imageBarrier.image = this->storageImage;
-    imageBarrier.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
-    imageBarrier.subresourceRange.levelCount = 1;
-    imageBarrier.subresourceRange.layerCount = 1;
-    imageBarrier.srcAccessMask = 0;
-    imageBarrier.dstAccessMask = VK_ACCESS_SHADER_WRITE_BIT |
-      VK_ACCESS_SHADER_READ_BIT;
-    vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
-                         VK_PIPELINE_STAGE_RAY_TRACING_SHADER_BIT_KHR |
-                           VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT |
-                           VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
-                         0, 0, nullptr, 0, nullptr, 1, &imageBarrier);
+    SoVulkanShared::imageTransition(
+      cmd, this->storageImage, VK_IMAGE_LAYOUT_UNDEFINED,
+      VK_IMAGE_LAYOUT_GENERAL, 0,
+      VK_ACCESS_SHADER_WRITE_BIT | VK_ACCESS_SHADER_READ_BIT,
+      VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
+      VK_PIPELINE_STAGE_RAY_TRACING_SHADER_BIT_KHR |
+        VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT |
+        VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT);
     this->storageImageNeedsLayoutInit = false;
   }
 
@@ -588,7 +572,7 @@ SoRTXRenderBackend::recordAccelerationStructures(
       ++this->statBlasReused;
     }
   }
-  if (SoVulkanShared::envString("FC_VULKAN_RT_DEBUG")) {
+  if (SoVulkanConfig::get().rtxDebug.rtDebug) {
       fprintf(stderr,
               "[RTDBG] blas frame=%u built=%u refit=%u reused=%u cache=%zu\n",
               params.frame, this->statBlasBuilt, this->statBlasRefit,
@@ -627,13 +611,18 @@ SoRTXRenderBackend::recordAccelerationStructures(
         || (this->ptInteractionLod && this->statTlasCulled > 0));
   this->tlasCullRebuildPending = false;
 
+  // Advance the descriptor ring every frame.  The slot repopulated below is
+  // then the one bound ringSize frames ago, and the ring is sized to the
+  // embedding's frames-in-flight count (setMaxFramesInFlight), so the
+  // caller-owned command buffer that last bound it has completed -- updating
+  // it is legal (VUID-vkUpdateDescriptorSets-None-03047).  A dirty-only
+  // advance could not guarantee that: the set touched on a dirty frame might
+  // still be bound by an in-flight caller frame.
+  this->descriptorSetIndex =
+    (this->descriptorSetIndex + 1) % this->descriptorRingSize;
+
+  bool asRebuilt = false;
   if (this->asDirty || cullRebuild) {
-    // Alternate the descriptor pair so the set we (re)populate below is not
-    // the one the previous, still-in-flight submission bound.  On non-dirty
-    // frames the index is left untouched so the trace keeps binding the set
-    // that was last populated -- the root cause of the alternate-frame black
-    // flash was tracing through a set that had never been updated.
-    this->descriptorSetIndex = (this->descriptorSetIndex + 1) & 1u;
     if (this->asDirty) {
       // Emissive-triangle pool for NEE.  Rebuilt only when the AS is dirty so
       // the baked object-to-world transforms stay fresh on transform-only
@@ -651,48 +640,27 @@ SoRTXRenderBackend::recordAccelerationStructures(
       this->emitError("recordAccelerationStructures: failed to build TLAS");
       return false;
     }
-    if (!this->updateDescriptors()) {
-      this->emitError("recordAccelerationStructures: descriptor update failed");
-      return false;
-    }
+    asRebuilt = true;
+  }
 
+  // Repopulate the current ring slot every frame (the index just moved).  This
+  // also covers the post-teardown case where a fresh, never-written set would
+  // otherwise be bound -> VUID-vkCmdDispatch-None-08114.
+  if (!this->updateDescriptors()) {
+    this->emitError("recordAccelerationStructures: descriptor update failed");
+    return false;
+  }
+
+  if (asRebuilt) {
     // Barrier: BLAS/TLAS builds -> ray tracing shaders.  Recorded here, still
     // outside the render pass (acceleration-structure builds and buffer copies
     // are not allowed inside one).
-    VkMemoryBarrier asBarrier {};
-    asBarrier.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
-    asBarrier.srcAccessMask = VK_ACCESS_ACCELERATION_STRUCTURE_WRITE_BIT_KHR;
-    asBarrier.dstAccessMask = VK_ACCESS_ACCELERATION_STRUCTURE_READ_BIT_KHR;
-    vkCmdPipelineBarrier(cmd,
-                         VK_PIPELINE_STAGE_ACCELERATION_STRUCTURE_BUILD_BIT_KHR,
-                         VK_PIPELINE_STAGE_RAY_TRACING_SHADER_BIT_KHR |
-                           VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
-                         0, 1, &asBarrier, 0, nullptr, 0, nullptr);
-  }
-
-  // Guard the descriptor-validity invariant.  The trace phase below binds
-  // rtDescriptorSets[descriptorSetIndex]; that set is written only inside the
-  // asDirty block above, and a camera-only (non-dirty) frame reuses the
-  // last-written set.  A resource teardown (device lost / re-init) resets the
-  // sets to NULL while descriptorSetIndex carries over, so the first frame of
-  // the new generation can be non-dirty and bind a freshly (re)allocated but
-  // never-written set -> VUID-vkCmdDispatch-None-08114.  The torn set cannot be
-  // referenced by an in-flight submission, so repopulating it here (still
-  // outside the render pass) is legal and closes that window.
-  if (this->tlas != VK_NULL_HANDLE && !this->rtSetValid[this->descriptorSetIndex]) {
-    if (!this->updateDescriptors()) {
-      this->emitError("recordAccelerationStructures: descriptor update failed");
-      return false;
-    }
-    VkMemoryBarrier asBarrier {};
-    asBarrier.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
-    asBarrier.srcAccessMask = VK_ACCESS_ACCELERATION_STRUCTURE_WRITE_BIT_KHR;
-    asBarrier.dstAccessMask = VK_ACCESS_ACCELERATION_STRUCTURE_READ_BIT_KHR;
-    vkCmdPipelineBarrier(cmd,
-                         VK_PIPELINE_STAGE_ACCELERATION_STRUCTURE_BUILD_BIT_KHR,
-                         VK_PIPELINE_STAGE_RAY_TRACING_SHADER_BIT_KHR |
-                           VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
-                         0, 1, &asBarrier, 0, nullptr, 0, nullptr);
+    SoVulkanShared::memoryBarrier(
+      cmd, VK_PIPELINE_STAGE_ACCELERATION_STRUCTURE_BUILD_BIT_KHR,
+      VK_PIPELINE_STAGE_RAY_TRACING_SHADER_BIT_KHR |
+        VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+      VK_ACCESS_ACCELERATION_STRUCTURE_WRITE_BIT_KHR,
+      VK_ACCESS_ACCELERATION_STRUCTURE_READ_BIT_KHR);
   }
 
   // --- Frame uniform data (host-visible; no barrier needed) --------------
@@ -771,7 +739,7 @@ SoRTXRenderBackend::recordAccelerationStructures(
     // AO (mode 2) and the Environment preview (mode 3) are real-time
     // previews: they never accumulate, so they must also force the
     // accumulate flag off to keep the state machine honest.
-    frame.state[1] = COIN_VULKAN_ENV_FLAG("FC_VULKAN_RT_DEBUG_FILL")
+    frame.state[1] = SoVulkanConfig::get().rtxDebug.rtDebugFill
       ? 4.0f
       : (this->rtxViewMode == RtxViewMode::RtxModeAmbientOcclusion ? 2.0f
          : (this->rtxViewMode == RtxViewMode::RtxModeEnvironment ? 3.0f
@@ -868,7 +836,7 @@ SoRTXRenderBackend::recordAccelerationStructures(
       std::memcpy(pf + 16, &pValue[0][0], sizeof(float) * 16);
     }
 
-    if (SoVulkanShared::envString("FC_VULKAN_RT_DEBUG")) {
+    if (SoVulkanConfig::get().rtxDebug.rtDebug) {
       static uint32_t debugFrame = 0;
       if ((debugFrame++ % 120) == 0) {
         fprintf(stderr,
@@ -924,7 +892,7 @@ SoRTXRenderBackend::recordAccelerationStructures(
     raygenPush.frameIndex = this->ptFrameIndex;
     raygenPush.flags = (this->ptEnabled ? 1u : 0u) |
       (this->ptAccumulating ? 2u : 0u) |
-      (COIN_VULKAN_ENV_FLAG("FC_VULKAN_RT_DEBUG_FILL") ? 4u : 0u);
+      (SoVulkanConfig::get().rtxDebug.rtDebugFill ? 4u : 0u);
     raygenPush.maxBounces = this->ptMaxBounces;
     vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_RAY_TRACING_KHR,
                       this->rtPipeline);
@@ -952,15 +920,12 @@ SoRTXRenderBackend::recordAccelerationStructures(
                   (this->storageHeight + 7) / 8, 1);
   }
 
-  VkMemoryBarrier traceBarrier {};
-  traceBarrier.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
-  traceBarrier.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
-  traceBarrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
-  vkCmdPipelineBarrier(cmd,
-                       VK_PIPELINE_STAGE_RAY_TRACING_SHADER_BIT_KHR |
-                         VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
-                       VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, 0, 1,
-                       &traceBarrier, 0, nullptr, 0, nullptr);
+  SoVulkanShared::memoryBarrier(
+    cmd,
+    VK_PIPELINE_STAGE_RAY_TRACING_SHADER_BIT_KHR |
+      VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+    VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, VK_ACCESS_SHADER_WRITE_BIT,
+    VK_ACCESS_SHADER_READ_BIT);
 
   // Denoiser readback: only on the target frame that reached the sample count
   // (ptDenoisePending).  Every other accumulating frame presents the in-shader
@@ -1069,7 +1034,7 @@ SoRTXRenderBackend::recordTraceAndPresent(const SoRenderParams & params,
     this->denoiseEffectiveScale,
     0.0f,
     0.0f};
-  if (SoVulkanShared::envString("FC_VULKAN_PT_DENOISE_TIMING")) {
+  if (SoVulkanConfig::get().rtxDebug.denoiseTiming) {
     fprintf(stderr,
             "[DENOISE-STATE] ord=%u frame=%u accum=%d pend=%d ready=%d "
             "denoise=%d kind=%d\n",

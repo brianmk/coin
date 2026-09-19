@@ -383,6 +383,81 @@ createBufferAllocated(VkDevice device, const VkAllocationCallbacks * allocator,
   return true;
 }
 
+// Resolve a device entry point into its concrete dispatch type.
+// vkGetDeviceProcAddr returns a generic PFN_vkVoidFunction; converting it to
+// the real PFN_vk* type with a direct reinterpret_cast between incompatible
+// function-pointer types is conditionally-supported and trips pedantic/strict
+// (and 32-bit) compilers.  Bit-copying through memcpy is the shim the Vulkan
+// loader documentation recommends.  The static_assert guards against any ABI
+// where the two pointer widths ever differ rather than silently truncating.
+template <typename Fn>
+inline Fn
+loadDispatch(PFN_vkVoidFunction fn)
+{
+  static_assert(sizeof(Fn) == sizeof(fn),
+                "Vulkan dispatch function pointer size mismatch");
+  Fn result{};
+  std::memcpy(&result, &fn, sizeof(result));
+  return result;
+}
+
+// --- VK_KHR_synchronization2 dispatch -------------------------------------
+// The device enables VK_KHR_synchronization2 (core in Vulkan 1.3) whenever it
+// is available.  When it is, barriers and submits go through the *2 entry
+// points; otherwise the legacy vkCmdPipelineBarrier / vkQueueSubmit are used.
+// The pointers are resolved once per device in the backend initialize(); a
+// null cmdPipelineBarrier2 means "not available, use the legacy path".
+//
+// Only core pipeline stages / accesses are passed by this renderer, and those
+// share their numeric values between the legacy and _2_ enums, so the legacy
+// masks widen to the _2_ types with a plain cast.  (The renderer never uses
+// VK_PIPELINE_STAGE_ALL_COMMANDS/ALL_GRAPHICS in a barrier.)
+struct Sync2Dispatch {
+  PFN_vkCmdPipelineBarrier2KHR cmdPipelineBarrier2 = nullptr;
+  PFN_vkQueueSubmit2KHR queueSubmit2 = nullptr;
+};
+
+// Function-local static: one instance shared by every translation unit (C++11
+// inline-function semantics), so the backends can install the pointers without
+// an out-of-line definition.
+inline Sync2Dispatch &
+sync2Dispatch()
+{
+  static Sync2Dispatch dispatch;
+  return dispatch;
+}
+
+// Emit a global memory barrier through synchronization2 when available, else
+// the legacy pipeline barrier.  Mirrors the single-memory-barrier form of
+// vkCmdPipelineBarrier.
+inline void
+memoryBarrier(VkCommandBuffer cmd,
+              VkPipelineStageFlags srcStage, VkPipelineStageFlags dstStage,
+              VkAccessFlags srcMask, VkAccessFlags dstMask)
+{
+  Sync2Dispatch & d = sync2Dispatch();
+  if (d.cmdPipelineBarrier2 != nullptr) {
+    VkMemoryBarrier2 b {};
+    b.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER_2;
+    b.srcStageMask = static_cast<VkPipelineStageFlags2>(srcStage);
+    b.srcAccessMask = static_cast<VkAccessFlags2>(srcMask);
+    b.dstStageMask = static_cast<VkPipelineStageFlags2>(dstStage);
+    b.dstAccessMask = static_cast<VkAccessFlags2>(dstMask);
+    VkDependencyInfo dep {};
+    dep.sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO;
+    dep.memoryBarrierCount = 1;
+    dep.pMemoryBarriers = &b;
+    d.cmdPipelineBarrier2(cmd, &dep);
+    return;
+  }
+  VkMemoryBarrier b {};
+  b.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
+  b.srcAccessMask = srcMask;
+  b.dstAccessMask = dstMask;
+  vkCmdPipelineBarrier(cmd, srcStage, dstStage, 0, 1, &b, 0, nullptr, 0,
+                       nullptr);
+}
+
 // Build an image memory barrier for a layout transition.  The subresource
 // range defaults to the single mip / layer used by the bulk of the transition
 // sites; pass levelCount/layerCount to cover a whole image.
@@ -420,6 +495,27 @@ imageTransition(VkCommandBuffer cmd, VkImage image,
 {
   VkImageMemoryBarrier b = imageBarrier(image, oldLayout, newLayout, srcMask,
                                         dstMask, aspect, levelCount, layerCount);
+  Sync2Dispatch & d = sync2Dispatch();
+  if (d.cmdPipelineBarrier2 != nullptr) {
+    VkImageMemoryBarrier2 b2 {};
+    b2.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2;
+    b2.srcStageMask = static_cast<VkPipelineStageFlags2>(srcStage);
+    b2.srcAccessMask = static_cast<VkAccessFlags2>(srcMask);
+    b2.dstStageMask = static_cast<VkPipelineStageFlags2>(dstStage);
+    b2.dstAccessMask = static_cast<VkAccessFlags2>(dstMask);
+    b2.oldLayout = oldLayout;
+    b2.newLayout = newLayout;
+    b2.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    b2.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    b2.image = image;
+    b2.subresourceRange = b.subresourceRange;
+    VkDependencyInfo dep {};
+    dep.sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO;
+    dep.imageMemoryBarrierCount = 1;
+    dep.pImageMemoryBarriers = &b2;
+    d.cmdPipelineBarrier2(cmd, &dep);
+    return;
+  }
   vkCmdPipelineBarrier(cmd, srcStage, dstStage, 0, 0, nullptr, 0, nullptr, 1, &b);
 }
 
@@ -439,6 +535,26 @@ bufferTransition(VkCommandBuffer cmd, VkBuffer buffer, VkDeviceSize offset,
   b.buffer = buffer;
   b.offset = offset;
   b.size = size;
+  Sync2Dispatch & d = sync2Dispatch();
+  if (d.cmdPipelineBarrier2 != nullptr) {
+    VkBufferMemoryBarrier2 b2 {};
+    b2.sType = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER_2;
+    b2.srcStageMask = static_cast<VkPipelineStageFlags2>(srcStage);
+    b2.srcAccessMask = static_cast<VkAccessFlags2>(srcMask);
+    b2.dstStageMask = static_cast<VkPipelineStageFlags2>(dstStage);
+    b2.dstAccessMask = static_cast<VkAccessFlags2>(dstMask);
+    b2.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    b2.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    b2.buffer = buffer;
+    b2.offset = offset;
+    b2.size = size;
+    VkDependencyInfo dep {};
+    dep.sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO;
+    dep.bufferMemoryBarrierCount = 1;
+    dep.pBufferMemoryBarriers = &b2;
+    d.cmdPipelineBarrier2(cmd, &dep);
+    return;
+  }
   vkCmdPipelineBarrier(cmd, srcStage, dstStage, 0, 0, nullptr, 1, &b, 0, nullptr);
 }
 

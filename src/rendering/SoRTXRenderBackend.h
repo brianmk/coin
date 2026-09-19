@@ -6,6 +6,16 @@
 #include "rendering/SoRenderBackend.h"
 #include "rendering/SoVulkanShared.h"
 
+// Vulkan Memory Allocator handles.  Only the opaque handle types are needed in
+// this header; the full API lives in third_party/vma/vk_mem_alloc.h, included
+// by the .cpp files that allocate.  VK_DEFINE_HANDLE produces the same typedef
+// VMA does, so either include order is safe.
+#ifndef AMD_VULKAN_MEMORY_ALLOCATOR_H
+VK_DEFINE_HANDLE(VmaAllocator)
+VK_DEFINE_HANDLE(VmaAllocation)
+VK_DEFINE_HANDLE(VmaPool)
+#endif
+
 #include <Inventor/rendering/SoVulkanRenderTarget.h>
 #include <Inventor/rendering/SoVulkanViewMode.h>
 
@@ -41,12 +51,12 @@
 */
 struct RTXCachedGeometry {
   VkBuffer vertexBuffer = VK_NULL_HANDLE;
-  VkDeviceMemory vertexMemory = VK_NULL_HANDLE;
+  VmaAllocation vertexMemory = VK_NULL_HANDLE;
   VkBuffer indexBuffer = VK_NULL_HANDLE;
-  VkDeviceMemory indexMemory = VK_NULL_HANDLE;
+  VmaAllocation indexMemory = VK_NULL_HANDLE;
   VkAccelerationStructureKHR blas = VK_NULL_HANDLE;
   VkBuffer blasBuffer = VK_NULL_HANDLE;
-  VkDeviceMemory blasMemory = VK_NULL_HANDLE;
+  VmaAllocation blasMemory = VK_NULL_HANDLE;
   VkDeviceSize blasSize = 0;
   uint32_t vertexCount = 0;
   uint32_t indexCount = 0;
@@ -371,6 +381,59 @@ public:
                         VkCommandBuffer commandBuffer,
                         VkRenderPass renderPass);
 
+  /*!
+    \brief One GPU ray-query pick result (see pickRay()).
+
+    \a commandIndex is the TLAS instance custom index, which buildTlas() sets
+    to the draw-list command index; the host resolves it to the originating
+    SoShape through the per-frame SoRenderCommand::userData snapshot
+    (pickCommandInfo).  \a primitiveId is the triangle index within that
+    command's BLAS, which maps back to a sub-element (for a SoBrepFaceSet,
+    partIndex maps the triangle to its topological face).
+
+    This is a Vulkan/RTX-only facility.  The GL renderer keeps the CPU
+    SoRayPickAction path unchanged.
+  */
+  struct RTPickHit {
+    bool hit = false;
+    float t = -1.0f;
+    float worldPos[3] = {0.0f, 0.0f, 0.0f};
+    uint32_t commandIndex = 0;
+    uint32_t primitiveId = 0;
+    // Producer identity resolved from the command index through
+    // pickCommandInfo: the originating SoShape (SoRenderCommand::userData)
+    // and that command's primitive offset within the source shape.  userData
+    // is null when the command index is out of range.
+    const void * userData = nullptr;
+    uint32_t primitiveOffset = 0;
+  };
+
+  /*!
+    \brief Cast one world-space ray against the current TLAS and return the
+    closest triangle hit.
+
+    Synchronous, and intended to be called from the GUI thread (the same thread
+    that drives startNextFrame()), so it never races a frame submission.
+    Returns false when the backend cannot pick: not initialized, no TLAS built
+    yet, or the pick resources could not be created.  The caller then keeps the
+    CPU picking path.
+  */
+  bool pickRay(const float origin[3], const float direction[3], float tMax,
+               RTPickHit & out);
+
+  /*!
+    \brief Size the descriptor ring to the embedding's frames-in-flight count.
+
+    The caller (SoVulkanRenderManager, fed by the Vulkan viewport) passes the
+    swapchain image count plus a margin.  A slot is then only rewritten after
+    that many frames, i.e. after the caller-owned command buffer that last
+    bound it has completed, which is what makes updating a descriptor set that
+    a previous frame used legal (VUID-vkUpdateDescriptorSets-None-03047).
+    Values below 2 are clamped to 2; values above RTX_MAX_FRAMES_IN_FLIGHT are
+    clamped to that.
+  */
+  void setMaxFramesInFlight(uint32_t count);
+
 private:
   // --- Initialization helpers -------------------------------------------
   bool createDescriptorSetLayout();
@@ -393,13 +456,13 @@ private:
 
   // --- Buffer helpers -----------------------------------------------------
   bool createDeviceLocalBuffer(VkDeviceSize size, VkBufferUsageFlags usage,
-                               VkBuffer & buffer, VkDeviceMemory & memory);
+                               VkBuffer & buffer, VmaAllocation & memory);
+  // Host-visible buffer, persistently mapped by VMA (the caller must NOT
+  // vmaMapMemory it, or the allocation asserts on destruction).  When `mapped`
+  // is non-null it receives the persistent host pointer.
   bool createHostVisibleBuffer(VkDeviceSize size, VkBufferUsageFlags usage,
-                               VkBuffer & buffer, VkDeviceMemory & memory);
-  // Cached memory-type pick (wraps memProps; keeps the old findMemoryType() call
-  // sites unchanged while removing the per-allocation device query).
-  uint32_t pickMemoryType(const VkMemoryRequirements & requirements,
-                          VkMemoryPropertyFlags desired) const;
+                               VkBuffer & buffer, VmaAllocation & memory,
+                               void ** mapped = nullptr);
   bool createScratchBuffer(VkDeviceSize size);
   bool createStorageImage(uint32_t width, uint32_t height);
   bool createPathTracingBuffers(uint32_t width, uint32_t height);
@@ -449,6 +512,11 @@ private:
   VkInstance instance = VK_NULL_HANDLE;
   VkPhysicalDevice physicalDevice = VK_NULL_HANDLE;
   VkDevice device = VK_NULL_HANDLE;
+  // Vulkan Memory Allocator for every RTX buffer (and the image/staging
+  // allocations the raster path already routes through VMA).  Created in
+  // initialize() with the buffer-device-address flag, since the BLAS/TLAS and
+  // SBT buffers expose device addresses; destroyed in shutdown().
+  VmaAllocator vmaAllocator = nullptr;
   VkQueue queue = VK_NULL_HANDLE;
   uint32_t queueFamilyIndex = 0;
   // Cached physical-device memory-properties picker (shared helper).  Bound to
@@ -512,6 +580,15 @@ private:
   // only records what the created device actually advertises so the shader /
   // builder paths can be selected at run time without querying every frame.
   bool hasPositionFetch = false;
+  //! True when the device has (and the embedding enabled) descriptor-indexing
+  //! update-after-bind.  The descriptor set layouts then carry
+  //! VK_DESCRIPTOR_BINDING_UPDATE_AFTER_BIND_BIT so a set may be rewritten
+  //! while an in-flight command buffer still references it
+  //! (VUID-vkUpdateDescriptorSets-None-03047).
+  bool hasUpdateAfterBind = false;
+  //! VK_EXT_pipeline_creation_feedback enabled by the app; gates the optional
+  //! pipeline-cache-hit / creation-cost log (FC_VULKAN_PIPELINE_FEEDBACK).
+  bool hasPipelineCreationFeedback = false;
   bool hasOpacityMicromap = false;
   bool hasNvCluster = false;
   bool hasNvPartitioned = false;
@@ -523,6 +600,26 @@ private:
   // frame; the caller submits and waits the buffer every frame.
   VkCommandPool transientPool = VK_NULL_HANDLE;
   VkCommandBuffer transientCommandBuffer = VK_NULL_HANDLE;
+
+  // --- GPU pick (Vulkan/RTX only) ----------------------------------------
+  // A single-ray ray-query against the TLAS for viewport hover/selection.
+  // Resources are created lazily on the first pickRay() call and torn down in
+  // shutdown().  Deliberately separate from the path tracer's pipeline and
+  // descriptor sets so the render path is not perturbed at all.
+  bool createPickResources();
+  void destroyPickResources();
+  VkShaderModule pickModule = VK_NULL_HANDLE;
+  VkDescriptorSetLayout pickSetLayout = VK_NULL_HANDLE;
+  VkPipelineLayout pickPipelineLayout = VK_NULL_HANDLE;
+  VkPipeline pickPipeline = VK_NULL_HANDLE;
+  VkDescriptorSet pickDescriptorSet = VK_NULL_HANDLE;
+  VkBuffer pickResultBuffer = VK_NULL_HANDLE;
+  VmaAllocation pickResultMemory = VK_NULL_HANDLE;
+  void * pickResultMapped = nullptr;
+  VkCommandPool pickCommandPool = VK_NULL_HANDLE;
+  VkCommandBuffer pickCommandBuffer = VK_NULL_HANDLE;
+  VkFence pickFence = VK_NULL_HANDLE;
+  bool pickResourcesReady = false;
 
   // --- RT pipeline resources ---------------------------------------------
   // The tracer has two dispatch modes:
@@ -540,27 +637,35 @@ private:
   VkDescriptorSetLayout presentSetLayout = VK_NULL_HANDLE;
   VkDescriptorSetLayout denoiseDownsampleSetLayout = VK_NULL_HANDLE;
   VkDescriptorPool descriptorPool = VK_NULL_HANDLE;
-  // Double-buffered descriptor sets: one frame's sets are bound while the
-  // previous frame's submission may still be pending, so each frame updates
-  // the inactive pair (VUID-vkUpdateDescriptorSets-None-03047).
-  VkDescriptorSet rtDescriptorSets[2] = {VK_NULL_HANDLE, VK_NULL_HANDLE};
-  VkDescriptorSet presentDescriptorSets[2] = {VK_NULL_HANDLE, VK_NULL_HANDLE};
+  // Descriptor ring: one pair (RT + present) per frame in flight.  The set
+  // bound by a caller-owned command buffer must not be updated while that
+  // command buffer is still pending (VUID-vkUpdateDescriptorSets-None-03047),
+  // and the embedding can keep more than two frames in flight (QVulkanWindow
+  // keeps up to its swapchain image count).  setMaxFramesInFlight() sizes the
+  // ring accordingly; the index advances every frame and the current slot is
+  // always rewritten before it is bound, so the slot reused at frame N was
+  // last bound at frame N-ringSize (>= frames in flight -> complete).
+  static constexpr uint32_t RTX_MAX_FRAMES_IN_FLIGHT = 8;
+  VkDescriptorSet rtDescriptorSets[RTX_MAX_FRAMES_IN_FLIGHT] = {};
+  VkDescriptorSet presentDescriptorSets[RTX_MAX_FRAMES_IN_FLIGHT] = {};
   VkDescriptorSet denoiseDownsampleDescriptorSet = VK_NULL_HANDLE;
   //! Whether denoiseDownsampleDescriptorSet currently holds the valid staging/
   //! G-buffer bindings (reset on teardown so a stale set is never dispatched).
   bool denoiseDownsampleValid = false;
   uint32_t descriptorSetIndex = 0;
+  //! Number of ring slots actually in use (>= 2, <= RTX_MAX_FRAMES_IN_FLIGHT).
+  //! Set by setMaxFramesInFlight(); the embedding passes swapchain image count
+  //! + 1 so a slot is always free when its turn comes around.
+  uint32_t descriptorRingSize = 2;
   // Whether rtDescriptorSets[i] / presentDescriptorSets[i] hold bindings that
   // updateDescriptors() actually wrote in the current engine generation.  The
-  // sets are populated only on an asDirty frame (a camera-only frame reuses the
-  // last-populated set), and they are torn down (-> NULL) on resource teardown
-  // while descriptorSetIndex carries over.  A fresh set that a non-dirty frame
-  // then binds has NEVER been written -> VUID-vkCmdDispatch-None-08114 (and,
-  // on the present set, the same class of undefined sample).  These flags make
-  // that hazard explicit so recordAccelerationStructures can repopulate a torn
-  // set before it is bound.
-  bool rtSetValid[2] = {false, false};
-  bool presentSetValid[2] = {false, false};
+  // sets are torn down (-> NULL) on resource teardown while descriptorSetIndex
+  // carries over.  A fresh set that is then bound has NEVER been written ->
+  // VUID-vkCmdDispatch-None-08114 (and, on the present set, the same class of
+  // undefined sample).  These flags make that hazard explicit so
+  // recordAccelerationStructures can repopulate a torn set before it is bound.
+  bool rtSetValid[RTX_MAX_FRAMES_IN_FLIGHT] = {};
+  bool presentSetValid[RTX_MAX_FRAMES_IN_FLIGHT] = {};
 
   VkPipelineLayout rtPipelineLayout = VK_NULL_HANDLE;
   VkPipelineLayout presentPipelineLayout = VK_NULL_HANDLE;
@@ -603,7 +708,7 @@ private:
   // hit, shadow closest hit) plus the three strided device-address regions
   // handed to vkCmdTraceRaysKHR.
   VkBuffer sbtBuffer = VK_NULL_HANDLE;
-  VkDeviceMemory sbtMemory = VK_NULL_HANDLE;
+  VmaAllocation sbtMemory = VK_NULL_HANDLE;
   uint32_t sbtGroupHandleSize = 32; //!< raw vkGetRayTracingShaderGroupHandlesKHR size
   uint32_t sbtGroupBaseAlignment = 64; //!< required region device-address alignment
   VkDeviceSize sbtRecordSize = 32;  //!< handle size aligned up for the record stride
@@ -629,7 +734,7 @@ private:
 
   // --- Per-frame resources ------------------------------------------------
   VkImage storageImage = VK_NULL_HANDLE;
-  VkDeviceMemory storageImageMemory = VK_NULL_HANDLE;
+  VmaAllocation storageImageMemory = VK_NULL_HANDLE;
   VkImageView storageImageView = VK_NULL_HANDLE;
   VkSampler presentSampler = VK_NULL_HANDLE;
   uint32_t storageWidth = 0;
@@ -642,28 +747,28 @@ private:
   // hit distance in w) for the denoising present pass.  Recreated when the
   // viewport size changes.
   VkBuffer accumBuffer = VK_NULL_HANDLE;
-  VkDeviceMemory accumMemory = VK_NULL_HANDLE;
+  VmaAllocation accumMemory = VK_NULL_HANDLE;
   VkBuffer normalBuffer = VK_NULL_HANDLE;
-  VkDeviceMemory normalMemory = VK_NULL_HANDLE;
+  VmaAllocation normalMemory = VK_NULL_HANDLE;
   VkBuffer positionBuffer = VK_NULL_HANDLE;
-  VkDeviceMemory positionMemory = VK_NULL_HANDLE;
+  VmaAllocation positionMemory = VK_NULL_HANDLE;
   // Adaptive sampling: per-pixel radiance sums-of-squares (variance test)
   // and a per-frame host-readable active-pixel counter.
   VkBuffer sumSqBuffer = VK_NULL_HANDLE;
-  VkDeviceMemory sumSqMemory = VK_NULL_HANDLE;
+  VmaAllocation sumSqMemory = VK_NULL_HANDLE;
   VkBuffer activeCounterBuffer = VK_NULL_HANDLE;
-  VkDeviceMemory activeCounterMemory = VK_NULL_HANDLE;
+  VmaAllocation activeCounterMemory = VK_NULL_HANDLE;
   void * activeCounterMapped = nullptr;
   // Temporal reprojection history: copies of the previous traced frame's
   // accumulation, sums-of-squares and world positions.  Handles are
   // swapped with the live buffers after every traced frame, so the shader
   // can carry converged samples across camera moves.
   VkBuffer accumHistoryBuffer = VK_NULL_HANDLE;
-  VkDeviceMemory accumHistoryMemory = VK_NULL_HANDLE;
+  VmaAllocation accumHistoryMemory = VK_NULL_HANDLE;
   VkBuffer sumSqHistoryBuffer = VK_NULL_HANDLE;
-  VkDeviceMemory sumSqHistoryMemory = VK_NULL_HANDLE;
+  VmaAllocation sumSqHistoryMemory = VK_NULL_HANDLE;
   VkBuffer positionHistoryBuffer = VK_NULL_HANDLE;
-  VkDeviceMemory positionHistoryMemory = VK_NULL_HANDLE;
+  VmaAllocation positionHistoryMemory = VK_NULL_HANDLE;
   // Screen-space motion-vector G-buffer (vec4 per pixel: xy = NDC motion
   // pointing from the current frame to the previous frame, z = prev-hit
   // flag, w = unused).  Written by the compute tracer on the first bounce
@@ -673,7 +778,7 @@ private:
   // samples), the motion vector is derived per-frame from u_prevViewProj,
   // so no separate history mirror is needed.
   VkBuffer motionBuffer = VK_NULL_HANDLE;
-  VkDeviceMemory motionMemory = VK_NULL_HANDLE;
+  VmaAllocation motionMemory = VK_NULL_HANDLE;
   // Set once at least one traced frame has been swapped into history; the
   // reprojection path only runs with valid history (fresh buffers and
   // resizes reset it).
@@ -790,7 +895,7 @@ private:
   // build, reused by BLAS and TLAS builds).
   VkAccelerationStructureKHR tlas = VK_NULL_HANDLE;
   VkBuffer tlasBuffer = VK_NULL_HANDLE;
-  VkDeviceMemory tlasMemory = VK_NULL_HANDLE;
+  VmaAllocation tlasMemory = VK_NULL_HANDLE;
   VkDeviceSize tlasSize = 0;
   // TLAS refit state: when the BLAS set and instance count are unchanged
   // (only the camera / instance transform moved) buildTlas() issues a
@@ -800,35 +905,47 @@ private:
   bool tlasBuiltOnce = false;
   uint32_t previousInstanceCount = 0;
   VkBuffer instanceBuffer = VK_NULL_HANDLE;
-  VkDeviceMemory instanceMemory = VK_NULL_HANDLE;
+  VmaAllocation instanceMemory = VK_NULL_HANDLE;
   uint32_t instanceCount = 0;
   uint32_t instanceBufferCapacity = 0;
   // Reusable per-frame instance collection (grown on demand) instead of a
   // fresh heap allocation inside buildTlas() every frame.
   std::vector<VkAccelerationStructureInstanceKHR> instanceScratch;
+  // Per-command producer identity captured when the TLAS is built, indexed by
+  // the TLAS instanceCustomIndex (buildTlas sets it to the draw-list command
+  // index).  A ray-query pick returns that index plus a primitive id; mapping
+  // them back to a scene node and sub-element needs the originating
+  // SoShape (SoRenderCommand::userData) and the command's primitiveOffset,
+  // which the per-frame draw list does not preserve after the frame ends.
+  // Vulkan/RTX only; the GL renderer and raster Vulkan path never read it.
+  struct RTPickCommandInfo {
+    const void * userData = nullptr;
+    uint32_t primitiveOffset = 0;
+  };
+  std::vector<RTPickCommandInfo> pickCommandInfo;
   VkBuffer scratchBuffer = VK_NULL_HANDLE;
-  VkDeviceMemory scratchMemory = VK_NULL_HANDLE;
+  VmaAllocation scratchMemory = VK_NULL_HANDLE;
   VkDeviceSize scratchSize = 0;
   VkDeviceAddress scratchAddress = 0;
   VkDeviceSize asScratchAlignment = 128;
 
   // Host-visible material record storage (set 0, binding 3).
   VkBuffer materialBuffer = VK_NULL_HANDLE;
-  VkDeviceMemory materialMemory = VK_NULL_HANDLE;
+  VmaAllocation materialMemory = VK_NULL_HANDLE;
   VkDeviceSize materialBufferBytes = 0;
   void * materialMapped = nullptr;
   uint32_t materialCount = 0;
 
   // Host-visible frame UBO (set 0, binding 2).
   VkBuffer frameBuffer = VK_NULL_HANDLE;
-  VkDeviceMemory frameMemory = VK_NULL_HANDLE;
+  VmaAllocation frameMemory = VK_NULL_HANDLE;
   void * frameMapped = nullptr;
 
   // Host-visible present frame UBO (set 0, binding 6 of the present set):
   // the traced camera's world->view and view->clip matrices, used by the
   // present pass to write scene depth for the raster composite edge overlay.
   VkBuffer presentFrameBuffer = VK_NULL_HANDLE;
-  VkDeviceMemory presentFrameMemory = VK_NULL_HANDLE;
+  VmaAllocation presentFrameMemory = VK_NULL_HANDLE;
   void * presentFrameMapped = nullptr;
 
   // Reusable scratch for updateMaterials(), grown on demand instead of
@@ -857,7 +974,7 @@ private:
   // only pool appended by buildBlas(); per-command offsets are carried in
   // the RTMaterial records.
   VkBuffer normalPoolBuffer = VK_NULL_HANDLE;
-  VkDeviceMemory normalPoolMemory = VK_NULL_HANDLE;
+  VmaAllocation normalPoolMemory = VK_NULL_HANDLE;
   void * normalPoolMapped = nullptr;
   VkDeviceSize normalPoolCapacity = 0;
   VkDeviceSize normalPoolUsed = 0;
@@ -869,7 +986,7 @@ private:
   // (buildNeePool) so baked transforms stay fresh without a BLAS rebuild;
   // per-command offsets ride in RTMaterial::triangleData (z/w).
   VkBuffer neePoolBuffer = VK_NULL_HANDLE;
-  VkDeviceMemory neePoolMemory = VK_NULL_HANDLE;
+  VmaAllocation neePoolMemory = VK_NULL_HANDLE;
   void * neePoolMapped = nullptr;
   VkDeviceSize neePoolCapacity = 0;
   VkDeviceSize neePoolUsed = 0;
@@ -881,7 +998,7 @@ private:
   // and ensureNeePoolCapacity(): double the host-visible pool until the
   // requested size fits, preserving the existing contents and used count.
   bool ensurePoolCapacity(VkDeviceSize bytes, VkBuffer & poolBuffer,
-                          VkDeviceMemory & poolMemory, void *& poolMapped,
+                          VmaAllocation & poolMemory, void *& poolMapped,
                           VkDeviceSize & poolCapacity, VkDeviceSize & poolUsed,
                           bool refreshDescriptors);
 
@@ -955,7 +1072,7 @@ private:
   // Staging buffers destroyed by buildBlas() are released only after the
   // owning command buffer finished executing (destroying a bound buffer
   // while the command buffer is recording or pending invalidates it).
-  std::vector<std::pair<VkBuffer, VkDeviceMemory>> pendingStagingDestroys;
+  std::vector<std::pair<VkBuffer, VmaAllocation>> pendingStagingDestroys;
   void freePendingStagingDestroys();
 
   // Resources replaced during a frame (resized storage image, grown
@@ -1052,17 +1169,17 @@ private:
   // the GPU (RTX/CUDA), then written out).  Only allocated while a denoiser
   // is active; freed on resize/shutdown.
   VkBuffer denoiseColorBuf = VK_NULL_HANDLE;      //!< accum average (rgb)
-  VkDeviceMemory denoiseColorMem = VK_NULL_HANDLE;
+  VmaAllocation denoiseColorMem = VK_NULL_HANDLE;
   VkBuffer denoiseAlbedoBuf = VK_NULL_HANDLE;     //!< albedo guide
-  VkDeviceMemory denoiseAlbedoMem = VK_NULL_HANDLE;
+  VmaAllocation denoiseAlbedoMem = VK_NULL_HANDLE;
   VkBuffer denoiseNormalBuf = VK_NULL_HANDLE;     //!< normal guide
-  VkDeviceMemory denoiseNormalMem = VK_NULL_HANDLE;
+  VmaAllocation denoiseNormalMem = VK_NULL_HANDLE;
   VkBuffer denoiseGuideBuf = VK_NULL_HANDLE;      //!< [validity mask, ...]
-  VkDeviceMemory denoiseGuideMem = VK_NULL_HANDLE;
+  VmaAllocation denoiseGuideMem = VK_NULL_HANDLE;
   VkBuffer denoiseMotionBuf = VK_NULL_HANDLE;     //!< motion-vector guide (xy NDC)
-  VkDeviceMemory denoiseMotionMem = VK_NULL_HANDLE;
+  VmaAllocation denoiseMotionMem = VK_NULL_HANDLE;
   VkBuffer denoiseOutBuf = VK_NULL_HANDLE;        //!< denoiser output (rgba)
-  VkDeviceMemory denoiseOutMem = VK_NULL_HANDLE;
+  VmaAllocation denoiseOutMem = VK_NULL_HANDLE;
   void * denoiseStagingPtr = nullptr;             //!< maps the host buffers
   uint32_t denoiseWidth = 0;
   uint32_t denoiseHeight = 0;
@@ -1075,11 +1192,11 @@ private:
   // the present shader when the denoiser has produced a result for the
   // current frame.
   VkBuffer denoisedBuffer = VK_NULL_HANDLE;
-  VkDeviceMemory denoisedMemory = VK_NULL_HANDLE;
+  VmaAllocation denoisedMemory = VK_NULL_HANDLE;
   // Albedo G-buffer (binding 14) written by the raygen; the denoiser uses it
   // as a guide, and it is read back with the other G-buffers.
   VkBuffer albedoBuffer = VK_NULL_HANDLE;
-  VkDeviceMemory albedoMemory = VK_NULL_HANDLE;
+  VmaAllocation albedoMemory = VK_NULL_HANDLE;
   //! When true the present pass samples denoisedBuffer instead of doing the
   //! in-shader edge-stopping filter.
   SbBool denoiseResultReady = FALSE;
@@ -1171,17 +1288,27 @@ private:
   // OptiX reads/writes them directly.  No host round-trip.  The Vulkan
   // handles own the allocation; the CUexternalMemory + mapped CUdeviceptr
   // alias it and must be released (cuDestroyExternalMemory) before the
-  // VkDeviceMemory is freed.
+  // VmaAllocation is freed.
   VkBuffer rtxColorVk = VK_NULL_HANDLE;
   VkBuffer rtxAlbedoVk = VK_NULL_HANDLE;
   VkBuffer rtxNormalVk = VK_NULL_HANDLE;
   VkBuffer rtxMotionVk = VK_NULL_HANDLE;
   VkBuffer rtxOutputVk = VK_NULL_HANDLE;
-  VkDeviceMemory rtxColorMem = VK_NULL_HANDLE;
-  VkDeviceMemory rtxAlbedoMem = VK_NULL_HANDLE;
-  VkDeviceMemory rtxNormalMem = VK_NULL_HANDLE;
-  VkDeviceMemory rtxMotionMem = VK_NULL_HANDLE;
-  VkDeviceMemory rtxOutputMem = VK_NULL_HANDLE;
+  // The interop buffers are VMA allocations drawn from rtxInteropPool, a
+  // custom pool whose pMemoryAllocateNext carries VkExportMemoryAllocateInfo
+  // so every allocation from it is opaque-FD exportable.  The pool exists only
+  // for these five buffers and is destroyed in shutdown() once they are gone.
+  VmaAllocation rtxColorMem = VK_NULL_HANDLE;
+  VmaAllocation rtxAlbedoMem = VK_NULL_HANDLE;
+  VmaAllocation rtxNormalMem = VK_NULL_HANDLE;
+  VmaAllocation rtxMotionMem = VK_NULL_HANDLE;
+  VmaAllocation rtxOutputMem = VK_NULL_HANDLE;
+  // Custom pool for the CUDA interop allocations.  pMemoryAllocateNext points
+  // at rtxInteropExportInfo, which must outlive the pool (VMA stores the
+  // pointer, not a copy).
+  VmaPool rtxInteropPool = VK_NULL_HANDLE;
+  VkExportMemoryAllocateInfo rtxInteropExportInfo {};
+
   CUexternalMemory rtxColorExt = nullptr;
   CUexternalMemory rtxAlbedoExt = nullptr;
   CUexternalMemory rtxNormalExt = nullptr;
@@ -1235,11 +1362,11 @@ private:
   //! Create the OptiX denoiser, its scratch/state/intensity buffers, and the
   //! CUDA-Vulkan interop working images.
   bool initRtxDenoiser();
-  //! Allocate one exportable device-local buffer and import it into CUDA;
-  //! returns the mapped CUdeviceptr in \a devPtr and owns handle state in the
-  //! ext/mem/buffer out-params.
+  //! Allocate one exportable device-local buffer from rtxInteropPool and
+  //! import it into CUDA; returns the mapped CUdeviceptr in \a devPtr and owns
+  //! handle state in the ext/mem/buffer out-params.
   bool createRtxInteropBuffer(size_t bytes, VkBufferUsageFlags usage,
-                              VkBuffer & buffer, VkDeviceMemory & memory,
+                              VkBuffer & buffer, VmaAllocation & memory,
                               CUexternalMemory & ext, CUdeviceptr & devPtr);
   //! Create an FD-exported Vulkan binary semaphore and import it into CUDA.
   bool createRtxInteropSemaphore(VkSemaphore & vkSem,

@@ -29,7 +29,9 @@
 
 layout(local_size_x = 64) in;
 
-layout(push_constant) uniform PushConstants {
+// Distinct block name from the raster PushConstants: the layout differs, and a
+// shared name would make offline reflection (spirv_layout_check.py) ambiguous.
+layout(push_constant) uniform SubPixelCullPush {
     mat4 u_mvp;        // offset 0:  combined model*view*projection (row-major
                        //            SbMat packed as mat4 columns)
     vec4 u_params;     // offset 64: x = viewport width  (px),

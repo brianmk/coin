@@ -537,6 +537,8 @@ soshape_emit_ir_commands(SoIRRenderAction * action, SoShape * shape,
     SoRenderCommand command = {};
     command.geometry.topology = geom.topology;
     command.geometry.vertexCount = static_cast<uint32_t>(batch.count);
+    command.geometry.primitiveOffset =
+      static_cast<uint32_t>(batch.first / primitiveWidth);
     command.geometry.normalCount = command.geometry.vertexCount;
     command.geometry.vertexStride = sizeof(float) * 3;
     command.geometry.texcoordStride = sizeof(float) * 4;

@@ -17,6 +17,9 @@
 #include "rendering/SoVulkanRenderBackend/SoVulkanRenderBackendP.h"
 #include "rendering/SoVulkanShared.h"
 #include "rendering/SoVulkanConfig.h"
+#include "rendering/SoVulkanDebugUtils.h"
+
+#include "vk_mem_alloc.h"
 
 #include <Inventor/elements/SoDrawStyleElement.h>
 #include <Inventor/errors/SoDebugError.h>
@@ -35,6 +38,7 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
+#include <fstream>
 #include <limits>
 #include <atomic>
 #include <condition_variable>
@@ -87,7 +91,7 @@ SoVulkanRenderBackend::setMaxFramesInFlight(const uint32_t count)
         static_cast<VkDeviceSize>(this->maxFramesInFlight) *
         this->uboSlotsPerFrame * this->uboSlotStride;
       VkBuffer newBuffer = VK_NULL_HANDLE;
-      VkDeviceMemory newMemory = VK_NULL_HANDLE;
+      VmaAllocation newMemory = nullptr;
       void * newMapped = nullptr;
       if (!this->createMappedBuffer(totalBytes,
                                     VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT,
@@ -157,12 +161,32 @@ SoVulkanRenderBackend::initialize(const SoRenderBackendInitParams & params)
     return FALSE;
   }
 
+  this->instance = deviceContext->instance;
   this->physicalDevice = deviceContext->physicalDevice;
   this->device = deviceContext->device;
   this->queue = deviceContext->graphicsQueue;
   this->queueFamilyIndex = deviceContext->graphicsQueueFamilyIndex;
   this->allocator = deviceContext->allocator;
+  if (deviceContext->capsValid) {
+    this->hasPipelineCreationFeedback =
+      deviceContext->caps.pipelineCreationFeedback;
+  }
   this->memProps.setDevice(this->physicalDevice);
+
+  // Resolve the synchronization2 entry points once for this device.  A null
+  // pointer means the extension was not enabled; the shared barrier/submit
+  // helpers then fall back to the legacy entry points.
+  {
+    SoVulkanShared::Sync2Dispatch & sync2 = SoVulkanShared::sync2Dispatch();
+    sync2.cmdPipelineBarrier2 =
+      SoVulkanShared::loadDispatch<PFN_vkCmdPipelineBarrier2KHR>(
+        vkGetDeviceProcAddr(this->device, "vkCmdPipelineBarrier2KHR"));
+    sync2.queueSubmit2 = SoVulkanShared::loadDispatch<PFN_vkQueueSubmit2KHR>(
+      vkGetDeviceProcAddr(this->device, "vkQueueSubmit2KHR"));
+    this->emitLog(sync2.cmdPipelineBarrier2 != nullptr
+                    ? "synchronization2: enabled"
+                    : "synchronization2: unavailable (legacy barriers)");
+  }
 
   // Bind the render-pass/framebuffer cache to this device and hook its
   // deferred resource release into the frame ring: an old framebuffer is
@@ -173,11 +197,20 @@ SoVulkanRenderBackend::initialize(const SoRenderBackendInitParams & params)
     this->deferDestroy(std::move(fn));
   });
 
-  // Opt-in device-memory sub-allocator (FC_VULKAN_MEM_POOL).  Default off so
-  // the behaviour is byte-for-byte the legacy path unless explicitly enabled.
-  if (SoVulkanConfig::get().memoryPool.enabled) {
-    this->memPool = std::make_unique<SoVulkanMemPool>(
-      this->device, this->allocator);
+  // Vulkan Memory Allocator: owns the texture-image device memory.  The
+  // allocator sub-allocates from large blocks, so per-texture creation does
+  // not hit the driver (and maxMemoryAllocationCount) once per upload.
+  {
+    VmaAllocatorCreateInfo allocatorInfo {};
+    allocatorInfo.physicalDevice = this->physicalDevice;
+    allocatorInfo.device = this->device;
+    allocatorInfo.instance = this->instance;
+    allocatorInfo.vulkanApiVersion = VK_API_VERSION_1_2;
+    allocatorInfo.pAllocationCallbacks = this->allocator;
+    if (vmaCreateAllocator(&allocatorInfo, &this->vmaAllocator) != VK_SUCCESS) {
+      this->emitError("SoVulkanRenderBackend: vmaCreateAllocator failed");
+      return FALSE;
+    }
   }
 
   // Worker count for the persistent record pool.  The pool is also used by the
@@ -312,19 +345,57 @@ SoVulkanRenderBackend::initialize(const SoRenderBackendInitParams & params)
 bool
 SoVulkanRenderBackend::createPipelineCache()
 {
-  // Pipelines are created lazily on the draw path (the first time a state
-  // combination is seen).  A persistent cache lets the driver keep the
-  // compiled/reused shader-and-state blobs between those creations, so the
-  // first frames of a scene transition do not stutter on pipeline builds.
-  VkPipelineCacheCreateInfo ci {};
-  ci.sType = VK_STRUCTURE_TYPE_PIPELINE_CACHE_CREATE_INFO;
-  return vkCreatePipelineCache(this->device, &ci, this->allocator,
-                               &this->pipelineCacheHandle) == VK_SUCCESS;
+  // The pipeline store owns the VkPipelineCache handle and its persistence;
+  // bind the device/allocator and route its messages through this backend's
+  // log callback before creating the handle.
+  this->pipelines.setDevice(this->device, this->allocator);
+  this->pipelines.setLogger(
+    [this](const char * message) { this->emitLog(message); });
+  return this->pipelines.initialize();
+}
+
+void
+SoVulkanRenderBackend::setPipelineCachePath(const std::string & path)
+{
+  // Key the persisted cache to the compiled shaders.  The pipeline-state key
+  // (PipelineKey) does not capture shader code, so without this a rebuilt
+  // shader would be served a pipeline compiled from the previous one -- e.g.
+  // a stale projection/push-constant layout, which shows up as displaced
+  // edges on the first frame.  A shader change yields a new key and the old
+  // blob is rejected.
+  uint64_t shaderKey = 1469598103934665603ull; // FNV-1a offset basis
+  const auto mix = [&shaderKey](const uint32_t * code, const size_t count) {
+    const auto * bytes = reinterpret_cast<const unsigned char *>(code);
+    const size_t n = count * sizeof(uint32_t);
+    for (size_t i = 0; i < n; ++i) {
+      shaderKey ^= bytes[i];
+      shaderKey *= 1099511628211ull; // FNV-1a prime
+    }
+  };
+  mix(coin_vulkan_visual_vertex_spirv, coin_vulkan_visual_vertex_spirv_count);
+  mix(coin_vulkan_visual_fragment_spirv,
+      coin_vulkan_visual_fragment_spirv_count);
+  mix(coin_vulkan_wide_line_vertex_spirv,
+      coin_vulkan_wide_line_vertex_spirv_count);
+  mix(coin_vulkan_wide_line_fragment_spirv,
+      coin_vulkan_wide_line_fragment_spirv_count);
+  mix(coin_vulkan_wide_line_instanced_vertex_spirv,
+      coin_vulkan_wide_line_instanced_vertex_spirv_count);
+  mix(coin_vulkan_background_vertex_spirv,
+      coin_vulkan_background_vertex_spirv_count);
+  mix(coin_vulkan_background_fragment_spirv,
+      coin_vulkan_background_fragment_spirv_count);
+  this->pipelines.setShaderKey(shaderKey);
+  this->pipelines.setPath(path);
 }
 
 bool
 SoVulkanRenderBackend::createCommandPool()
 {
+  SoVulkanDebugUtils::setDevice(this->device);
+  SoVulkanDebugUtils::nameObject(this->device, VK_OBJECT_TYPE_DEVICE,
+                                 reinterpret_cast<uint64_t>(this->device),
+                                 "Coin raster VkDevice");
   VkCommandPoolCreateInfo ci {};
   ci.sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO;
   ci.flags = VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT |
@@ -334,17 +405,26 @@ SoVulkanRenderBackend::createCommandPool()
                           &this->commandPool) != VK_SUCCESS) {
     return false;
   }
+  SoVulkanDebugUtils::nameObject(this->device, VK_OBJECT_TYPE_COMMAND_POOL,
+                                 reinterpret_cast<uint64_t>(this->commandPool),
+                                 "Coin raster primary command pool");
   // Secondary pools for the M1c/M1d opaque-pass re-record: same
   // transient/reset flags as the primary pool, secondary-level buffers.  One
   // pool per worker (worker 0 = the recording thread): VkCommandPool host
   // access is externally synchronized, so concurrent reset/begin/end of
   // buffers from a SHARED pool would race its internal allocator.
   this->secondaryCommandPools.assign(this->maxRecordWorkers, VK_NULL_HANDLE);
-  for (VkCommandPool & pool : this->secondaryCommandPools) {
+  for (size_t i = 0; i < this->secondaryCommandPools.size(); ++i) {
+    VkCommandPool & pool = this->secondaryCommandPools[i];
     if (vkCreateCommandPool(this->device, &ci, this->allocator, &pool) !=
         VK_SUCCESS) {
       return false;
     }
+    char label[64];
+    std::snprintf(label, sizeof(label),
+                  "Coin raster secondary command pool %zu", i);
+    SoVulkanDebugUtils::nameObject(this->device, VK_OBJECT_TYPE_COMMAND_POOL,
+                                   reinterpret_cast<uint64_t>(pool), label);
   }
   return this->allocateFrameResources();
 }
@@ -710,6 +790,9 @@ SoVulkanRenderBackend::createDescriptorPool()
   }
   this->descriptorPool = pool;
   this->descriptorPools.push_back(pool);
+  SoVulkanDebugUtils::nameObject(this->device, VK_OBJECT_TYPE_DESCRIPTOR_POOL,
+                                 reinterpret_cast<uint64_t>(pool),
+                                 "Coin raster descriptor pool");
   return true;
 }
 
@@ -782,6 +865,9 @@ SoVulkanRenderBackend::createLightingUniformBuffer()
     this->emitError("createLightingUniformBuffer: buffer create/map failed");
     return false;
   }
+  SoVulkanDebugUtils::nameObject(
+    this->device, VK_OBJECT_TYPE_BUFFER,
+    reinterpret_cast<uint64_t>(this->lightingBuffer), "draw UBO ring");
   // The per-instance model-matrix ring parallels the lighting UBO ring
   // (same slot layout), so pre-size it here; the per-draw path must never
   // grow (re-create) this buffer, which would race under parallel recording.
@@ -821,6 +907,10 @@ SoVulkanRenderBackend::createLightingConstBuffer()
     this->emitError("createLightingConstBuffer: buffer create/map failed");
     return false;
   }
+  SoVulkanDebugUtils::nameObject(
+    this->device, VK_OBJECT_TYPE_BUFFER,
+    reinterpret_cast<uint64_t>(this->lightingConstBuffer),
+    "lighting UBO ring");
   return true;
 }
 
@@ -863,7 +953,7 @@ SoVulkanRenderBackend::growLightingUbo(const uint32_t minSlots)
   if (slots <= this->uboSlotsPerFrame) return true;
 
   VkBuffer newBuffer = VK_NULL_HANDLE;
-  VkDeviceMemory newMemory = VK_NULL_HANDLE;
+  VmaAllocation newMemory = nullptr;
   void * newMapped = nullptr;
   const VkDeviceSize totalBytes =
     static_cast<VkDeviceSize>(this->maxFramesInFlight) *
@@ -879,12 +969,12 @@ SoVulkanRenderBackend::growLightingUbo(const uint32_t minSlots)
 
 bool
 SoVulkanRenderBackend::swapLightingBuffer(VkBuffer newBuffer,
-                                          VkDeviceMemory newMemory,
+                                          VmaAllocation newMemory,
                                           void * newMapped,
                                           const uint32_t newSlotsPerFrame)
 {
   const VkBuffer oldBuffer = this->lightingBuffer;
-  const VkDeviceMemory oldMemory = this->lightingMemory;
+  const VmaAllocation oldMemory = this->lightingMemory;
   this->lightingBuffer = newBuffer;
   this->lightingMemory = newMemory;
   this->lightingMapped = newMapped;
@@ -1044,89 +1134,63 @@ SoVulkanRenderBackend::deferDestroyCacheEntry(VulkanCachedCommand & entry)
     std::vector<VulkanCachedCommand::VulkanSubPixelSlot> subPixel =
       std::move(entry.subPixelSlots);
     const VkBuffer instancedLineBuffer = entry.instancedLineBuffer;
-    const VkDeviceMemory instancedLineMemory = entry.instancedLineMemory;
-    VkDevice device = this->device;
-    const VkAllocationCallbacks * allocator = this->allocator;
-    this->deferDestroy([device, allocator, wideLine, subPixel, instancedLineBuffer,
+    const VmaAllocation instancedLineMemory = entry.instancedLineMemory;
+    VmaAllocator vma = this->vmaAllocator;
+    this->deferDestroy([vma, wideLine, subPixel, instancedLineBuffer,
                         instancedLineMemory]() mutable {
       for (VulkanCachedCommand::VulkanWideLineBuffer & slot : wideLine) {
-        slot.destroy(device, allocator);
+        slot.destroy(vma);
       }
       for (VulkanCachedCommand::VulkanSubPixelSlot & slot : subPixel) {
         if (slot.indexBuffer != VK_NULL_HANDLE) {
-          vkDestroyBuffer(device, slot.indexBuffer, allocator);
-        }
-        if (slot.indexMemory != VK_NULL_HANDLE) {
-          vkFreeMemory(device, slot.indexMemory, allocator);
+          vmaDestroyBuffer(vma, slot.indexBuffer, slot.indexMemory);
         }
         if (slot.indirectBuffer != VK_NULL_HANDLE) {
-          vkDestroyBuffer(device, slot.indirectBuffer, allocator);
-        }
-        if (slot.indirectMemory != VK_NULL_HANDLE) {
-          vkFreeMemory(device, slot.indirectMemory, allocator);
+          vmaDestroyBuffer(vma, slot.indirectBuffer, slot.indirectMemory);
         }
       }
       if (instancedLineBuffer != VK_NULL_HANDLE) {
-        vkDestroyBuffer(device, instancedLineBuffer, allocator);
-      }
-      if (instancedLineMemory != VK_NULL_HANDLE) {
-        vkFreeMemory(device, instancedLineMemory, allocator);
+        vmaDestroyBuffer(vma, instancedLineBuffer, instancedLineMemory);
       }
     });
     this->deferReleaseGeometryBlock(sharedBlockId);
     entry = VulkanCachedCommand();
     return;
   }
-  VkDevice device = this->device;
-  const VkAllocationCallbacks * allocator = this->allocator;
+  VmaAllocator vma = this->vmaAllocator;
   const VkBuffer vertexBuffer = entry.vertexBuffer;
-  const VkDeviceMemory vertexMemory = entry.vertexMemory;
+  const VmaAllocation vertexMemory = entry.vertexMemory;
   const VkBuffer indexBuffer = entry.indexBuffer;
-  const VkDeviceMemory indexMemory = entry.indexMemory;
+  const VmaAllocation indexMemory = entry.indexMemory;
   const VkBuffer instancedLineBuffer = entry.instancedLineBuffer;
-  const VkDeviceMemory instancedLineMemory = entry.instancedLineMemory;
+  const VmaAllocation instancedLineMemory = entry.instancedLineMemory;
   std::vector<VulkanCachedCommand::VulkanWideLineBuffer> wideLine =
     std::move(entry.wideLineBuffers);
   std::vector<VulkanCachedCommand::VulkanSubPixelSlot> subPixel =
     std::move(entry.subPixelSlots);
   this->deferDestroy(
-    [device, allocator, vertexBuffer, vertexMemory, indexBuffer,
+    [vma, vertexBuffer, vertexMemory, indexBuffer,
      indexMemory, instancedLineBuffer, instancedLineMemory, wideLine,
      subPixel]() mutable {
       for (VulkanCachedCommand::VulkanWideLineBuffer & slot : wideLine) {
-        slot.destroy(device, allocator);
+        slot.destroy(vma);
       }
       for (VulkanCachedCommand::VulkanSubPixelSlot & slot : subPixel) {
         if (slot.indexBuffer != VK_NULL_HANDLE) {
-          vkDestroyBuffer(device, slot.indexBuffer, allocator);
-        }
-        if (slot.indexMemory != VK_NULL_HANDLE) {
-          vkFreeMemory(device, slot.indexMemory, allocator);
+          vmaDestroyBuffer(vma, slot.indexBuffer, slot.indexMemory);
         }
         if (slot.indirectBuffer != VK_NULL_HANDLE) {
-          vkDestroyBuffer(device, slot.indirectBuffer, allocator);
-        }
-        if (slot.indirectMemory != VK_NULL_HANDLE) {
-          vkFreeMemory(device, slot.indirectMemory, allocator);
+          vmaDestroyBuffer(vma, slot.indirectBuffer, slot.indirectMemory);
         }
       }
       if (instancedLineBuffer != VK_NULL_HANDLE) {
-        vkDestroyBuffer(device, instancedLineBuffer, allocator);
-      }
-      if (instancedLineMemory != VK_NULL_HANDLE) {
-        vkFreeMemory(device, instancedLineMemory, allocator);
+        vmaDestroyBuffer(vma, instancedLineBuffer, instancedLineMemory);
       }
       if (indexBuffer != VK_NULL_HANDLE) {
-        vkDestroyBuffer(device, indexBuffer, allocator);
-      }
-      if (indexMemory != VK_NULL_HANDLE) {
-        vkFreeMemory(device, indexMemory, allocator);
+        vmaDestroyBuffer(vma, indexBuffer, indexMemory);
       }
       if (vertexBuffer != VK_NULL_HANDLE) {
-        vkDestroyBuffer(device, vertexBuffer, allocator);
-      }
-      if (vertexMemory != VK_NULL_HANDLE) {
-        vkFreeMemory(device, vertexMemory, allocator);
+        vmaDestroyBuffer(vma, vertexBuffer, vertexMemory);
       }
     });
   entry = VulkanCachedCommand();
@@ -1154,29 +1218,24 @@ SoVulkanRenderBackend::deferDestroyTextureEntry(VulkanCachedTexture & entry)
     entry = VulkanCachedTexture();
     return;
   }
-  VkDevice device = this->device;
+  const VkDevice device = this->device;
   const VkAllocationCallbacks * allocator = this->allocator;
+  const VmaAllocator vmaAllocator = this->vmaAllocator;
   const VkImage image = entry.image;
-  const VkDeviceMemory memory = entry.memory;
-  const VkDeviceSize imageSize = entry.memorySize;
-  const VkDeviceSize memoryOffset = entry.memoryOffset;
+  const VmaAllocation allocation = entry.allocation;
   const VkImageView view = entry.view;
   // The sampler is shared (samplerCache), so it is NOT destroyed here; it is
-  // released once at shutdown() after the texture cache has been emptied.
-  // Capture `this` so the memory is returned to the sub-allocator (when
-  // enabled) inside the deferred lambda, by which point the frame's
-  // submission is complete and the range is safe to reuse.
-  SoVulkanRenderBackend * self = this;
-  this->deferDestroy([self, device, allocator, image, memory, imageSize,
-                      memoryOffset, view]() {
+  // released once at shutdown() after the texture cache has been emptied.  The
+  // image and its VMA allocation are freed together, once the frame's
+  // submission is complete (the deferred ring), so no in-flight reference is
+  // aliased.
+  this->deferDestroy([device, allocator, vmaAllocator, image, allocation,
+                      view]() {
     if (view != VK_NULL_HANDLE) {
       vkDestroyImageView(device, view, allocator);
     }
     if (image != VK_NULL_HANDLE) {
-      vkDestroyImage(device, image, allocator);
-    }
-    if (memory != VK_NULL_HANDLE) {
-      self->releaseMemory(memory, imageSize, memoryOffset);
+      vmaDestroyImage(vmaAllocator, image, allocation);
     }
   });
   entry = VulkanCachedTexture();
@@ -1200,31 +1259,17 @@ SoVulkanRenderBackend::createWhiteTexture()
   ci.usage = VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
   ci.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
   ci.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
-  if (vkCreateImage(this->device, &ci, this->allocator, &this->whiteImage) !=
-      VK_SUCCESS) {
+  VmaAllocationCreateInfo allocInfo {};
+  allocInfo.usage = VMA_MEMORY_USAGE_AUTO;
+  allocInfo.requiredFlags = VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT;
+  if (vmaCreateImage(this->vmaAllocator, &ci, &allocInfo, &this->whiteImage,
+                     &this->whiteImageAllocation, nullptr) != VK_SUCCESS) {
+    this->emitError("createWhiteTexture: vmaCreateImage failed");
     return false;
   }
-
-  VkMemoryRequirements requirements;
-  vkGetImageMemoryRequirements(this->device, this->whiteImage, &requirements);
-  uint32_t memoryTypeIndex = 0;
-  if (!this->selectMemoryType(requirements, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT,
-                              memoryTypeIndex)) {
-    this->emitError("createWhiteTexture: no device-local memory type");
-    return false;
-  }
-  VkMemoryAllocateInfo ai {};
-  ai.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
-  ai.allocationSize = requirements.size;
-  ai.memoryTypeIndex = memoryTypeIndex;
-  if (vkAllocateMemory(this->device, &ai, this->allocator,
-                       &this->whiteImageMemory) != VK_SUCCESS) {
-    return false;
-  }
-  vkBindImageMemory(this->device, this->whiteImage, this->whiteImageMemory, 0);
 
   VkBuffer staging = VK_NULL_HANDLE;
-  VkDeviceMemory stagingMemory = VK_NULL_HANDLE;
+  VmaAllocation stagingMemory = nullptr;
   if (!this->createBuffer(4, VK_BUFFER_USAGE_TRANSFER_SRC_BIT, staging,
                           stagingMemory, &white)) {
     return false;
@@ -1255,12 +1300,10 @@ SoVulkanRenderBackend::createWhiteTexture()
             VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT);
         })) {
     this->emitError("createWhiteTexture: one-shot upload failed");
-    vkDestroyBuffer(this->device, staging, this->allocator);
-    vkFreeMemory(this->device, stagingMemory, this->allocator);
+    vmaDestroyBuffer(this->vmaAllocator, staging, stagingMemory);
     return false;
   }
-  vkDestroyBuffer(this->device, staging, this->allocator);
-  vkFreeMemory(this->device, stagingMemory, this->allocator);
+  vmaDestroyBuffer(this->vmaAllocator, staging, stagingMemory);
 
   this->whiteImageView =
     createImageView(this->device, this->whiteImage, VK_FORMAT_R8G8B8A8_UNORM,
@@ -1286,9 +1329,10 @@ SoVulkanRenderBackend::createWhiteTexture()
 bool
 SoVulkanRenderBackend::createPipelineLayout()
 {
-  // The visual push-constant block carries the projection matrix, colors,
-  // texture state, point size, and line params.  Verify the device can hold
-  // it (desktop GPUs advertise 256 bytes; some embedded parts only 128).
+  // The visual push-constant block carries the per-draw material/texture/line
+  // state (the projection matrix lives in the DrawBlock UBO).  At 112 bytes it
+  // fits the 128-byte Vulkan guaranteed minimum, so even minimum-spec devices
+  // (and the desktop-baseline device profiles) can create the pipeline.
   VkPhysicalDeviceProperties deviceProps {};
   vkGetPhysicalDeviceProperties(this->physicalDevice, &deviceProps);
   if (deviceProps.limits.maxPushConstantsSize < sizeof(VulkanPushConstants)) {
@@ -1443,7 +1487,7 @@ SoVulkanRenderBackend::createSubPixelCullPipeline()
   cpci.stage.module = this->subPixelCullModule;
   cpci.stage.pName = "main";
   cpci.layout = this->subPixelPipelineLayout;
-  if (vkCreateComputePipelines(this->device, this->pipelineCacheHandle, 1,
+  if (vkCreateComputePipelines(this->device, this->pipelines.handle(), 1,
                                &cpci, this->allocator,
                                &this->subPixelCullPipeline) != VK_SUCCESS) {
     this->subPixelCullPipeline = VK_NULL_HANDLE;
@@ -1468,6 +1512,9 @@ SoVulkanRenderBackend::createSubPixelCullPipeline()
   }
   this->subPixelDescriptorPools.push_back(pool);
   this->subPixelDescriptorSetCount = 0;
+  SoVulkanDebugUtils::nameObject(this->device, VK_OBJECT_TYPE_DESCRIPTOR_POOL,
+                                 reinterpret_cast<uint64_t>(pool),
+                                 "Coin raster sub-pixel descriptor pool");
 
   // Cache the device's single-binding storage-buffer range limit so the
   // pre-pass can reject a command whose vertex/index buffer cannot legally be

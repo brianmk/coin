@@ -5,6 +5,7 @@
 
 #include "rendering/SoRTXRenderBackend.h"
 #include "rendering/SoVulkanConfig.h"
+#include "rendering/SoVulkanDebugUtils.h"
 #include <Inventor/errors/SoDebugError.h>
 #include <algorithm>
 #include <array>
@@ -15,6 +16,8 @@
 #include <cstring>
 #include <string>
 #include <rendering/SoRTXRenderBackend/SoRTXRenderBackendP.h>
+
+#include "vk_mem_alloc.h"
 
 using namespace SoRTXBackend;
 
@@ -354,7 +357,7 @@ SoRTXRenderBackend::setInteractionLod(SbBool active)
   this->ptInteractionLod = active;
   this->ptMaxBounces =
     active ? this->ptInteractionBounces : this->ptMaxBouncesBase;
-  if (SoVulkanShared::envString("FC_VULKAN_RT_DEBUG")) {
+  if (SoVulkanConfig::get().rtxDebug.rtDebug) {
     fprintf(stderr, "[RTDBG] interactionLod active=%d bounces=%u\n",
             active ? 1 : 0, this->ptMaxBounces);
   }
@@ -470,7 +473,7 @@ SoRTXRenderBackend::probeComputeQueue(void)
       this->hasComputeQueue = (this->computeQueue != VK_NULL_HANDLE);
     }
   }
-  if (SoVulkanShared::envString("FC_VULKAN_RT_DEBUG")) {
+  if (SoVulkanConfig::get().rtxDebug.rtDebug) {
     fprintf(stderr,
             "[RTDBG] computeCaps family=%u idx=%u req=%d computeQueue=%d "
             "computeCount=%u flags=0x%x\n",
@@ -519,6 +522,37 @@ SoRTXRenderBackend::initialize(const SoRenderBackendInitParams & params)
   this->queueFamilyIndex = deviceContext->graphicsQueueFamilyIndex;
   this->allocator = deviceContext->allocator;
   this->memProps.setDevice(this->physicalDevice);
+
+  // Resolve the synchronization2 entry points once for this device.  A null
+  // pointer means the extension was not enabled; the shared barrier/submit
+  // helpers then fall back to the legacy entry points.
+  {
+    SoVulkanShared::Sync2Dispatch & sync2 = SoVulkanShared::sync2Dispatch();
+    sync2.cmdPipelineBarrier2 =
+      SoVulkanShared::loadDispatch<PFN_vkCmdPipelineBarrier2KHR>(
+        vkGetDeviceProcAddr(this->device, "vkCmdPipelineBarrier2KHR"));
+    sync2.queueSubmit2 = SoVulkanShared::loadDispatch<PFN_vkQueueSubmit2KHR>(
+      vkGetDeviceProcAddr(this->device, "vkQueueSubmit2KHR"));
+    this->emitLog(sync2.cmdPipelineBarrier2 != nullptr
+                    ? "synchronization2: enabled"
+                    : "synchronization2: unavailable (legacy barriers)");
+  }
+
+  // Create the VMA allocator before any buffer/image allocation.  The
+  // buffer-device-address flag is required because the BLAS/TLAS and SBT
+  // buffers expose VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT; VMA then adds
+  // VK_MEMORY_ALLOCATE_DEVICE_ADDRESS_BIT to the backing allocation.
+  VmaAllocatorCreateInfo allocatorInfo {};
+  allocatorInfo.physicalDevice = this->physicalDevice;
+  allocatorInfo.device = this->device;
+  allocatorInfo.instance = this->instance;
+  allocatorInfo.vulkanApiVersion = deviceContext->apiVersion;
+  allocatorInfo.pAllocationCallbacks = this->allocator;
+  allocatorInfo.flags = VMA_ALLOCATOR_CREATE_BUFFER_DEVICE_ADDRESS_BIT;
+  if (vmaCreateAllocator(&allocatorInfo, &this->vmaAllocator) != VK_SUCCESS) {
+    this->emitError("SoRTXRenderBackend: vmaCreateAllocator failed");
+    return FALSE;
+  }
 
   // The async-compute queue requested at device creation (see the widget's
   // setQueueCreateInfoModifier).  probeComputeQueue() retrieves the handle
@@ -572,6 +606,10 @@ SoRTXRenderBackend::initialize(const SoRenderBackendInitParams & params)
     this->hasNvCluster = deviceContext->caps.nvCluster;
     this->hasNvPartitioned = deviceContext->caps.nvPartitioned;
     this->hasNvLinearSweptSpheres = deviceContext->caps.nvLinearSweptSpheres;
+    this->hasUpdateAfterBind =
+      deviceContext->caps.descriptorIndexingUpdateAfterBind;
+    this->hasPipelineCreationFeedback =
+      deviceContext->caps.pipelineCreationFeedback;
   }
   else {
     uint32_t extCount = 0;
@@ -596,6 +634,17 @@ SoRTXRenderBackend::initialize(const SoRenderBackendInitParams & params)
       hasExt("VK_NV_partitioned_acceleration_structure");
     this->hasNvLinearSweptSpheres =
       hasExt("VK_NV_ray_tracing_linear_swept_spheres");
+    VkPhysicalDeviceDescriptorIndexingFeatures di {};
+    di.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DESCRIPTOR_INDEXING_FEATURES;
+    VkPhysicalDeviceFeatures2 f2 {};
+    f2.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2;
+    f2.pNext = &di;
+    vkGetPhysicalDeviceFeatures2(this->physicalDevice, &f2);
+    this->hasUpdateAfterBind =
+      di.descriptorBindingSampledImageUpdateAfterBind &&
+      di.descriptorBindingStorageImageUpdateAfterBind &&
+      di.descriptorBindingUniformBufferUpdateAfterBind &&
+      di.descriptorBindingStorageBufferUpdateAfterBind;
   }
   char capsBuf[192];
   std::snprintf(
@@ -798,6 +847,7 @@ SoRTXRenderBackend::beginTransientCommandBuffer()
   // buffer every frame; resetting it here is safe because the submission is
   // provably complete (vkQueueWaitIdle) by the time the next frame begins.
   if (this->transientPool == VK_NULL_HANDLE) {
+    SoVulkanDebugUtils::setDevice(this->device);
     VkCommandPoolCreateInfo pci {};
     pci.sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO;
     pci.flags = VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT |
@@ -807,6 +857,9 @@ SoRTXRenderBackend::beginTransientCommandBuffer()
                             &this->transientPool) != VK_SUCCESS) {
       return VK_NULL_HANDLE;
     }
+    SoVulkanDebugUtils::nameObject(this->device, VK_OBJECT_TYPE_COMMAND_POOL,
+                                   reinterpret_cast<uint64_t>(this->transientPool),
+                                   "Coin RT transient command pool");
     VkCommandBufferAllocateInfo ai {};
     ai.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
     ai.commandPool = this->transientPool;
@@ -844,6 +897,24 @@ SoRTXRenderBackend::releaseTransientCommandBuffer()
   }
 }
 
+void
+SoRTXRenderBackend::setMaxFramesInFlight(uint32_t count)
+{
+  uint32_t size = count < 2u ? 2u : count;
+  if (size > RTX_MAX_FRAMES_IN_FLIGHT) {
+    size = RTX_MAX_FRAMES_IN_FLIGHT;
+  }
+  if (size == this->descriptorRingSize) {
+    return;
+  }
+  this->descriptorRingSize = size;
+  if (this->descriptorSetIndex >= size) {
+    this->descriptorSetIndex = 0;
+  }
+  // Extra ring slots are allocated lazily by updateDescriptors(); slots beyond
+  // the new size stay allocated but are simply never bound again.
+}
+
 // --- Lifecycle ------------------------------------------------------------
 
 void
@@ -860,134 +931,122 @@ SoRTXRenderBackend::shutdown()
   this->invalidateCache();
   this->freePendingStagingDestroys();
 
+  // GPU-pick resources (Vulkan/RTX only): no-op unless a pick ever ran.
+  this->destroyPickResources();
+
   if (this->tlas != VK_NULL_HANDLE) {
     vkDestroyAccelerationStructureKHR(this->device, this->tlas,
                                       this->allocator);
     this->tlas = VK_NULL_HANDLE;
   }
   if (this->tlasBuffer != VK_NULL_HANDLE) {
-    vkDestroyBuffer(this->device, this->tlasBuffer, this->allocator);
+    vmaDestroyBuffer(this->vmaAllocator, this->tlasBuffer, this->tlasMemory);
     this->tlasBuffer = VK_NULL_HANDLE;
   }
   if (this->tlasMemory != VK_NULL_HANDLE) {
-    vkFreeMemory(this->device, this->tlasMemory, this->allocator);
     this->tlasMemory = VK_NULL_HANDLE;
   }
   if (this->instanceBuffer != VK_NULL_HANDLE) {
-    vkDestroyBuffer(this->device, this->instanceBuffer, this->allocator);
+    vmaDestroyBuffer(this->vmaAllocator, this->instanceBuffer, this->instanceMemory);
     this->instanceBuffer = VK_NULL_HANDLE;
   }
   if (this->instanceMemory != VK_NULL_HANDLE) {
-    vkFreeMemory(this->device, this->instanceMemory, this->allocator);
     this->instanceMemory = VK_NULL_HANDLE;
   }
   this->instanceBufferCapacity = 0;
   this->tlasSize = 0;
   if (this->scratchBuffer != VK_NULL_HANDLE) {
-    vkDestroyBuffer(this->device, this->scratchBuffer, this->allocator);
+    vmaDestroyBuffer(this->vmaAllocator, this->scratchBuffer, this->scratchMemory);
     this->scratchBuffer = VK_NULL_HANDLE;
   }
   if (this->scratchMemory != VK_NULL_HANDLE) {
-    vkFreeMemory(this->device, this->scratchMemory, this->allocator);
     this->scratchMemory = VK_NULL_HANDLE;
   }
   this->scratchSize = 0;
   this->scratchAddress = 0;
   if (this->storageImage != VK_NULL_HANDLE) {
     vkDestroyImageView(this->device, this->storageImageView, this->allocator);
-    vkDestroyImage(this->device, this->storageImage, this->allocator);
-    vkFreeMemory(this->device, this->storageImageMemory, this->allocator);
+    vmaDestroyImage(this->vmaAllocator, this->storageImage,
+                    this->storageImageMemory);
     this->storageImage = VK_NULL_HANDLE;
     this->storageImageView = VK_NULL_HANDLE;
-    this->storageImageMemory = VK_NULL_HANDLE;
+    this->storageImageMemory = nullptr;
   }
   if (this->presentSampler != VK_NULL_HANDLE) {
     vkDestroySampler(this->device, this->presentSampler, this->allocator);
     this->presentSampler = VK_NULL_HANDLE;
   }
   if (this->accumBuffer != VK_NULL_HANDLE) {
-    vkDestroyBuffer(this->device, this->accumBuffer, this->allocator);
+    vmaDestroyBuffer(this->vmaAllocator, this->accumBuffer, this->accumMemory);
     this->accumBuffer = VK_NULL_HANDLE;
   }
   if (this->accumMemory != VK_NULL_HANDLE) {
-    vkFreeMemory(this->device, this->accumMemory, this->allocator);
     this->accumMemory = VK_NULL_HANDLE;
   }
   if (this->normalBuffer != VK_NULL_HANDLE) {
-    vkDestroyBuffer(this->device, this->normalBuffer, this->allocator);
+    vmaDestroyBuffer(this->vmaAllocator, this->normalBuffer, this->normalMemory);
     this->normalBuffer = VK_NULL_HANDLE;
   }
   if (this->normalMemory != VK_NULL_HANDLE) {
-    vkFreeMemory(this->device, this->normalMemory, this->allocator);
     this->normalMemory = VK_NULL_HANDLE;
   }
   if (this->positionBuffer != VK_NULL_HANDLE) {
-    vkDestroyBuffer(this->device, this->positionBuffer, this->allocator);
+    vmaDestroyBuffer(this->vmaAllocator, this->positionBuffer, this->positionMemory);
     this->positionBuffer = VK_NULL_HANDLE;
   }
   if (this->positionMemory != VK_NULL_HANDLE) {
-    vkFreeMemory(this->device, this->positionMemory, this->allocator);
     this->positionMemory = VK_NULL_HANDLE;
   }
   if (this->sumSqBuffer != VK_NULL_HANDLE) {
-    vkDestroyBuffer(this->device, this->sumSqBuffer, this->allocator);
+    vmaDestroyBuffer(this->vmaAllocator, this->sumSqBuffer, this->sumSqMemory);
     this->sumSqBuffer = VK_NULL_HANDLE;
   }
   if (this->sumSqMemory != VK_NULL_HANDLE) {
-    vkFreeMemory(this->device, this->sumSqMemory, this->allocator);
     this->sumSqMemory = VK_NULL_HANDLE;
   }
   if (this->activeCounterBuffer != VK_NULL_HANDLE) {
-    if (this->activeCounterMapped != nullptr) {
-      vkUnmapMemory(this->device, this->activeCounterMemory);
-      this->activeCounterMapped = nullptr;
-    }
-    vkDestroyBuffer(this->device, this->activeCounterBuffer, this->allocator);
+    // The persistent mapping comes from VMA_ALLOCATION_CREATE_MAPPED_BIT, so
+    // there is no vmaMapMemory to balance before vmaDestroyBuffer.
+    this->activeCounterMapped = nullptr;
+    vmaDestroyBuffer(this->vmaAllocator, this->activeCounterBuffer, this->activeCounterMemory);
     this->activeCounterBuffer = VK_NULL_HANDLE;
   }
   if (this->activeCounterMemory != VK_NULL_HANDLE) {
-    vkFreeMemory(this->device, this->activeCounterMemory, this->allocator);
     this->activeCounterMemory = VK_NULL_HANDLE;
   }
   if (this->accumHistoryBuffer != VK_NULL_HANDLE) {
-    vkDestroyBuffer(this->device, this->accumHistoryBuffer, this->allocator);
+    vmaDestroyBuffer(this->vmaAllocator, this->accumHistoryBuffer, this->accumHistoryMemory);
     this->accumHistoryBuffer = VK_NULL_HANDLE;
   }
   if (this->accumHistoryMemory != VK_NULL_HANDLE) {
-    vkFreeMemory(this->device, this->accumHistoryMemory, this->allocator);
     this->accumHistoryMemory = VK_NULL_HANDLE;
   }
   if (this->sumSqHistoryBuffer != VK_NULL_HANDLE) {
-    vkDestroyBuffer(this->device, this->sumSqHistoryBuffer, this->allocator);
+    vmaDestroyBuffer(this->vmaAllocator, this->sumSqHistoryBuffer, this->sumSqHistoryMemory);
     this->sumSqHistoryBuffer = VK_NULL_HANDLE;
   }
   if (this->sumSqHistoryMemory != VK_NULL_HANDLE) {
-    vkFreeMemory(this->device, this->sumSqHistoryMemory, this->allocator);
     this->sumSqHistoryMemory = VK_NULL_HANDLE;
   }
   if (this->positionHistoryBuffer != VK_NULL_HANDLE) {
-    vkDestroyBuffer(this->device, this->positionHistoryBuffer,
-                    this->allocator);
+    vmaDestroyBuffer(this->vmaAllocator, this->positionHistoryBuffer, this->positionHistoryMemory);
     this->positionHistoryBuffer = VK_NULL_HANDLE;
   }
   if (this->positionHistoryMemory != VK_NULL_HANDLE) {
-    vkFreeMemory(this->device, this->positionHistoryMemory, this->allocator);
     this->positionHistoryMemory = VK_NULL_HANDLE;
   }
   // The screen-space motion-vector G-buffer (read by the denoiser readback)
   // is part of the same PT buffer pool, so it must be destroyed here too.
   if (this->motionBuffer != VK_NULL_HANDLE) {
-    vkDestroyBuffer(this->device, this->motionBuffer, this->allocator);
+    vmaDestroyBuffer(this->vmaAllocator, this->motionBuffer, this->motionMemory);
     this->motionBuffer = VK_NULL_HANDLE;
   }
   if (this->motionMemory != VK_NULL_HANDLE) {
-    vkFreeMemory(this->device, this->motionMemory, this->allocator);
     this->motionMemory = VK_NULL_HANDLE;
   }
   this->ptHistoryValid = FALSE;
   this->ptReprojectFrame = FALSE;
   if (this->positionMemory != VK_NULL_HANDLE) {
-    vkFreeMemory(this->device, this->positionMemory, this->allocator);
     this->positionMemory = VK_NULL_HANDLE;
   }
   this->ptBufferWidth = 0;
@@ -998,8 +1057,7 @@ SoRTXRenderBackend::shutdown()
   this->flushPendingDestroys();
   this->flushPendingDestroys();
   if (this->materialBuffer != VK_NULL_HANDLE) {
-    vkDestroyBuffer(this->device, this->materialBuffer, this->allocator);
-    vkFreeMemory(this->device, this->materialMemory, this->allocator);
+    vmaDestroyBuffer(this->vmaAllocator, this->materialBuffer, this->materialMemory);
     this->materialBuffer = VK_NULL_HANDLE;
     this->materialMemory = VK_NULL_HANDLE;
     this->materialMapped = nullptr;
@@ -1007,15 +1065,13 @@ SoRTXRenderBackend::shutdown()
   this->materialCount = 0;
   this->materialBufferBytes = 0;
   if (this->frameBuffer != VK_NULL_HANDLE) {
-    vkDestroyBuffer(this->device, this->frameBuffer, this->allocator);
-    vkFreeMemory(this->device, this->frameMemory, this->allocator);
+    vmaDestroyBuffer(this->vmaAllocator, this->frameBuffer, this->frameMemory);
     this->frameBuffer = VK_NULL_HANDLE;
     this->frameMemory = VK_NULL_HANDLE;
     this->frameMapped = nullptr;
   }
   if (this->presentFrameBuffer != VK_NULL_HANDLE) {
-    vkDestroyBuffer(this->device, this->presentFrameBuffer, this->allocator);
-    vkFreeMemory(this->device, this->presentFrameMemory, this->allocator);
+    vmaDestroyBuffer(this->vmaAllocator, this->presentFrameBuffer, this->presentFrameMemory);
     this->presentFrameBuffer = VK_NULL_HANDLE;
     this->presentFrameMemory = VK_NULL_HANDLE;
     this->presentFrameMapped = nullptr;
@@ -1098,29 +1154,26 @@ SoRTXRenderBackend::shutdown()
     this->shadowClosestHitModule = VK_NULL_HANDLE;
   }
   if (this->sbtBuffer != VK_NULL_HANDLE) {
-    vkDestroyBuffer(this->device, this->sbtBuffer, this->allocator);
+    vmaDestroyBuffer(this->vmaAllocator, this->sbtBuffer, this->sbtMemory);
     this->sbtBuffer = VK_NULL_HANDLE;
   }
   if (this->sbtMemory != VK_NULL_HANDLE) {
-    vkFreeMemory(this->device, this->sbtMemory, this->allocator);
     this->sbtMemory = VK_NULL_HANDLE;
   }
   this->sbtRecordSize = 32;
   this->sbtBaseOffset = 0;
   if (this->normalPoolBuffer != VK_NULL_HANDLE) {
     this->normalPoolMapped = nullptr;
-    vkDestroyBuffer(this->device, this->normalPoolBuffer, this->allocator);
+    vmaDestroyBuffer(this->vmaAllocator, this->normalPoolBuffer, this->normalPoolMemory);
     this->normalPoolBuffer = VK_NULL_HANDLE;
-    vkFreeMemory(this->device, this->normalPoolMemory, this->allocator);
     this->normalPoolMemory = VK_NULL_HANDLE;
   }
   this->normalPoolCapacity = 0;
   this->normalPoolUsed = 0;
   if (this->neePoolBuffer != VK_NULL_HANDLE) {
     this->neePoolMapped = nullptr;
-    vkDestroyBuffer(this->device, this->neePoolBuffer, this->allocator);
+    vmaDestroyBuffer(this->vmaAllocator, this->neePoolBuffer, this->neePoolMemory);
     this->neePoolBuffer = VK_NULL_HANDLE;
-    vkFreeMemory(this->device, this->neePoolMemory, this->allocator);
     this->neePoolMemory = VK_NULL_HANDLE;
   }
   this->neePoolCapacity = 0;
@@ -1159,17 +1212,27 @@ SoRTXRenderBackend::shutdown()
   this->releaseTransientCommandBuffer();
   this->offscreenColorImage = VK_NULL_HANDLE;
   this->offscreenColorView = VK_NULL_HANDLE;
-  this->rtDescriptorSets[0] = VK_NULL_HANDLE;
-  this->rtDescriptorSets[1] = VK_NULL_HANDLE;
-  this->presentDescriptorSets[0] = VK_NULL_HANDLE;
-  this->presentDescriptorSets[1] = VK_NULL_HANDLE;
-  // The sets are invalid until updateDescriptors() rewrites them in the next
-  // engine generation; descriptorSetIndex is intentionally NOT reset here, so
-  // the first (possibly non-dirty) frame must repopulate its torn set.
-  this->rtSetValid[0] = false;
-  this->rtSetValid[1] = false;
-  this->presentSetValid[0] = false;
-  this->presentSetValid[1] = false;
+  for (uint32_t i = 0; i < RTX_MAX_FRAMES_IN_FLIGHT; ++i) {
+    this->rtDescriptorSets[i] = VK_NULL_HANDLE;
+    this->presentDescriptorSets[i] = VK_NULL_HANDLE;
+    // The sets are invalid until updateDescriptors() rewrites them in the next
+    // engine generation; descriptorSetIndex is intentionally NOT reset here, so
+    // the first (possibly non-dirty) frame must repopulate its torn set.
+    this->rtSetValid[i] = false;
+    this->presentSetValid[i] = false;
+  }
+
+  // Every VMA-backed buffer/image has been released above (including the
+  // deferred CUDA-interop destroys flushed by destroyDenoiser()); drop the
+  // custom export pool before the allocator so VMA sees it empty.
+  if (this->rtxInteropPool != VK_NULL_HANDLE) {
+    vmaDestroyPool(this->vmaAllocator, this->rtxInteropPool);
+    this->rtxInteropPool = VK_NULL_HANDLE;
+  }
+  if (this->vmaAllocator != nullptr) {
+    vmaDestroyAllocator(this->vmaAllocator);
+    this->vmaAllocator = nullptr;
+  }
 
   this->instance = VK_NULL_HANDLE;
   this->physicalDevice = VK_NULL_HANDLE;
@@ -1426,7 +1489,7 @@ SoRTXRenderBackend::render(const SoDrawList & drawlist,
     this->updateDenoise();
     this->swapPathTracingHistory();
   }
-  if (SoVulkanShared::envString("FC_VULKAN_RT_DEBUG")) {
+  if (SoVulkanConfig::get().rtxDebug.rtDebug) {
     fprintf(stderr, "[RTDBG] submit=%d wait=%d asOk=%d traceOk=%d\n",
             static_cast<int>(submitResult), static_cast<int>(waitResult),
             asOk ? 1 : 0, traceOk ? 1 : 0);
