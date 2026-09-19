@@ -10,8 +10,9 @@
 // instead of dereferencing a null pointer.
 //
 // Single-device assumption: the renderer shares one VkDevice across the raster
-// and ray-tracing backends, so the resolved entry points are cached once.  If
-// a second device ever appears, call setDevice() from its creation site.
+// and ray-tracing backends.  setDevice() resolves the entry points at the
+// device-creation site, before any frame recording; call it again if a second
+// device ever appears.
 
 #ifndef COIN_SOVULKANDEBUGUTILS_H
 #define COIN_SOVULKANDEBUGUTILS_H
@@ -37,39 +38,43 @@ deviceRef()
   return device;
 }
 
-inline void
-setDevice(VkDevice device)
-{
-  deviceRef() = device;
-}
-
 struct Functions {
   PFN_vkSetDebugUtilsObjectNameEXT setName = nullptr;
   PFN_vkCmdBeginDebugUtilsLabelEXT beginLabel = nullptr;
   PFN_vkCmdEndDebugUtilsLabelEXT endLabel = nullptr;
 };
 
+inline Functions &
+functionsRef()
+{
+  static Functions fns;
+  return fns;
+}
+
+// Resolve the device-level entry points here, at the single-threaded
+// device-creation site, instead of lazily on first use: a lazy resolve raced
+// concurrent first calls and could latch an all-null table.  Calling this again
+// for a second device re-resolves for that device.
+inline void
+setDevice(VkDevice device)
+{
+  deviceRef() = device;
+  Functions fns {};
+  if (device != VK_NULL_HANDLE) {
+    fns.setName = reinterpret_cast<PFN_vkSetDebugUtilsObjectNameEXT>(
+      vkGetDeviceProcAddr(device, "vkSetDebugUtilsObjectNameEXT"));
+    fns.beginLabel = reinterpret_cast<PFN_vkCmdBeginDebugUtilsLabelEXT>(
+      vkGetDeviceProcAddr(device, "vkCmdBeginDebugUtilsLabelEXT"));
+    fns.endLabel = reinterpret_cast<PFN_vkCmdEndDebugUtilsLabelEXT>(
+      vkGetDeviceProcAddr(device, "vkCmdEndDebugUtilsLabelEXT"));
+  }
+  functionsRef() = fns;
+}
+
 inline const Functions &
 functions()
 {
-  // Resolve once, but only once the device is available.  The previous one-shot
-  // static cached whatever deviceRef() held on the first call, so a call before
-  // setDevice() latched an all-null table and disabled debug utils permanently.
-  static Functions fns {};
-  static bool resolved = false;
-  if (!resolved) {
-    const VkDevice device = deviceRef();
-    if (device != VK_NULL_HANDLE) {
-      fns.setName = reinterpret_cast<PFN_vkSetDebugUtilsObjectNameEXT>(
-        vkGetDeviceProcAddr(device, "vkSetDebugUtilsObjectNameEXT"));
-      fns.beginLabel = reinterpret_cast<PFN_vkCmdBeginDebugUtilsLabelEXT>(
-        vkGetDeviceProcAddr(device, "vkCmdBeginDebugUtilsLabelEXT"));
-      fns.endLabel = reinterpret_cast<PFN_vkCmdEndDebugUtilsLabelEXT>(
-        vkGetDeviceProcAddr(device, "vkCmdEndDebugUtilsLabelEXT"));
-      resolved = true;
-    }
-  }
-  return fns;
+  return functionsRef();
 }
 
 inline void

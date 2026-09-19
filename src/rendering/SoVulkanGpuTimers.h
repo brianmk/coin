@@ -66,6 +66,10 @@ private:
 
   uint32_t ringIndex = 0;
   uint32_t scopeCount = 0;
+  //! True between a recorded beginScope() and its matching endScope().  A
+  //! dropped begin (max scopes reached) clears it, so the paired endScope() is
+  //! a no-op and cannot overwrite the previous scope's end timestamp.
+  bool scopePending = false;
   uint32_t slotScopeCount[kRingFrames] = {};
   const char * scopeNames[kRingFrames][kMaxScopesPerFrame] = {};
 };

@@ -74,6 +74,9 @@ SoVulkanGpuTimers::beginScope(VkCommandBuffer commandBuffer, const char * name)
   if (this->queryPool == VK_NULL_HANDLE ||
       commandBuffer == VK_NULL_HANDLE ||
       this->scopeCount >= kMaxScopesPerFrame) {
+    // No begin was recorded, so the matching endScope() must not write either:
+    // otherwise it would close the previous scope's pair a second time.
+    this->scopePending = false;
     return;
   }
   const uint32_t slot = this->ringIndex;
@@ -89,13 +92,14 @@ SoVulkanGpuTimers::beginScope(VkCommandBuffer commandBuffer, const char * name)
   vkCmdWriteTimestamp(commandBuffer, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
                       this->queryPool, base + this->scopeCount * 2);
   ++this->scopeCount;
+  this->scopePending = true;
 }
 
 void
 SoVulkanGpuTimers::endScope(VkCommandBuffer commandBuffer)
 {
   if (this->queryPool == VK_NULL_HANDLE || commandBuffer == VK_NULL_HANDLE ||
-      this->scopeCount == 0) {
+      !this->scopePending) {
     return;
   }
   const uint32_t slot = this->ringIndex;
@@ -103,6 +107,7 @@ SoVulkanGpuTimers::endScope(VkCommandBuffer commandBuffer)
   vkCmdWriteTimestamp(commandBuffer, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT,
                       this->queryPool,
                       base + (this->scopeCount - 1) * 2 + 1);
+  this->scopePending = false;
 }
 
 void
@@ -111,6 +116,8 @@ SoVulkanGpuTimers::endFrame()
   if (this->queryPool == VK_NULL_HANDLE) {
     return;
   }
+  // An unmatched begin (no endScope this frame) must not leak into the next.
+  this->scopePending = false;
   const uint32_t slot = this->ringIndex;
   this->slotScopeCount[slot] = this->scopeCount;
   this->scopeCount = 0;
