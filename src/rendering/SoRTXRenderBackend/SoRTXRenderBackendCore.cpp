@@ -354,7 +354,7 @@ SoRTXRenderBackend::setInteractionLod(SbBool active)
   this->ptInteractionLod = active;
   this->ptMaxBounces =
     active ? this->ptInteractionBounces : this->ptMaxBouncesBase;
-  if (SoVulkanShared::envString("FC_VULKAN_RT_DEBUG")) {
+  if (SoVulkanConfig::get().rtxDebug.rtDebug) {
     fprintf(stderr, "[RTDBG] interactionLod active=%d bounces=%u\n",
             active ? 1 : 0, this->ptMaxBounces);
   }
@@ -470,7 +470,7 @@ SoRTXRenderBackend::probeComputeQueue(void)
       this->hasComputeQueue = (this->computeQueue != VK_NULL_HANDLE);
     }
   }
-  if (SoVulkanShared::envString("FC_VULKAN_RT_DEBUG")) {
+  if (SoVulkanConfig::get().rtxDebug.rtDebug) {
     fprintf(stderr,
             "[RTDBG] computeCaps family=%u idx=%u req=%d computeQueue=%d "
             "computeCount=%u flags=0x%x\n",
@@ -1426,7 +1426,7 @@ SoRTXRenderBackend::render(const SoDrawList & drawlist,
     this->updateDenoise();
     this->swapPathTracingHistory();
   }
-  if (SoVulkanShared::envString("FC_VULKAN_RT_DEBUG")) {
+  if (SoVulkanConfig::get().rtxDebug.rtDebug) {
     fprintf(stderr, "[RTDBG] submit=%d wait=%d asOk=%d traceOk=%d\n",
             static_cast<int>(submitResult), static_cast<int>(waitResult),
             asOk ? 1 : 0, traceOk ? 1 : 0);

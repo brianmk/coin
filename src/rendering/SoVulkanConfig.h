@@ -46,6 +46,26 @@ struct GeometryLod {
   uint32_t maxIndices = 64000000u;
 };
 
+// Ray-tracing / path-tracing diagnostics.  Presence-only (any value, including
+// "0", enables) except rtDebugFill, which keeps the historical "0"/"false"/
+// "off" opt-out; each field documents the flag it resolves.
+struct RtxDebug {
+  //! FC_VULKAN_RT_DEBUG: TLAS/BLAS build and ptState per-frame diagnostics.
+  bool rtDebug = false;
+  //! FC_VULKAN_RT_GEO: per-command BLAS geometry diagnostics.
+  bool rtGeo = false;
+  //! FC_VULKAN_RT_DEBUG_FILL: constant-fill debug output for traced triangles.
+  bool rtDebugFill = false;
+  //! FC_VULKAN_PT_DEBUG: path-tracer debug output.
+  bool ptDebug = false;
+  //! FC_VULKAN_PT_DENOISER_DEBUG: denoiser diagnostics.
+  bool denoiserDebug = false;
+  //! FC_VULKAN_PT_DENOISE_TIMING: denoise phase timings.
+  bool denoiseTiming = false;
+  //! FC_VULKAN_ASYNC_COMPUTE_TIMING: async-compute overlap timings.
+  bool asyncComputeTiming = false;
+};
+
 // Ray-tracing TLAS instance culling (frustum + sub-pixel).
 struct RtxCull {
   //! Instance culling master switch.  FC_VULKAN_TLAS_CULL; default OFF
@@ -121,6 +141,7 @@ struct Raster {
 
 struct Config {
   GeometryLod geometryLod;
+  RtxDebug rtxDebug;
   RtxCull rtxCull;
   PathTracing pathTracing;
   AccelerationStructures accelerationStructures;

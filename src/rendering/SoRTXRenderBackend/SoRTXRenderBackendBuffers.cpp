@@ -12,6 +12,7 @@
 #include <cstring>
 #include <string>
 #include <rendering/SoRTXRenderBackend/SoRTXRenderBackendP.h>
+#include <rendering/SoVulkanConfig.h>
 #include <rendering/SoVulkanShared.h>
 
 using namespace SoRTXBackend;
@@ -103,7 +104,7 @@ SoRTXRenderBackend::createScratchBuffer(VkDeviceSize size)
   const VkDeviceAddress base = this->getDeviceAddress(this->scratchBuffer);
   const VkDeviceAddress offset = (alignment - (base % alignment)) % alignment;
   this->scratchAddress = base + offset;
-  if (SoVulkanShared::envString("FC_VULKAN_RT_DEBUG")) {
+  if (SoVulkanConfig::get().rtxDebug.rtDebug) {
     fprintf(stderr,
             "[RTDBG] scratch: requiredAlignment=%llu base=0x%llx "
             "aligned=0x%llx offset=%llu size=%llu\n",

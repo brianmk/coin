@@ -104,6 +104,19 @@ Config load()
   c.geometryLod.maxIndices =
     readPositiveUint("FC_VULKAN_GEOM_LOD_MAX_INDEX", 64000000u);
 
+  // Presence-only diagnostics (see RtxDebug): any value enables them.  The
+  // fill debug is the exception: it historically honored the "0"/"false"/
+  // "off" opt-out, so keep that (envFlagEnabled) rather than presence-only.
+  c.rtxDebug.rtDebug = SoVulkanShared::envSet("FC_VULKAN_RT_DEBUG");
+  c.rtxDebug.rtGeo = SoVulkanShared::envSet("FC_VULKAN_RT_GEO");
+  c.rtxDebug.rtDebugFill =
+    SoVulkanShared::envFlagEnabled("FC_VULKAN_RT_DEBUG_FILL", false);
+  c.rtxDebug.ptDebug = SoVulkanShared::envSet("FC_VULKAN_PT_DEBUG");
+  c.rtxDebug.denoiserDebug = SoVulkanShared::envSet("FC_VULKAN_PT_DENOISER_DEBUG");
+  c.rtxDebug.denoiseTiming = SoVulkanShared::envSet("FC_VULKAN_PT_DENOISE_TIMING");
+  c.rtxDebug.asyncComputeTiming =
+    SoVulkanShared::envSet("FC_VULKAN_ASYNC_COMPUTE_TIMING");
+
   c.rtxCull.enabled =
     SoVulkanShared::envFlagEnabled("FC_VULKAN_TLAS_CULL", false);
   c.rtxCull.pixels = readNonNegativeFloat("FC_VULKAN_TLAS_PIX", 1.0f);
@@ -172,6 +185,16 @@ void dump()
                c.geometryLod.stats ? 1 : 0,
                static_cast<double>(c.geometryLod.minAreaPixels),
                c.geometryLod.maxIndices);
+  std::fprintf(stderr,
+               "[VKCONFIG] rtxDebug rtDebug=%d rtGeo=%d rtFill=%d ptDebug=%d "
+               "denoiser=%d denoiseTiming=%d asyncTiming=%d\n",
+               c.rtxDebug.rtDebug ? 1 : 0,
+               c.rtxDebug.rtGeo ? 1 : 0,
+               c.rtxDebug.rtDebugFill ? 1 : 0,
+               c.rtxDebug.ptDebug ? 1 : 0,
+               c.rtxDebug.denoiserDebug ? 1 : 0,
+               c.rtxDebug.denoiseTiming ? 1 : 0,
+               c.rtxDebug.asyncComputeTiming ? 1 : 0);
   std::fprintf(stderr,
                "[VKCONFIG] rtxCull enabled=%d pixels=%.3f\n",
                c.rtxCull.enabled ? 1 : 0,

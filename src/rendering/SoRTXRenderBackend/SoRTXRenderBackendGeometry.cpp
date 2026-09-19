@@ -272,7 +272,7 @@ SoRTXRenderBackend::buildNeePool(const SoDrawList & drawlist)
   }
 
   this->neePoolCount = entryCount;
-  if (SoVulkanShared::envString("FC_VULKAN_RT_DEBUG") && entryCount > 0) {
+  if (SoVulkanConfig::get().rtxDebug.rtDebug && entryCount > 0) {
     const float * e = static_cast<const float *>(this->neePoolMapped);
     fprintf(stderr, "[RTDBG] nee pool triangles=%u bytes=%llu enabled=%d "
                     "mis=%d xformT=(%.2f,%.2f,%.2f)\n",
@@ -479,7 +479,7 @@ SoRTXRenderBackend::compactBlas(RTXCachedGeometry & entry)
       compactSize >= entry.blasSize) {
     entry.compacted = true;  // nothing to save; stop asking
     entry.wantsCompact = false;
-    if (SoVulkanShared::envString("FC_VULKAN_RT_DEBUG")) {
+    if (SoVulkanConfig::get().rtxDebug.rtDebug) {
       fprintf(stderr, "[RTDBG] compact size=%llu -> %llu saved=0\n",
               static_cast<unsigned long long>(origSize),
               static_cast<unsigned long long>(compactSize));
@@ -566,7 +566,7 @@ SoRTXRenderBackend::compactBlas(RTXCachedGeometry & entry)
   // consumed by recordAccelerationStructures to compute asDirty and is the
   // "instance set changed" signal, which is exactly what this is.)
   this->asTransformChanged = true;
-  if (SoVulkanShared::envString("FC_VULKAN_RT_DEBUG")) {
+  if (SoVulkanConfig::get().rtxDebug.rtDebug) {
     fprintf(stderr, "[RTDBG] compact size=%llu -> %llu saved=1\n",
             static_cast<unsigned long long>(origSize),
             static_cast<unsigned long long>(compactSize));
@@ -602,7 +602,7 @@ SoRTXRenderBackend::compactPendingBlases()
       this->compactBlas(entry);
     }
   }
-  if (SoVulkanShared::envString("FC_VULKAN_RT_DEBUG")) {
+  if (SoVulkanConfig::get().rtxDebug.rtDebug) {
     fprintf(stderr, "[RTDBG] compactSweep cache=%zu candidates=%u\n",
             this->geometryCache.size(), candidates);
   }
@@ -642,7 +642,7 @@ SoRTXRenderBackend::updateGeometryCache(const SoDrawList & drawlist)
     const bool indexed = geometry.indexCount > 0 && geometry.indices != nullptr;
 
     const bool traced = (command.pass != SO_RENDERPASS_OVERLAY);
-    if (!traced && SoVulkanShared::envString("FC_VULKAN_RT_GEO") &&
+    if (!traced && SoVulkanConfig::get().rtxDebug.rtGeo &&
         geometry.vertexCount == 6 && geometry.indexCount == 0) {
       fprintf(stderr, "[GCR] FR fr=%u OVERLAY vc=6 cmd=%p pos=%p\n", frame,
               static_cast<const void *>(&command),
@@ -711,7 +711,7 @@ SoRTXRenderBackend::updateGeometryCache(const SoDrawList & drawlist)
     // TEMP breadcrumb: per-frame pointer/thread/retained trace for the probe
     // box so we can see whether the geometry pointer is stable across frames
     // and on which thread updateGeometryCache reads it.
-    if (SoVulkanShared::envString("FC_VULKAN_RT_GEO") &&
+    if (SoVulkanConfig::get().rtxDebug.rtGeo &&
         geometry.indexCount == 0 &&
         (geometry.vertexCount == 36 || geometry.vertexCount == 6)) {
       const float * tp = geometry.positions;
@@ -811,7 +811,7 @@ SoRTXRenderBackend::updateGeometryCache(const SoDrawList & drawlist)
           ((entry.idxKey != nullptr) == indexed) &&
           entry.indexHash == indexHash;
         this->cacheChanged = true;
-        if (SoVulkanShared::envString("FC_VULKAN_RT_GEO")) {
+        if (SoVulkanConfig::get().rtxDebug.rtGeo) {
           const float * p0 = static_cast<const float *>(geometry.positions);
           fprintf(stderr,
                   "[GCR] CONTENT fr=%u tid=%llx cmd=%p pass=%d vc=%u ic=%u "
@@ -901,7 +901,7 @@ SoRTXRenderBackend::updateGeometryCache(const SoDrawList & drawlist)
       }
       else {
         this->cacheChanged = true;
-        if (SoVulkanShared::envString("FC_VULKAN_RT_GEO")) {
+        if (SoVulkanConfig::get().rtxDebug.rtGeo) {
           fprintf(stderr,
                   "[GCR] NEW fr=%u tid=%llx cmd=%p pass=%d vc=%u ic=%u "
                   "stride=%u ret=%d pos=%p hash=%016llx\n",
@@ -940,7 +940,7 @@ SoRTXRenderBackend::updateGeometryCache(const SoDrawList & drawlist)
       if (std::memcmp(entryPtr->transformBits, m,
                       sizeof(entryPtr->transformBits)) != 0) {
         this->asTransformChanged = true;
-        if (SoVulkanShared::envString("FC_VULKAN_RT_GEO")) {
+        if (SoVulkanConfig::get().rtxDebug.rtGeo) {
           fprintf(stderr, "[GCR] TRANSFORM cmd=%p pass=%d vc=%u\n",
                   static_cast<const void *>(&command),
                   static_cast<int>(command.pass), geometry.vertexCount);
@@ -961,7 +961,7 @@ SoRTXRenderBackend::updateGeometryCache(const SoDrawList & drawlist)
       const uint64_t mh = hashMaterial(command.material);
       if (mh != 0 && mh != entryPtr->materialHash) {
         this->cacheChanged = true;
-        if (SoVulkanShared::envString("FC_VULKAN_RT_GEO")) {
+        if (SoVulkanConfig::get().rtxDebug.rtGeo) {
           fprintf(stderr, "[GCR] MATERIAL cmd=%p pass=%d vc=%u old=%016llx new=%016llx\n",
                   static_cast<const void *>(&command),
                   static_cast<int>(command.pass), geometry.vertexCount,
@@ -988,7 +988,7 @@ SoRTXRenderBackend::updateGeometryCache(const SoDrawList & drawlist)
     }
   }
   if (anyStale) {
-    if (SoVulkanShared::envString("FC_VULKAN_RT_GEO")) {
+    if (SoVulkanConfig::get().rtxDebug.rtGeo) {
       size_t nstale = 0;
       for (size_t i = 0; i < this->geometryCache.size(); ++i) {
         if (this->geometryCache[i].cacheGeneration != frame) {
@@ -1111,7 +1111,7 @@ SoRTXRenderBackend::blasBuildOrRefit(RTXCachedGeometry & entry,
   const uint32_t posStrideFloats = entry.vertexStride / sizeof(float);
   const char * tag = refit ? "refitBlas" : "buildBlas";
 
-  if (SoVulkanShared::envString("FC_VULKAN_RT_DEBUG")) {
+  if (SoVulkanConfig::get().rtxDebug.rtDebug) {
     static uint32_t blasSeq = 0;
     fprintf(stderr,
             "[RTDBG] %s #%u verts=%u idx=%u stride=%u indexed=%d "
@@ -1184,7 +1184,7 @@ SoRTXRenderBackend::blasBuildOrRefit(RTXCachedGeometry & entry,
   else {
     vertexSrc = positions.data();
   }
-  if (SoVulkanShared::envString("FC_VULKAN_RT_DEBUG")) {
+  if (SoVulkanConfig::get().rtxDebug.rtDebug) {
     fprintf(stderr, "[RTDBG] blasFmt %s packed=%d stride=%u fmt=0x%x\n",
             tag, useHalf ? 1 : 0, entry.blasVertexStride,
             static_cast<unsigned>(entry.blasVertexFormat));
@@ -1646,7 +1646,7 @@ SoRTXRenderBackend::buildTlas(const SoDrawList & drawlist,
   }
   this->instanceCount = static_cast<uint32_t>(instances.size());
 
-  if (SoVulkanShared::envString("FC_VULKAN_RT_DEBUG")) {
+  if (SoVulkanConfig::get().rtxDebug.rtDebug) {
     if (!this->lastTlasDebugLogged || this->lastTlasTotal != instances.size() ||
         this->lastTlasCulled != this->statTlasCulled) {
       fprintf(stderr,

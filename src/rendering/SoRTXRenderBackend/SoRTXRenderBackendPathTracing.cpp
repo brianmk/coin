@@ -11,6 +11,7 @@
 #include <cmath>
 #include <cstring>
 #include <string>
+#include "rendering/SoVulkanConfig.h"
 #include "rendering/vulkan/rt/PathTrace.spv.h"
 #include "rendering/vulkan/rt/Raygen.spv.h"
 #include "rendering/vulkan/rt/Miss.spv.h"
@@ -307,7 +308,7 @@ SoRTXRenderBackend::updatePathTracingState(const SoDrawList & /*drawlist*/,
   }
   // else: converged idle -- nothing to do until the camera or scene moves.
 
-  if (SoVulkanShared::envString("FC_VULKAN_RT_DEBUG") && this->ptEnabled) {
+  if (SoVulkanConfig::get().rtxDebug.rtDebug && this->ptEnabled) {
     fprintf(stderr,
             "[RTDBG] ptState frame=%u viewChanged=%d sceneChanged=%d "
             "bgChanged=%d latch=%d accum=%d frameIndex=%u idle=%u "
@@ -319,7 +320,7 @@ SoRTXRenderBackend::updatePathTracingState(const SoDrawList & /*drawlist*/,
             this->ptIdleFrames, this->ptReprojectFrame ? 1 : 0);
   }
 
-  if (SoVulkanShared::envString("FC_VULKAN_PT_DEBUG")) {
+  if (SoVulkanConfig::get().rtxDebug.ptDebug) {
     static uint32_t debugFrame = 0;
     if ((debugFrame++ % 30) == 0 || viewChanged || sceneChanged) {
       float maxViewDelta = 0.0f;
@@ -455,7 +456,7 @@ SoRTXRenderBackend::updateAdaptiveStats()
   this->ptLastActiveFraction =
     (this->ptEnabled && this->ptAccumulating && total > 0)
       ? static_cast<float>(active) / static_cast<float>(total) : 1.0f;
-  if (SoVulkanShared::envString("FC_VULKAN_RT_DEBUG") && this->ptEnabled) {
+  if (SoVulkanConfig::get().rtxDebug.rtDebug && this->ptEnabled) {
     fprintf(stderr,
             "[RTDBG] adaptive frame=%u active=%u/%llu fraction=%.4f "
             "frameIndex=%u accum=%d self=%p buf=%ux%u reprojected=%u "
@@ -588,7 +589,7 @@ SoRTXRenderBackend::recordAccelerationStructures(
       ++this->statBlasReused;
     }
   }
-  if (SoVulkanShared::envString("FC_VULKAN_RT_DEBUG")) {
+  if (SoVulkanConfig::get().rtxDebug.rtDebug) {
       fprintf(stderr,
               "[RTDBG] blas frame=%u built=%u refit=%u reused=%u cache=%zu\n",
               params.frame, this->statBlasBuilt, this->statBlasRefit,
@@ -771,7 +772,7 @@ SoRTXRenderBackend::recordAccelerationStructures(
     // AO (mode 2) and the Environment preview (mode 3) are real-time
     // previews: they never accumulate, so they must also force the
     // accumulate flag off to keep the state machine honest.
-    frame.state[1] = COIN_VULKAN_ENV_FLAG("FC_VULKAN_RT_DEBUG_FILL")
+    frame.state[1] = SoVulkanConfig::get().rtxDebug.rtDebugFill
       ? 4.0f
       : (this->rtxViewMode == RtxViewMode::RtxModeAmbientOcclusion ? 2.0f
          : (this->rtxViewMode == RtxViewMode::RtxModeEnvironment ? 3.0f
@@ -868,7 +869,7 @@ SoRTXRenderBackend::recordAccelerationStructures(
       std::memcpy(pf + 16, &pValue[0][0], sizeof(float) * 16);
     }
 
-    if (SoVulkanShared::envString("FC_VULKAN_RT_DEBUG")) {
+    if (SoVulkanConfig::get().rtxDebug.rtDebug) {
       static uint32_t debugFrame = 0;
       if ((debugFrame++ % 120) == 0) {
         fprintf(stderr,
@@ -924,7 +925,7 @@ SoRTXRenderBackend::recordAccelerationStructures(
     raygenPush.frameIndex = this->ptFrameIndex;
     raygenPush.flags = (this->ptEnabled ? 1u : 0u) |
       (this->ptAccumulating ? 2u : 0u) |
-      (COIN_VULKAN_ENV_FLAG("FC_VULKAN_RT_DEBUG_FILL") ? 4u : 0u);
+      (SoVulkanConfig::get().rtxDebug.rtDebugFill ? 4u : 0u);
     raygenPush.maxBounces = this->ptMaxBounces;
     vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_RAY_TRACING_KHR,
                       this->rtPipeline);
@@ -1069,7 +1070,7 @@ SoRTXRenderBackend::recordTraceAndPresent(const SoRenderParams & params,
     this->denoiseEffectiveScale,
     0.0f,
     0.0f};
-  if (SoVulkanShared::envString("FC_VULKAN_PT_DENOISE_TIMING")) {
+  if (SoVulkanConfig::get().rtxDebug.denoiseTiming) {
     fprintf(stderr,
             "[DENOISE-STATE] ord=%u frame=%u accum=%d pend=%d ready=%d "
             "denoise=%d kind=%d\n",
