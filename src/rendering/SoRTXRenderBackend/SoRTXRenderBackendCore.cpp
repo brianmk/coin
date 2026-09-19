@@ -1207,8 +1207,13 @@ SoRTXRenderBackend::shutdown()
     this->presentSetValid[i] = false;
   }
 
-  // Every VMA-backed buffer/image has been released above; drop the allocator
-  // last so any missed allocation is reported by VMA rather than leaking.
+  // Every VMA-backed buffer/image has been released above (including the
+  // deferred CUDA-interop destroys flushed by destroyDenoiser()); drop the
+  // custom export pool before the allocator so VMA sees it empty.
+  if (this->rtxInteropPool != VK_NULL_HANDLE) {
+    vmaDestroyPool(this->vmaAllocator, this->rtxInteropPool);
+    this->rtxInteropPool = VK_NULL_HANDLE;
+  }
   if (this->vmaAllocator != nullptr) {
     vmaDestroyAllocator(this->vmaAllocator);
     this->vmaAllocator = nullptr;

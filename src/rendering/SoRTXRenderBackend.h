@@ -13,6 +13,7 @@
 #ifndef AMD_VULKAN_MEMORY_ALLOCATOR_H
 VK_DEFINE_HANDLE(VmaAllocator)
 VK_DEFINE_HANDLE(VmaAllocation)
+VK_DEFINE_HANDLE(VmaPool)
 #endif
 
 #include <Inventor/rendering/SoVulkanRenderTarget.h>
@@ -462,10 +463,6 @@ private:
   bool createHostVisibleBuffer(VkDeviceSize size, VkBufferUsageFlags usage,
                                VkBuffer & buffer, VmaAllocation & memory,
                                void ** mapped = nullptr);
-  // Cached memory-type pick (wraps memProps; keeps the old findMemoryType() call
-  // sites unchanged while removing the per-allocation device query).
-  uint32_t pickMemoryType(const VkMemoryRequirements & requirements,
-                          VkMemoryPropertyFlags desired) const;
   bool createScratchBuffer(VkDeviceSize size);
   bool createStorageImage(uint32_t width, uint32_t height);
   bool createPathTracingBuffers(uint32_t width, uint32_t height);
@@ -1297,16 +1294,21 @@ private:
   VkBuffer rtxNormalVk = VK_NULL_HANDLE;
   VkBuffer rtxMotionVk = VK_NULL_HANDLE;
   VkBuffer rtxOutputVk = VK_NULL_HANDLE;
-  // The CUDA interop buffers stay on raw Vulkan allocations: exporting an
-  // opaque FD needs VkExportMemoryAllocateInfo chained into the allocation,
-  // which VMA only supports through a custom VmaPool (pMemoryAllocateNext).
-  // These five buffers are created once and freed by the CUDA interop path,
-  // so the extra pool lifecycle is not worth it here.
-  VkDeviceMemory rtxColorMem = VK_NULL_HANDLE;
-  VkDeviceMemory rtxAlbedoMem = VK_NULL_HANDLE;
-  VkDeviceMemory rtxNormalMem = VK_NULL_HANDLE;
-  VkDeviceMemory rtxMotionMem = VK_NULL_HANDLE;
-  VkDeviceMemory rtxOutputMem = VK_NULL_HANDLE;
+  // The interop buffers are VMA allocations drawn from rtxInteropPool, a
+  // custom pool whose pMemoryAllocateNext carries VkExportMemoryAllocateInfo
+  // so every allocation from it is opaque-FD exportable.  The pool exists only
+  // for these five buffers and is destroyed in shutdown() once they are gone.
+  VmaAllocation rtxColorMem = VK_NULL_HANDLE;
+  VmaAllocation rtxAlbedoMem = VK_NULL_HANDLE;
+  VmaAllocation rtxNormalMem = VK_NULL_HANDLE;
+  VmaAllocation rtxMotionMem = VK_NULL_HANDLE;
+  VmaAllocation rtxOutputMem = VK_NULL_HANDLE;
+  // Custom pool for the CUDA interop allocations.  pMemoryAllocateNext points
+  // at rtxInteropExportInfo, which must outlive the pool (VMA stores the
+  // pointer, not a copy).
+  VmaPool rtxInteropPool = VK_NULL_HANDLE;
+  VkExportMemoryAllocateInfo rtxInteropExportInfo {};
+
   CUexternalMemory rtxColorExt = nullptr;
   CUexternalMemory rtxAlbedoExt = nullptr;
   CUexternalMemory rtxNormalExt = nullptr;
@@ -1360,11 +1362,11 @@ private:
   //! Create the OptiX denoiser, its scratch/state/intensity buffers, and the
   //! CUDA-Vulkan interop working images.
   bool initRtxDenoiser();
-  //! Allocate one exportable device-local buffer and import it into CUDA;
-  //! returns the mapped CUdeviceptr in \a devPtr and owns handle state in the
-  //! ext/mem/buffer out-params.
+  //! Allocate one exportable device-local buffer from rtxInteropPool and
+  //! import it into CUDA; returns the mapped CUdeviceptr in \a devPtr and owns
+  //! handle state in the ext/mem/buffer out-params.
   bool createRtxInteropBuffer(size_t bytes, VkBufferUsageFlags usage,
-                              VkBuffer & buffer, VkDeviceMemory & memory,
+                              VkBuffer & buffer, VmaAllocation & memory,
                               CUexternalMemory & ext, CUdeviceptr & devPtr);
   //! Create an FD-exported Vulkan binary semaphore and import it into CUDA.
   bool createRtxInteropSemaphore(VkSemaphore & vkSem,

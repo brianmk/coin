@@ -1386,24 +1386,19 @@ SoRTXRenderBackend::teardownRtxDenoiser()
   // The four working images were exported from Vulkan and imported into CUDA.
   // Reverse the import (release the CUDA alias) BEFORE freeing the Vulkan
   // allocation that owns the memory.
-  auto releaseInterop = [this](VkBuffer & buf, VkDeviceMemory & mem,
+  auto releaseInterop = [this](VkBuffer & buf, VmaAllocation & mem,
                                CUexternalMemory & ext) {
     if (ext) {
       cuDestroyExternalMemory(ext);
       ext = nullptr;
     }
     const VkBuffer vkBuf = buf;
-    const VkDeviceMemory vkMem = mem;
+    const VmaAllocation vkMem = mem;
     buf = VK_NULL_HANDLE;
     mem = VK_NULL_HANDLE;
     if (vkBuf != VK_NULL_HANDLE || vkMem != VK_NULL_HANDLE) {
       this->deferDestroy([this, vkBuf, vkMem]() {
-        if (vkBuf != VK_NULL_HANDLE) {
-          vkDestroyBuffer(this->device, vkBuf, this->allocator);
-        }
-        if (vkMem != VK_NULL_HANDLE) {
-          vkFreeMemory(this->device, vkMem, this->allocator);
-        }
+        vmaDestroyBuffer(this->vmaAllocator, vkBuf, vkMem);
       });
     }
   };
@@ -1652,7 +1647,7 @@ bool
 SoRTXRenderBackend::createRtxInteropBuffer(size_t bytes,
                                            VkBufferUsageFlags usage,
                                            VkBuffer & buffer,
-                                           VkDeviceMemory & memory,
+                                           VmaAllocation & memory,
                                            CUexternalMemory & ext,
                                            CUdeviceptr & devPtr)
 {
@@ -1676,10 +1671,9 @@ SoRTXRenderBackend::createRtxInteropBuffer(size_t bytes,
   ci.size = bytes;
   ci.usage = usage;
   ci.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
-  if (vkCreateBuffer(this->device, &ci, this->allocator, &buffer) != VK_SUCCESS) {
-    return false;
-  }
 
+  // Exportability depends only on the buffer's usage, so query it before
+  // touching the allocator.
   VkPhysicalDeviceExternalBufferInfo externalQuery {};
   externalQuery.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_EXTERNAL_BUFFER_INFO;
   externalQuery.flags = 0;
@@ -1706,62 +1700,78 @@ SoRTXRenderBackend::createRtxInteropBuffer(size_t bytes,
               static_cast<unsigned>(externalMem.compatibleHandleTypes),
               static_cast<unsigned>(usage), bytes);
     }
-    vkDestroyBuffer(this->device, buffer, this->allocator);
-    buffer = VK_NULL_HANDLE;
     return false;
   }
 
-  const bool dedicatedOnly =
-    (externalMem.externalMemoryFeatures &
-     VK_EXTERNAL_MEMORY_FEATURE_DEDICATED_ONLY_BIT) != 0;
+  // Lazily create the custom export pool.  The five interop buffers share one
+  // device-local memory type; the pool exists solely to carry
+  // VkExportMemoryAllocateInfo into every allocation's pNext chain, which is
+  // the only way VMA can export an opaque FD (VkMemoryAllocateInfo has no
+  // direct field for it).  rtxInteropExportInfo must outlive the pool: VMA
+  // stores the pointer, not a copy.
+  if (this->rtxInteropPool == VK_NULL_HANDLE) {
+    VmaAllocationCreateInfo poolUsage {};
+    poolUsage.usage = VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE;
+    uint32_t memTypeIndex = 0;
+    if (vmaFindMemoryTypeIndexForBufferInfo(this->vmaAllocator, &ci,
+                                            &poolUsage,
+                                            &memTypeIndex) != VK_SUCCESS) {
+      this->emitError("RTX denoiser: no device-local memory type for the "
+                      "exportable CUDA interop buffers");
+      return false;
+    }
+    this->rtxInteropExportInfo.sType =
+      VK_STRUCTURE_TYPE_EXPORT_MEMORY_ALLOCATE_INFO;
+    this->rtxInteropExportInfo.pNext = nullptr;
+    this->rtxInteropExportInfo.handleTypes =
+      VK_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_FD_BIT;
+    VmaPoolCreateInfo poolInfo {};
+    poolInfo.memoryTypeIndex = memTypeIndex;
+    poolInfo.pMemoryAllocateNext =
+      static_cast<void *>(&this->rtxInteropExportInfo);
+    if (vmaCreatePool(this->vmaAllocator, &poolInfo,
+                      &this->rtxInteropPool) != VK_SUCCESS) {
+      this->rtxInteropPool = VK_NULL_HANDLE;
+      this->emitError("RTX denoiser: vmaCreatePool for the CUDA interop "
+                      "buffers failed");
+      return false;
+    }
+  }
 
-  VkMemoryRequirements req;
-  vkGetBufferMemoryRequirements(this->device, buffer, &req);
-
-  // Request an opaque FD export so CUDA can import the same physical memory.
-  VkExportMemoryAllocateInfo exportInfo {};
-  exportInfo.sType = VK_STRUCTURE_TYPE_EXPORT_MEMORY_ALLOCATE_INFO;
-  exportInfo.handleTypes = VK_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_FD_BIT;
-  VkMemoryDedicatedAllocateInfo dedicatedInfo {};
-  dedicatedInfo.sType = VK_STRUCTURE_TYPE_MEMORY_DEDICATED_ALLOCATE_INFO;
-  dedicatedInfo.buffer = buffer;
-  dedicatedInfo.image = VK_NULL_HANDLE;
-  VkMemoryAllocateFlagsInfo allocFlags {};
-  allocFlags.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_FLAGS_INFO;
-  allocFlags.flags = VK_MEMORY_ALLOCATE_DEVICE_ADDRESS_BIT;
-  allocFlags.pNext = dedicatedOnly ? static_cast<void *>(&dedicatedInfo)
-                                   : static_cast<void *>(&exportInfo);
-  dedicatedInfo.pNext = &exportInfo;
-  VkMemoryAllocateInfo ai {};
-  ai.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
-  ai.allocationSize = req.size;
-  ai.memoryTypeIndex = this->pickMemoryType(
-    req, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
-  ai.pNext = &allocFlags;
-  if (vkAllocateMemory(this->device, &ai, this->allocator, &memory) !=
-      VK_SUCCESS) {
+  // A dedicated allocation gives each interop buffer its own VkDeviceMemory at
+  // offset 0: the FD export is per memory object and CUDA imports it whole, so
+  // suballocating several buffers out of one block would alias them.
+  VmaAllocationCreateInfo allocInfo {};
+  allocInfo.pool = this->rtxInteropPool;
+  allocInfo.flags = VMA_ALLOCATION_CREATE_DEDICATED_MEMORY_BIT;
+  VmaAllocationInfo allocationInfo {};
+  if (vmaCreateBuffer(this->vmaAllocator, &ci, &allocInfo, &buffer, &memory,
+                      &allocationInfo) != VK_SUCCESS) {
     if (SoVulkanConfig::get().rtxDebug.denoiserDebug) {
       fprintf(stderr,
               "[RTX-DENOISER] failed to allocate external CUDA/Vulkan "
-              "buffer: bytes=%zu dedicatedOnly=%d memoryType=%u\n",
-              bytes, dedicatedOnly ? 1 : 0, ai.memoryTypeIndex);
+              "buffer: bytes=%zu\n", bytes);
     }
-    vkDestroyBuffer(this->device, buffer, this->allocator);
     buffer = VK_NULL_HANDLE;
+    memory = VK_NULL_HANDLE;
     return false;
   }
-  vkBindBufferMemory(this->device, buffer, memory, 0);
+  // vkGetMemoryFdKHR takes the raw VkDeviceMemory; VMA exposes it through the
+  // allocation info.  The allocation is dedicated, so its size is the whole
+  // memory object and the buffer sits at offset 0.
+  const VkDeviceMemory vkMemory = allocationInfo.deviceMemory;
+  const VkDeviceSize importSize =
+    allocationInfo.size != 0 ? allocationInfo.size : bytes;
 
   // Export an opaque FD and hand it to CUDA to map as a device pointer.
   VkMemoryGetFdInfoKHR fdInfo {};
   fdInfo.sType = VK_STRUCTURE_TYPE_MEMORY_GET_FD_INFO_KHR;
-  fdInfo.memory = memory;
+  fdInfo.memory = vkMemory;
   fdInfo.handleType = VK_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_FD_BIT;
   int fd = -1;
   if (this->vkGetMemoryFdKHR(this->device, &fdInfo, &fd) != VK_SUCCESS ||
       fd < 0) {
-    vkFreeMemory(this->device, memory, this->allocator);
-    vkDestroyBuffer(this->device, buffer, this->allocator);
+    vmaDestroyBuffer(this->vmaAllocator, buffer, memory);
     buffer = VK_NULL_HANDLE;
     memory = VK_NULL_HANDLE;
     return false;
@@ -1770,12 +1780,11 @@ SoRTXRenderBackend::createRtxInteropBuffer(size_t bytes,
   CUDA_EXTERNAL_MEMORY_HANDLE_DESC hdesc {};
   hdesc.type = CU_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_FD;
   hdesc.handle.fd = fd;
-  hdesc.size = req.size;
+  hdesc.size = importSize;
   CUresult cuRes = cuImportExternalMemory(&ext, &hdesc);
   if (cuRes != CUDA_SUCCESS) {
     ::close(fd);
-    vkFreeMemory(this->device, memory, this->allocator);
-    vkDestroyBuffer(this->device, buffer, this->allocator);
+    vmaDestroyBuffer(this->vmaAllocator, buffer, memory);
     buffer = VK_NULL_HANDLE;
     memory = VK_NULL_HANDLE;
     ext = nullptr;
@@ -1785,14 +1794,13 @@ SoRTXRenderBackend::createRtxInteropBuffer(size_t bytes,
 
   CUDA_EXTERNAL_MEMORY_BUFFER_DESC bdesc {};
   bdesc.offset = 0;
-  bdesc.size = req.size;
+  bdesc.size = importSize;
   bdesc.flags = 0;
   cuRes = cuExternalMemoryGetMappedBuffer(&devPtr, ext, &bdesc);
   if (cuRes != CUDA_SUCCESS) {
     cuDestroyExternalMemory(ext);
     ext = nullptr;
-    vkFreeMemory(this->device, memory, this->allocator);
-    vkDestroyBuffer(this->device, buffer, this->allocator);
+    vmaDestroyBuffer(this->vmaAllocator, buffer, memory);
     buffer = VK_NULL_HANDLE;
     memory = VK_NULL_HANDLE;
     return false;

@@ -20,15 +20,6 @@
 
 using namespace SoRTXBackend;
 
-uint32_t
-SoRTXRenderBackend::pickMemoryType(const VkMemoryRequirements & requirements,
-                                   VkMemoryPropertyFlags desired) const
-{
-  uint32_t memoryTypeIndex = 0;
-  this->memProps.pick(requirements, desired, memoryTypeIndex);
-  return memoryTypeIndex;
-}
-
 bool
 SoRTXRenderBackend::createDeviceLocalBuffer(VkDeviceSize size,
                                             VkBufferUsageFlags usage,
