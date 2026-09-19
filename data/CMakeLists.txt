@@ -92,6 +92,61 @@ if(COIN_BUILD_VULKAN_RENDERER)
   find_program(COIN_GLSLANG_VALIDATOR glslangValidator DOC
     "Path to glslangValidator for offline Vulkan SPIR-V regeneration")
 
+  # Offline SPIR-V validation gate for the regeneration target.  Optional: the
+  # committed .spv.h headers build without either tool, and a machine lacking
+  # them simply skips validation (the step is a no-op, not a hard error).
+  find_program(COIN_SPIRV_VAL spirv-val DOC
+    "Path to spirv-val for offline Vulkan SPIR-V validation")
+  find_program(COIN_SPIRV_OPT spirv-opt DOC
+    "Path to spirv-opt for optional offline SPIR-V optimization checking")
+
+  # Optional std140 layout reflection gate (spirv-dis based; the packaged
+  # toolchains have no SPIRV-Reflect).  The superproject points these at
+  # tools/rendering/spirv_layout_check.py + spirv_layouts.json before adding
+  # this directory; a standalone Coin build leaves them empty and the step is
+  # skipped.  It asserts the shader block layouts match the C++ mirrors
+  # (VulkanPushConstants/VulkanBackgroundPush/VulkanLightingUbo/VulkanDrawUbo).
+  find_program(COIN_SPIRV_DIS spirv-dis DOC
+    "Path to spirv-dis for offline SPIR-V layout reflection")
+  set(COIN_SPIRV_LAYOUT_CHECK "" CACHE FILEPATH
+    "Path to spirv_layout_check.py (SPIR-V std140 layout reflection)")
+  set(COIN_SPIRV_LAYOUTS "" CACHE FILEPATH
+    "Path to spirv_layouts.json (expected std140 block layouts)")
+  if(COIN_SPIRV_LAYOUT_CHECK)
+    find_package(Python3 COMPONENTS Interpreter QUIET)
+  endif()
+  # Re-run the gate when the expected layouts change, not only when the shader
+  # source changes.
+  set(_coin_layout_deps "")
+  foreach(_layout_file "${COIN_SPIRV_LAYOUT_CHECK}" "${COIN_SPIRV_LAYOUTS}")
+    if(_layout_file AND EXISTS "${_layout_file}")
+      list(APPEND _coin_layout_deps "${_layout_file}")
+    endif()
+  endforeach()
+
+  # Shader-side diagnostics (debugPrintfEXT).  Off by default so the committed
+  # .spv.h headers stay byte-identical; turning it on recompiles the shaders
+  # with COIN_ENABLE_DEBUG_PRINTF and requires FC_VULKAN_DEBUG_PRINTF at run
+  # time.  A shader opts in with the guarded pattern:
+  #
+  #   #ifdef COIN_ENABLE_DEBUG_PRINTF
+  #   #extension GL_EXT_debug_printf : enable
+  #   #endif
+  #   ...
+  #   #ifdef COIN_ENABLE_DEBUG_PRINTF
+  #     debugPrintfEXT("value=%f", value);
+  #   #endif
+  #
+  # (glslang 16.4 rejects variadic macros, so a COIN_DEBUG_PRINTF(...) helper
+  # is deliberately not used.)
+  option(COIN_VULKAN_DEBUG_PRINTF
+    "Compile Vulkan shaders with COIN_ENABLE_DEBUG_PRINTF (VK_EXT_debug_printf)"
+    OFF)
+  set(_coin_glsl_define "")
+  if(COIN_VULKAN_DEBUG_PRINTF)
+    set(_coin_glsl_define "COIN_ENABLE_DEBUG_PRINTF")
+  endif()
+
   set(COIN_VULKAN_SPIRV_REGENERATE_TARGETS "")
 
   macro(coin_embed_vulkan_spirv _name _input _stage)
@@ -125,10 +180,18 @@ if(COIN_BUILD_VULKAN_RENDERER)
         "-DSTAGE=${_stage}"
         "-DVARIABLE_NAME=${_variable_name}"
         "-DTARGET_ENV=${_target_env}"
+        "-DSPIRV_VAL=${COIN_SPIRV_VAL}"
+        "-DSPIRV_OPT=${COIN_SPIRV_OPT}"
+        "-DSPIRV_DIS=${COIN_SPIRV_DIS}"
+        "-DSPIRV_LAYOUT_CHECK=${COIN_SPIRV_LAYOUT_CHECK}"
+        "-DSPIRV_LAYOUTS=${COIN_SPIRV_LAYOUTS}"
+        "-DPYTHON_EXECUTABLE=${Python3_EXECUTABLE}"
+        "-DGLSL_DEFINE=${_coin_glsl_define}"
         -P "${CMAKE_CURRENT_SOURCE_DIR}/GenerateVulkanSpirvHeader.cmake"
       DEPENDS
         "${_input_file}"
         "${CMAKE_CURRENT_SOURCE_DIR}/GenerateVulkanSpirvHeader.cmake"
+        ${_coin_layout_deps}
       VERBATIM
       COMMENT "Regenerating Vulkan SPIR-V for ${_name} (${_stage})"
     )
@@ -142,6 +205,13 @@ if(COIN_BUILD_VULKAN_RENDERER)
     message(WARNING
       "glslangValidator not found; the coin_regenerate_vulkan_spirv target is unavailable")
   else()
+    if(NOT COIN_SPIRV_VAL)
+      message(STATUS
+        "spirv-val not found; SPIR-V regeneration will skip validation")
+    else()
+      message(STATUS
+        "SPIR-V regeneration will validate with ${COIN_SPIRV_VAL}")
+    endif()
     coin_embed_vulkan_spirv(vulkan_visual_vertex
       data/shaders/vulkan/visual/Vertex.glsl vert)
     coin_embed_vulkan_spirv(vulkan_visual_fragment

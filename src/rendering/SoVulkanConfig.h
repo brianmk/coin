@@ -139,6 +139,24 @@ struct Raster {
   bool wideLineCpu = false;
 };
 
+// Vulkan diagnostic tooling.  All default off and must be zero-cost (or
+// near-zero) when disabled; they exist to make captures and measurements
+// readable, never to change rendered output.
+struct Diagnostics {
+  //! VK_EXT_debug_utils object names and command-buffer labels.
+  //! FC_VULKAN_DEBUG_UTILS; default off.
+  bool debugUtils = false;
+  //! VK_EXT_debug_printf shader-side diagnostics (debug shader variants).
+  //! FC_VULKAN_DEBUG_PRINTF; default off.
+  bool debugPrintf = false;
+  //! Per-pass GPU timestamps (VK_QUERY_TYPE_TIMESTAMP).
+  //! FC_VULKAN_GPU_TIMING; default off.
+  bool gpuTimestamps = false;
+  //! VK_EXT_pipeline_creation_feedback logging (cache hit + creation cost).
+  //! FC_VULKAN_PIPELINE_FEEDBACK; default off.
+  bool pipelineFeedback = false;
+};
+
 struct Config {
   GeometryLod geometryLod;
   RtxDebug rtxDebug;
@@ -149,6 +167,7 @@ struct Config {
   MemoryPool memoryPool;
   Concurrency concurrency;
   Raster raster;
+  Diagnostics diagnostics;
 };
 
 /*!

@@ -15,6 +15,7 @@
 #include "rendering/SoVulkanRenderBackend.h"
 #include "rendering/SoVulkanRenderBackend/SoVulkanRenderBackendP.h"
 #include "rendering/SoVulkanConfig.h"
+#include "rendering/SoVulkanDebugUtils.h"
 
 #include <Inventor/elements/SoDrawStyleElement.h>
 #include <Inventor/errors/SoDebugError.h>
@@ -204,6 +205,11 @@ SoVulkanRenderBackend::shutdown()
   if (!this->isInitialized()) return;
 
   vkQueueWaitIdle(this->queue);
+
+  // Destroy the timestamp query pool now, while the VkDevice is still alive;
+  // the destructor would otherwise run after device teardown
+  // (VUID-vkDestroyQueryPool-device-parameter).
+  this->gpuTimers.shutdown();
 
   // The queue is idle, so every deferred resource is safe to release now.
   this->flushAllPendingDestroys();
@@ -607,6 +613,14 @@ SoVulkanRenderBackend::renderInternal(const SoDrawList & drawlist,
     this->emitError("failed to begin Vulkan command buffer");
     return FALSE;
   }
+  SoVulkanDebugUtils::beginLabel(this->currentCommandBuffer(),
+                                 overlaysOnly ? "Coin raster frame (overlays)"
+                                              : "Coin raster frame");
+  if (SoVulkanConfig::get().diagnostics.gpuTimestamps &&
+      !this->gpuTimers.initialized()) {
+    this->gpuTimers.initialize(this->device, this->physicalDevice,
+                               this->queueFamilyIndex);
+  }
 
   // The framebuffer is cached for the current target identity (image views +
   // extent + render pass) and recreated whenever any of those change.  The
@@ -631,10 +645,12 @@ SoVulkanRenderBackend::renderInternal(const SoDrawList & drawlist,
   // are recorded below, after the copies, and the descriptor sets they bind
   // must already exist.  Staging buffers are released through the deferred
   // ring once the slot fence signals.
+  this->gpuTimers.beginScope(this->currentCommandBuffer(), "textureUploads");
   if (!this->recordPendingTextureUploads()) {
     this->emitError("failed to record texture uploads");
   }
   this->finalizePendingTextureUploads();
+  this->gpuTimers.endScope(this->currentCommandBuffer());
 
   VkRenderPassBeginInfo rpbi {};
   rpbi.sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO;
@@ -671,6 +687,10 @@ SoVulkanRenderBackend::renderInternal(const SoDrawList & drawlist,
   // inline fallback (canUseSecondary == false) instead.
   vkCmdBeginRenderPass(this->currentCommandBuffer(), &rpbi,
                        VK_SUBPASS_CONTENTS_INLINE_AND_SECONDARY_COMMAND_BUFFERS_EXT);
+  SoVulkanDebugUtils::beginLabel(this->currentCommandBuffer(),
+                                 overlaysOnly ? "overlay pass" : "opaque pass",
+                                 0.9f, 0.6f, 0.2f);
+  this->gpuTimers.beginScope(this->currentCommandBuffer(), "renderPass");
 
   this->recordContext.buffer = this->currentCommandBuffer();
   bool recorded = true;
@@ -690,12 +710,16 @@ SoVulkanRenderBackend::renderInternal(const SoDrawList & drawlist,
   }
   this->recordContext.buffer = VK_NULL_HANDLE;
 
+  this->gpuTimers.endScope(this->currentCommandBuffer());
+  SoVulkanDebugUtils::endLabel(this->currentCommandBuffer());
   vkCmdEndRenderPass(this->currentCommandBuffer());
+  SoVulkanDebugUtils::endLabel(this->currentCommandBuffer());
 
   // Submit even when recordFrame() failed: an unsubmitted one-shot command
   // buffer cannot be reused, and a partial frame is preferable to a dead
   // backend.
   const bool submitted = this->endAndSubmit();
+  this->gpuTimers.endFrame();
   if (!submitted) {
     this->emitError("failed to submit Vulkan command buffer");
     return FALSE;

@@ -11,6 +11,7 @@
 #include "rendering/SoVulkanRenderBackend/SoVulkanPipelineCache.h"
 #include "rendering/SoVulkanRenderBackend/SoVulkanRecordContext.h"
 #include "rendering/SoVulkanRenderBackend/SoVulkanRenderPassCache.h"
+#include "rendering/SoVulkanGpuTimers.h"
 
 #include <Inventor/rendering/SoVulkanRenderTarget.h>
 
@@ -167,8 +168,8 @@ struct VulkanCachedCommand {
   // Pipeline-resolution fast path (getOrCreatePipeline()).  The exact
   // PipelineKey resolved for this command last is stored verbatim, plus the
   // handle it produced.  A match (cheap field-by-field equality, no hashing)
-  // skips rebuilding the key and the per-frame pipelineCache unordered_map
-  // lookup for unchanged commands.  The entry lives and dies with the
+  // skips rebuilding the key and the SoVulkanPipelineCache map lookup for
+  // unchanged commands.  The entry lives and dies with the
   // geometry cache, which invalidateCache() clears together with the
   // pipeline cache, so these fields never outlive the handles they name.
   PipelineKey resolvedKey;
@@ -403,7 +404,8 @@ private:
                               const SoRenderCommand & command,
                               const SoRenderParams & params,
                               VkDeviceSize uboOffset,
-                              bool unlit = false);
+                              bool unlit = false,
+                              const float * projFloats = nullptr);
   // Dynamic byte offset into the lighting ring for a command's handle (0 if
   // the command references no lighting).  Uses the frame-local
   // lightingSlotOffsets built by updateLightingSetup().
@@ -935,6 +937,13 @@ private:
   // UNORM).  VK_FORMAT_R8G8B8A8_UNORM (the fallback) is a required format.
   bool sampledR8 = false;
   bool sampledR8G8 = false;
+  // VK_EXT_pipeline_creation_feedback enabled by the app; gates the optional
+  // pipeline-cache-hit / creation-cost log (FC_VULKAN_PIPELINE_FEEDBACK).
+  bool hasPipelineCreationFeedback = false;
+
+  // Per-pass GPU timestamps (FC_VULKAN_GPU_TIMING).  Lazily initialized on the
+  // first instrumented frame; a no-op when disabled or unsupported.
+  SoVulkanGpuTimers gpuTimers;
 
   VkCommandPool commandPool = VK_NULL_HANDLE;
   // One command buffer and fence per in-flight frame slot.  The own-queue

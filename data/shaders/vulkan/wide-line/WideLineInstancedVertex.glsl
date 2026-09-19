@@ -21,22 +21,27 @@
 #version 450
 
 layout(push_constant) uniform PushConstants {
-    mat4  u_proj;         // offset 0, 64 bytes
-    vec4  u_color;        // offset 64, 16 bytes
-    vec4  u_flags;        // offset 80, 16 bytes
-    vec4  u_texParams;    // offset 96, 16 bytes
-    vec4  u_texBlend;     // offset 112, 16 bytes
-    float u_pointSize;    // offset 128, 16 bytes (pad[3])
-    vec4  u_lineParams;   // offset 144, 16 bytes
-    vec4  u_lineGeom;     // offset 160, 16 bytes: x = line width (device px),
+    vec4  u_color;        // offset 0, 16 bytes
+    vec4  u_flags;        // offset 16, 16 bytes
+    vec4  u_texParams;    // offset 32, 16 bytes
+    vec4  u_texBlend;     // offset 48, 16 bytes
+    float u_pointSize;    // offset 64, 16 bytes (pad[3])
+    vec4  u_lineParams;   // offset 80, 16 bytes
+    vec4  u_lineGeom;     // offset 96, 16 bytes: x = line width (device px),
                           // y = viewport width, z = viewport height,
                           // w = device pixel ratio
 } pc;
 
-// Per-draw view matrix (set 1, binding 0).  Only u_view is read; declaring the
-// leading member is enough (the block is std140 and u_view sits at offset 0).
+// Per-draw block (set 1, binding 0).  The projection matrix now lives here
+// (offset 192) so the push-constant block fits the 128-byte Vulkan minimum.
 layout(set = 1, binding = 0, std140) uniform DrawBlock {
-    mat4  u_view;
+    mat4  u_view;                 // offset 0
+    mat4  u_model;                // offset 64
+    vec4  u_emissiveColor;        // offset 128
+    vec4  u_materialAmbient;      // offset 144
+    vec4  u_materialSpecular;     // offset 160
+    vec4  u_materialParams;       // offset 176
+    mat4  u_proj;                 // offset 192
 } draw;
 
 // Instance-rate attributes: the segment endpoints/colors (binding 0) and the
@@ -69,7 +74,7 @@ void main()
     v_lineDistance = 0.0;
 
     mat4 model = mat4(a_iModelRow0, a_iModelRow1, a_iModelRow2, a_iModelRow3);
-    mat4 mvp = pc.u_proj * draw.u_view * model;
+    mat4 mvp = draw.u_proj * draw.u_view * model;
 
     vec4 c0 = mvp * vec4(a_p0.xyz, 1.0);
     vec4 c1 = mvp * vec4(a_p1.xyz, 1.0);

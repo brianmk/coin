@@ -5,6 +5,7 @@
 
 #include "rendering/SoRTXRenderBackend.h"
 #include "rendering/SoVulkanConfig.h"
+#include "rendering/SoVulkanDebugUtils.h"
 #include <Inventor/errors/SoDebugError.h>
 #include <algorithm>
 #include <array>
@@ -574,6 +575,8 @@ SoRTXRenderBackend::initialize(const SoRenderBackendInitParams & params)
     this->hasNvLinearSweptSpheres = deviceContext->caps.nvLinearSweptSpheres;
     this->hasUpdateAfterBind =
       deviceContext->caps.descriptorIndexingUpdateAfterBind;
+    this->hasPipelineCreationFeedback =
+      deviceContext->caps.pipelineCreationFeedback;
   }
   else {
     uint32_t extCount = 0;
@@ -811,6 +814,7 @@ SoRTXRenderBackend::beginTransientCommandBuffer()
   // buffer every frame; resetting it here is safe because the submission is
   // provably complete (vkQueueWaitIdle) by the time the next frame begins.
   if (this->transientPool == VK_NULL_HANDLE) {
+    SoVulkanDebugUtils::setDevice(this->device);
     VkCommandPoolCreateInfo pci {};
     pci.sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO;
     pci.flags = VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT |
@@ -820,6 +824,9 @@ SoRTXRenderBackend::beginTransientCommandBuffer()
                             &this->transientPool) != VK_SUCCESS) {
       return VK_NULL_HANDLE;
     }
+    SoVulkanDebugUtils::nameObject(this->device, VK_OBJECT_TYPE_COMMAND_POOL,
+                                   reinterpret_cast<uint64_t>(this->transientPool),
+                                   "Coin RT transient command pool");
     VkCommandBufferAllocateInfo ai {};
     ai.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
     ai.commandPool = this->transientPool;

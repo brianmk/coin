@@ -12,14 +12,13 @@
 #version 450
 
 layout(push_constant) uniform PushConstants {
-    mat4  u_proj;         // offset 0, 64 bytes
-    vec4  u_color;        // offset 64, 16 bytes
-    vec4  u_flags;        // offset 80, 16 bytes
-    vec4  u_texParams;    // offset 96, 16 bytes
-    vec4  u_texBlend;     // offset 112, 16 bytes
-    float u_pointSize;    // offset 128, 16 bytes (pad[3])
-    vec4  u_lineParams;   // offset 144, 16 bytes: x = stipple factor (px/bit),
-                        // y = 16-bit stipple pattern
+    vec4  u_color;        // offset 0, 16 bytes
+    vec4  u_flags;        // offset 16, 16 bytes
+    vec4  u_texParams;    // offset 32, 16 bytes
+    vec4  u_texBlend;     // offset 48, 16 bytes
+    float u_pointSize;    // offset 64, 16 bytes (pad[3])
+    vec4  u_lineParams;   // offset 80, 16 bytes: x = stipple factor (px/bit),
+                          // y = 16-bit stipple pattern
 } pc;
 
 layout(location = 0) in vec4 a_position;

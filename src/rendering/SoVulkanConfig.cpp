@@ -160,6 +160,15 @@ Config load()
   c.raster.wideLineCpu =
     SoVulkanShared::envFlagEnabled("FC_VULKAN_WLINE_CPU", false);
 
+  c.diagnostics.debugUtils =
+    SoVulkanShared::envFlagEnabled("FC_VULKAN_DEBUG_UTILS", false);
+  c.diagnostics.debugPrintf =
+    SoVulkanShared::envFlagEnabled("FC_VULKAN_DEBUG_PRINTF", false);
+  c.diagnostics.gpuTimestamps =
+    SoVulkanShared::envFlagEnabled("FC_VULKAN_GPU_TIMING", false);
+  c.diagnostics.pipelineFeedback =
+    SoVulkanShared::envFlagEnabled("FC_VULKAN_PIPELINE_FEEDBACK", false);
+
   return c;
 }
 
@@ -255,6 +264,13 @@ void dump()
                c.concurrency.externalSecondary ? 1 : 0,
                c.concurrency.asyncCompute ? 1 : 0,
                c.raster.wideLineCpu ? 1 : 0);
+  std::fprintf(stderr,
+               "[VKCONFIG] diagnostics debugUtils=%d debugPrintf=%d "
+               "gpuTiming=%d pipelineFeedback=%d\n",
+               c.diagnostics.debugUtils ? 1 : 0,
+               c.diagnostics.debugPrintf ? 1 : 0,
+               c.diagnostics.gpuTimestamps ? 1 : 0,
+               c.diagnostics.pipelineFeedback ? 1 : 0);
 }
 
 } // namespace SoVulkanConfig

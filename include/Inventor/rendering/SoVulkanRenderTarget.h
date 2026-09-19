@@ -67,6 +67,13 @@ struct SoVulkanDeviceCaps {
   //! frame ring cannot always guarantee
   //! (VUID-vkUpdateDescriptorSets-None-03047).
   bool descriptorIndexingUpdateAfterBind = false;
+  //! VK_EXT_pipeline_creation_feedback, enabled by the app so the backend can
+  //! log pipeline-cache hits and creation cost (FC_VULKAN_PIPELINE_FEEDBACK).
+  bool pipelineCreationFeedback = false;
+  //! VK_EXT_debug_printf + VK_KHR_shader_non_semantic_info, enabled by the app
+  //! so shaders compiled with COIN_ENABLE_DEBUG_PRINTF can emit diagnostics
+  //! through the validation layer (FC_VULKAN_DEBUG_PRINTF).
+  bool debugPrintf = false;
 };
 
 /*!

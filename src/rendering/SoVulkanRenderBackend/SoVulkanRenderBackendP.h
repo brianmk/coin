@@ -487,32 +487,38 @@ constexpr uint32_t VULKAN_VERTEX_STRIDE = 32;
 // FC_VULKAN_MAX_VERTEX_COUNT for a smaller/larger budget.
 constexpr int MAX_VERTEX_COUNT = 64000000;
 
+// The projection matrix deliberately lives in the per-draw DrawBlock UBO
+// (below), not here: the block must fit VkPhysicalDeviceLimits::
+// maxPushConstantsSize, whose guaranteed minimum is only 128 bytes.  Keeping
+// the matrix out leaves this at 112 bytes, so the renderer runs on
+// minimum-spec devices instead of hard-failing in createPipelineLayout().
 struct alignas(16) VulkanPushConstants {
-  float proj[16];       // projection matrix (view/model live in the UBO)
-  float color[4];       // uniform diffuse color
-  float flags[4];       // x = useVertexColor
+  float color[4];       // offset 0: uniform diffuse color
+  float flags[4];       // offset 16: x = useVertexColor
                         // y = vertexColorAlphaIncludesOpacity
                         // z = textureEnabled
                         // w = textureAlphaIncludesOpacity
-  float texParams[4];   // x = textureModel, y = alphaTestFunction,
+  float texParams[4];   // offset 32: x = textureModel, y = alphaTestFunction,
                         // z = alphaTestReference
-  float texBlend[4];    // texture blend color
-  float pointSize;      // gl_PointSize (point primitives and polygon mode)
+  float texBlend[4];    // offset 48: texture blend color
+  float pointSize;      // offset 64: gl_PointSize (points/polygon mode)
   float pointSizePad[3];// std140: pointSize occupies a full vec4 slot
-  float lineParams[4];  // x = stipple factor (px/bit, glLineStipple factor),
-                        // y = stipple pattern bits (wide-line) / round
-                        //     points (visual), z = line primitive,
+  float lineParams[4];  // offset 80: x = stipple factor (px/bit, glLineStipple
+                        // factor), y = stipple pattern bits (wide-line) /
+                        // round points (visual), z = line primitive,
                         // w = point primitive
-  float lineGeom[4];    // x = line width (device px), y = viewport width,
-                        // z = viewport height, w = device pixel ratio.  Read
-                        // only by the GPU-instanced wide-line vertex shader.
+  float lineGeom[4];    // offset 96: x = line width (device px), y = viewport
+                        // width, z = viewport height, w = device pixel ratio.
+                        // Read only by the GPU-instanced wide-line vertex
+                        // shader.
 };
-static_assert(offsetof(VulkanPushConstants, lineParams) == 144,
-              "lineParams must land at shader offset 144");
-static_assert(offsetof(VulkanPushConstants, lineGeom) == 160,
-              "lineGeom must land at shader offset 160");
-static_assert(sizeof(VulkanPushConstants) == 176,
-              "push-constant block must be 176 bytes");
+static_assert(offsetof(VulkanPushConstants, lineParams) == 80,
+              "lineParams must land at shader offset 80");
+static_assert(offsetof(VulkanPushConstants, lineGeom) == 96,
+              "lineGeom must land at shader offset 96");
+static_assert(sizeof(VulkanPushConstants) == 112,
+              "push-constant block must be 112 bytes (<= the 128-byte Vulkan "
+              "minimum)");
 
 // Push-constant block for the background gradient pass (BackgroundFragment.glsl).
 struct alignas(16) VulkanBackgroundPush {
@@ -539,7 +545,8 @@ static_assert(sizeof(VulkanLightingUbo) == 784,
 // std140 mirror of the DrawBlock uniform (set 1, binding 0) in the visual
 // shaders.  This is the per-draw member that actually varies per command
 // (view/model/material); it is pointed at through a dynamic offset into the
-// per-draw UBO ring.
+// per-draw UBO ring.  The projection matrix lives here rather than in the
+// push constants so the push block fits the 128-byte Vulkan minimum.
 struct alignas(16) VulkanDrawUbo {
   float view[16];                 // offset 0
   float model[16];                // offset 64
@@ -547,8 +554,9 @@ struct alignas(16) VulkanDrawUbo {
   float materialAmbient[4];       // offset 144
   float materialSpecular[4];      // offset 160
   float materialParams[4];        // offset 176
+  float proj[16];                 // offset 192
 };
-static_assert(sizeof(VulkanDrawUbo) == 192,
+static_assert(sizeof(VulkanDrawUbo) == 256,
               "VulkanDrawUbo must match DrawBlock std140 layout");
 
   inline VkCompareOp

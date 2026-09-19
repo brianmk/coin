@@ -11,6 +11,7 @@
 
 #include "rendering/SoVulkanRenderBackend.h"
 #include "rendering/SoVulkanRenderBackend/SoVulkanRenderBackendP.h"
+#include "rendering/SoVulkanConfig.h"
 
 #include <Inventor/elements/SoDrawStyleElement.h>
 #include <Inventor/errors/SoDebugError.h>
@@ -80,10 +81,32 @@ SoVulkanRenderBackend::createGraphicsPipeline(
   ci.renderPass = renderPass;
   ci.subpass = 0;
 
+  const bool wantFeedback =
+    this->hasPipelineCreationFeedback &&
+    SoVulkanConfig::get().diagnostics.pipelineFeedback;
+  VkPipelineCreationFeedbackEXT feedback {};
+  VkPipelineCreationFeedbackCreateInfoEXT feedbackInfo {};
+  if (wantFeedback) {
+    feedbackInfo.sType =
+      VK_STRUCTURE_TYPE_PIPELINE_CREATION_FEEDBACK_CREATE_INFO_EXT;
+    feedbackInfo.pPipelineCreationFeedback = &feedback;
+    feedbackInfo.pipelineStageCreationFeedbackCount = 0;
+    ci.pNext = &feedbackInfo;
+  }
+
   VkPipeline created = VK_NULL_HANDLE;
   if (vkCreateGraphicsPipelines(this->device, this->pipelines.handle(), 1,
                                 &ci, this->allocator, &created) != VK_SUCCESS) {
     return VK_NULL_HANDLE;
+  }
+  if (wantFeedback) {
+    const bool cacheHit =
+      (feedback.flags &
+       VK_PIPELINE_CREATION_FEEDBACK_APPLICATION_PIPELINE_CACHE_HIT_BIT_EXT) != 0;
+    std::fprintf(stderr,
+                 "[RTDBG] pipelineFeedback raster cacheHit=%d creation=%.3fus\n",
+                 cacheHit ? 1 : 0,
+                 static_cast<double>(feedback.duration) * 1.0e-3);
   }
   return created;
 }

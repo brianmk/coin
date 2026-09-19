@@ -571,6 +571,9 @@ private:
   //! while an in-flight command buffer still references it
   //! (VUID-vkUpdateDescriptorSets-None-03047).
   bool hasUpdateAfterBind = false;
+  //! VK_EXT_pipeline_creation_feedback enabled by the app; gates the optional
+  //! pipeline-cache-hit / creation-cost log (FC_VULKAN_PIPELINE_FEEDBACK).
+  bool hasPipelineCreationFeedback = false;
   bool hasOpacityMicromap = false;
   bool hasNvCluster = false;
   bool hasNvPartitioned = false;

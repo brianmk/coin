@@ -19,6 +19,7 @@ set(COIN_RENDERING_FILES
 if(COIN_BUILD_VULKAN_RENDERER)
 	list(APPEND COIN_RENDERING_FILES
 		SoVulkanConfig.cpp
+		SoVulkanGpuTimers.cpp
 		SoVulkanRenderBackend/SoVulkanRenderBackendCore.cpp
 		SoVulkanRenderBackend/SoVulkanRenderPassCache.cpp
 		SoVulkanRenderBackend/SoVulkanMemPool.cpp

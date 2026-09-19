@@ -14,6 +14,7 @@
 
 #include "rendering/SoVulkanRenderBackend.h"
 #include "rendering/SoVulkanRenderBackend/SoVulkanRenderBackendP.h"
+#include "rendering/SoVulkanDebugUtils.h"
 #include "rendering/SoVulkanShared.h"
 
 #include <Inventor/elements/SoDrawStyleElement.h>
@@ -251,6 +252,9 @@ SoVulkanRenderBackend::ensureStagingPoolSize(VkDeviceSize required)
   this->stagingPoolMemory = newMemory;
   this->stagingPoolMapped = newMapped;
   this->stagingPoolCapacity = newCapacity;
+  SoVulkanDebugUtils::nameObject(
+    this->device, VK_OBJECT_TYPE_BUFFER,
+    reinterpret_cast<uint64_t>(this->stagingPoolBuffer), "texture staging pool");
   return true;
 }
 

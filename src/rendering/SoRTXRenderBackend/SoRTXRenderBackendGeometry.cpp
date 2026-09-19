@@ -5,6 +5,7 @@
 
 #include "rendering/SoRTXRenderBackend.h"
 #include "rendering/SoVulkanConfig.h"
+#include "rendering/SoVulkanDebugUtils.h"
 #include <Inventor/errors/SoDebugError.h>
 #include <algorithm>
 #include <array>
@@ -1385,6 +1386,9 @@ SoRTXRenderBackend::blasBuildOrRefit(RTXCachedGeometry & entry,
                                          &entry.blas) != VK_SUCCESS) {
       return false;
     }
+    SoVulkanDebugUtils::nameObject(
+      this->device, VK_OBJECT_TYPE_ACCELERATION_STRUCTURE_KHR,
+      reinterpret_cast<uint64_t>(entry.blas), "RT BLAS");
     // Capture the BLAS device address now.  It is constant for the lifetime of
     // the BLAS, so the per-frame instance collection in buildTlas() reuses it
     // instead of calling vkGetAccelerationStructureDeviceAddressKHR every frame.
@@ -1786,6 +1790,9 @@ SoRTXRenderBackend::buildTlas(const SoDrawList & drawlist,
                                          &this->tlas) != VK_SUCCESS) {
       return false;
     }
+    SoVulkanDebugUtils::nameObject(
+      this->device, VK_OBJECT_TYPE_ACCELERATION_STRUCTURE_KHR,
+      reinterpret_cast<uint64_t>(this->tlas), "RT TLAS");
     if (!this->updateDescriptors()) {
       return false;
     }

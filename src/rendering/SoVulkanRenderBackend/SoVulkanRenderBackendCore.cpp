@@ -17,6 +17,7 @@
 #include "rendering/SoVulkanRenderBackend/SoVulkanRenderBackendP.h"
 #include "rendering/SoVulkanShared.h"
 #include "rendering/SoVulkanConfig.h"
+#include "rendering/SoVulkanDebugUtils.h"
 
 #include <Inventor/elements/SoDrawStyleElement.h>
 #include <Inventor/errors/SoDebugError.h>
@@ -163,6 +164,10 @@ SoVulkanRenderBackend::initialize(const SoRenderBackendInitParams & params)
   this->queue = deviceContext->graphicsQueue;
   this->queueFamilyIndex = deviceContext->graphicsQueueFamilyIndex;
   this->allocator = deviceContext->allocator;
+  if (deviceContext->capsValid) {
+    this->hasPipelineCreationFeedback =
+      deviceContext->caps.pipelineCreationFeedback;
+  }
   this->memProps.setDevice(this->physicalDevice);
 
   // Bind the render-pass/framebuffer cache to this device and hook its
@@ -331,6 +336,10 @@ SoVulkanRenderBackend::setPipelineCachePath(const std::string & path)
 bool
 SoVulkanRenderBackend::createCommandPool()
 {
+  SoVulkanDebugUtils::setDevice(this->device);
+  SoVulkanDebugUtils::nameObject(this->device, VK_OBJECT_TYPE_DEVICE,
+                                 reinterpret_cast<uint64_t>(this->device),
+                                 "Coin raster VkDevice");
   VkCommandPoolCreateInfo ci {};
   ci.sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO;
   ci.flags = VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT |
@@ -340,17 +349,26 @@ SoVulkanRenderBackend::createCommandPool()
                           &this->commandPool) != VK_SUCCESS) {
     return false;
   }
+  SoVulkanDebugUtils::nameObject(this->device, VK_OBJECT_TYPE_COMMAND_POOL,
+                                 reinterpret_cast<uint64_t>(this->commandPool),
+                                 "Coin raster primary command pool");
   // Secondary pools for the M1c/M1d opaque-pass re-record: same
   // transient/reset flags as the primary pool, secondary-level buffers.  One
   // pool per worker (worker 0 = the recording thread): VkCommandPool host
   // access is externally synchronized, so concurrent reset/begin/end of
   // buffers from a SHARED pool would race its internal allocator.
   this->secondaryCommandPools.assign(this->maxRecordWorkers, VK_NULL_HANDLE);
-  for (VkCommandPool & pool : this->secondaryCommandPools) {
+  for (size_t i = 0; i < this->secondaryCommandPools.size(); ++i) {
+    VkCommandPool & pool = this->secondaryCommandPools[i];
     if (vkCreateCommandPool(this->device, &ci, this->allocator, &pool) !=
         VK_SUCCESS) {
       return false;
     }
+    char label[64];
+    std::snprintf(label, sizeof(label),
+                  "Coin raster secondary command pool %zu", i);
+    SoVulkanDebugUtils::nameObject(this->device, VK_OBJECT_TYPE_COMMAND_POOL,
+                                   reinterpret_cast<uint64_t>(pool), label);
   }
   return this->allocateFrameResources();
 }
@@ -716,6 +734,9 @@ SoVulkanRenderBackend::createDescriptorPool()
   }
   this->descriptorPool = pool;
   this->descriptorPools.push_back(pool);
+  SoVulkanDebugUtils::nameObject(this->device, VK_OBJECT_TYPE_DESCRIPTOR_POOL,
+                                 reinterpret_cast<uint64_t>(pool),
+                                 "Coin raster descriptor pool");
   return true;
 }
 
@@ -788,6 +809,9 @@ SoVulkanRenderBackend::createLightingUniformBuffer()
     this->emitError("createLightingUniformBuffer: buffer create/map failed");
     return false;
   }
+  SoVulkanDebugUtils::nameObject(
+    this->device, VK_OBJECT_TYPE_BUFFER,
+    reinterpret_cast<uint64_t>(this->lightingBuffer), "draw UBO ring");
   // The per-instance model-matrix ring parallels the lighting UBO ring
   // (same slot layout), so pre-size it here; the per-draw path must never
   // grow (re-create) this buffer, which would race under parallel recording.
@@ -827,6 +851,10 @@ SoVulkanRenderBackend::createLightingConstBuffer()
     this->emitError("createLightingConstBuffer: buffer create/map failed");
     return false;
   }
+  SoVulkanDebugUtils::nameObject(
+    this->device, VK_OBJECT_TYPE_BUFFER,
+    reinterpret_cast<uint64_t>(this->lightingConstBuffer),
+    "lighting UBO ring");
   return true;
 }
 
@@ -1292,9 +1320,10 @@ SoVulkanRenderBackend::createWhiteTexture()
 bool
 SoVulkanRenderBackend::createPipelineLayout()
 {
-  // The visual push-constant block carries the projection matrix, colors,
-  // texture state, point size, and line params.  Verify the device can hold
-  // it (desktop GPUs advertise 256 bytes; some embedded parts only 128).
+  // The visual push-constant block carries the per-draw material/texture/line
+  // state (the projection matrix lives in the DrawBlock UBO).  At 112 bytes it
+  // fits the 128-byte Vulkan guaranteed minimum, so even minimum-spec devices
+  // (and the desktop-baseline device profiles) can create the pipeline.
   VkPhysicalDeviceProperties deviceProps {};
   vkGetPhysicalDeviceProperties(this->physicalDevice, &deviceProps);
   if (deviceProps.limits.maxPushConstantsSize < sizeof(VulkanPushConstants)) {
@@ -1474,6 +1503,9 @@ SoVulkanRenderBackend::createSubPixelCullPipeline()
   }
   this->subPixelDescriptorPools.push_back(pool);
   this->subPixelDescriptorSetCount = 0;
+  SoVulkanDebugUtils::nameObject(this->device, VK_OBJECT_TYPE_DESCRIPTOR_POOL,
+                                 reinterpret_cast<uint64_t>(pool),
+                                 "Coin raster sub-pixel descriptor pool");
 
   // Cache the device's single-binding storage-buffer range limit so the
   // pre-pass can reject a command whose vertex/index buffer cannot legally be

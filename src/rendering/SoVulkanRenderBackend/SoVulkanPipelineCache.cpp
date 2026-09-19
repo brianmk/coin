@@ -5,6 +5,8 @@
 
 #include "rendering/SoVulkanRenderBackend/SoVulkanPipelineCache.h"
 
+#include "rendering/SoVulkanDebugUtils.h"
+
 #include <cstdio>
 #include <fstream>
 
@@ -58,6 +60,11 @@ SoVulkanPipelineCache::initialize()
     std::snprintf(msg, sizeof(msg), "pipeline cache: supplied %zu bytes from %s",
                   initialData.size(), this->path.c_str());
     this->emit(msg);
+  }
+  if (result == VK_SUCCESS) {
+    SoVulkanDebugUtils::nameObject(this->device, VK_OBJECT_TYPE_PIPELINE_CACHE,
+                                   reinterpret_cast<uint64_t>(this->cache),
+                                   "Coin raster pipeline cache");
   }
   return result == VK_SUCCESS;
 }

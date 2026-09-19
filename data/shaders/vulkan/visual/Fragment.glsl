@@ -10,14 +10,12 @@
 #version 450
 
 layout(push_constant) uniform PushConstants {
-    mat4  u_proj;         // offset 0, 64 bytes
-    vec4  u_color;        // offset 64, 16 bytes
-    vec4  u_flags;        // offset 80, 16 bytes
-    vec4  u_texParams;    // offset 96, 16 bytes
-    vec4  u_texBlend;     // offset 112, 16 bytes
-    float u_pointSize;    // offset 128, 16 bytes (pad[3])
-    vec4  u_lineParams;   // offset 144, 16 bytes: x = stipple factor,
-                        // y = round points
+    vec4  u_color;        // offset 0, 16 bytes
+    vec4  u_flags;        // offset 16, 16 bytes
+    vec4  u_texParams;    // offset 32, 16 bytes
+    vec4  u_texBlend;     // offset 48, 16 bytes
+    float u_pointSize;    // offset 64, 16 bytes (pad[3])
+    vec4  u_lineParams;   // offset 80, 16 bytes: x = stipple factor,
                           //   y = round points, z = line primitive,
                           //   w = point primitive
 } pc;
@@ -42,6 +40,7 @@ layout(set = 1, binding = 0, std140) uniform DrawBlock {
     vec4  u_materialSpecular;     // offset 160
     vec4  u_materialParams;       // offset 176: x=shininess, y=twoSided,
                                   //            z=lightCount, w=shadingModel
+    mat4  u_proj;                 // offset 192: projection (view/model above)
 } draw;
 
 layout(set = 1, binding = 1) uniform sampler2D u_texture;
@@ -69,7 +68,7 @@ vec3 coin_vulkan_lighting(vec3 eyePos, vec3 eyeNormal, vec3 baseColor)
     // normal flip below triggered over the front surface and drew a hard-edged
     // dark ring.  u_proj[2][3] is the perspective-divide term: 0 for an
     // orthographic projection, -1 for a perspective one.
-    vec3 V = (pc.u_proj[2][3] == 0.0) ? vec3(0.0, 0.0, 1.0)
+    vec3 V = (draw.u_proj[2][3] == 0.0) ? vec3(0.0, 0.0, 1.0)
                                       : normalize(-eyePos);
     if (draw.u_materialParams.y > 0.5 && dot(N, V) < 0.0) {
         N = -N;

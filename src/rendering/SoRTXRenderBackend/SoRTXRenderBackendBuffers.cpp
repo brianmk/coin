@@ -13,6 +13,7 @@
 #include <string>
 #include <rendering/SoRTXRenderBackend/SoRTXRenderBackendP.h>
 #include <rendering/SoVulkanConfig.h>
+#include <rendering/SoVulkanDebugUtils.h>
 #include <rendering/SoVulkanShared.h>
 
 using namespace SoRTXBackend;
@@ -206,6 +207,14 @@ SoRTXRenderBackend::createStorageImage(uint32_t width, uint32_t height)
     this->storageHeight = 0;
     return false;
   }
+
+  SoVulkanDebugUtils::nameObject(
+    this->device, VK_OBJECT_TYPE_IMAGE,
+    reinterpret_cast<uint64_t>(this->storageImage), "RT storage image");
+  SoVulkanDebugUtils::nameObject(
+    this->device, VK_OBJECT_TYPE_IMAGE_VIEW,
+    reinterpret_cast<uint64_t>(this->storageImageView),
+    "RT storage image view");
 
   // The image/view/sampler identity changed.  The previous sampler (if any)
   // may still be referenced by an in-flight present pass; release it at the

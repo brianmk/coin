@@ -4,11 +4,13 @@
 // member functions for the "Pipeline" concern of the Vulkan RTX backend.
 
 #include "rendering/SoRTXRenderBackend.h"
+#include "rendering/SoVulkanConfig.h"
 #include <Inventor/errors/SoDebugError.h>
 #include <algorithm>
 #include <array>
 #include <chrono>
 #include <cmath>
+#include <cstdio>
 #include <cstring>
 #include <string>
 #include "rendering/vulkan/rt/PathTrace.spv.h"
@@ -23,6 +25,41 @@
 #include <rendering/SoRTXRenderBackend/SoRTXRenderBackendP.h>
 
 using namespace SoRTXBackend;
+
+namespace {
+
+// Optional VK_EXT_pipeline_creation_feedback chaining (FC_VULKAN_PIPELINE_FEEDBACK).
+// Only used when the app enabled the extension + feature (hasPipelineCreationFeedback)
+// and the config flag is on; otherwise the create-info pNext is left untouched.
+bool pipelineFeedbackWanted(bool supported)
+{
+  return supported && SoVulkanConfig::get().diagnostics.pipelineFeedback;
+}
+
+void chainPipelineFeedback(VkPipelineCreationFeedbackCreateInfoEXT & info,
+                           VkPipelineCreationFeedbackEXT & feedback,
+                           void * createInfo)
+{
+  info.sType = VK_STRUCTURE_TYPE_PIPELINE_CREATION_FEEDBACK_CREATE_INFO_EXT;
+  info.pPipelineCreationFeedback = &feedback;
+  info.pipelineStageCreationFeedbackCount = 0;
+  reinterpret_cast<VkBaseOutStructure *>(createInfo)->pNext =
+    reinterpret_cast<VkBaseOutStructure *>(&info);
+}
+
+void logPipelineFeedback(const char * label,
+                         const VkPipelineCreationFeedbackEXT & feedback)
+{
+  const bool cacheHit =
+    (feedback.flags &
+     VK_PIPELINE_CREATION_FEEDBACK_APPLICATION_PIPELINE_CACHE_HIT_BIT_EXT) != 0;
+  std::fprintf(stderr,
+               "[RTDBG] pipelineFeedback %s cacheHit=%d creation=%.3fus\n",
+               label, cacheHit ? 1 : 0,
+               static_cast<double>(feedback.duration) * 1.0e-3);
+}
+
+} // namespace
 
 bool
 SoRTXRenderBackend::createDescriptorSetLayout()
@@ -867,10 +904,19 @@ SoRTXRenderBackend::createPipelines()
   ci.pGroups = groups;
   ci.maxPipelineRayRecursionDepth = 2; // primary + one shadow level
   ci.layout = this->rtPipelineLayout;
+  const bool wantFeedback = pipelineFeedbackWanted(this->hasPipelineCreationFeedback);
+  VkPipelineCreationFeedbackEXT feedback {};
+  VkPipelineCreationFeedbackCreateInfoEXT feedbackInfo {};
+  if (wantFeedback) {
+    chainPipelineFeedback(feedbackInfo, feedback, &ci);
+  }
   if (this->vkCreateRayTracingPipelinesKHR(
         this->device, VK_NULL_HANDLE, VK_NULL_HANDLE, 1, &ci,
         this->allocator, &this->rtPipeline) != VK_SUCCESS) {
     return false;
+  }
+  if (wantFeedback) {
+    logPipelineFeedback("rt-pipeline", feedback);
   }
   if (!this->createShaderBindingTable()) {
     return false;
@@ -885,10 +931,16 @@ SoRTXRenderBackend::createPipelines()
   computeCI.stage.module = this->pathTraceModule;
   computeCI.stage.pName = "main";
   computeCI.layout = this->rtPipelineLayout;
+  if (wantFeedback) {
+    chainPipelineFeedback(feedbackInfo, feedback, &computeCI);
+  }
   if (vkCreateComputePipelines(this->device, VK_NULL_HANDLE, 1, &computeCI,
                                this->allocator,
                                &this->computePipeline) != VK_SUCCESS) {
     return false;
+  }
+  if (wantFeedback) {
+    logPipelineFeedback("rt-compute", feedback);
   }
   return this->createDenoiseDownsamplePipeline();
 }
@@ -918,11 +970,20 @@ SoRTXRenderBackend::createDenoiseDownsamplePipeline()
   computeCI.stage.module = this->denoiseDownsampleModule;
   computeCI.stage.pName = "main";
   computeCI.layout = this->denoiseDownsamplePipelineLayout;
+  const bool wantFeedback = pipelineFeedbackWanted(this->hasPipelineCreationFeedback);
+  VkPipelineCreationFeedbackEXT feedback {};
+  VkPipelineCreationFeedbackCreateInfoEXT feedbackInfo {};
+  if (wantFeedback) {
+    chainPipelineFeedback(feedbackInfo, feedback, &computeCI);
+  }
   if (vkCreateComputePipelines(this->device, VK_NULL_HANDLE, 1, &computeCI,
                                this->allocator,
                                &this->denoiseDownsamplePipeline) !=
       VK_SUCCESS) {
     return false;
+  }
+  if (wantFeedback) {
+    logPipelineFeedback("denoise-downsample", feedback);
   }
   checkDenoiseDownsampleLayout();
   return true;
