@@ -72,6 +72,13 @@ struct SoVulkanDeviceCaps {
   //! frame ring cannot always guarantee
   //! (VUID-vkUpdateDescriptorSets-None-03047).
   bool descriptorIndexingUpdateAfterBind = false;
+  //! VK_EXT_nested_command_buffer with nestedCommandBufferRendering enabled,
+  //! so a subpass begun with
+  //! VK_SUBPASS_CONTENTS_INLINE_AND_SECONDARY_COMMAND_BUFFERS_EXT may record
+  //! inline commands and execute secondaries.  Without it the backend must
+  //! begin such a pass with VK_SUBPASS_CONTENTS_INLINE and skip secondary
+  //! recording (the plain INLINE contents forbid vkCmdExecuteCommands).
+  bool nestedCommandBuffer = false;
   //! VK_EXT_pipeline_creation_feedback, enabled by the app so the backend can
   //! log pipeline-cache hits and creation cost (FC_VULKAN_PIPELINE_FEEDBACK).
   bool pipelineCreationFeedback = false;

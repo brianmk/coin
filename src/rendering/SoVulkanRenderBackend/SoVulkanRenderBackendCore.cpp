@@ -185,8 +185,6 @@ SoVulkanRenderBackend::initialize(const SoRenderBackendInitParams & params)
     this->hasPipelineCreationFeedback =
       deviceContext->caps.pipelineCreationFeedback;
   }
-  this->memProps.setDevice(this->physicalDevice);
-
   // Resolve the synchronization2 entry points once for this device.  A null
   // pointer means the extension was not enabled; the shared barrier/submit
   // helpers then fall back to the legacy entry points.

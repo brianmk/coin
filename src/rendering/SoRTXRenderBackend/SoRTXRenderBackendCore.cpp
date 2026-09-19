@@ -1186,13 +1186,17 @@ SoRTXRenderBackend::shutdown()
     this->presentSetValid[i] = false;
   }
 
+#if COIN_BUILD_RTX_DENOISER
   // Every VMA-backed buffer/image has been released above (including the
   // deferred CUDA-interop destroys flushed by destroyDenoiser()); drop the
-  // custom export pool before the allocator so VMA sees it empty.
+  // custom export pool before the allocator so VMA sees it empty.  The pool
+  // and rtxInteropPool member exist only when the OptiX denoiser is compiled
+  // in, so the destroy must be guarded to match the declaration.
   if (this->rtxInteropPool != VK_NULL_HANDLE) {
     vmaDestroyPool(this->vmaAllocator, this->rtxInteropPool);
     this->rtxInteropPool = VK_NULL_HANDLE;
   }
+#endif
   if (this->vmaAllocator != nullptr) {
     vmaDestroyAllocator(this->vmaAllocator);
     this->vmaAllocator = nullptr;
