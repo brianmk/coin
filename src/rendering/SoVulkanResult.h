@@ -26,7 +26,6 @@ namespace SoVulkan {
 enum class Status : uint8_t {
   Ok = 0,
   Error,            //!< generic failure (allocation, upload, recording)
-  InvalidArgument,  //!< caller misuse (null target, bad params)
 };
 
 /*!
@@ -47,14 +46,8 @@ public:
   {
     return Result(Status::Error, std::move(message));
   }
-  static Result invalidArgument(std::string message)
-  {
-    return Result(Status::InvalidArgument, std::move(message));
-  }
 
   bool isOk() const { return this->status_ == Status::Ok; }
-  explicit operator bool() const { return this->isOk(); }
-  Status status() const { return this->status_; }
   const std::string & message() const { return this->message_; }
 
 private:
@@ -66,20 +59,6 @@ private:
   Status status_ = Status::Ok;
   std::string message_;
 };
-
-/*!
-  \brief Propagate a failed Result out of the current function.
-
-  Usage: `COIN_VULKAN_TRY(uploadTexture(...));` where the enclosing function
-  returns SoVulkan::Result.  A no-op on success.
-*/
-#define COIN_VULKAN_TRY(expr)                                                  \
-  do {                                                                         \
-    ::SoVulkan::Result coin_vulkan_try_result = (expr);                        \
-    if (!coin_vulkan_try_result.isOk()) {                                      \
-      return coin_vulkan_try_result;                                           \
-    }                                                                          \
-  } while (false)
 
 } // namespace SoVulkan
 

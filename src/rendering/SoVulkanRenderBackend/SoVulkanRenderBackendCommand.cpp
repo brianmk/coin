@@ -1168,10 +1168,17 @@ SoVulkanRenderBackend::beginCommandBuffer()
   vkBackendTrace(this->uboFrameIndex, "beginCommandBuffer.enter",
                  "primary=%p", reinterpret_cast<const void *>(
                    this->currentCommandBuffer()));
+  VkCommandBuffer cmd = this->currentCommandBuffer();
+  if (cmd == VK_NULL_HANDLE) {
+    // The frame ring is empty (a frame-resource allocation failed).  Do not
+    // call vkBeginCommandBuffer(VK_NULL_HANDLE).
+    this->emitError("beginCommandBuffer: no frame command buffer available");
+    return false;
+  }
   VkCommandBufferBeginInfo bi {};
   bi.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
   bi.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
-  return vkBeginCommandBuffer(this->currentCommandBuffer(), &bi) == VK_SUCCESS;
+  return vkBeginCommandBuffer(cmd, &bi) == VK_SUCCESS;
 }
 
 bool

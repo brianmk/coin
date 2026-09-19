@@ -506,7 +506,7 @@ private:
   // same family) and FC_VULKAN_ASYNC_COMPUTE is set, the copy runs on that
   // queue so the graphics queue is free to process other submits; a fence is
   // blocked on so the result is published before the present that samples it.
-  void submitDenoiseCopy(VkCommandBuffer cmd);
+  bool submitDenoiseCopy(VkCommandBuffer cmd);
 
   // --- Device handles ----------------------------------------------------
   VkInstance instance = VK_NULL_HANDLE;
@@ -559,7 +559,6 @@ private:
   // OIDN instead of grabbing the wrong CUDA device on non-NVIDIA or
   // multi-GPU machines.
   uint32_t deviceVendorID = 0;
-  uint32_t deviceID = 0;
   // True once the physical device has been identified as NVIDIA.  Drives the
   // RTX denoiser gate; the Vulkan ray-tracing pipeline itself is unaffected.
   bool deviceIsNvidia = false;
@@ -570,16 +569,6 @@ private:
   uint8_t deviceUUID[16] = {0};
   bool haveDeviceUUID = false;
 
-  // Optional device capability flags, self-probed from the physical device at
-  // initialize() via vkEnumerateDeviceExtensionProperties.  Each gates a
-  // feature that improves the path tracer (position fetch for smooth normals
-  // + UVs, opacity micromaps for alpha-tested textures, NV cluster/partitioned
-  // acceleration structures for large assemblies, NV linear swept spheres for
-  // analytic CAD primitives).  The embedding application must already have
-  // requested the extension + feature in its own device creation; a flag here
-  // only records what the created device actually advertises so the shader /
-  // builder paths can be selected at run time without querying every frame.
-  bool hasPositionFetch = false;
   //! True when the device has (and the embedding enabled) descriptor-indexing
   //! update-after-bind.  The descriptor set layouts then carry
   //! VK_DESCRIPTOR_BINDING_UPDATE_AFTER_BIND_BIT so a set may be rewritten
@@ -589,10 +578,6 @@ private:
   //! VK_EXT_pipeline_creation_feedback enabled by the app; gates the optional
   //! pipeline-cache-hit / creation-cost log (FC_VULKAN_PIPELINE_FEEDBACK).
   bool hasPipelineCreationFeedback = false;
-  bool hasOpacityMicromap = false;
-  bool hasNvCluster = false;
-  bool hasNvPartitioned = false;
-  bool hasNvLinearSweptSpheres = false;
 
   // Persistent transient command pool + buffer for the one-shot
   // acceleration-structure phase (BLAS/TLAS builds and buffer copies, which
@@ -992,7 +977,7 @@ private:
   VkDeviceSize neePoolUsed = 0;
   uint32_t neePoolCount = 0;
   bool ensureNeePoolCapacity(VkDeviceSize bytes);
-  void buildNeePool(const SoDrawList & drawlist);
+  bool buildNeePool(const SoDrawList & drawlist);
 
   // Shared grow-only pool (re)allocation used by ensureNormalPoolCapacity()
   // and ensureNeePoolCapacity(): double the host-visible pool until the
@@ -1253,6 +1238,10 @@ private:
   //! Set by the worker after it published the denoised result in the staging
   //! output region; the render thread copies it device-ward and converges.
   std::atomic<bool> oidnWorkerDone {false};
+  //! Set by the worker when OIDN reported an error (the output region is
+  //! black/invalid); oidnWorkerDone is still published so the render thread can
+  //! join and then fall back instead of presenting the black result.
+  std::atomic<bool> oidnWorkerFailed {false};
   //! The worker joinable handle (one shot per denoise-at-target).
   std::thread oidnWorker;
   //! True when the denoise GPU-downsample pass already wrote the normalized
