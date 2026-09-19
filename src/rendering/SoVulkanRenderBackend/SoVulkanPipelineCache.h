@@ -195,6 +195,13 @@ public:
   //! On-disk persistence path (empty = no persistence).
   void setPath(const std::string & path) { this->path = path; }
 
+  //! Content key of the compiled shaders whose pipelines this cache holds.
+  //! Written into the persisted file and checked on load: a file written from
+  //! different shaders is rejected, so a rebuilt shader can never be served a
+  //! pipeline compiled from the previous one (the pipeline-state key alone
+  //! does not capture shader code).
+  void setShaderKey(uint64_t key) { this->shaderKey = key; }
+
   //! Route this class's informational messages (cache supplied/saved/rejected)
   //! to the backend's log callback.
   void setLogger(std::function<void(const char *)> logger)
@@ -250,6 +257,7 @@ private:
   const VkAllocationCallbacks * allocator = nullptr;
   VkPipelineCache cache = VK_NULL_HANDLE;
   std::string path;
+  uint64_t shaderKey = 0;
   std::function<void(const char *)> logger;
   std::unordered_map<PipelineKey, VkPipeline, PipelineKeyHash> pipelines;
   std::unordered_map<BackgroundPipelineKey, VkPipeline,

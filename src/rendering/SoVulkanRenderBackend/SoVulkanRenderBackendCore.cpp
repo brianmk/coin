@@ -342,6 +342,35 @@ SoVulkanRenderBackend::createPipelineCache()
 void
 SoVulkanRenderBackend::setPipelineCachePath(const std::string & path)
 {
+  // Key the persisted cache to the compiled shaders.  The pipeline-state key
+  // (PipelineKey) does not capture shader code, so without this a rebuilt
+  // shader would be served a pipeline compiled from the previous one -- e.g.
+  // a stale projection/push-constant layout, which shows up as displaced
+  // edges on the first frame.  A shader change yields a new key and the old
+  // blob is rejected.
+  uint64_t shaderKey = 1469598103934665603ull; // FNV-1a offset basis
+  const auto mix = [&shaderKey](const uint32_t * code, const size_t count) {
+    const auto * bytes = reinterpret_cast<const unsigned char *>(code);
+    const size_t n = count * sizeof(uint32_t);
+    for (size_t i = 0; i < n; ++i) {
+      shaderKey ^= bytes[i];
+      shaderKey *= 1099511628211ull; // FNV-1a prime
+    }
+  };
+  mix(coin_vulkan_visual_vertex_spirv, coin_vulkan_visual_vertex_spirv_count);
+  mix(coin_vulkan_visual_fragment_spirv,
+      coin_vulkan_visual_fragment_spirv_count);
+  mix(coin_vulkan_wide_line_vertex_spirv,
+      coin_vulkan_wide_line_vertex_spirv_count);
+  mix(coin_vulkan_wide_line_fragment_spirv,
+      coin_vulkan_wide_line_fragment_spirv_count);
+  mix(coin_vulkan_wide_line_instanced_vertex_spirv,
+      coin_vulkan_wide_line_instanced_vertex_spirv_count);
+  mix(coin_vulkan_background_vertex_spirv,
+      coin_vulkan_background_vertex_spirv_count);
+  mix(coin_vulkan_background_fragment_spirv,
+      coin_vulkan_background_fragment_spirv_count);
+  this->pipelines.setShaderKey(shaderKey);
   this->pipelines.setPath(path);
 }
 
