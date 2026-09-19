@@ -5,6 +5,7 @@
 
 #include "rendering/SoRTXRenderBackend.h"
 #include "rendering/SoVulkanConfig.h"
+#include "rendering/SoVulkanDebugUtils.h"
 #include <Inventor/errors/SoDebugError.h>
 #include <algorithm>
 #include <array>
@@ -22,6 +23,8 @@
 #include "rendering/vulkan/rt/PresentVertex.spv.h"
 #include "rendering/vulkan/rt/PresentFragment.spv.h"
 #include <rendering/SoRTXRenderBackend/SoRTXRenderBackendP.h>
+
+#include "vk_mem_alloc.h"
 
 using namespace SoRTXBackend;
 
@@ -133,7 +136,7 @@ SoRTXRenderBackend::ensureNeePoolCapacity(VkDeviceSize bytes)
 bool
 SoRTXRenderBackend::ensurePoolCapacity(VkDeviceSize bytes,
                                        VkBuffer & poolBuffer,
-                                       VkDeviceMemory & poolMemory,
+                                       VmaAllocation & poolMemory,
                                        void *& poolMapped,
                                        VkDeviceSize & poolCapacity,
                                        VkDeviceSize & poolUsed,
@@ -147,17 +150,11 @@ SoRTXRenderBackend::ensurePoolCapacity(VkDeviceSize bytes,
     newCapacity *= 2;
   }
   VkBuffer newBuffer = VK_NULL_HANDLE;
-  VkDeviceMemory newMemory = VK_NULL_HANDLE;
+  VmaAllocation newMemory = nullptr;
   void * newMapped = nullptr;
   if (!this->createHostVisibleBuffer(
         newCapacity, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
-        newBuffer, newMemory)) {
-    return false;
-  }
-  if (vkMapMemory(this->device, newMemory, 0, newCapacity, 0,
-                  &newMapped) != VK_SUCCESS) {
-    vkDestroyBuffer(this->device, newBuffer, this->allocator);
-    vkFreeMemory(this->device, newMemory, this->allocator);
+        newBuffer, newMemory, &newMapped)) {
     return false;
   }
   if (poolBuffer != VK_NULL_HANDLE) {
@@ -167,10 +164,9 @@ SoRTXRenderBackend::ensurePoolCapacity(VkDeviceSize bytes,
     // clobbered memory (they would all read the last-written object's
     // normals -- the source of the per-wedge cap artifacts).
     std::memcpy(newMapped, poolMapped, poolUsed);
-    vkDestroyBuffer(this->device, poolBuffer, this->allocator);
+    vmaDestroyBuffer(this->vmaAllocator, poolBuffer, poolMemory);
     poolBuffer = VK_NULL_HANDLE;
-    vkFreeMemory(this->device, poolMemory, this->allocator);
-    poolMemory = VK_NULL_HANDLE;
+    poolMemory = nullptr;
     poolMapped = nullptr;
   }
   else {
@@ -272,7 +268,7 @@ SoRTXRenderBackend::buildNeePool(const SoDrawList & drawlist)
   }
 
   this->neePoolCount = entryCount;
-  if (SoVulkanShared::envString("FC_VULKAN_RT_DEBUG") && entryCount > 0) {
+  if (SoVulkanConfig::get().rtxDebug.rtDebug && entryCount > 0) {
     const float * e = static_cast<const float *>(this->neePoolMapped);
     fprintf(stderr, "[RTDBG] nee pool triangles=%u bytes=%llu enabled=%d "
                     "mis=%d xformT=(%.2f,%.2f,%.2f)\n",
@@ -308,28 +304,20 @@ SoRTXRenderBackend::destroyCacheEntry(RTXCachedGeometry & entry)
     entry.blas = VK_NULL_HANDLE;
   }
   if (entry.blasBuffer != VK_NULL_HANDLE) {
-    vkDestroyBuffer(this->device, entry.blasBuffer, this->allocator);
+    vmaDestroyBuffer(this->vmaAllocator, entry.blasBuffer, entry.blasMemory);
     entry.blasBuffer = VK_NULL_HANDLE;
-  }
-  if (entry.blasMemory != VK_NULL_HANDLE) {
-    vkFreeMemory(this->device, entry.blasMemory, this->allocator);
-    entry.blasMemory = VK_NULL_HANDLE;
+    entry.blasMemory = nullptr;
   }
   if (entry.vertexBuffer != VK_NULL_HANDLE) {
-    vkDestroyBuffer(this->device, entry.vertexBuffer, this->allocator);
+    vmaDestroyBuffer(this->vmaAllocator, entry.vertexBuffer,
+                     entry.vertexMemory);
     entry.vertexBuffer = VK_NULL_HANDLE;
-  }
-  if (entry.vertexMemory != VK_NULL_HANDLE) {
-    vkFreeMemory(this->device, entry.vertexMemory, this->allocator);
-    entry.vertexMemory = VK_NULL_HANDLE;
+    entry.vertexMemory = nullptr;
   }
   if (entry.indexBuffer != VK_NULL_HANDLE) {
-    vkDestroyBuffer(this->device, entry.indexBuffer, this->allocator);
+    vmaDestroyBuffer(this->vmaAllocator, entry.indexBuffer, entry.indexMemory);
     entry.indexBuffer = VK_NULL_HANDLE;
-  }
-  if (entry.indexMemory != VK_NULL_HANDLE) {
-    vkFreeMemory(this->device, entry.indexMemory, this->allocator);
-    entry.indexMemory = VK_NULL_HANDLE;
+    entry.indexMemory = nullptr;
   }
   entry = RTXCachedGeometry();
 }
@@ -344,38 +332,30 @@ SoRTXRenderBackend::deferDestroyCacheEntry(RTXCachedGeometry & entry)
   }
   VkDevice device = this->device;
   const VkAllocationCallbacks * allocator = this->allocator;
+  VmaAllocator vma = this->vmaAllocator;
   const PFN_vkDestroyAccelerationStructureKHR vkDestroyAS =
     this->vkDestroyAccelerationStructureKHR;
   const VkAccelerationStructureKHR blas = entry.blas;
   const VkBuffer blasBuffer = entry.blasBuffer;
-  const VkDeviceMemory blasMemory = entry.blasMemory;
+  const VmaAllocation blasMemory = entry.blasMemory;
   const VkBuffer vertexBuffer = entry.vertexBuffer;
-  const VkDeviceMemory vertexMemory = entry.vertexMemory;
+  const VmaAllocation vertexMemory = entry.vertexMemory;
   const VkBuffer indexBuffer = entry.indexBuffer;
-  const VkDeviceMemory indexMemory = entry.indexMemory;
-  this->deferDestroy([device, allocator, vkDestroyAS, blas, blasBuffer,
+  const VmaAllocation indexMemory = entry.indexMemory;
+  this->deferDestroy([device, allocator, vma, vkDestroyAS, blas, blasBuffer,
                       blasMemory, vertexBuffer, vertexMemory, indexBuffer,
                       indexMemory]() {
     if (blas != VK_NULL_HANDLE) {
       vkDestroyAS(device, blas, allocator);
     }
     if (blasBuffer != VK_NULL_HANDLE) {
-      vkDestroyBuffer(device, blasBuffer, allocator);
-    }
-    if (blasMemory != VK_NULL_HANDLE) {
-      vkFreeMemory(device, blasMemory, allocator);
+      vmaDestroyBuffer(vma, blasBuffer, blasMemory);
     }
     if (indexBuffer != VK_NULL_HANDLE) {
-      vkDestroyBuffer(device, indexBuffer, allocator);
-    }
-    if (indexMemory != VK_NULL_HANDLE) {
-      vkFreeMemory(device, indexMemory, allocator);
+      vmaDestroyBuffer(vma, indexBuffer, indexMemory);
     }
     if (vertexBuffer != VK_NULL_HANDLE) {
-      vkDestroyBuffer(device, vertexBuffer, allocator);
-    }
-    if (vertexMemory != VK_NULL_HANDLE) {
-      vkFreeMemory(device, vertexMemory, allocator);
+      vmaDestroyBuffer(vma, vertexBuffer, vertexMemory);
     }
   });
   entry = RTXCachedGeometry();
@@ -386,10 +366,7 @@ SoRTXRenderBackend::freePendingStagingDestroys()
 {
   for (const auto & entry : this->pendingStagingDestroys) {
     if (entry.first != VK_NULL_HANDLE) {
-      vkDestroyBuffer(this->device, entry.first, this->allocator);
-    }
-    if (entry.second != VK_NULL_HANDLE) {
-      vkFreeMemory(this->device, entry.second, this->allocator);
+      vmaDestroyBuffer(this->vmaAllocator, entry.first, entry.second);
     }
   }
   this->pendingStagingDestroys.clear();
@@ -479,7 +456,7 @@ SoRTXRenderBackend::compactBlas(RTXCachedGeometry & entry)
       compactSize >= entry.blasSize) {
     entry.compacted = true;  // nothing to save; stop asking
     entry.wantsCompact = false;
-    if (SoVulkanShared::envString("FC_VULKAN_RT_DEBUG")) {
+    if (SoVulkanConfig::get().rtxDebug.rtDebug) {
       fprintf(stderr, "[RTDBG] compact size=%llu -> %llu saved=0\n",
               static_cast<unsigned long long>(origSize),
               static_cast<unsigned long long>(compactSize));
@@ -488,7 +465,7 @@ SoRTXRenderBackend::compactBlas(RTXCachedGeometry & entry)
   }
 
   VkBuffer cBuf = VK_NULL_HANDLE;
-  VkDeviceMemory cMem = VK_NULL_HANDLE;
+  VmaAllocation cMem = nullptr;
   if (!this->createDeviceLocalBuffer(
         compactSize,
         VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_STORAGE_BIT_KHR |
@@ -505,8 +482,7 @@ SoRTXRenderBackend::compactBlas(RTXCachedGeometry & entry)
   if (vkCreateAccelerationStructureKHR(this->device, &asCI, this->allocator,
                                        &cAs) != VK_SUCCESS ||
       cAs == VK_NULL_HANDLE) {
-    vkDestroyBuffer(this->device, cBuf, this->allocator);
-    vkFreeMemory(this->device, cMem, this->allocator);
+    vmaDestroyBuffer(this->vmaAllocator, cBuf, cMem);
     return false;
   }
 
@@ -535,8 +511,7 @@ SoRTXRenderBackend::compactBlas(RTXCachedGeometry & entry)
 
   if (!ok) {
     vkDestroyAccelerationStructureKHR(this->device, cAs, this->allocator);
-    vkDestroyBuffer(this->device, cBuf, this->allocator);
-    vkFreeMemory(this->device, cMem, this->allocator);
+    vmaDestroyBuffer(this->vmaAllocator, cBuf, cMem);
     return false;
   }
 
@@ -544,7 +519,7 @@ SoRTXRenderBackend::compactBlas(RTXCachedGeometry & entry)
   // reference the old address until the frame that used it completes).
   VkAccelerationStructureKHR oldAs = entry.blas;
   VkBuffer oldBuf = entry.blasBuffer;
-  VkDeviceMemory oldMem = entry.blasMemory;
+  VmaAllocation oldMem = entry.blasMemory;
   entry.blas = cAs;
   entry.blasBuffer = cBuf;
   entry.blasMemory = cMem;
@@ -566,24 +541,23 @@ SoRTXRenderBackend::compactBlas(RTXCachedGeometry & entry)
   // consumed by recordAccelerationStructures to compute asDirty and is the
   // "instance set changed" signal, which is exactly what this is.)
   this->asTransformChanged = true;
-  if (SoVulkanShared::envString("FC_VULKAN_RT_DEBUG")) {
+  if (SoVulkanConfig::get().rtxDebug.rtDebug) {
     fprintf(stderr, "[RTDBG] compact size=%llu -> %llu saved=1\n",
             static_cast<unsigned long long>(origSize),
             static_cast<unsigned long long>(compactSize));
   }
   VkDevice device = this->device;
   const VkAllocationCallbacks * alloc = this->allocator;
+  VmaAllocator vma = this->vmaAllocator;
   const PFN_vkDestroyAccelerationStructureKHR vkDestroyAS =
     this->vkDestroyAccelerationStructureKHR;
-  this->deferDestroy([device, alloc, vkDestroyAS, oldAs, oldBuf, oldMem]() {
+  this->deferDestroy([device, alloc, vma, vkDestroyAS, oldAs, oldBuf,
+                      oldMem]() {
     if (oldAs != VK_NULL_HANDLE) {
       vkDestroyAS(device, oldAs, alloc);
     }
     if (oldBuf != VK_NULL_HANDLE) {
-      vkDestroyBuffer(device, oldBuf, alloc);
-    }
-    if (oldMem != VK_NULL_HANDLE) {
-      vkFreeMemory(device, oldMem, alloc);
+      vmaDestroyBuffer(vma, oldBuf, oldMem);
     }
   });
   return true;
@@ -602,7 +576,7 @@ SoRTXRenderBackend::compactPendingBlases()
       this->compactBlas(entry);
     }
   }
-  if (SoVulkanShared::envString("FC_VULKAN_RT_DEBUG")) {
+  if (SoVulkanConfig::get().rtxDebug.rtDebug) {
     fprintf(stderr, "[RTDBG] compactSweep cache=%zu candidates=%u\n",
             this->geometryCache.size(), candidates);
   }
@@ -642,7 +616,7 @@ SoRTXRenderBackend::updateGeometryCache(const SoDrawList & drawlist)
     const bool indexed = geometry.indexCount > 0 && geometry.indices != nullptr;
 
     const bool traced = (command.pass != SO_RENDERPASS_OVERLAY);
-    if (!traced && SoVulkanShared::envString("FC_VULKAN_RT_GEO") &&
+    if (!traced && SoVulkanConfig::get().rtxDebug.rtGeo &&
         geometry.vertexCount == 6 && geometry.indexCount == 0) {
       fprintf(stderr, "[GCR] FR fr=%u OVERLAY vc=6 cmd=%p pos=%p\n", frame,
               static_cast<const void *>(&command),
@@ -711,7 +685,7 @@ SoRTXRenderBackend::updateGeometryCache(const SoDrawList & drawlist)
     // TEMP breadcrumb: per-frame pointer/thread/retained trace for the probe
     // box so we can see whether the geometry pointer is stable across frames
     // and on which thread updateGeometryCache reads it.
-    if (SoVulkanShared::envString("FC_VULKAN_RT_GEO") &&
+    if (SoVulkanConfig::get().rtxDebug.rtGeo &&
         geometry.indexCount == 0 &&
         (geometry.vertexCount == 36 || geometry.vertexCount == 6)) {
       const float * tp = geometry.positions;
@@ -811,7 +785,7 @@ SoRTXRenderBackend::updateGeometryCache(const SoDrawList & drawlist)
           ((entry.idxKey != nullptr) == indexed) &&
           entry.indexHash == indexHash;
         this->cacheChanged = true;
-        if (SoVulkanShared::envString("FC_VULKAN_RT_GEO")) {
+        if (SoVulkanConfig::get().rtxDebug.rtGeo) {
           const float * p0 = static_cast<const float *>(geometry.positions);
           fprintf(stderr,
                   "[GCR] CONTENT fr=%u tid=%llx cmd=%p pass=%d vc=%u ic=%u "
@@ -901,7 +875,7 @@ SoRTXRenderBackend::updateGeometryCache(const SoDrawList & drawlist)
       }
       else {
         this->cacheChanged = true;
-        if (SoVulkanShared::envString("FC_VULKAN_RT_GEO")) {
+        if (SoVulkanConfig::get().rtxDebug.rtGeo) {
           fprintf(stderr,
                   "[GCR] NEW fr=%u tid=%llx cmd=%p pass=%d vc=%u ic=%u "
                   "stride=%u ret=%d pos=%p hash=%016llx\n",
@@ -940,7 +914,7 @@ SoRTXRenderBackend::updateGeometryCache(const SoDrawList & drawlist)
       if (std::memcmp(entryPtr->transformBits, m,
                       sizeof(entryPtr->transformBits)) != 0) {
         this->asTransformChanged = true;
-        if (SoVulkanShared::envString("FC_VULKAN_RT_GEO")) {
+        if (SoVulkanConfig::get().rtxDebug.rtGeo) {
           fprintf(stderr, "[GCR] TRANSFORM cmd=%p pass=%d vc=%u\n",
                   static_cast<const void *>(&command),
                   static_cast<int>(command.pass), geometry.vertexCount);
@@ -961,7 +935,7 @@ SoRTXRenderBackend::updateGeometryCache(const SoDrawList & drawlist)
       const uint64_t mh = hashMaterial(command.material);
       if (mh != 0 && mh != entryPtr->materialHash) {
         this->cacheChanged = true;
-        if (SoVulkanShared::envString("FC_VULKAN_RT_GEO")) {
+        if (SoVulkanConfig::get().rtxDebug.rtGeo) {
           fprintf(stderr, "[GCR] MATERIAL cmd=%p pass=%d vc=%u old=%016llx new=%016llx\n",
                   static_cast<const void *>(&command),
                   static_cast<int>(command.pass), geometry.vertexCount,
@@ -988,7 +962,7 @@ SoRTXRenderBackend::updateGeometryCache(const SoDrawList & drawlist)
     }
   }
   if (anyStale) {
-    if (SoVulkanShared::envString("FC_VULKAN_RT_GEO")) {
+    if (SoVulkanConfig::get().rtxDebug.rtGeo) {
       size_t nstale = 0;
       for (size_t i = 0; i < this->geometryCache.size(); ++i) {
         if (this->geometryCache[i].cacheGeneration != frame) {
@@ -1111,7 +1085,7 @@ SoRTXRenderBackend::blasBuildOrRefit(RTXCachedGeometry & entry,
   const uint32_t posStrideFloats = entry.vertexStride / sizeof(float);
   const char * tag = refit ? "refitBlas" : "buildBlas";
 
-  if (SoVulkanShared::envString("FC_VULKAN_RT_DEBUG")) {
+  if (SoVulkanConfig::get().rtxDebug.rtDebug) {
     static uint32_t blasSeq = 0;
     fprintf(stderr,
             "[RTDBG] %s #%u verts=%u idx=%u stride=%u indexed=%d "
@@ -1184,7 +1158,7 @@ SoRTXRenderBackend::blasBuildOrRefit(RTXCachedGeometry & entry,
   else {
     vertexSrc = positions.data();
   }
-  if (SoVulkanShared::envString("FC_VULKAN_RT_DEBUG")) {
+  if (SoVulkanConfig::get().rtxDebug.rtDebug) {
     fprintf(stderr, "[RTDBG] blasFmt %s packed=%d stride=%u fmt=0x%x\n",
             tag, useHalf ? 1 : 0, entry.blasVertexStride,
             static_cast<unsigned>(entry.blasVertexFormat));
@@ -1219,49 +1193,44 @@ SoRTXRenderBackend::blasBuildOrRefit(RTXCachedGeometry & entry,
   }
 
   VkBuffer staging = VK_NULL_HANDLE;
-  VkDeviceMemory stagingMemory = VK_NULL_HANDLE;
+  VmaAllocation stagingMemory = nullptr;
   if (!this->createHostVisibleBuffer(vertexBytes,
                                      VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
                                      staging, stagingMemory)) {
     return false;
   }
   void * mapped = nullptr;
-  if (vkMapMemory(this->device, stagingMemory, 0, vertexBytes, 0, &mapped) !=
-        VK_SUCCESS ||
+  if (vmaMapMemory(this->vmaAllocator, stagingMemory, &mapped) != VK_SUCCESS ||
       mapped == nullptr) {
     this->emitError(
-      (std::string(tag) + ": vkMapMemory (vertex staging) failed").c_str());
-    vkDestroyBuffer(this->device, staging, this->allocator);
-    vkFreeMemory(this->device, stagingMemory, this->allocator);
+      (std::string(tag) + ": vmaMapMemory (vertex staging) failed").c_str());
+    vmaDestroyBuffer(this->vmaAllocator, staging, stagingMemory);
     return false;
   }
   std::memcpy(mapped, vertexSrc, static_cast<size_t>(vertexBytes));
-  vkUnmapMemory(this->device, stagingMemory);
+  vmaUnmapMemory(this->vmaAllocator, stagingMemory);
 
   VkBuffer indexStaging = VK_NULL_HANDLE;
-  VkDeviceMemory indexStagingMemory = VK_NULL_HANDLE;
+  VmaAllocation indexStagingMemory = nullptr;
   if (indexed && !refit) {
     if (!this->createHostVisibleBuffer(indexBytes,
                                        VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
                                        indexStaging, indexStagingMemory)) {
-      vkDestroyBuffer(this->device, staging, this->allocator);
-      vkFreeMemory(this->device, stagingMemory, this->allocator);
+      vmaDestroyBuffer(this->vmaAllocator, staging, stagingMemory);
       return false;
     }
     void * imapped = nullptr;
-    if (vkMapMemory(this->device, indexStagingMemory, 0, indexBytes, 0,
-                    &imapped) != VK_SUCCESS ||
+    if (vmaMapMemory(this->vmaAllocator, indexStagingMemory, &imapped) !=
+          VK_SUCCESS ||
         imapped == nullptr) {
       this->emitError(
-        (std::string(tag) + ": vkMapMemory (index staging) failed").c_str());
-      vkDestroyBuffer(this->device, staging, this->allocator);
-      vkFreeMemory(this->device, stagingMemory, this->allocator);
-      vkDestroyBuffer(this->device, indexStaging, this->allocator);
-      vkFreeMemory(this->device, indexStagingMemory, this->allocator);
+        (std::string(tag) + ": vmaMapMemory (index staging) failed").c_str());
+      vmaDestroyBuffer(this->vmaAllocator, staging, stagingMemory);
+      vmaDestroyBuffer(this->vmaAllocator, indexStaging, indexStagingMemory);
       return false;
     }
     std::memcpy(imapped, geometry.indices, static_cast<size_t>(indexBytes));
-    vkUnmapMemory(this->device, indexStagingMemory);
+    vmaUnmapMemory(this->vmaAllocator, indexStagingMemory);
   }
 
   VkBufferCopy vertexCopy {};
@@ -1272,14 +1241,11 @@ SoRTXRenderBackend::blasBuildOrRefit(RTXCachedGeometry & entry,
     indexCopy.size = indexBytes;
     vkCmdCopyBuffer(cmd, indexStaging, entry.indexBuffer, 1, &indexCopy);
   }
-  VkMemoryBarrier copyBarrier {};
-  copyBarrier.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
-  copyBarrier.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
-  copyBarrier.dstAccessMask =
-    VK_ACCESS_ACCELERATION_STRUCTURE_READ_BIT_KHR;
-  vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_TRANSFER_BIT,
-                       VK_PIPELINE_STAGE_ACCELERATION_STRUCTURE_BUILD_BIT_KHR,
-                       0, 1, &copyBarrier, 0, nullptr, 0, nullptr);
+  SoVulkanShared::memoryBarrier(
+    cmd, VK_PIPELINE_STAGE_TRANSFER_BIT,
+    VK_PIPELINE_STAGE_ACCELERATION_STRUCTURE_BUILD_BIT_KHR,
+    VK_ACCESS_TRANSFER_WRITE_BIT,
+    VK_ACCESS_ACCELERATION_STRUCTURE_READ_BIT_KHR);
 
   // The staging buffers are referenced by the copy commands recorded above;
   // destroying them now would invalidate this command buffer.  Defer the
@@ -1385,6 +1351,9 @@ SoRTXRenderBackend::blasBuildOrRefit(RTXCachedGeometry & entry,
                                          &entry.blas) != VK_SUCCESS) {
       return false;
     }
+    SoVulkanDebugUtils::nameObject(
+      this->device, VK_OBJECT_TYPE_ACCELERATION_STRUCTURE_KHR,
+      reinterpret_cast<uint64_t>(entry.blas), "RT BLAS");
     // Capture the BLAS device address now.  It is constant for the lifetime of
     // the BLAS, so the per-frame instance collection in buildTlas() reuses it
     // instead of calling vkGetAccelerationStructureDeviceAddressKHR every frame.
@@ -1407,14 +1376,11 @@ SoRTXRenderBackend::blasBuildOrRefit(RTXCachedGeometry & entry,
   const VkAccelerationStructureBuildRangeInfoKHR * rangeInfos[] = {&rangeInfo};
   vkCmdBuildAccelerationStructuresKHR(cmd, 1, &buildInfo, rangeInfos);
 
-  VkMemoryBarrier blasBarrier {};
-  blasBarrier.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
-  blasBarrier.srcAccessMask = VK_ACCESS_ACCELERATION_STRUCTURE_WRITE_BIT_KHR;
-  blasBarrier.dstAccessMask = VK_ACCESS_ACCELERATION_STRUCTURE_READ_BIT_KHR;
-  vkCmdPipelineBarrier(cmd,
-                       VK_PIPELINE_STAGE_ACCELERATION_STRUCTURE_BUILD_BIT_KHR,
-                       VK_PIPELINE_STAGE_ACCELERATION_STRUCTURE_BUILD_BIT_KHR,
-                       0, 1, &blasBarrier, 0, nullptr, 0, nullptr);
+  SoVulkanShared::memoryBarrier(
+    cmd, VK_PIPELINE_STAGE_ACCELERATION_STRUCTURE_BUILD_BIT_KHR,
+    VK_PIPELINE_STAGE_ACCELERATION_STRUCTURE_BUILD_BIT_KHR,
+    VK_ACCESS_ACCELERATION_STRUCTURE_WRITE_BIT_KHR,
+    VK_ACCESS_ACCELERATION_STRUCTURE_READ_BIT_KHR);
 
   if (refit) {
     entry.refitPending = false;
@@ -1496,6 +1462,19 @@ SoRTXRenderBackend::buildTlas(const SoDrawList & drawlist,
   std::vector<VkAccelerationStructureInstanceKHR> & instances =
     this->instanceScratch;
   instances.clear();
+
+  // Snapshot the producer identity for every draw-list command index so a
+  // later ray-query pick can resolve a hit after this frame's draw list is
+  // gone.  instanceCustomIndex is the command index (see the instance fill
+  // below), so this vector is indexed directly by it.  Vulkan/RTX only: the
+  // GL renderer and raster Vulkan path never build a TLAS and never read this.
+  this->pickCommandInfo.resize(static_cast<size_t>(drawlist.getNumCommands()));
+  for (int i = 0; i < drawlist.getNumCommands(); ++i) {
+    const SoRenderCommand & command = drawlist.getCommand(i);
+    RTPickCommandInfo & info = this->pickCommandInfo[static_cast<size_t>(i)];
+    info.userData = command.userData;
+    info.primitiveOffset = command.geometry.primitiveOffset;
+  }
 
   // Instance culling (frustum + sub-pixel).  Dropping off-screen instances
   // and instances whose projected footprint is below FC_VULKAN_TLAS_PIX
@@ -1646,7 +1625,7 @@ SoRTXRenderBackend::buildTlas(const SoDrawList & drawlist,
   }
   this->instanceCount = static_cast<uint32_t>(instances.size());
 
-  if (SoVulkanShared::envString("FC_VULKAN_RT_DEBUG")) {
+  if (SoVulkanConfig::get().rtxDebug.rtDebug) {
     if (!this->lastTlasDebugLogged || this->lastTlasTotal != instances.size() ||
         this->lastTlasCulled != this->statTlasCulled) {
       fprintf(stderr,
@@ -1672,16 +1651,14 @@ SoRTXRenderBackend::buildTlas(const SoDrawList & drawlist,
         this->instanceBufferCapacity < instances.size()) {
       if (this->instanceBuffer != VK_NULL_HANDLE) {
         // Defer: a pending frame may still read the old instance buffer.
-        VkDevice device = this->device;
-        const VkAllocationCallbacks * allocator = this->allocator;
+        VmaAllocator vma = this->vmaAllocator;
         const VkBuffer buffer = this->instanceBuffer;
-        const VkDeviceMemory memory = this->instanceMemory;
-        this->deferDestroy([device, allocator, buffer, memory]() {
-          vkDestroyBuffer(device, buffer, allocator);
-          vkFreeMemory(device, memory, allocator);
+        const VmaAllocation memory = this->instanceMemory;
+        this->deferDestroy([vma, buffer, memory]() {
+          vmaDestroyBuffer(vma, buffer, memory);
         });
         this->instanceBuffer = VK_NULL_HANDLE;
-        this->instanceMemory = VK_NULL_HANDLE;
+        this->instanceMemory = nullptr;
       }
       if (!this->createHostVisibleBuffer(
             instanceBytes,
@@ -1693,12 +1670,11 @@ SoRTXRenderBackend::buildTlas(const SoDrawList & drawlist,
       this->instanceBufferCapacity = static_cast<uint32_t>(instances.size());
     }
     void * mapped = nullptr;
-    if (vkMapMemory(this->device, this->instanceMemory, 0, instanceBytes, 0,
-                    &mapped) != VK_SUCCESS) {
+    if (vmaMapMemory(this->vmaAllocator, this->instanceMemory, &mapped) != VK_SUCCESS) {
       return false;
     }
     std::memcpy(mapped, instances.data(), static_cast<size_t>(instanceBytes));
-    vkUnmapMemory(this->device, this->instanceMemory);
+    vmaUnmapMemory(this->vmaAllocator, this->instanceMemory);
   }
 
   // TLAS build sizes.
@@ -1745,8 +1721,7 @@ SoRTXRenderBackend::buildTlas(const SoDrawList & drawlist,
     if (this->tlas != VK_NULL_HANDLE) {
       vkDestroyAccelerationStructureKHR(this->device, this->tlas,
                                         this->allocator);
-      vkDestroyBuffer(this->device, this->tlasBuffer, this->allocator);
-      vkFreeMemory(this->device, this->tlasMemory, this->allocator);
+      vmaDestroyBuffer(this->vmaAllocator, this->tlasBuffer, this->tlasMemory);
       this->tlas = VK_NULL_HANDLE;
       this->tlasBuffer = VK_NULL_HANDLE;
       this->tlasMemory = VK_NULL_HANDLE;
@@ -1773,6 +1748,9 @@ SoRTXRenderBackend::buildTlas(const SoDrawList & drawlist,
                                          &this->tlas) != VK_SUCCESS) {
       return false;
     }
+    SoVulkanDebugUtils::nameObject(
+      this->device, VK_OBJECT_TYPE_ACCELERATION_STRUCTURE_KHR,
+      reinterpret_cast<uint64_t>(this->tlas), "RT TLAS");
     if (!this->updateDescriptors()) {
       return false;
     }
@@ -1827,28 +1805,21 @@ SoRTXRenderBackend::updateMaterials(const SoDrawList & drawlist)
       bytes > this->materialBufferBytes) {
     if (this->materialBuffer != VK_NULL_HANDLE) {
       // Defer: a pending frame may still read the old material buffer.
-      VkDevice device = this->device;
-      const VkAllocationCallbacks * allocator = this->allocator;
+      VmaAllocator vma = this->vmaAllocator;
       const VkBuffer buffer = this->materialBuffer;
-      const VkDeviceMemory memory = this->materialMemory;
-      this->deferDestroy([device, allocator, buffer, memory]() {
-        vkUnmapMemory(device, memory);
-        vkDestroyBuffer(device, buffer, allocator);
-        vkFreeMemory(device, memory, allocator);
+      const VmaAllocation memory = this->materialMemory;
+      this->deferDestroy([vma, buffer, memory]() {
+        vmaDestroyBuffer(vma, buffer, memory);
       });
       this->materialBuffer = VK_NULL_HANDLE;
-      this->materialMemory = VK_NULL_HANDLE;
+      this->materialMemory = nullptr;
       this->materialMapped = nullptr;
     }
     if (!this->createHostVisibleBuffer(
           bytes, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
-          this->materialBuffer, this->materialMemory)) {
+          this->materialBuffer, this->materialMemory,
+          &this->materialMapped)) {
       this->emitError("updateMaterials: failed to create material buffer");
-      return;
-    }
-    if (vkMapMemory(this->device, this->materialMemory, 0, bytes, 0,
-                    &this->materialMapped) != VK_SUCCESS) {
-      this->materialMapped = nullptr;
       return;
     }
     this->materialBufferBytes = bytes;

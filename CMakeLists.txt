@@ -326,6 +326,10 @@ if(COIN_BUILD_VULKAN_RENDERER)
     list(APPEND COIN_TARGET_INCLUDE_DIRECTORIES ${Vulkan_INCLUDE_DIRS})
     list(APPEND COIN_TARGET_LINK_LIBRARIES ${Vulkan_LIBRARIES})
   endif()
+  # Vendored Vulkan Memory Allocator (header-only; the implementation is
+  # compiled once from rendering/third_party/vma/vk_mem_alloc_impl.cpp).
+  list(APPEND COIN_TARGET_INCLUDE_DIRECTORIES
+       ${PROJECT_SOURCE_DIR}/src/rendering/third_party/vma)
   set(HAVE_VULKAN 1)
   # Optional: Intel Open Image Denoise for the path tracing denoise pass.
   # When absent the RTX backend falls back to the in-shader edge-stopping

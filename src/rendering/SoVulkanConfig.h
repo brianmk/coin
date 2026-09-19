@@ -46,6 +46,26 @@ struct GeometryLod {
   uint32_t maxIndices = 64000000u;
 };
 
+// Ray-tracing / path-tracing diagnostics.  Presence-only (any value, including
+// "0", enables) except rtDebugFill, which keeps the historical "0"/"false"/
+// "off" opt-out; each field documents the flag it resolves.
+struct RtxDebug {
+  //! FC_VULKAN_RT_DEBUG: TLAS/BLAS build and ptState per-frame diagnostics.
+  bool rtDebug = false;
+  //! FC_VULKAN_RT_GEO: per-command BLAS geometry diagnostics.
+  bool rtGeo = false;
+  //! FC_VULKAN_RT_DEBUG_FILL: constant-fill debug output for traced triangles.
+  bool rtDebugFill = false;
+  //! FC_VULKAN_PT_DEBUG: path-tracer debug output.
+  bool ptDebug = false;
+  //! FC_VULKAN_PT_DENOISER_DEBUG: denoiser diagnostics.
+  bool denoiserDebug = false;
+  //! FC_VULKAN_PT_DENOISE_TIMING: denoise phase timings.
+  bool denoiseTiming = false;
+  //! FC_VULKAN_ASYNC_COMPUTE_TIMING: async-compute overlap timings.
+  bool asyncComputeTiming = false;
+};
+
 // Ray-tracing TLAS instance culling (frustum + sub-pixel).
 struct RtxCull {
   //! Instance culling master switch.  FC_VULKAN_TLAS_CULL; default OFF
@@ -91,12 +111,6 @@ struct RayTracing {
   bool sbtPipeline = false;
 };
 
-// Device-memory sub-allocator (raster backend).
-struct MemoryPool {
-  //! FC_VULKAN_MEM_POOL; default off (legacy vkAllocateMemory path).
-  bool enabled = false;
-};
-
 // Command recording / queue concurrency.
 struct Concurrency {
   //! Parallel command recording.  FC_VULKAN_PARALLEL_RECORD; default off.
@@ -119,15 +133,34 @@ struct Raster {
   bool wideLineCpu = false;
 };
 
+// Vulkan diagnostic tooling.  All default off and must be zero-cost (or
+// near-zero) when disabled; they exist to make captures and measurements
+// readable, never to change rendered output.
+struct Diagnostics {
+  //! VK_EXT_debug_utils object names and command-buffer labels.
+  //! FC_VULKAN_DEBUG_UTILS; default off.
+  bool debugUtils = false;
+  //! VK_EXT_debug_printf shader-side diagnostics (debug shader variants).
+  //! FC_VULKAN_DEBUG_PRINTF; default off.
+  bool debugPrintf = false;
+  //! Per-pass GPU timestamps (VK_QUERY_TYPE_TIMESTAMP).
+  //! FC_VULKAN_GPU_TIMING; default off.
+  bool gpuTimestamps = false;
+  //! VK_EXT_pipeline_creation_feedback logging (cache hit + creation cost).
+  //! FC_VULKAN_PIPELINE_FEEDBACK; default off.
+  bool pipelineFeedback = false;
+};
+
 struct Config {
   GeometryLod geometryLod;
+  RtxDebug rtxDebug;
   RtxCull rtxCull;
   PathTracing pathTracing;
   AccelerationStructures accelerationStructures;
   RayTracing rayTracing;
-  MemoryPool memoryPool;
   Concurrency concurrency;
   Raster raster;
+  Diagnostics diagnostics;
 };
 
 /*!

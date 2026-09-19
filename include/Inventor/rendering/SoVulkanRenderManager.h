@@ -25,6 +25,7 @@
 #include <Inventor/SbVec2s.h>
 #include <Inventor/SbVec3f.h>
 #include <Inventor/rendering/SoRenderIR.h>
+#include <string>
 #include <vector>
 
 // Pull in Vulkan handle types for renderExternal().  This header is only
@@ -196,6 +197,18 @@ public:
     first render when the caller submits frames concurrently.
   */
   void setMaxFramesInFlight(uint32_t count);
+
+  /*!
+    \brief Path of a persistent (on-disk) Vulkan pipeline cache.
+
+    When non-empty, initialize() loads the file's bytes as the initial
+    pipeline-cache data and shutdown() writes the driver's cache blob back, so
+    the lazily-created pipeline variants survive a process restart.  The
+    embedding application owns the path and must create its directory; a
+    missing, corrupt or stale (different device/driver) file is ignored and an
+    empty cache is created.  Set it before initialize().
+  */
+  void setPipelineCachePath(const std::string & path);
 
   /*!
     \brief Shut down the owned backend while the Vulkan device/queue are
@@ -395,6 +408,40 @@ public:
 
   //! The RT backend, or NULL when ray tracing is unavailable.
   SoRTXRenderBackend * getRayTracingBackend(void) const;
+
+  /*!
+    \brief One GPU ray-query pick result (see pickRay()).
+
+    Plain POD so an embedding does not need the RTX backend's internal header.
+    \a commandIndex is the TLAS instance custom index (the draw-list command
+    index); \a primitiveId is the triangle index within that command's BLAS.
+    Vulkan/RTX only.
+  */
+  struct VulkanPickHit {
+    bool hit = false;
+    float t = -1.0f;
+    float worldPos[3] = {0.0f, 0.0f, 0.0f};
+    uint32_t commandIndex = 0;
+    uint32_t primitiveId = 0;
+    // Resolved producer identity: the originating SoShape
+    // (SoRenderCommand::userData) and the command's primitive offset within
+    // the source shape.  userData is null when the command index is out of
+    // range.
+    const void * userData = nullptr;
+    uint32_t primitiveOffset = 0;
+  };
+
+  /*!
+    \brief Cast one world-space ray against the ray-tracing backend's TLAS and
+    return the closest triangle hit.
+
+    Returns false when ray tracing is not active or no TLAS has been built yet;
+    the caller then keeps the CPU picking path.  Intended to be called from the
+    GUI thread (the same thread that drives rendering), so it does not race a
+    frame submission.
+  */
+  bool pickRay(const float origin[3], const float direction[3], float tMax,
+               VulkanPickHit & out) const;
 
   //! Ordinal of the last presented frame (1-based; 0 before the first render).
   //! Bumped exactly once per render()/renderExternal() and copied into that

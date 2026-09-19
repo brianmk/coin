@@ -89,6 +89,14 @@ struct SoGeometryDesc {
   uint32_t            vertexStride = 0;   //!< Position/normal stride in bytes.
   uint32_t            texcoordStride = 0; //!< Texture-coordinate stride in bytes.
 
+  //!< Index of this command's first primitive within the source shape's
+  //!< primitive stream.  A shape whose material changes partway is split into
+  //!< several contiguous commands (see soshape_emit_ir_commands); each carries
+  //!< the offset so a backend can map a per-command primitive id back to a
+  //!< global primitive index (e.g. a SoBrepFaceSet face via partIndex).  Zero
+  //!< when the command covers the shape from its start.
+  uint32_t            primitiveOffset = 0;
+
   //!< Lifetime owners for the borrowed streams above.  When set, this command
   //!< co-owns the storage its raw pointers refer to (the pointers may be
   //!< offsets into these buffers), so the storage outlives the command even

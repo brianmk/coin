@@ -15,6 +15,9 @@
 #include "rendering/SoVulkanRenderBackend.h"
 #include "rendering/SoVulkanRenderBackend/SoVulkanRenderBackendP.h"
 #include "rendering/SoVulkanConfig.h"
+#include "rendering/SoVulkanDebugUtils.h"
+
+#include "vk_mem_alloc.h"
 
 #include <Inventor/elements/SoDrawStyleElement.h>
 #include <Inventor/errors/SoDebugError.h>
@@ -205,6 +208,11 @@ SoVulkanRenderBackend::shutdown()
 
   vkQueueWaitIdle(this->queue);
 
+  // Destroy the timestamp query pool now, while the VkDevice is still alive;
+  // the destructor would otherwise run after device teardown
+  // (VUID-vkDestroyQueryPool-device-parameter).
+  this->gpuTimers.shutdown();
+
   // The queue is idle, so every deferred resource is safe to release now.
   this->flushAllPendingDestroys();
 
@@ -221,25 +229,17 @@ SoVulkanRenderBackend::shutdown()
 
   this->invalidateCache();
   this->destroyAllGeometryBlocks();
+  // invalidateCache()/destroyAllGeometryBlocks() release their cached command
+  // buffers (vertex/index/instanced-line/sub-pixel) through deferDestroy(),
+  // because a frame may still have referenced them when they were evicted.
+  // The queue is idle here, so flush that batch now; without it those buffers
+  // and their device memory leak past vkDestroyDevice
+  // (VUID-vkDestroyDevice-device-05137).
+  this->flushAllPendingDestroys();
 
-  for (auto & entry : this->pipelineCache) {
-    if (entry.second != VK_NULL_HANDLE) {
-      vkDestroyPipeline(this->device, entry.second, this->allocator);
-    }
-  }
-  this->pipelineCache.clear();
-  if (this->pipelineCacheHandle != VK_NULL_HANDLE) {
-    vkDestroyPipelineCache(this->device, this->pipelineCacheHandle,
-                           this->allocator);
-    this->pipelineCacheHandle = VK_NULL_HANDLE;
-  }
-
-  for (auto & entry : this->backgroundPipelineCache) {
-    if (entry.second != VK_NULL_HANDLE) {
-      vkDestroyPipeline(this->device, entry.second, this->allocator);
-    }
-  }
-  this->backgroundPipelineCache.clear();
+  // Persist the driver's blob and destroy every cached pipeline + the
+  // VkPipelineCache handle (see SoVulkanPipelineCache).
+  this->pipelines.shutdown();
 
   // The render-pass/framebuffer cache owns the current pass + framebuffer;
   // releasing it after the deferred destroys flush above (queue is idle).
@@ -309,55 +309,39 @@ SoVulkanRenderBackend::shutdown()
     vkDestroyPipelineLayout(this->device, this->pipelineLayout, this->allocator);
     this->pipelineLayout = VK_NULL_HANDLE;
   }
-  if (this->instanceModelMapped != nullptr) {
-    vkUnmapMemory(this->device, this->instanceModelMemory);
-    this->instanceModelMapped = nullptr;
-  }
   if (this->instanceModelBuffer != VK_NULL_HANDLE) {
-    vkDestroyBuffer(this->device, this->instanceModelBuffer, this->allocator);
+    // vmaDestroyBuffer releases the buffer, its memory and the persistent host
+    // mapping together, so no explicit vkUnmapMemory is needed.
+    vmaDestroyBuffer(this->vmaAllocator, this->instanceModelBuffer,
+                     this->instanceModelMemory);
     this->instanceModelBuffer = VK_NULL_HANDLE;
+    this->instanceModelMemory = nullptr;
   }
-  if (this->instanceModelMemory != VK_NULL_HANDLE) {
-    vkFreeMemory(this->device, this->instanceModelMemory, this->allocator);
-    this->instanceModelMemory = VK_NULL_HANDLE;
-  }
+  this->instanceModelMapped = nullptr;
   this->instanceModelCapacity = 0;
-  if (this->lightingMapped != nullptr) {
-    vkUnmapMemory(this->device, this->lightingMemory);
-    this->lightingMapped = nullptr;
-  }
   if (this->lightingBuffer != VK_NULL_HANDLE) {
-    vkDestroyBuffer(this->device, this->lightingBuffer, this->allocator);
+    vmaDestroyBuffer(this->vmaAllocator, this->lightingBuffer,
+                     this->lightingMemory);
     this->lightingBuffer = VK_NULL_HANDLE;
+    this->lightingMemory = nullptr;
   }
-  if (this->lightingMemory != VK_NULL_HANDLE) {
-    vkFreeMemory(this->device, this->lightingMemory, this->allocator);
-    this->lightingMemory = VK_NULL_HANDLE;
-  }
-  if (this->lightingConstMapped != nullptr) {
-    vkUnmapMemory(this->device, this->lightingConstMemory);
-    this->lightingConstMapped = nullptr;
-  }
+  this->lightingMapped = nullptr;
   if (this->lightingConstBuffer != VK_NULL_HANDLE) {
-    vkDestroyBuffer(this->device, this->lightingConstBuffer, this->allocator);
+    vmaDestroyBuffer(this->vmaAllocator, this->lightingConstBuffer,
+                     this->lightingConstMemory);
     this->lightingConstBuffer = VK_NULL_HANDLE;
+    this->lightingConstMemory = nullptr;
   }
-  if (this->lightingConstMemory != VK_NULL_HANDLE) {
-    vkFreeMemory(this->device, this->lightingConstMemory, this->allocator);
-    this->lightingConstMemory = VK_NULL_HANDLE;
-  }
+  this->lightingConstMapped = nullptr;
   this->lightingDescriptorSet = VK_NULL_HANDLE;
-  if (this->stagingPoolMapped != nullptr) {
-    vkUnmapMemory(this->device, this->stagingPoolMemory);
-    this->stagingPoolMapped = nullptr;
-  }
   if (this->stagingPoolBuffer != VK_NULL_HANDLE) {
-    vkDestroyBuffer(this->device, this->stagingPoolBuffer, this->allocator);
+    // vmaDestroyBuffer releases the buffer, its memory and the persistent host
+    // mapping together.
+    vmaDestroyBuffer(this->vmaAllocator, this->stagingPoolBuffer,
+                     this->stagingPoolAllocation);
     this->stagingPoolBuffer = VK_NULL_HANDLE;
-  }
-  if (this->stagingPoolMemory != VK_NULL_HANDLE) {
-    vkFreeMemory(this->device, this->stagingPoolMemory, this->allocator);
-    this->stagingPoolMemory = VK_NULL_HANDLE;
+    this->stagingPoolAllocation = nullptr;
+    this->stagingPoolMapped = nullptr;
   }
   this->stagingPoolCapacity = 0;
   this->stagingPoolCursor = 0;
@@ -376,12 +360,10 @@ SoVulkanRenderBackend::shutdown()
     this->whiteImageView = VK_NULL_HANDLE;
   }
   if (this->whiteImage != VK_NULL_HANDLE) {
-    vkDestroyImage(this->device, this->whiteImage, this->allocator);
+    vmaDestroyImage(this->vmaAllocator, this->whiteImage,
+                    this->whiteImageAllocation);
     this->whiteImage = VK_NULL_HANDLE;
-  }
-  if (this->whiteImageMemory != VK_NULL_HANDLE) {
-    vkFreeMemory(this->device, this->whiteImageMemory, this->allocator);
-    this->whiteImageMemory = VK_NULL_HANDLE;
+    this->whiteImageAllocation = nullptr;
   }
   this->whiteDescriptorSet = VK_NULL_HANDLE;
   for (VkDescriptorPool pool : this->descriptorPools) {
@@ -416,13 +398,14 @@ SoVulkanRenderBackend::shutdown()
     }
   }
   this->secondaryCommandPools.clear();
-  if (this->memPool) {
+  if (this->vmaAllocator != nullptr) {
     // Queue is idle and every deferred destroy has been flushed, so all
-    // sub-allocated ranges are free and every block can be released.
-    this->memPool->destroyAll();
-    this->memPool.reset();
+    // allocations are free and the allocator (and its blocks) can be released.
+    vmaDestroyAllocator(this->vmaAllocator);
+    this->vmaAllocator = nullptr;
   }
 
+  this->instance = VK_NULL_HANDLE;
   this->physicalDevice = VK_NULL_HANDLE;
   this->device = VK_NULL_HANDLE;
   this->queue = VK_NULL_HANDLE;
@@ -615,6 +598,14 @@ SoVulkanRenderBackend::renderInternal(const SoDrawList & drawlist,
     this->emitError("failed to begin Vulkan command buffer");
     return FALSE;
   }
+  SoVulkanDebugUtils::beginLabel(this->currentCommandBuffer(),
+                                 overlaysOnly ? "Coin raster frame (overlays)"
+                                              : "Coin raster frame");
+  if (SoVulkanConfig::get().diagnostics.gpuTimestamps &&
+      !this->gpuTimers.initialized()) {
+    this->gpuTimers.initialize(this->device, this->physicalDevice,
+                               this->queueFamilyIndex);
+  }
 
   // The framebuffer is cached for the current target identity (image views +
   // extent + render pass) and recreated whenever any of those change.  The
@@ -639,10 +630,12 @@ SoVulkanRenderBackend::renderInternal(const SoDrawList & drawlist,
   // are recorded below, after the copies, and the descriptor sets they bind
   // must already exist.  Staging buffers are released through the deferred
   // ring once the slot fence signals.
+  this->gpuTimers.beginScope(this->currentCommandBuffer(), "textureUploads");
   if (!this->recordPendingTextureUploads()) {
     this->emitError("failed to record texture uploads");
   }
   this->finalizePendingTextureUploads();
+  this->gpuTimers.endScope(this->currentCommandBuffer());
 
   VkRenderPassBeginInfo rpbi {};
   rpbi.sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO;
@@ -679,6 +672,10 @@ SoVulkanRenderBackend::renderInternal(const SoDrawList & drawlist,
   // inline fallback (canUseSecondary == false) instead.
   vkCmdBeginRenderPass(this->currentCommandBuffer(), &rpbi,
                        VK_SUBPASS_CONTENTS_INLINE_AND_SECONDARY_COMMAND_BUFFERS_EXT);
+  SoVulkanDebugUtils::beginLabel(this->currentCommandBuffer(),
+                                 overlaysOnly ? "overlay pass" : "opaque pass",
+                                 0.9f, 0.6f, 0.2f);
+  this->gpuTimers.beginScope(this->currentCommandBuffer(), "renderPass");
 
   this->recordContext.buffer = this->currentCommandBuffer();
   bool recorded = true;
@@ -698,12 +695,16 @@ SoVulkanRenderBackend::renderInternal(const SoDrawList & drawlist,
   }
   this->recordContext.buffer = VK_NULL_HANDLE;
 
+  this->gpuTimers.endScope(this->currentCommandBuffer());
+  SoVulkanDebugUtils::endLabel(this->currentCommandBuffer());
   vkCmdEndRenderPass(this->currentCommandBuffer());
+  SoVulkanDebugUtils::endLabel(this->currentCommandBuffer());
 
   // Submit even when recordFrame() failed: an unsubmitted one-shot command
   // buffer cannot be reused, and a partial frame is preferable to a dead
   // backend.
   const bool submitted = this->endAndSubmit();
+  this->gpuTimers.endFrame();
   if (!submitted) {
     this->emitError("failed to submit Vulkan command buffer");
     return FALSE;
@@ -727,6 +728,12 @@ SoVulkanRenderBackend::renderOverlaysOnly(const SoDrawList & drawlist,
                                           const SoRenderParams & params)
 {
   return this->renderInternal(drawlist, params, true);
+}
+
+void
+SoVulkanRenderBackend::setOverlayCompositeMode(SbBool enabled)
+{
+  this->overlayCompositeMode = enabled != FALSE;
 }
 
 SbBool
@@ -1074,7 +1081,7 @@ SoVulkanRenderBackend::buildWorkItems(const SoDrawList & drawlist,
 
   // M1d: when the opaque pass is recorded in parallel, pre-resolve every
   // recordToSecondary item's pipeline here (single-threaded).  getOrCreatePipeline()
-  // mutates the shared pipelineCache/gpuCache on its cold path, so warming each
+  // mutates the shared pipeline store/gpuCache on its cold path, so warming each
   // key ahead of the dispatch means the parallel recorders only hit the read-only
   // warm fast path and never race on the cache.  Opaque items use the default
   // (non-transparent, no fill-mode override, not an overlay) recording state.

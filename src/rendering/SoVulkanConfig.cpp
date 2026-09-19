@@ -104,6 +104,19 @@ Config load()
   c.geometryLod.maxIndices =
     readPositiveUint("FC_VULKAN_GEOM_LOD_MAX_INDEX", 64000000u);
 
+  // Presence-only diagnostics (see RtxDebug): any value enables them.  The
+  // fill debug is the exception: it historically honored the "0"/"false"/
+  // "off" opt-out, so keep that (envFlagEnabled) rather than presence-only.
+  c.rtxDebug.rtDebug = SoVulkanShared::envSet("FC_VULKAN_RT_DEBUG");
+  c.rtxDebug.rtGeo = SoVulkanShared::envSet("FC_VULKAN_RT_GEO");
+  c.rtxDebug.rtDebugFill =
+    SoVulkanShared::envFlagEnabled("FC_VULKAN_RT_DEBUG_FILL", false);
+  c.rtxDebug.ptDebug = SoVulkanShared::envSet("FC_VULKAN_PT_DEBUG");
+  c.rtxDebug.denoiserDebug = SoVulkanShared::envSet("FC_VULKAN_PT_DENOISER_DEBUG");
+  c.rtxDebug.denoiseTiming = SoVulkanShared::envSet("FC_VULKAN_PT_DENOISE_TIMING");
+  c.rtxDebug.asyncComputeTiming =
+    SoVulkanShared::envSet("FC_VULKAN_ASYNC_COMPUTE_TIMING");
+
   c.rtxCull.enabled =
     SoVulkanShared::envFlagEnabled("FC_VULKAN_TLAS_CULL", false);
   c.rtxCull.pixels = readNonNegativeFloat("FC_VULKAN_TLAS_PIX", 1.0f);
@@ -131,8 +144,6 @@ Config load()
     SoVulkanShared::envSet("FC_VULKAN_AS_COMPACT");
   c.rayTracing.sbtPipeline = SoVulkanShared::envFlagEnabled("FC_VULKAN_RT_SBT");
 
-  c.memoryPool.enabled =
-    SoVulkanShared::envFlagEnabled("FC_VULKAN_MEM_POOL", false);
   c.concurrency.parallelRecord =
     SoVulkanShared::envFlagEnabled("FC_VULKAN_PARALLEL_RECORD", false);
   if (SoVulkanShared::envSet("FC_VULKAN_RECORD_WORKERS")) {
@@ -146,6 +157,15 @@ Config load()
   c.concurrency.asyncCompute = SoVulkanShared::envSet("FC_VULKAN_ASYNC_COMPUTE");
   c.raster.wideLineCpu =
     SoVulkanShared::envFlagEnabled("FC_VULKAN_WLINE_CPU", false);
+
+  c.diagnostics.debugUtils =
+    SoVulkanShared::envFlagEnabled("FC_VULKAN_DEBUG_UTILS", false);
+  c.diagnostics.debugPrintf =
+    SoVulkanShared::envFlagEnabled("FC_VULKAN_DEBUG_PRINTF", false);
+  c.diagnostics.gpuTimestamps =
+    SoVulkanShared::envFlagEnabled("FC_VULKAN_GPU_TIMING", false);
+  c.diagnostics.pipelineFeedback =
+    SoVulkanShared::envFlagEnabled("FC_VULKAN_PIPELINE_FEEDBACK", false);
 
   return c;
 }
@@ -172,6 +192,16 @@ void dump()
                c.geometryLod.stats ? 1 : 0,
                static_cast<double>(c.geometryLod.minAreaPixels),
                c.geometryLod.maxIndices);
+  std::fprintf(stderr,
+               "[VKCONFIG] rtxDebug rtDebug=%d rtGeo=%d rtFill=%d ptDebug=%d "
+               "denoiser=%d denoiseTiming=%d asyncTiming=%d\n",
+               c.rtxDebug.rtDebug ? 1 : 0,
+               c.rtxDebug.rtGeo ? 1 : 0,
+               c.rtxDebug.rtDebugFill ? 1 : 0,
+               c.rtxDebug.ptDebug ? 1 : 0,
+               c.rtxDebug.denoiserDebug ? 1 : 0,
+               c.rtxDebug.denoiseTiming ? 1 : 0,
+               c.rtxDebug.asyncComputeTiming ? 1 : 0);
   std::fprintf(stderr,
                "[VKCONFIG] rtxCull enabled=%d pixels=%.3f\n",
                c.rtxCull.enabled ? 1 : 0,
@@ -224,14 +254,20 @@ void dump()
     std::snprintf(sWorkerCap, sizeof(sWorkerCap), "-");
   }
   std::fprintf(stderr,
-               "[VKCONFIG] memPool=%d parallel=%d workerCap=%s extSec=%d "
+               "[VKCONFIG] parallel=%d workerCap=%s extSec=%d "
                "asyncCompute=%d wlineCpu=%d\n",
-               c.memoryPool.enabled ? 1 : 0,
                c.concurrency.parallelRecord ? 1 : 0,
                sWorkerCap,
                c.concurrency.externalSecondary ? 1 : 0,
                c.concurrency.asyncCompute ? 1 : 0,
                c.raster.wideLineCpu ? 1 : 0);
+  std::fprintf(stderr,
+               "[VKCONFIG] diagnostics debugUtils=%d debugPrintf=%d "
+               "gpuTiming=%d pipelineFeedback=%d\n",
+               c.diagnostics.debugUtils ? 1 : 0,
+               c.diagnostics.debugPrintf ? 1 : 0,
+               c.diagnostics.gpuTimestamps ? 1 : 0,
+               c.diagnostics.pipelineFeedback ? 1 : 0);
 }
 
 } // namespace SoVulkanConfig

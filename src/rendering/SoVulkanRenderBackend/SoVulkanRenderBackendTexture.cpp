@@ -14,7 +14,10 @@
 
 #include "rendering/SoVulkanRenderBackend.h"
 #include "rendering/SoVulkanRenderBackend/SoVulkanRenderBackendP.h"
+#include "rendering/SoVulkanDebugUtils.h"
 #include "rendering/SoVulkanShared.h"
+
+#include "vk_mem_alloc.h"
 
 #include <Inventor/elements/SoDrawStyleElement.h>
 #include <Inventor/errors/SoDebugError.h>
@@ -57,23 +60,6 @@ void stampTextureContent(VulkanCachedTexture & entry,
 // --- Texture cache --------------------------------------------------------
 
 void
-SoVulkanRenderBackend::releaseMemory(VkDeviceMemory memory, VkDeviceSize size,
-                                    VkDeviceSize offset)
-{
-  if (memory == VK_NULL_HANDLE) return;
-  if (this->usingMemPool() && size > 0) {
-    // Return the range to the sub-allocator.  Safe here because the callers
-    // defer this free: destroyTextureEntry() flushes through the deferred ring
-    // (see deferDestroyTextureEntry), so the GPU can no longer reference the
-    // range when this runs.
-    this->memPool->free(memory, offset, size);
-  }
-  else {
-    vkFreeMemory(this->device, memory, this->allocator);
-  }
-}
-
-void
 SoVulkanRenderBackend::destroyTextureEntry(VulkanCachedTexture & entry)
 {
   if (entry.descriptorSet != VK_NULL_HANDLE) {
@@ -93,12 +79,9 @@ SoVulkanRenderBackend::destroyTextureEntry(VulkanCachedTexture & entry)
     entry.view = VK_NULL_HANDLE;
   }
   if (entry.image != VK_NULL_HANDLE) {
-    vkDestroyImage(this->device, entry.image, this->allocator);
+    vmaDestroyImage(this->vmaAllocator, entry.image, entry.allocation);
     entry.image = VK_NULL_HANDLE;
-  }
-  if (entry.memory != VK_NULL_HANDLE) {
-    this->releaseMemory(entry.memory, entry.memorySize, entry.memoryOffset);
-    entry.memory = VK_NULL_HANDLE;
+    entry.allocation = nullptr;
   }
   entry = VulkanCachedTexture();
 }
@@ -214,23 +197,32 @@ SoVulkanRenderBackend::ensureStagingPoolSize(VkDeviceSize required)
   newCapacity = std::max<VkDeviceSize>(newCapacity, 256u * 1024u);
 
   VkBuffer newBuffer = VK_NULL_HANDLE;
-  VkDeviceMemory newMemory = VK_NULL_HANDLE;
-  if (!SoVulkanShared::createBufferAllocated(
-        this->device, this->allocator, newCapacity,
-        VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
-        VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
-        /*deviceAddress*/ false,
-        [this](const VkMemoryRequirements & req, VkMemoryPropertyFlags desired,
-               uint32_t & memoryTypeIndex) {
-          return this->selectMemoryType(req, desired, memoryTypeIndex);
-        }, newBuffer, newMemory)) {
+  VmaAllocation newAllocation = nullptr;
+  VkBufferCreateInfo bci {};
+  bci.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
+  bci.size = newCapacity;
+  bci.usage = VK_BUFFER_USAGE_TRANSFER_SRC_BIT;
+  bci.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+  VmaAllocationCreateInfo allocInfo {};
+  allocInfo.usage = VMA_MEMORY_USAGE_AUTO;
+  allocInfo.requiredFlags = VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT |
+                            VK_MEMORY_PROPERTY_HOST_COHERENT_BIT;
+  // Ask VMA for the persistent host mapping up front: the staging pool is
+  // written every frame, so a one-time map (no per-upload vkMapMemory) is the
+  // whole point.  VMA_MEMORY_USAGE_AUTO requires an explicit host-access flag
+  // whenever MAPPED is requested.
+  allocInfo.flags = VMA_ALLOCATION_CREATE_MAPPED_BIT |
+                    VMA_ALLOCATION_CREATE_HOST_ACCESS_SEQUENTIAL_WRITE_BIT;
+  VmaAllocationInfo allocationInfo {};
+  if (vmaCreateBuffer(this->vmaAllocator, &bci, &allocInfo, &newBuffer,
+                      &newAllocation, &allocationInfo) != VK_SUCCESS) {
     return false;
   }
-  void * newMapped = nullptr;
-  if (vkMapMemory(this->device, newMemory, 0, newCapacity, 0, &newMapped) !=
-      VK_SUCCESS) {
-    vkDestroyBuffer(this->device, newBuffer, this->allocator);
-    vkFreeMemory(this->device, newMemory, this->allocator);
+  void * newMapped = allocationInfo.pMappedData;
+  if (newMapped == nullptr) {
+    // Should not happen with VMA_ALLOCATION_CREATE_MAPPED_BIT on host-visible
+    // memory, but do not leave a half-built pool behind.
+    vmaDestroyBuffer(this->vmaAllocator, newBuffer, newAllocation);
     return false;
   }
   // Preserve any bytes already staged in the old buffer (uploads prepared
@@ -241,16 +233,16 @@ SoVulkanRenderBackend::ensureStagingPoolSize(VkDeviceSize required)
                 static_cast<size_t>(this->stagingPoolCursor));
   }
   if (this->stagingPoolBuffer != VK_NULL_HANDLE) {
-    if (this->stagingPoolMapped != nullptr) {
-      vkUnmapMemory(this->device, this->stagingPoolMemory);
-    }
-    vkDestroyBuffer(this->device, this->stagingPoolBuffer, this->allocator);
-    vkFreeMemory(this->device, this->stagingPoolMemory, this->allocator);
+    vmaDestroyBuffer(this->vmaAllocator, this->stagingPoolBuffer,
+                     this->stagingPoolAllocation);
   }
   this->stagingPoolBuffer = newBuffer;
-  this->stagingPoolMemory = newMemory;
+  this->stagingPoolAllocation = newAllocation;
   this->stagingPoolMapped = newMapped;
   this->stagingPoolCapacity = newCapacity;
+  SoVulkanDebugUtils::nameObject(
+    this->device, VK_OBJECT_TYPE_BUFFER,
+    reinterpret_cast<uint64_t>(this->stagingPoolBuffer), "texture staging pool");
   return true;
 }
 
@@ -304,15 +296,19 @@ SoVulkanRenderBackend::prepareTextureUpload(VulkanCachedTexture & entry,
   ci.usage = VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
   ci.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
   ci.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
-  if (vkCreateImage(this->device, &ci, this->allocator, &entry.image) !=
-      VK_SUCCESS) {
-    this->emitError("prepareTextureUpload: vkCreateImage failed");
+  // The image and its device memory are owned by the VMA allocator: a single
+  // vmaCreateImage creates, allocates and binds, sub-allocating from large
+  // blocks rather than hitting the driver (and maxMemoryAllocationCount) per
+  // upload.  Device-local, matching the old selectMemoryType() requirement.
+  VmaAllocationCreateInfo allocInfo {};
+  allocInfo.usage = VMA_MEMORY_USAGE_AUTO;
+  allocInfo.requiredFlags = VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT;
+  if (vmaCreateImage(this->vmaAllocator, &ci, &allocInfo, &entry.image,
+                     &entry.allocation, nullptr) != VK_SUCCESS) {
+    this->emitError("prepareTextureUpload: vmaCreateImage failed");
     return false;
   }
 
-  VkMemoryRequirements requirements;
-  vkGetImageMemoryRequirements(this->device, entry.image, &requirements);
-  entry.memorySize = requirements.size;
   // Stage the pixels into the shared staging pool.  The pool is host-visible
   // and reused across frames (grown on demand), so all pending uploads of a
   // frame coalesce into one buffer -- one allocation, one cleanup surface --
@@ -329,49 +325,6 @@ SoVulkanRenderBackend::prepareTextureUpload(VulkanCachedTexture & entry,
                         static_cast<size_t>(stagingOffset);
   std::memcpy(dst, uploadPixels, static_cast<size_t>(byteSize));
   this->stagingPoolCursor += ((byteSize + 3u) & ~(VkDeviceSize)3u);
-
-  if (this->usingMemPool()) {
-    // Sub-allocate the image memory from the pool; falls back to a standalone
-    // allocation if the pool cannot fit/grow the range.
-    uint32_t poolTypeIndex = 0;
-    if (this->selectMemoryType(requirements, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT,
-                               poolTypeIndex)) {
-      VkDeviceSize offset = 0;
-      if (this->memPool->alloc(poolTypeIndex, requirements.size,
-                               requirements.alignment, entry.memory, offset)) {
-      entry.memoryOffset = offset;
-      const VkResult bindRes = vkBindImageMemory(
-        this->device, entry.image, entry.memory, offset);
-      if (bindRes == VK_SUCCESS) {
-        return true;
-      }
-        // Binding failed: return the range to the pool and fall through to the
-        // legacy path so the upload can still proceed (at a cost of correctness
-        // pressure only in the failure case).
-        this->releaseMemory(entry.memory, entry.memorySize, entry.memoryOffset);
-        entry.memory = VK_NULL_HANDLE;
-      }
-    }
-  }
-  uint32_t memoryTypeIndex = 0;
-  if (!this->selectMemoryType(requirements, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT,
-                              memoryTypeIndex)) {
-    this->emitError("prepareTextureUpload: no device-local memory type");
-    this->destroyTextureEntry(entry);
-    return false;
-  }
-  VkMemoryAllocateInfo ai {};
-  ai.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
-  ai.allocationSize = requirements.size;
-  ai.memoryTypeIndex = memoryTypeIndex;
-  if (vkAllocateMemory(this->device, &ai, this->allocator, &entry.memory) !=
-      VK_SUCCESS) {
-    this->emitError("prepareTextureUpload: vkAllocateMemory failed");
-    this->destroyTextureEntry(entry);
-    return false;
-  }
-  entry.memoryOffset = 0;
-  vkBindImageMemory(this->device, entry.image, entry.memory, 0);
 
   return true;
 }

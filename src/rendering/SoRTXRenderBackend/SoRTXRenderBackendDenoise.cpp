@@ -30,6 +30,8 @@
 #include <string>
 #include <rendering/SoRTXRenderBackend/SoRTXRenderBackendP.h>
 
+#include "vk_mem_alloc.h"
+
 #if COIN_BUILD_RTX_DENOISER
 // The OptiX function table lives in exactly this TU.
 #include <optix_function_table_definition.h>
@@ -131,7 +133,7 @@ SoRTXRenderBackend::configureOidnFilter()
 #if COIN_BUILD_OIDN
   this->setupOidnDevice();
   if (!this->oidnDevice) {
-    if (SoVulkanShared::envString("FC_VULKAN_PT_DENOISER_DEBUG")) {
+    if (SoVulkanConfig::get().rtxDebug.denoiserDebug) {
       fprintf(stderr, "[DENOISE] OIDN device null\n");
     }
     return false;
@@ -226,7 +228,7 @@ SoRTXRenderBackend::createDenoiseBackend()
   }
   this->denoiseKindDirty = false;
 
-  if (SoVulkanShared::envString("FC_VULKAN_PT_DENOISER_DEBUG")) {
+  if (SoVulkanConfig::get().rtxDebug.denoiserDebug) {
     fprintf(stderr,
             "[DENOISE] resolved kind=%d explicit=%d pref=%d ptEnabled=%d\n",
             static_cast<int>(this->denoiseKind),
@@ -292,7 +294,8 @@ SoRTXRenderBackend::createDenoiseBackend()
           totalBytes, VK_BUFFER_USAGE_TRANSFER_DST_BIT |
             VK_BUFFER_USAGE_TRANSFER_SRC_BIT |
             VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
-          this->denoiseColorBuf, this->denoiseColorMem)) {
+          this->denoiseColorBuf, this->denoiseColorMem,
+          &this->denoiseStagingPtr)) {
       // The host-visible staging block is the constrained allocation (several
       // image-sized regions at viewport resolution); if the driver cannot back
       // it, degrade gracefully rather than failing the whole path-tracing
@@ -319,12 +322,6 @@ SoRTXRenderBackend::createDenoiseBackend()
       this->denoiseGuideMem = this->denoiseColorMem;
       this->denoiseMotionMem = this->denoiseColorMem;
       this->denoiseOutMem = this->denoiseColorMem;
-      if (vkMapMemory(this->device, this->denoiseColorMem, 0, totalBytes, 0,
-                      &this->denoiseStagingPtr) != VK_SUCCESS) {
-        this->denoiseStagingPtr = nullptr;
-        this->emitError("failed to map denoiser staging buffer; disabling denoiser");
-        stagingFailed = true;
-      }
     }
   }
 
@@ -384,7 +381,7 @@ SoRTXRenderBackend::createDenoiseBackend()
     // vendor-neutral: on an AMD/Intel RT-capable device it renders fine, so
     // only the denoiser must be gated here and degraded to OIDN.
     if (!this->deviceIsNvidia) {
-      if (SoVulkanShared::envString("FC_VULKAN_PT_DENOISER_DEBUG")) {
+      if (SoVulkanConfig::get().rtxDebug.denoiserDebug) {
         fprintf(stderr,
                 "[DENOISE] RTX denoiser unavailable: Vulkan device vendor "
                 "0x%04x is not NVIDIA; using OIDN\n",
@@ -449,7 +446,7 @@ SoRTXRenderBackend::createDenoiseBackend()
   if (this->denoiseKind == DenoiseRtx && this->rtxDenoiser) configured = true;
 #endif
   if (!configured) {
-    if (SoVulkanShared::envString("FC_VULKAN_PT_DENOISER_DEBUG")) {
+    if (SoVulkanConfig::get().rtxDebug.denoiserDebug) {
       fprintf(stderr, "[DENOISE] no backend configured for kind=%d\n",
               static_cast<int>(this->denoiseKind));
     }
@@ -460,7 +457,7 @@ SoRTXRenderBackend::createDenoiseBackend()
   this->denoiserActive = true;
   this->denoiseStagedWidth = this->denoiseWidth;
   this->denoiseStagedHeight = this->denoiseHeight;
-  if (SoVulkanShared::envString("FC_VULKAN_PT_DENOISER_DEBUG")) {
+  if (SoVulkanConfig::get().rtxDebug.denoiserDebug) {
     fprintf(stderr, "[DENOISE] backend configured kind=%d active=%s\n",
             static_cast<int>(this->denoiseKind),
             this->denoiserActive ? "yes" : "no");
@@ -506,7 +503,7 @@ SoRTXRenderBackend::submitDenoiseCopy(VkCommandBuffer cmd)
       wi.pSemaphores = &this->asyncComputeTimeline;
       wi.pValues = &value;
       vkWaitSemaphores(this->device, &wi, UINT64_MAX);
-      if (SoVulkanShared::envString("FC_VULKAN_ASYNC_COMPUTE_TIMING")) {
+      if (SoVulkanConfig::get().rtxDebug.asyncComputeTiming) {
         fprintf(stderr, "[ASYNC] compute copy signalled timeline value=%llu\n",
                 static_cast<unsigned long long>(value));
       }
@@ -560,7 +557,7 @@ SoRTXRenderBackend::ensureAsyncComputeTimeline()
     return false;
   }
   this->asyncComputeTimelineValue = 0;
-  if (SoVulkanShared::envString("FC_VULKAN_ASYNC_COMPUTE_TIMING")) {
+  if (SoVulkanConfig::get().rtxDebug.asyncComputeTiming) {
     fprintf(stderr, "[ASYNC] created compute timeline semaphore\n");
   }
   return true;
@@ -594,14 +591,12 @@ SoRTXRenderBackend::recordDenoiseReadback(VkCommandBuffer cmd)
   // denoiser kernel (OptiX) is imported over the same device memory, so the
   // G-buffers are copied device-to-device and no host staging is involved.
   if (this->denoiseKind == DenoiseRtx && this->rtxInteropReady) {
-    VkMemoryBarrier before {};
-    before.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
-    before.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
-    before.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
-    vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_RAY_TRACING_SHADER_BIT_KHR |
-                              VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
-                         VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 1, &before, 0,
-                         nullptr, 0, nullptr);
+    SoVulkanShared::memoryBarrier(
+      cmd,
+      VK_PIPELINE_STAGE_RAY_TRACING_SHADER_BIT_KHR |
+        VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+      VK_PIPELINE_STAGE_TRANSFER_BIT, VK_ACCESS_SHADER_WRITE_BIT,
+      VK_ACCESS_TRANSFER_READ_BIT);
 
     if (this->accumBuffer != VK_NULL_HANDLE && this->rtxColorVk != VK_NULL_HANDLE) {
       VkBufferCopy c0 {0, 0, stride};
@@ -622,14 +617,10 @@ SoRTXRenderBackend::recordDenoiseReadback(VkCommandBuffer cmd)
 
     // Make the copies visible to the CUDA driver (COMPUTE stage) after the
     // Vulkan queue waits idle.
-    VkMemoryBarrier afterStaging {};
-    afterStaging.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
-    afterStaging.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
-    afterStaging.dstAccessMask = VK_ACCESS_SHADER_READ_BIT |
-                                 VK_ACCESS_SHADER_WRITE_BIT;
-    vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_TRANSFER_BIT,
-                         VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, 1,
-                         &afterStaging, 0, nullptr, 0, nullptr);
+    SoVulkanShared::memoryBarrier(
+      cmd, VK_PIPELINE_STAGE_TRANSFER_BIT,
+      VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_ACCESS_TRANSFER_WRITE_BIT,
+      VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT);
     this->oidnReadbackPending = TRUE;
     return;
   }
@@ -642,14 +633,12 @@ SoRTXRenderBackend::recordDenoiseReadback(VkCommandBuffer cmd)
   if (this->denoiseColorBuf == VK_NULL_HANDLE) return;
   if (this->accumBuffer == VK_NULL_HANDLE) return;
 
-  VkMemoryBarrier before {};
-  before.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
-  before.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
-  before.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
-  vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_RAY_TRACING_SHADER_BIT_KHR |
-                            VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
-                       VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 1, &before, 0,
-                       nullptr, 0, nullptr);
+  SoVulkanShared::memoryBarrier(
+    cmd,
+    VK_PIPELINE_STAGE_RAY_TRACING_SHADER_BIT_KHR |
+      VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+    VK_PIPELINE_STAGE_TRANSFER_BIT, VK_ACCESS_SHADER_WRITE_BIT,
+    VK_ACCESS_TRANSFER_READ_BIT);
 
   // color (accum average), albedo, normal, motion.  The position buffer is not
   // needed: the present shader's denoised-alpha test uses the averaged color's
@@ -696,15 +685,12 @@ SoRTXRenderBackend::recordDenoiseReadback(VkCommandBuffer cmd)
 
     // The G-buffers were written by the raygen/compute tracer earlier in this
     // command buffer; make the writes visible to this compute dispatch.
-    VkMemoryBarrier gpuBefore {};
-    gpuBefore.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
-    gpuBefore.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
-    gpuBefore.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
-    vkCmdPipelineBarrier(cmd,
-                         VK_PIPELINE_STAGE_RAY_TRACING_SHADER_BIT_KHR |
-                           VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
-                         VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, 1,
-                         &gpuBefore, 0, nullptr, 0, nullptr);
+    SoVulkanShared::memoryBarrier(
+      cmd,
+      VK_PIPELINE_STAGE_RAY_TRACING_SHADER_BIT_KHR |
+        VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+      VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_ACCESS_SHADER_WRITE_BIT,
+      VK_ACCESS_SHADER_READ_BIT);
 
     vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE,
                       this->denoiseDownsamplePipeline);
@@ -718,13 +704,10 @@ SoRTXRenderBackend::recordDenoiseReadback(VkCommandBuffer cmd)
     // Make the working-set writes visible to the host (the worker reads them
     // from the HOST_COHERENT staging block).
 
-    VkMemoryBarrier gpuAfter {};
-    gpuAfter.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
-    gpuAfter.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
-    gpuAfter.dstAccessMask = VK_ACCESS_HOST_READ_BIT | VK_ACCESS_HOST_WRITE_BIT;
-    vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
-                         VK_PIPELINE_STAGE_HOST_BIT, 0, 1, &gpuAfter, 0,
-                         nullptr, 0, nullptr);
+    SoVulkanShared::memoryBarrier(
+      cmd, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_HOST_BIT,
+      VK_ACCESS_SHADER_WRITE_BIT,
+      VK_ACCESS_HOST_READ_BIT | VK_ACCESS_HOST_WRITE_BIT);
     // The worker must NOT re-apply the normalize/downsample the GPU did.
     this->oidnGpuPrepared = true;
   }
@@ -745,13 +728,10 @@ SoRTXRenderBackend::recordDenoiseReadback(VkCommandBuffer cmd)
       vkCmdCopyBuffer(cmd, this->motionBuffer, this->denoiseColorBuf, 1, &cM);
     }
 
-    VkMemoryBarrier afterStaging {};
-    afterStaging.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
-    afterStaging.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
-    afterStaging.dstAccessMask = VK_ACCESS_HOST_READ_BIT | VK_ACCESS_HOST_WRITE_BIT;
-    vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_TRANSFER_BIT,
-                         VK_PIPELINE_STAGE_HOST_BIT, 0, 1, &afterStaging, 0,
-                         nullptr, 0, nullptr);
+    SoVulkanShared::memoryBarrier(
+      cmd, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_HOST_BIT,
+      VK_ACCESS_TRANSFER_WRITE_BIT,
+      VK_ACCESS_HOST_READ_BIT | VK_ACCESS_HOST_WRITE_BIT);
   }
   this->oidnReadbackPending = TRUE;
 }
@@ -793,23 +773,16 @@ SoRTXRenderBackend::updateDenoise()
       // the staging is HOST_COHERENT so the worker's writes are visible here.
       VkCommandBuffer cmd = this->beginTransientCommandBuffer();
       if (cmd != VK_NULL_HANDLE) {
-        VkMemoryBarrier hostBar {};
-        hostBar.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
-        hostBar.srcAccessMask = VK_ACCESS_HOST_WRITE_BIT;
-        hostBar.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
-        vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_HOST_BIT,
-                             VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 1, &hostBar, 0,
-                             nullptr, 0, nullptr);
+        SoVulkanShared::memoryBarrier(
+          cmd, VK_PIPELINE_STAGE_HOST_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT,
+          VK_ACCESS_HOST_WRITE_BIT, VK_ACCESS_TRANSFER_READ_BIT);
         VkBufferCopy cOut {outOffset, 0, outStride};
         vkCmdCopyBuffer(cmd, this->denoiseOutBuf, this->denoisedBuffer, 1,
                         &cOut);
-        VkMemoryBarrier outBar {};
-        outBar.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
-        outBar.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
-        outBar.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
-        vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_TRANSFER_BIT,
-                             VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, 0, 1,
-                             &outBar, 0, nullptr, 0, nullptr);
+        SoVulkanShared::memoryBarrier(
+          cmd, VK_PIPELINE_STAGE_TRANSFER_BIT,
+          VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
+          VK_ACCESS_TRANSFER_WRITE_BIT, VK_ACCESS_SHADER_READ_BIT);
         vkEndCommandBuffer(cmd);
         // Run the denoiser-output copy on the compute queue when the async
         // path is available, so the graphics queue stays free (see
@@ -865,7 +838,7 @@ SoRTXRenderBackend::updateDenoise()
         this->denoiseResultReady = FALSE;
         this->convergeAfterDenoise();
       }
-      if (SoVulkanShared::envString("FC_VULKAN_PT_DENOISE_TIMING")) {
+      if (SoVulkanConfig::get().rtxDebug.denoiseTiming) {
         fprintf(stderr, "[DENOISE] OIDN async worker published (%ux%u)\n",
                 w, h);
       }
@@ -951,23 +924,17 @@ SoRTXRenderBackend::updateDenoise()
       this->convergeAfterDenoise();
       return;
     }
-    VkMemoryBarrier hostBar {};
-    hostBar.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
-    hostBar.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
-    hostBar.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
-    vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
-                         VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 1, &hostBar, 0,
-                         nullptr, 0, nullptr);
+    SoVulkanShared::memoryBarrier(
+      cmd, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+      VK_PIPELINE_STAGE_TRANSFER_BIT, VK_ACCESS_SHADER_WRITE_BIT,
+      VK_ACCESS_TRANSFER_READ_BIT);
     const VkDeviceSize stride = static_cast<VkDeviceSize>(w) * h * 16;
     VkBufferCopy cOut {0, 0, stride};
     vkCmdCopyBuffer(cmd, this->rtxOutputVk, this->denoisedBuffer, 1, &cOut);
-    VkMemoryBarrier outBar {};
-    outBar.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
-    outBar.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
-    outBar.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
-    vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_TRANSFER_BIT,
-                         VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, 0, 1,
-                         &outBar, 0, nullptr, 0, nullptr);
+    SoVulkanShared::memoryBarrier(
+      cmd, VK_PIPELINE_STAGE_TRANSFER_BIT,
+      VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, VK_ACCESS_TRANSFER_WRITE_BIT,
+      VK_ACCESS_SHADER_READ_BIT);
     vkEndCommandBuffer(cmd);
     VkSubmitInfo si {};
     si.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
@@ -999,7 +966,7 @@ SoRTXRenderBackend::updateDenoise()
       this->denoiseResultReady = FALSE;
       this->convergeAfterDenoise();
     }
-    if (SoVulkanShared::envString("FC_VULKAN_PT_DENOISE_TIMING")) {
+    if (SoVulkanConfig::get().rtxDebug.denoiseTiming) {
       const double t1 = std::chrono::duration<double>(
         std::chrono::steady_clock::now().time_since_epoch()).count();
       fprintf(stderr, "[DENOISE] kind=2 frame denoise took %.1f ms (%ux%u)\n",
@@ -1172,7 +1139,7 @@ SoRTXRenderBackend::updateDenoise()
         // unsupported input image format).  Surface the first such failure as
         // a warning; the worker is a background thread so this cannot corrupt
         // the render state, and the in-shader edge-stopped mean still shows.
-        if (SoVulkanShared::envString("FC_VULKAN_PT_DENOISER_DEBUG")) {
+        if (SoVulkanConfig::get().rtxDebug.denoiserDebug) {
           const char * omsg = nullptr;
           const OIDNError oerr = oidnGetDeviceError(this->oidnDevice, &omsg);
           if (oerr != OIDN_ERROR_NONE) {
@@ -1194,7 +1161,7 @@ SoRTXRenderBackend::updateDenoise()
         // atomics are independent), fall through the worker-running guard, and
         // convergeAfterDenoise() with denoiseResultReady=FALSE -- publishing no
         // denoised result so the run idled on the raw/edge-stopped image.
-        if (SoVulkanShared::envString("FC_VULKAN_PT_DENOISE_TIMING")) {
+        if (SoVulkanConfig::get().rtxDebug.denoiseTiming) {
           const auto wEnd = std::chrono::steady_clock::now();
           fprintf(stderr, "[DENOISE] OIDN async worker total=%.1fms (%ux%u)\n",
                   std::chrono::duration<double, std::milli>(wEnd - wStart).count(),
@@ -1206,7 +1173,7 @@ SoRTXRenderBackend::updateDenoise()
       // here.  The present pass for THIS frame already shows the fresh
       // in-shader edge-stopped mean; the denoised result is published on the
       // frame that observes oidnWorkerDone (copy-back + converge below).
-      if (SoVulkanShared::envString("FC_VULKAN_PT_DENOISE_TIMING")) {
+      if (SoVulkanConfig::get().rtxDebug.denoiseTiming) {
         fprintf(stderr, "[DENOISE] OIDN async worker launched (%ux%u)\n", w, h);
       }
       return;
@@ -1259,32 +1226,28 @@ SoRTXRenderBackend::releaseDenoiseStaging()
 #endif
   if (this->denoiseColorBuf != VK_NULL_HANDLE) {
     const VkBuffer buf = this->denoiseColorBuf;
-    const VkDeviceMemory mem = this->denoiseColorMem;
-    if (this->denoiseStagingPtr) {
-      vkUnmapMemory(this->device, mem);
-      this->denoiseStagingPtr = nullptr;
-    }
+    const VmaAllocation mem = this->denoiseColorMem;
+    // The staging pointer is VMA's persistent mapping
+    // (VMA_ALLOCATION_CREATE_MAPPED_BIT), so there is no vmaMapMemory to
+    // balance before vmaDestroyBuffer.
+    this->denoiseStagingPtr = nullptr;
     // denoiseColorBuf is the single allocation; the alias handles do not
     // own it.
     this->denoiseColorBuf = VK_NULL_HANDLE;
-    this->denoiseColorMem = VK_NULL_HANDLE;
+    this->denoiseColorMem = nullptr;
     this->denoiseAlbedoBuf = VK_NULL_HANDLE;
     this->denoiseNormalBuf = VK_NULL_HANDLE;
     this->denoiseGuideBuf = VK_NULL_HANDLE;
     this->denoiseMotionBuf = VK_NULL_HANDLE;
     this->denoiseOutBuf = VK_NULL_HANDLE;
-    this->denoiseAlbedoMem = VK_NULL_HANDLE;
-    this->denoiseNormalMem = VK_NULL_HANDLE;
-    this->denoiseGuideMem = VK_NULL_HANDLE;
-    this->denoiseMotionMem = VK_NULL_HANDLE;
-    this->denoiseOutMem = VK_NULL_HANDLE;
-    this->deferDestroy([this, buf, mem]() {
-      if (buf != VK_NULL_HANDLE) {
-        vkDestroyBuffer(this->device, buf, this->allocator);
-      }
-      if (mem != VK_NULL_HANDLE) {
-        vkFreeMemory(this->device, mem, this->allocator);
-      }
+    this->denoiseAlbedoMem = nullptr;
+    this->denoiseNormalMem = nullptr;
+    this->denoiseGuideMem = nullptr;
+    this->denoiseMotionMem = nullptr;
+    this->denoiseOutMem = nullptr;
+    VmaAllocator vma = this->vmaAllocator;
+    this->deferDestroy([vma, buf, mem]() {
+      vmaDestroyBuffer(vma, buf, mem);
     });
   }
   // The device-local denoised output and albedo G-buffer are kept across a
@@ -1306,30 +1269,22 @@ SoRTXRenderBackend::destroyDenoiser()
   // valid); the whole backend is going away here so it is safe.
   if (this->denoisedBuffer != VK_NULL_HANDLE) {
     const VkBuffer buf = this->denoisedBuffer;
-    const VkDeviceMemory mem = this->denoisedMemory;
+    const VmaAllocation mem = this->denoisedMemory;
     this->denoisedBuffer = VK_NULL_HANDLE;
-    this->denoisedMemory = VK_NULL_HANDLE;
-    this->deferDestroy([this, buf, mem]() {
-      if (buf != VK_NULL_HANDLE) {
-        vkDestroyBuffer(this->device, buf, this->allocator);
-      }
-      if (mem != VK_NULL_HANDLE) {
-        vkFreeMemory(this->device, mem, this->allocator);
-      }
+    this->denoisedMemory = nullptr;
+    VmaAllocator vma = this->vmaAllocator;
+    this->deferDestroy([vma, buf, mem]() {
+      vmaDestroyBuffer(vma, buf, mem);
     });
   }
   if (this->albedoBuffer != VK_NULL_HANDLE) {
     const VkBuffer buf = this->albedoBuffer;
-    const VkDeviceMemory mem = this->albedoMemory;
+    const VmaAllocation mem = this->albedoMemory;
     this->albedoBuffer = VK_NULL_HANDLE;
-    this->albedoMemory = VK_NULL_HANDLE;
-    this->deferDestroy([this, buf, mem]() {
-      if (buf != VK_NULL_HANDLE) {
-        vkDestroyBuffer(this->device, buf, this->allocator);
-      }
-      if (mem != VK_NULL_HANDLE) {
-        vkFreeMemory(this->device, mem, this->allocator);
-      }
+    this->albedoMemory = nullptr;
+    VmaAllocator vma = this->vmaAllocator;
+    this->deferDestroy([vma, buf, mem]() {
+      vmaDestroyBuffer(vma, buf, mem);
     });
   }
 
@@ -1401,24 +1356,19 @@ SoRTXRenderBackend::teardownRtxDenoiser()
   // The four working images were exported from Vulkan and imported into CUDA.
   // Reverse the import (release the CUDA alias) BEFORE freeing the Vulkan
   // allocation that owns the memory.
-  auto releaseInterop = [this](VkBuffer & buf, VkDeviceMemory & mem,
+  auto releaseInterop = [this](VkBuffer & buf, VmaAllocation & mem,
                                CUexternalMemory & ext) {
     if (ext) {
       cuDestroyExternalMemory(ext);
       ext = nullptr;
     }
     const VkBuffer vkBuf = buf;
-    const VkDeviceMemory vkMem = mem;
+    const VmaAllocation vkMem = mem;
     buf = VK_NULL_HANDLE;
     mem = VK_NULL_HANDLE;
     if (vkBuf != VK_NULL_HANDLE || vkMem != VK_NULL_HANDLE) {
       this->deferDestroy([this, vkBuf, vkMem]() {
-        if (vkBuf != VK_NULL_HANDLE) {
-          vkDestroyBuffer(this->device, vkBuf, this->allocator);
-        }
-        if (vkMem != VK_NULL_HANDLE) {
-          vkFreeMemory(this->device, vkMem, this->allocator);
-        }
+        vmaDestroyBuffer(this->vmaAllocator, vkBuf, vkMem);
       });
     }
   };
@@ -1452,7 +1402,7 @@ void
 rtxLogCallback(unsigned int level, const char * tag, const char * message,
                void * /*cbdata*/)
 {
-  if (SoVulkanShared::envString("FC_VULKAN_PT_DENOISER_DEBUG") || level <= 2) {
+  if (SoVulkanConfig::get().rtxDebug.denoiserDebug || level <= 2) {
     fprintf(stderr, "[RTX-DENOISER] level=%u tag=%s: %s\n", level,
             tag ? tag : "", message ? message : "");
   }
@@ -1516,7 +1466,7 @@ SoRTXRenderBackend::initRtxCuda()
     // A UUID was available, but none of the CUDA devices matched it.  Do not
     // silently fall back to another GPU: importing memory into a different
     // CUDA context would bind the denoiser to the wrong physical device.
-    if (SoVulkanShared::envString("FC_VULKAN_PT_DENOISER_DEBUG")) {
+    if (SoVulkanConfig::get().rtxDebug.denoiserDebug) {
       fprintf(stderr,
               "[RTX-DENOISER] no CUDA device matches the Vulkan device UUID "
               "(count=%d)\n",
@@ -1667,7 +1617,7 @@ bool
 SoRTXRenderBackend::createRtxInteropBuffer(size_t bytes,
                                            VkBufferUsageFlags usage,
                                            VkBuffer & buffer,
-                                           VkDeviceMemory & memory,
+                                           VmaAllocation & memory,
                                            CUexternalMemory & ext,
                                            CUdeviceptr & devPtr)
 {
@@ -1691,10 +1641,9 @@ SoRTXRenderBackend::createRtxInteropBuffer(size_t bytes,
   ci.size = bytes;
   ci.usage = usage;
   ci.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
-  if (vkCreateBuffer(this->device, &ci, this->allocator, &buffer) != VK_SUCCESS) {
-    return false;
-  }
 
+  // Exportability depends only on the buffer's usage, so query it before
+  // touching the allocator.
   VkPhysicalDeviceExternalBufferInfo externalQuery {};
   externalQuery.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_EXTERNAL_BUFFER_INFO;
   externalQuery.flags = 0;
@@ -1713,7 +1662,7 @@ SoRTXRenderBackend::createRtxInteropBuffer(size_t bytes,
     (externalMem.compatibleHandleTypes &
      VK_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_FD_BIT) != 0;
   if (!exportable || !compatibleOpaque) {
-    if (SoVulkanShared::envString("FC_VULKAN_PT_DENOISER_DEBUG")) {
+    if (SoVulkanConfig::get().rtxDebug.denoiserDebug) {
       fprintf(stderr,
               "[RTX-DENOISER] CUDA external buffer is not exportable: "
               "features=0x%x compatible=0x%x usage=0x%x bytes=%zu\n",
@@ -1721,62 +1670,92 @@ SoRTXRenderBackend::createRtxInteropBuffer(size_t bytes,
               static_cast<unsigned>(externalMem.compatibleHandleTypes),
               static_cast<unsigned>(usage), bytes);
     }
-    vkDestroyBuffer(this->device, buffer, this->allocator);
-    buffer = VK_NULL_HANDLE;
     return false;
   }
 
-  const bool dedicatedOnly =
-    (externalMem.externalMemoryFeatures &
-     VK_EXTERNAL_MEMORY_FEATURE_DEDICATED_ONLY_BIT) != 0;
+  // Lazily create the custom export pool.  The five interop buffers share one
+  // device-local memory type; the pool exists solely to carry
+  // VkExportMemoryAllocateInfo into every allocation's pNext chain, which is
+  // the only way VMA can export an opaque FD (VkMemoryAllocateInfo has no
+  // direct field for it).  rtxInteropExportInfo must outlive the pool: VMA
+  // stores the pointer, not a copy.
+  if (this->rtxInteropPool == VK_NULL_HANDLE) {
+    // Resolve the pool's memory type from the buffer's own requirements.
+    // vmaFindMemoryTypeIndexForBufferInfo() is the obvious call, but it takes
+    // VMA's Vulkan-1.3 vkGetDeviceBufferMemoryRequirements path whenever the
+    // allocator's apiVersion is >= 1.3, and this app never enables the
+    // maintenance4 feature that entry point requires; with a layer in the
+    // chain that resolves to a null driver entry and crashes.  Query the 1.0
+    // requirements of a throw-away buffer instead (no memory is bound to it).
+    VkBuffer probe = VK_NULL_HANDLE;
+    if (vkCreateBuffer(this->device, &ci, this->allocator, &probe) !=
+        VK_SUCCESS) {
+      this->emitError("RTX denoiser: failed to create the CUDA interop "
+                      "memory-type probe buffer");
+      return false;
+    }
+    VkMemoryRequirements req {};
+    vkGetBufferMemoryRequirements(this->device, probe, &req);
+    vkDestroyBuffer(this->device, probe, this->allocator);
+    uint32_t memTypeIndex = 0;
+    if (!this->memProps.pick(req, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT,
+                             memTypeIndex)) {
+      this->emitError("RTX denoiser: no memory type for the exportable "
+                      "CUDA interop buffers");
+      return false;
+    }
+    this->rtxInteropExportInfo.sType =
+      VK_STRUCTURE_TYPE_EXPORT_MEMORY_ALLOCATE_INFO;
+    this->rtxInteropExportInfo.pNext = nullptr;
+    this->rtxInteropExportInfo.handleTypes =
+      VK_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_FD_BIT;
+    VmaPoolCreateInfo poolInfo {};
+    poolInfo.memoryTypeIndex = memTypeIndex;
+    poolInfo.pMemoryAllocateNext =
+      static_cast<void *>(&this->rtxInteropExportInfo);
+    if (vmaCreatePool(this->vmaAllocator, &poolInfo,
+                      &this->rtxInteropPool) != VK_SUCCESS) {
+      this->rtxInteropPool = VK_NULL_HANDLE;
+      this->emitError("RTX denoiser: vmaCreatePool for the CUDA interop "
+                      "buffers failed");
+      return false;
+    }
+  }
 
-  VkMemoryRequirements req;
-  vkGetBufferMemoryRequirements(this->device, buffer, &req);
-
-  // Request an opaque FD export so CUDA can import the same physical memory.
-  VkExportMemoryAllocateInfo exportInfo {};
-  exportInfo.sType = VK_STRUCTURE_TYPE_EXPORT_MEMORY_ALLOCATE_INFO;
-  exportInfo.handleTypes = VK_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_FD_BIT;
-  VkMemoryDedicatedAllocateInfo dedicatedInfo {};
-  dedicatedInfo.sType = VK_STRUCTURE_TYPE_MEMORY_DEDICATED_ALLOCATE_INFO;
-  dedicatedInfo.buffer = buffer;
-  dedicatedInfo.image = VK_NULL_HANDLE;
-  VkMemoryAllocateFlagsInfo allocFlags {};
-  allocFlags.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_FLAGS_INFO;
-  allocFlags.flags = VK_MEMORY_ALLOCATE_DEVICE_ADDRESS_BIT;
-  allocFlags.pNext = dedicatedOnly ? static_cast<void *>(&dedicatedInfo)
-                                   : static_cast<void *>(&exportInfo);
-  dedicatedInfo.pNext = &exportInfo;
-  VkMemoryAllocateInfo ai {};
-  ai.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
-  ai.allocationSize = req.size;
-  ai.memoryTypeIndex = this->pickMemoryType(
-    req, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
-  ai.pNext = &allocFlags;
-  if (vkAllocateMemory(this->device, &ai, this->allocator, &memory) !=
-      VK_SUCCESS) {
-    if (SoVulkanShared::envString("FC_VULKAN_PT_DENOISER_DEBUG")) {
+  // A dedicated allocation gives each interop buffer its own VkDeviceMemory at
+  // offset 0: the FD export is per memory object and CUDA imports it whole, so
+  // suballocating several buffers out of one block would alias them.
+  VmaAllocationCreateInfo allocInfo {};
+  allocInfo.pool = this->rtxInteropPool;
+  allocInfo.flags = VMA_ALLOCATION_CREATE_DEDICATED_MEMORY_BIT;
+  VmaAllocationInfo allocationInfo {};
+  if (vmaCreateBuffer(this->vmaAllocator, &ci, &allocInfo, &buffer, &memory,
+                      &allocationInfo) != VK_SUCCESS) {
+    if (SoVulkanConfig::get().rtxDebug.denoiserDebug) {
       fprintf(stderr,
               "[RTX-DENOISER] failed to allocate external CUDA/Vulkan "
-              "buffer: bytes=%zu dedicatedOnly=%d memoryType=%u\n",
-              bytes, dedicatedOnly ? 1 : 0, ai.memoryTypeIndex);
+              "buffer: bytes=%zu\n", bytes);
     }
-    vkDestroyBuffer(this->device, buffer, this->allocator);
     buffer = VK_NULL_HANDLE;
+    memory = VK_NULL_HANDLE;
     return false;
   }
-  vkBindBufferMemory(this->device, buffer, memory, 0);
+  // vkGetMemoryFdKHR takes the raw VkDeviceMemory; VMA exposes it through the
+  // allocation info.  The allocation is dedicated, so its size is the whole
+  // memory object and the buffer sits at offset 0.
+  const VkDeviceMemory vkMemory = allocationInfo.deviceMemory;
+  const VkDeviceSize importSize =
+    allocationInfo.size != 0 ? allocationInfo.size : bytes;
 
   // Export an opaque FD and hand it to CUDA to map as a device pointer.
   VkMemoryGetFdInfoKHR fdInfo {};
   fdInfo.sType = VK_STRUCTURE_TYPE_MEMORY_GET_FD_INFO_KHR;
-  fdInfo.memory = memory;
+  fdInfo.memory = vkMemory;
   fdInfo.handleType = VK_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_FD_BIT;
   int fd = -1;
   if (this->vkGetMemoryFdKHR(this->device, &fdInfo, &fd) != VK_SUCCESS ||
       fd < 0) {
-    vkFreeMemory(this->device, memory, this->allocator);
-    vkDestroyBuffer(this->device, buffer, this->allocator);
+    vmaDestroyBuffer(this->vmaAllocator, buffer, memory);
     buffer = VK_NULL_HANDLE;
     memory = VK_NULL_HANDLE;
     return false;
@@ -1785,12 +1764,11 @@ SoRTXRenderBackend::createRtxInteropBuffer(size_t bytes,
   CUDA_EXTERNAL_MEMORY_HANDLE_DESC hdesc {};
   hdesc.type = CU_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_FD;
   hdesc.handle.fd = fd;
-  hdesc.size = req.size;
+  hdesc.size = importSize;
   CUresult cuRes = cuImportExternalMemory(&ext, &hdesc);
   if (cuRes != CUDA_SUCCESS) {
     ::close(fd);
-    vkFreeMemory(this->device, memory, this->allocator);
-    vkDestroyBuffer(this->device, buffer, this->allocator);
+    vmaDestroyBuffer(this->vmaAllocator, buffer, memory);
     buffer = VK_NULL_HANDLE;
     memory = VK_NULL_HANDLE;
     ext = nullptr;
@@ -1800,14 +1778,13 @@ SoRTXRenderBackend::createRtxInteropBuffer(size_t bytes,
 
   CUDA_EXTERNAL_MEMORY_BUFFER_DESC bdesc {};
   bdesc.offset = 0;
-  bdesc.size = req.size;
+  bdesc.size = importSize;
   bdesc.flags = 0;
   cuRes = cuExternalMemoryGetMappedBuffer(&devPtr, ext, &bdesc);
   if (cuRes != CUDA_SUCCESS) {
     cuDestroyExternalMemory(ext);
     ext = nullptr;
-    vkFreeMemory(this->device, memory, this->allocator);
-    vkDestroyBuffer(this->device, buffer, this->allocator);
+    vmaDestroyBuffer(this->vmaAllocator, buffer, memory);
     buffer = VK_NULL_HANDLE;
     memory = VK_NULL_HANDLE;
     return false;
@@ -1926,7 +1903,7 @@ SoRTXRenderBackend::ensureRtxInteropSemaphores()
   }
   this->rtxVkToCudaSignalPending = false;
   this->rtxCudaSignalPending = false;
-  if (SoVulkanShared::envString("FC_VULKAN_PT_DENOISER_DEBUG")) {
+  if (SoVulkanConfig::get().rtxDebug.denoiserDebug) {
     fprintf(stderr, "[RTX-DENOISER] CUDA/Vulkan semaphores ready=%s\n",
             ok ? "yes" : "no");
   }
@@ -1958,13 +1935,9 @@ submitRtxSemaphoreBarrier(VkDevice device, VkCommandPool pool, VkQueue queue,
   bi.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
   bool ok = vkBeginCommandBuffer(cmd, &bi) == VK_SUCCESS;
   if (ok) {
-    VkMemoryBarrier noOp {};
-    noOp.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
-    noOp.srcAccessMask = 0;
-    noOp.dstAccessMask = 0;
-    vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
-                         VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, 0, 1, &noOp, 0,
-                         nullptr, 0, nullptr);
+    SoVulkanShared::memoryBarrier(
+      cmd, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
+      VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, 0, 0);
     ok = vkEndCommandBuffer(cmd) == VK_SUCCESS;
   }
   if (ok) {

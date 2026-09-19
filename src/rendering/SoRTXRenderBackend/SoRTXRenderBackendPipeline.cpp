@@ -4,11 +4,13 @@
 // member functions for the "Pipeline" concern of the Vulkan RTX backend.
 
 #include "rendering/SoRTXRenderBackend.h"
+#include "rendering/SoVulkanConfig.h"
 #include <Inventor/errors/SoDebugError.h>
 #include <algorithm>
 #include <array>
 #include <chrono>
 #include <cmath>
+#include <cstdio>
 #include <cstring>
 #include <string>
 #include "rendering/vulkan/rt/PathTrace.spv.h"
@@ -22,7 +24,44 @@
 #include "rendering/vulkan/rt/DenoiseDownsample.spv.h"
 #include <rendering/SoRTXRenderBackend/SoRTXRenderBackendP.h>
 
+#include "vk_mem_alloc.h"
+
 using namespace SoRTXBackend;
+
+namespace {
+
+// Optional VK_EXT_pipeline_creation_feedback chaining (FC_VULKAN_PIPELINE_FEEDBACK).
+// Only used when the app enabled the extension + feature (hasPipelineCreationFeedback)
+// and the config flag is on; otherwise the create-info pNext is left untouched.
+bool pipelineFeedbackWanted(bool supported)
+{
+  return supported && SoVulkanConfig::get().diagnostics.pipelineFeedback;
+}
+
+void chainPipelineFeedback(VkPipelineCreationFeedbackCreateInfoEXT & info,
+                           VkPipelineCreationFeedbackEXT & feedback,
+                           void * createInfo)
+{
+  info.sType = VK_STRUCTURE_TYPE_PIPELINE_CREATION_FEEDBACK_CREATE_INFO_EXT;
+  info.pPipelineCreationFeedback = &feedback;
+  info.pipelineStageCreationFeedbackCount = 0;
+  reinterpret_cast<VkBaseOutStructure *>(createInfo)->pNext =
+    reinterpret_cast<VkBaseOutStructure *>(&info);
+}
+
+void logPipelineFeedback(const char * label,
+                         const VkPipelineCreationFeedbackEXT & feedback)
+{
+  const bool cacheHit =
+    (feedback.flags &
+     VK_PIPELINE_CREATION_FEEDBACK_APPLICATION_PIPELINE_CACHE_HIT_BIT_EXT) != 0;
+  std::fprintf(stderr,
+               "[RTDBG] pipelineFeedback %s cacheHit=%d creation=%.3fus\n",
+               label, cacheHit ? 1 : 0,
+               static_cast<double>(feedback.duration) * 1.0e-3);
+}
+
+} // namespace
 
 bool
 SoRTXRenderBackend::createDescriptorSetLayout()
@@ -116,10 +155,44 @@ SoRTXRenderBackend::createDescriptorSetLayout()
   bindings[15].stageFlags = VK_SHADER_STAGE_RAYGEN_BIT_KHR |
     VK_SHADER_STAGE_COMPUTE_BIT;
 
+  // UPDATE_AFTER_BIND binding flags when the device supports (and the
+  // embedding enabled) descriptor indexing: every binding here is rewritten
+  // while a caller-owned frame may still reference the set, which is otherwise
+  // illegal (VUID-vkUpdateDescriptorSets-None-03047).  The backing storage is
+  // reused across the three layout creations below; vkCreateDescriptorSetLayout
+  // consumes it synchronously.
+  std::vector<VkDescriptorBindingFlags> bindingFlags;
+  VkDescriptorSetLayoutBindingFlagsCreateInfo flagsCI {};
+  const auto attachBindingFlags =
+    [this, &bindingFlags, &flagsCI](VkDescriptorSetLayoutCreateInfo & layoutCI,
+                                    uint32_t count) {
+      if (!this->hasUpdateAfterBind) {
+        return;
+      }
+      bindingFlags.assign(count, VK_DESCRIPTOR_BINDING_UPDATE_AFTER_BIND_BIT);
+      flagsCI.sType =
+        VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_BINDING_FLAGS_CREATE_INFO;
+      flagsCI.bindingCount = count;
+      flagsCI.pBindingFlags = bindingFlags.data();
+      layoutCI.pNext = &flagsCI;
+      // Required whenever any binding carries UPDATE_AFTER_BIND
+      // (VUID-VkDescriptorSetLayoutCreateInfo-flags-03000).
+      layoutCI.flags |=
+        VK_DESCRIPTOR_SET_LAYOUT_CREATE_UPDATE_AFTER_BIND_POOL_BIT;
+    };
+
   VkDescriptorSetLayoutCreateInfo ci {};
   ci.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
   ci.bindingCount = 16;
   ci.pBindings = bindings;
+  attachBindingFlags(ci, 16);
+  if (this->hasUpdateAfterBind) {
+    // Binding 0 is the TLAS: acceleration-structure update-after-bind is a
+    // separate feature (VkPhysicalDeviceAccelerationStructureFeaturesKHR) that
+    // is not requested, so it must not carry the flag
+    // (VUID-VkDescriptorSetLayoutBindingFlagsCreateInfo-descriptorBindingAccelerationStructureUpdateAfterBind-03570).
+    bindingFlags[0] = 0;
+  }
   if (vkCreateDescriptorSetLayout(this->device, &ci, this->allocator,
                                   &this->rtSetLayout) != VK_SUCCESS) {
     return false;
@@ -152,6 +225,7 @@ SoRTXRenderBackend::createDescriptorSetLayout()
   pci.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
   pci.bindingCount = 6;
   pci.pBindings = presentBindings;
+  attachBindingFlags(pci, 6);
   if (vkCreateDescriptorSetLayout(this->device, &pci, this->allocator,
                                   &this->presentSetLayout) != VK_SUCCESS) {
     return false;
@@ -177,6 +251,17 @@ SoRTXRenderBackend::createDenoiseDownsampleSetLayout()
   ci.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
   ci.bindingCount = 5;
   ci.pBindings = bindings;
+  std::vector<VkDescriptorBindingFlags> bindingFlags;
+  VkDescriptorSetLayoutBindingFlagsCreateInfo flagsCI {};
+  if (this->hasUpdateAfterBind) {
+    bindingFlags.assign(5, VK_DESCRIPTOR_BINDING_UPDATE_AFTER_BIND_BIT);
+    flagsCI.sType =
+      VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_BINDING_FLAGS_CREATE_INFO;
+    flagsCI.bindingCount = 5;
+    flagsCI.pBindingFlags = bindingFlags.data();
+    ci.pNext = &flagsCI;
+    ci.flags |= VK_DESCRIPTOR_SET_LAYOUT_CREATE_UPDATE_AFTER_BIND_POOL_BIT;
+  }
   return vkCreateDescriptorSetLayout(this->device, &ci, this->allocator,
                                      &this->denoiseDownsampleSetLayout) ==
     VK_SUCCESS;
@@ -185,21 +270,34 @@ SoRTXRenderBackend::createDenoiseDownsampleSetLayout()
 bool
 SoRTXRenderBackend::createDescriptorPool()
 {
+  // Sized for a full RTX_MAX_FRAMES_IN_FLIGHT ring (one RT + one present set
+  // per slot) plus the denoise-downsample and GPU-pick sets.  The ring is
+  // normally only a few slots (swapchain image count + 1); the pool is
+  // over-provisioned so setMaxFramesInFlight() never has to recreate it.
+  const uint32_t ring = RTX_MAX_FRAMES_IN_FLIGHT;
   VkDescriptorPoolSize sizes[5] {};
   sizes[0].type = VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR;
-  sizes[0].descriptorCount = 2;
+  // One per RT set plus the single GPU-pick set.
+  sizes[0].descriptorCount = ring + 1;
   sizes[1].type = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
-  sizes[1].descriptorCount = 2;
+  // One per RT set (storage image) and one per present set (sampled image).
+  sizes[1].descriptorCount = ring * 2;
   sizes[2].type = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-  sizes[2].descriptorCount = 2;
+  sizes[2].descriptorCount = ring;
   sizes[3].type = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
-  sizes[3].descriptorCount = 2;
+  sizes[3].descriptorCount = ring * 2;
   sizes[4].type = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
-  sizes[4].descriptorCount = 64;
+  sizes[4].descriptorCount = ring * 24 + 16;
 
   VkDescriptorPoolCreateInfo ci {};
   ci.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
-  ci.maxSets = 5;
+  // Required when any set allocated from this pool carries the
+  // UPDATE_AFTER_BIND binding flag (see createDescriptorSetLayout).
+  ci.flags = this->hasUpdateAfterBind
+    ? VK_DESCRIPTOR_POOL_CREATE_UPDATE_AFTER_BIND_BIT
+    : 0;
+  // ring RT sets + ring present sets + 1 denoise set + 1 GPU-pick set.
+  ci.maxSets = ring * 2 + 2;
   ci.poolSizeCount = 5;
   ci.pPoolSizes = sizes;
   return vkCreateDescriptorPool(this->device, &ci, this->allocator,
@@ -270,34 +368,25 @@ SoRTXRenderBackend::createFrameBuffer()
   if (this->frameBuffer == VK_NULL_HANDLE) {
     if (!this->createHostVisibleBuffer(
           sizeof(RTXFrameBlock), VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT,
-          this->frameBuffer, this->frameMemory)) {
-      return false;
-    }
-    if (vkMapMemory(this->device, this->frameMemory, 0,
-                    sizeof(RTXFrameBlock), 0, &this->frameMapped) !=
-        VK_SUCCESS) {
+          this->frameBuffer, this->frameMemory, &this->frameMapped)) {
       return false;
     }
   }
   // Compact present frame block: world->view (mat4) followed by view->clip
   // (mat4), exactly matching the PresentFrame std140 block in
   // PresentFragment.glsl (two mat4, offsets 0 and 64).
-  if (!this->createHostVisibleBuffer(
-        2 * sizeof(float) * 16, VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT,
-        this->presentFrameBuffer, this->presentFrameMemory)) {
-    return false;
-  }
-  return vkMapMemory(this->device, this->presentFrameMemory, 0,
-                     2 * sizeof(float) * 16, 0, &this->presentFrameMapped) ==
-    VK_SUCCESS;
+  return this->createHostVisibleBuffer(
+    2 * sizeof(float) * 16, VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT,
+    this->presentFrameBuffer, this->presentFrameMemory,
+    &this->presentFrameMapped);
 }
 
 bool
 SoRTXRenderBackend::updateDescriptors()
 {
-  // Allocate the double-buffered pairs once (the layouts differ, so two
-  // allocations of two sets each).
-  for (int pair = 0; pair < 2; ++pair) {
+  // Allocate the ring slots once (the layouts differ, so one allocation per
+  // slot per layout).
+  for (uint32_t pair = 0; pair < this->descriptorRingSize; ++pair) {
     if (this->rtDescriptorSets[pair] != VK_NULL_HANDLE) continue;
     VkDescriptorSetLayout layout = this->rtSetLayout;
     VkDescriptorSetAllocateInfo ai {};
@@ -311,7 +400,7 @@ SoRTXRenderBackend::updateDescriptors()
       return false;
     }
   }
-  for (int pair = 0; pair < 2; ++pair) {
+  for (uint32_t pair = 0; pair < this->descriptorRingSize; ++pair) {
     if (this->presentDescriptorSets[pair] != VK_NULL_HANDLE) continue;
     VkDescriptorSetLayout layout = this->presentSetLayout;
     VkDescriptorSetAllocateInfo ai {};
@@ -808,10 +897,19 @@ SoRTXRenderBackend::createPipelines()
   ci.pGroups = groups;
   ci.maxPipelineRayRecursionDepth = 2; // primary + one shadow level
   ci.layout = this->rtPipelineLayout;
+  const bool wantFeedback = pipelineFeedbackWanted(this->hasPipelineCreationFeedback);
+  VkPipelineCreationFeedbackEXT feedback {};
+  VkPipelineCreationFeedbackCreateInfoEXT feedbackInfo {};
+  if (wantFeedback) {
+    chainPipelineFeedback(feedbackInfo, feedback, &ci);
+  }
   if (this->vkCreateRayTracingPipelinesKHR(
         this->device, VK_NULL_HANDLE, VK_NULL_HANDLE, 1, &ci,
         this->allocator, &this->rtPipeline) != VK_SUCCESS) {
     return false;
+  }
+  if (wantFeedback) {
+    logPipelineFeedback("rt-pipeline", feedback);
   }
   if (!this->createShaderBindingTable()) {
     return false;
@@ -826,10 +924,16 @@ SoRTXRenderBackend::createPipelines()
   computeCI.stage.module = this->pathTraceModule;
   computeCI.stage.pName = "main";
   computeCI.layout = this->rtPipelineLayout;
+  if (wantFeedback) {
+    chainPipelineFeedback(feedbackInfo, feedback, &computeCI);
+  }
   if (vkCreateComputePipelines(this->device, VK_NULL_HANDLE, 1, &computeCI,
                                this->allocator,
                                &this->computePipeline) != VK_SUCCESS) {
     return false;
+  }
+  if (wantFeedback) {
+    logPipelineFeedback("rt-compute", feedback);
   }
   return this->createDenoiseDownsamplePipeline();
 }
@@ -859,11 +963,20 @@ SoRTXRenderBackend::createDenoiseDownsamplePipeline()
   computeCI.stage.module = this->denoiseDownsampleModule;
   computeCI.stage.pName = "main";
   computeCI.layout = this->denoiseDownsamplePipelineLayout;
+  const bool wantFeedback = pipelineFeedbackWanted(this->hasPipelineCreationFeedback);
+  VkPipelineCreationFeedbackEXT feedback {};
+  VkPipelineCreationFeedbackCreateInfoEXT feedbackInfo {};
+  if (wantFeedback) {
+    chainPipelineFeedback(feedbackInfo, feedback, &computeCI);
+  }
   if (vkCreateComputePipelines(this->device, VK_NULL_HANDLE, 1, &computeCI,
                                this->allocator,
                                &this->denoiseDownsamplePipeline) !=
       VK_SUCCESS) {
     return false;
+  }
+  if (wantFeedback) {
+    logPipelineFeedback("denoise-downsample", feedback);
   }
   checkDenoiseDownsampleLayout();
   return true;
@@ -900,8 +1013,7 @@ SoRTXRenderBackend::createShaderBindingTable()
     return false;
   }
   void * mapped = nullptr;
-  if (vkMapMemory(this->device, this->sbtMemory, 0, tableSize, 0,
-                  &mapped) != VK_SUCCESS) {
+  if (vmaMapMemory(this->vmaAllocator, this->sbtMemory, &mapped) != VK_SUCCESS) {
     return false;
   }
   const VkDeviceAddress rawBase = this->getDeviceAddress(this->sbtBuffer);
@@ -914,7 +1026,7 @@ SoRTXRenderBackend::createShaderBindingTable()
                 handles.data() + static_cast<size_t>(i) * handleSize,
                 handleSize);
   }
-  vkUnmapMemory(this->device, this->sbtMemory);
+  vmaUnmapMemory(this->vmaAllocator, this->sbtMemory);
 
   // Strided device-address regions handed to vkCmdTraceRaysKHR.
   const VkDeviceSize stride = this->sbtRecordSize;

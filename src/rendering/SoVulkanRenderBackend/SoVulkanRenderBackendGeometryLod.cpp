@@ -38,6 +38,8 @@
 
 #include <Inventor/errors/SoDebugError.h>
 
+#include "vk_mem_alloc.h"
+
 #include <algorithm>
 #include <atomic>
 #include <cstdint>
@@ -154,20 +156,14 @@ SoVulkanRenderBackend::destroySubPixelResources(VulkanCachedCommand & entry)
 {
   for (VulkanCachedCommand::VulkanSubPixelSlot & s : entry.subPixelSlots) {
     if (s.indexBuffer != VK_NULL_HANDLE) {
-      vkDestroyBuffer(this->device, s.indexBuffer, this->allocator);
+      vmaDestroyBuffer(this->vmaAllocator, s.indexBuffer, s.indexMemory);
       s.indexBuffer = VK_NULL_HANDLE;
-    }
-    if (s.indexMemory != VK_NULL_HANDLE) {
-      vkFreeMemory(this->device, s.indexMemory, this->allocator);
-      s.indexMemory = VK_NULL_HANDLE;
+      s.indexMemory = nullptr;
     }
     if (s.indirectBuffer != VK_NULL_HANDLE) {
-      vkDestroyBuffer(this->device, s.indirectBuffer, this->allocator);
+      vmaDestroyBuffer(this->vmaAllocator, s.indirectBuffer, s.indirectMemory);
       s.indirectBuffer = VK_NULL_HANDLE;
-    }
-    if (s.indirectMemory != VK_NULL_HANDLE) {
-      vkFreeMemory(this->device, s.indirectMemory, this->allocator);
-      s.indirectMemory = VK_NULL_HANDLE;
+      s.indirectMemory = nullptr;
     }
   }
   entry.subPixelSlots.clear();
@@ -180,21 +176,14 @@ SoVulkanRenderBackend::deferDestroySubPixelResources(VulkanCachedCommand & entry
   if (entry.subPixelSlots.empty()) return;
   std::vector<VulkanCachedCommand::VulkanSubPixelSlot> slots =
     std::move(entry.subPixelSlots);
-  VkDevice device = this->device;
-  const VkAllocationCallbacks * allocator = this->allocator;
-  this->deferDestroy([device, allocator, slots]() mutable {
+  VmaAllocator vma = this->vmaAllocator;
+  this->deferDestroy([vma, slots]() mutable {
     for (VulkanCachedCommand::VulkanSubPixelSlot & s : slots) {
       if (s.indexBuffer != VK_NULL_HANDLE) {
-        vkDestroyBuffer(device, s.indexBuffer, allocator);
-      }
-      if (s.indexMemory != VK_NULL_HANDLE) {
-        vkFreeMemory(device, s.indexMemory, allocator);
+        vmaDestroyBuffer(vma, s.indexBuffer, s.indexMemory);
       }
       if (s.indirectBuffer != VK_NULL_HANDLE) {
-        vkDestroyBuffer(device, s.indirectBuffer, allocator);
-      }
-      if (s.indirectMemory != VK_NULL_HANDLE) {
-        vkFreeMemory(device, s.indirectMemory, allocator);
+        vmaDestroyBuffer(vma, s.indirectBuffer, s.indirectMemory);
       }
     }
   });
@@ -271,12 +260,9 @@ SoVulkanRenderBackend::ensureSubPixelSlot(VulkanCachedCommand & entry,
   // The caller has already invalidated the slots on a content change.
   if (s.indexBuffer == VK_NULL_HANDLE || s.maxIndices < elementCount) {
     if (s.indexBuffer != VK_NULL_HANDLE) {
-      vkDestroyBuffer(this->device, s.indexBuffer, this->allocator);
+      vmaDestroyBuffer(this->vmaAllocator, s.indexBuffer, s.indexMemory);
       s.indexBuffer = VK_NULL_HANDLE;
-    }
-    if (s.indexMemory != VK_NULL_HANDLE) {
-      vkFreeMemory(this->device, s.indexMemory, this->allocator);
-      s.indexMemory = VK_NULL_HANDLE;
+      s.indexMemory = nullptr;
     }
     const VkDeviceSize indexBytes =
       static_cast<VkDeviceSize>(elementCount) * sizeof(uint32_t);
@@ -460,11 +446,11 @@ SoVulkanRenderBackend::recordGeometryLodPrepass(VkCommandBuffer cb,
     // stalls the frame).
     if (geometryLodStats() && s.readyFrame != 0) {
       void * mapped = nullptr;
-      if (vkMapMemory(this->device, s.indirectMemory, 0, sizeof(uint32_t), 0,
-                      &mapped) == VK_SUCCESS) {
+      if (vmaMapMemory(this->vmaAllocator, s.indirectMemory, &mapped) ==
+          VK_SUCCESS) {
         uint32_t survivors = 0;
         std::memcpy(&survivors, mapped, sizeof(uint32_t));
-        vkUnmapMemory(this->device, s.indirectMemory);
+        vmaUnmapMemory(this->vmaAllocator, s.indirectMemory);
         // The shader appends INDICES, so the indirect indexCount is 3x the
         // surviving triangles.  Report triangles to compare with primCount:
         // at FC_VULKAN_GEOM_LOD_PIXELS=0 every triangle must survive
@@ -485,14 +471,10 @@ SoVulkanRenderBackend::recordGeometryLodPrepass(VkCommandBuffer cb,
     // first 4 bytes are touched, so the fixed fields stay intact.
     vkCmdFillBuffer(cb, s.indirectBuffer, 0, sizeof(uint32_t), 0);
 
-    VkMemoryBarrier fillBarrier {};
-    fillBarrier.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
-    fillBarrier.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
-    fillBarrier.dstAccessMask =
-      VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT;
-    vkCmdPipelineBarrier(cb, VK_PIPELINE_STAGE_TRANSFER_BIT,
-                         VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, 1,
-                         &fillBarrier, 0, nullptr, 0, nullptr);
+    SoVulkanShared::memoryBarrier(
+      cb, VK_PIPELINE_STAGE_TRANSFER_BIT,
+      VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_ACCESS_TRANSFER_WRITE_BIT,
+      VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT);
 
     SubPixelPush pc {};
     // Same combined transform as the visual vertex shader: the shader applies
@@ -529,16 +511,12 @@ SoVulkanRenderBackend::recordGeometryLodPrepass(VkCommandBuffer cb,
 
   // One barrier after every dispatch: compute writes become visible to the
   // indirect-command read and the index/vertex-input reads of the draws.
-  VkMemoryBarrier drawBarrier {};
-  drawBarrier.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
-  drawBarrier.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
-  drawBarrier.dstAccessMask =
-    VK_ACCESS_INDIRECT_COMMAND_READ_BIT | VK_ACCESS_INDEX_READ_BIT |
-    VK_ACCESS_VERTEX_ATTRIBUTE_READ_BIT;
-  vkCmdPipelineBarrier(
+  SoVulkanShared::memoryBarrier(
     cb, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
     VK_PIPELINE_STAGE_DRAW_INDIRECT_BIT | VK_PIPELINE_STAGE_VERTEX_INPUT_BIT,
-    0, 1, &drawBarrier, 0, nullptr, 0, nullptr);
+    VK_ACCESS_SHADER_WRITE_BIT,
+    VK_ACCESS_INDIRECT_COMMAND_READ_BIT | VK_ACCESS_INDEX_READ_BIT |
+      VK_ACCESS_VERTEX_ATTRIBUTE_READ_BIT);
 
   if (debug) {
     fprintf(stderr, "[GEOMLOD] prepass slot=%u compacted=%u skipped=%u "

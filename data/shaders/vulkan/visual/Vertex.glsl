@@ -29,14 +29,12 @@
 #version 450
 
 layout(push_constant) uniform PushConstants {
-    mat4  u_proj;         // offset 0, 64 bytes
-    vec4  u_color;        // offset 64, 16 bytes
-    vec4  u_flags;        // offset 80, 16 bytes
-    vec4  u_texParams;    // offset 96, 16 bytes
-    vec4  u_texBlend;     // offset 112, 16 bytes
-    float u_pointSize;    // offset 128, 16 bytes (pad[3])
-    vec4  u_lineParams;   // offset 144, 16 bytes: x = stipple factor,
-                        // y = round points
+    vec4  u_color;        // offset 0, 16 bytes
+    vec4  u_flags;        // offset 16, 16 bytes
+    vec4  u_texParams;    // offset 32, 16 bytes
+    vec4  u_texBlend;     // offset 48, 16 bytes
+    float u_pointSize;    // offset 64, 16 bytes (pad[3])
+    vec4  u_lineParams;   // offset 80, 16 bytes: x = stipple factor,
                           //   y = round points, z = line primitive,
                           //   w = point primitive
 } pc;
@@ -61,6 +59,7 @@ layout(set = 1, binding = 0, std140) uniform DrawBlock {
     vec4  u_materialSpecular;     // offset 160
     vec4  u_materialParams;       // offset 176: x=shininess, y=twoSided,
                                   //            z=lightCount, w=shadingModel
+    mat4  u_proj;                 // offset 192: projection (view/model above)
 } draw;
 
 layout(location = 0) in vec3 a_position;
@@ -95,7 +94,7 @@ void main()
     mat3 normalMatrix = transpose(inverse(mat3(draw.u_view * u_iModel)));
     vec3 eyeNormal = normalMatrix * a_normal;
 
-    vec4 clip = pc.u_proj * eyePos;
+    vec4 clip = draw.u_proj * eyePos;
     // Coin/OpenGL uses a bottom-left origin; Vulkan uses top-left.  Flip Y so
     // the two pipelines produce identical output for the same viewport.
     clip.y = -clip.y;

@@ -7,9 +7,18 @@
 
 #include "rendering/SoVulkanShared.h"
 #include "rendering/SoVulkanResult.h"
-#include "rendering/SoVulkanRenderBackend/SoVulkanMemPool.h"
+// Vulkan Memory Allocator handles.  Only the opaque handle types are needed in
+// this header; the full API lives in third_party/vma/vk_mem_alloc.h, included
+// by the .cpp files that allocate.  VK_DEFINE_HANDLE produces the same typedef
+// VMA does, so either include order is safe.
+#ifndef AMD_VULKAN_MEMORY_ALLOCATOR_H
+VK_DEFINE_HANDLE(VmaAllocator)
+VK_DEFINE_HANDLE(VmaAllocation)
+#endif
+#include "rendering/SoVulkanRenderBackend/SoVulkanPipelineCache.h"
 #include "rendering/SoVulkanRenderBackend/SoVulkanRecordContext.h"
 #include "rendering/SoVulkanRenderBackend/SoVulkanRenderPassCache.h"
+#include "rendering/SoVulkanGpuTimers.h"
 
 #include <Inventor/rendering/SoVulkanRenderTarget.h>
 
@@ -20,95 +29,15 @@
 #include <functional>
 #include <memory>
 #include <mutex>
+#include <string>
 #include <thread>
 #include <unordered_map>
 #include <utility>
 #include <vector>
 
-// Shared combine step for the hand-rolled hash functors below.  Keeping one
-// implementation prevents the == operator and the hash from drifting apart.
-static inline size_t hashCombine(size_t hash, size_t value)
-{
-  return hash ^ (value + 0x9e3779b9 + (hash << 6) + (hash >> 2));
-}
-
-/*!
-  \brief Immutable graphics-pipeline identity.
-
-  Pipelines are cached in \c pipelineCache keyed by this struct.  It is
-  defined before VulkanCachedCommand so each cached command can remember the
-  exact key it last resolved to, letting getOrCreatePipeline() skip re-hashing
-  (and the map lookup) for an unchanged command on the steady-state path.
-*/
-struct PipelineKey {
-  VkRenderPass renderPass = VK_NULL_HANDLE;
-  uint8_t topology = 0;
-  uint8_t fillMode = 0;
-  uint8_t cullMode = 0;
-  uint8_t ccwFrontFace = 1;
-  bool depthTestEnable = false;
-  bool depthWriteEnable = false;
-  uint8_t depthFunction = 0;
-  bool depthBiasEnable = false;
-  float depthBiasConstantFactor = 0.0f;
-  float depthBiasSlopeFactor = 0.0f;
-  bool blendEnable = false;
-  uint8_t blendSrcRGB = 0;
-  uint8_t blendDstRGB = 0;
-  uint8_t blendSrcAlpha = 0;
-  uint8_t blendDstAlpha = 0;
-  uint8_t blendEquationRGB = 0;
-  uint8_t blendEquationAlpha = 0;
-  bool stencilEnable = false;
-  uint8_t stencilFunction = 0;
-  uint8_t stencilReference = 0;
-  uint8_t stencilCompareMask = 0xFF;
-  uint8_t stencilWriteMask = 0xFF;
-  uint8_t stencilFailOp = 0;
-  uint8_t stencilZFailOp = 0;
-  uint8_t stencilZPassOp = 0;
-  uint32_t sampleCount = 1;
-  bool wideLine = false;
-  //! GPU-instanced wide-line variant: the same wide-line output, but the
-  //! vertex shader expands the segment on the GPU from an instance-rate
-  //! endpoint buffer instead of drawing the CPU-expanded quads.  Shares the
-  //! fragment module with `wideLine` but needs a distinct pipeline (different
-  //! vertex module and vertex input layout).
-  bool wideLineInstanced = false;
-
-  bool operator==(const PipelineKey & other) const
-  {
-    return renderPass == other.renderPass && topology == other.topology &&
-      fillMode == other.fillMode && cullMode == other.cullMode &&
-      ccwFrontFace == other.ccwFrontFace &&
-      depthTestEnable == other.depthTestEnable &&
-      depthWriteEnable == other.depthWriteEnable &&
-      depthFunction == other.depthFunction &&
-      depthBiasEnable == other.depthBiasEnable &&
-      (!depthBiasEnable ||
-       (depthBiasConstantFactor == other.depthBiasConstantFactor &&
-        depthBiasSlopeFactor == other.depthBiasSlopeFactor)) &&
-      blendEnable == other.blendEnable &&
-      (!blendEnable ||
-       (blendSrcRGB == other.blendSrcRGB &&
-        blendDstRGB == other.blendDstRGB &&
-        blendSrcAlpha == other.blendSrcAlpha &&
-        blendDstAlpha == other.blendDstAlpha &&
-        blendEquationRGB == other.blendEquationRGB &&
-        blendEquationAlpha == other.blendEquationAlpha)) &&
-      stencilEnable == other.stencilEnable &&
-      (!stencilEnable ||
-       (stencilFunction == other.stencilFunction &&
-        stencilReference == other.stencilReference &&
-        stencilCompareMask == other.stencilCompareMask &&
-        stencilWriteMask == other.stencilWriteMask &&
-        stencilFailOp == other.stencilFailOp &&
-        stencilZFailOp == other.stencilZFailOp &&
-        stencilZPassOp == other.stencilZPassOp)) &&
-      sampleCount == other.sampleCount && wideLine == other.wideLine &&
-      wideLineInstanced == other.wideLineInstanced;
-  }
-};
+// PipelineKey / PipelineKeyHash / BackgroundPipelineKey* and the
+// SoVulkanPipelineCache store live in SoVulkanPipelineCache.h (included
+// above); PipelineKey is used by VulkanCachedCommand below.
 
 /*!
   \brief Cached GPU geometry for one retained SoRenderCommand.
@@ -121,9 +50,9 @@ struct PipelineKey {
 */
 struct VulkanCachedCommand {
   VkBuffer vertexBuffer = VK_NULL_HANDLE;
-  VkDeviceMemory vertexMemory = VK_NULL_HANDLE;
+  VmaAllocation vertexMemory = nullptr;
   VkBuffer indexBuffer = VK_NULL_HANDLE;
-  VkDeviceMemory indexMemory = VK_NULL_HANDLE;
+  VmaAllocation indexMemory = nullptr;
   VkDeviceSize vertexOffset = 0;
   VkDeviceSize indexOffset = 0;
   uint32_t sharedBlockId = 0;
@@ -137,7 +66,7 @@ struct VulkanCachedCommand {
   // or quad upload happens for this command.  A null buffer means the build
   // failed (or the command is not eligible) and the CPU expansion is used.
   VkBuffer instancedLineBuffer = VK_NULL_HANDLE;
-  VkDeviceMemory instancedLineMemory = VK_NULL_HANDLE;
+  VmaAllocation instancedLineMemory = nullptr;
   uint32_t instancedLineSegmentCount = 0;
   uint64_t instancedLineHash = 0;
 
@@ -150,9 +79,9 @@ struct VulkanCachedCommand {
   // built lazily by the pre-pass and kept until the geometry content changes.
   struct VulkanSubPixelSlot {
     VkBuffer indexBuffer = VK_NULL_HANDLE;      // compacted indices
-    VkDeviceMemory indexMemory = VK_NULL_HANDLE;
+    VmaAllocation indexMemory = nullptr;
     VkBuffer indirectBuffer = VK_NULL_HANDLE;   // VkDrawIndexedIndirectCommand
-    VkDeviceMemory indirectMemory = VK_NULL_HANDLE;
+    VmaAllocation indirectMemory = nullptr;
     VkDescriptorSet descriptorSet = VK_NULL_HANDLE;
     uint32_t maxIndices = 0;                    // capacity of indexBuffer
     // Frame ordinal this slot was compacted for (0 = not ready).  The draw
@@ -180,7 +109,7 @@ struct VulkanCachedCommand {
   // waits the slot's fence before the slot is reused.
   struct VulkanWideLineBuffer {
     VkBuffer buffer = VK_NULL_HANDLE;
-    VkDeviceMemory memory = VK_NULL_HANDLE;
+    VmaAllocation memory = nullptr;
     //! Persistent host mapping of `memory` (VK_MEMORY_PROPERTY_HOST_VISIBLE |
     //! HOST_COHERENT), established once at (re)creation and kept alive so the
     //! steady-state per-frame update is a plain memcpy instead of a per-command
@@ -200,20 +129,10 @@ struct VulkanCachedCommand {
 
     // Release the slot's buffer + memory and reset it to the empty state.
     // Singular teardown used by both the synchronous and the deferred cache
-    // destroy paths.
-    void destroy(VkDevice device, const VkAllocationCallbacks * allocator)
-    {
-      if (buffer != VK_NULL_HANDLE) {
-        vkDestroyBuffer(device, buffer, allocator);
-        buffer = VK_NULL_HANDLE;
-      }
-      if (memory != VK_NULL_HANDLE) {
-        vkFreeMemory(device, memory, allocator);
-        memory = VK_NULL_HANDLE;
-      }
-      mapped = nullptr;
-      size = 0;
-    }
+    // destroy paths.  Defined out-of-line in SoVulkanRenderBackendGeometry.cpp
+    // because vmaDestroyBuffer needs the full VMA API, which this header
+    // deliberately does not include.
+    void destroy(VmaAllocator allocator);
   };
   std::vector<VulkanWideLineBuffer> wideLineBuffers;
   uint32_t wideLineVertexCount = 0;
@@ -232,6 +151,12 @@ struct VulkanCachedCommand {
   uint32_t texcoordStride = 0;
   uint32_t normalCount = 0;
   uint32_t cacheGeneration = 0;
+  // Visit stamp for the overlay-composite sweep.  While ray tracing owns the
+  // scene, overlays-only frames cannot key eviction on the draw-list
+  // generation (a replayed retained list never advances it), so this epoch --
+  // bumped once per composite pass -- marks the entries the pass visited;
+  // everything else (the traced triangle commands) is released.
+  uint32_t compositeEpoch = 0;
   // Content hash of the uploaded streams: pointer identity alone cannot
   // detect in-place edits (the per-frame arena hands out the same pointers
   // for unchanged layouts), which would otherwise serve stale geometry.
@@ -240,8 +165,8 @@ struct VulkanCachedCommand {
   // Pipeline-resolution fast path (getOrCreatePipeline()).  The exact
   // PipelineKey resolved for this command last is stored verbatim, plus the
   // handle it produced.  A match (cheap field-by-field equality, no hashing)
-  // skips rebuilding the key and the per-frame pipelineCache unordered_map
-  // lookup for unchanged commands.  The entry lives and dies with the
+  // skips rebuilding the key and the SoVulkanPipelineCache map lookup for
+  // unchanged commands.  The entry lives and dies with the
   // geometry cache, which invalidateCache() clears together with the
   // pipeline cache, so these fields never outlive the handles they name.
   PipelineKey resolvedKey;
@@ -252,14 +177,10 @@ struct VulkanCachedCommand {
 /*! \brief Cached GPU texture for one retained command's SoTextureData. */
 struct VulkanCachedTexture {
   VkImage image = VK_NULL_HANDLE;
-  VkDeviceMemory memory = VK_NULL_HANDLE;
-  // Offset of `memory` into the sub-allocator block it came from (0 when the
-  // memory is a standalone vkAllocateMemory -- the legacy path).  Needed to
-  // return the range when FC_VULKAN_MEM_POOL is enabled.
-  VkDeviceSize memoryOffset = 0;
-  // Size of the `memory` range (the sub-allocated block size / allocation
-  // size).  Tracked so releaseMemory() returns exactly what was allocated.
-  VkDeviceSize memorySize = 0;
+  // Backing device memory, owned by the VMA allocator.  The image and its
+  // allocation are created and destroyed together (vmaCreateImage /
+  // vmaDestroyImage); no separate VkDeviceMemory handle is kept.
+  VmaAllocation allocation = nullptr;
   VkImageView view = VK_NULL_HANDLE;
   VkSampler sampler = VK_NULL_HANDLE;
   VkDescriptorSet descriptorSet = VK_NULL_HANDLE;
@@ -351,6 +272,22 @@ public:
                             const SoRenderParams & params);
 
   /*!
+    \brief Declare that this backend only composites overlays and residual
+    geometry on top of a ray-traced frame.
+
+    While ray tracing is active the manager drives this backend through
+    renderExternalOverlay()/renderOverlaysOnly() only; the RT backend owns the
+    scene's triangle geometry.  In that state updateGeometryCache() runs its
+    stale-entry sweep on overlays-only frames too, evicting the traced triangle
+    commands this backend no longer visits, so the scene meshes are not held
+    resident a second time alongside the RT backend's copy.  The manager sets
+    this while ray tracing is active and clears it when it is not; it must stay
+    false for a backend that also performs full raster renders, whose cache has
+    to survive an interleaved overlay pass.
+  */
+  void setOverlayCompositeMode(SbBool enabled);
+
+  /*!
     \brief Declare how many recorded frames the caller may keep in flight.
 
     Drives the deferred-destruction batch count and the lighting UBO ring
@@ -362,6 +299,20 @@ public:
     concurrency).
   */
   void setMaxFramesInFlight(uint32_t count);
+
+  /*!
+    \brief Path of a persistent (on-disk) Vulkan pipeline cache.
+
+    When non-empty, initialize() loads the file's bytes as the initial
+    pipeline-cache data and shutdown() writes the driver's cache blob back, so
+    the many lazily-created pipeline variants survive a process restart.  The
+    file is advisory: a missing, corrupt or stale (different device/driver)
+    file is rejected by the implementation and an empty cache is created
+    instead.  The embedding application owns the path and its directory, since
+    Coin has no window-system or user-cache knowledge.  Set it before
+    initialize().
+  */
+  void setPipelineCachePath(const std::string & path);
 
   /*!
     \brief Configure Vulkan-only display overlays.
@@ -446,7 +397,8 @@ private:
                               const SoRenderCommand & command,
                               const SoRenderParams & params,
                               VkDeviceSize uboOffset,
-                              bool unlit = false);
+                              bool unlit = false,
+                              const float * projFloats = nullptr);
   // Dynamic byte offset into the lighting ring for a command's handle (0 if
   // the command references no lighting).  Uses the frame-local
   // lightingSlotOffsets built by updateLightingSetup().
@@ -476,7 +428,7 @@ private:
 
   struct VulkanGeometryBlock {
     VkBuffer buffer = VK_NULL_HANDLE;
-    VkDeviceMemory memory = VK_NULL_HANDLE;
+    VmaAllocation memory = nullptr;
     void * mapped = nullptr;
     VkDeviceSize capacity = 0;
     VkDeviceSize used = 0;
@@ -611,17 +563,6 @@ private:
                                     VkDescriptorSet & set);
   bool ensureDescriptorPoolSpace();
   VkDescriptorSet resolveTextureSet(const SoRenderCommand & command);
-  // Release a texture image or staging buffer's device memory back to the
-  // sub-allocator when enabled (FC_VULKAN_MEM_POOL), else vkFreeMemory as the
-  // legacy path.  The caller must have recorded the offset (from a pool alloc)
-  // into the entry/staging record — when the pool is disabled the memory is a
-  // standalone allocation and offset is 0.  Destroying the VkBuffer/VkImage
-  // for the pool case is the caller's responsibility (the memory block outlives
-  // the buffer/image); this helper only returns the memory.
-  void releaseMemory(VkDeviceMemory memory, VkDeviceSize size,
-                     VkDeviceSize offset);
-  // True when sub-allocating transient texture memory (FC_VULKAN_MEM_POOL).
-  bool usingMemPool() const { return this->memPool != nullptr; }
 
   // --- Render recording ---------------------------------------------------
   // Every record* helper below takes the VulkanRecordContext it records
@@ -874,10 +815,13 @@ private:
       const SoRenderParams & params) const;
 
   // --- Vulkan resource helpers -------------------------------------------
+  // Create a buffer + VMA allocation and, when `data` is non-null, fill it
+  // through a one-time host mapping.  On failure buffer/allocation are left
+  // null.
   bool createBuffer(VkDeviceSize size,
                     VkBufferUsageFlags usage,
                     VkBuffer & buffer,
-                    VkDeviceMemory & memory,
+                    VmaAllocation & memory,
                     const void * data);
   // Device-local variant of createBuffer() for retained static geometry.
   // Uses a transient staging buffer + one-shot transfer and waits for the
@@ -886,40 +830,27 @@ private:
   bool createBufferDeviceLocal(VkDeviceSize size,
                                VkBufferUsageFlags usage,
                                VkBuffer & buffer,
-                               VkDeviceMemory & memory,
+                               VmaAllocation & memory,
                                const void * data);
-  // Pick a memory type for `requirements` that satisfies `desired` properties
-  // and a compatible memoryTypeBits.  Uses the shared cached
-  // SoVulkanShared::MemoryProperties (memProps) so the memory-type search lives
-  // in one place.  Returns false when no suitable type exists.
-  bool selectMemoryType(const VkMemoryRequirements & requirements,
-                        VkMemoryPropertyFlags desired,
-                        uint32_t & memoryTypeIndex);
-  // Allocate device memory for an already-created `buffer` and bind it.  On
-  // failure `memory` is left null and the caller destroys `buffer`.
-  bool allocateBufferMemory(VkBuffer buffer,
-                            const VkMemoryRequirements & requirements,
-                            VkMemoryPropertyFlags desiredProperties,
-                            VkDeviceMemory & memory);
   // Create a buffer backed by memory with the desired properties.  When
   // `data` is non-null the host-visible contents are filled.  On failure
-  // buffer/memory are left null.
+  // buffer/allocation are left null.
   bool createBufferWithProperties(VkDeviceSize size, VkBufferUsageFlags usage,
                                   VkMemoryPropertyFlags desiredProperties,
-                                  VkBuffer & buffer, VkDeviceMemory & memory,
+                                  VkBuffer & buffer, VmaAllocation & memory,
                                   const void * data = nullptr);
   // Create a HOST_VISIBLE | HOST_COHERENT buffer and establish its persistent
-  // mapping in one step.  On any failure buffer/memory are left null and
+  // mapping in one step.  On any failure buffer/allocation are left null and
   // *mapped null, with nothing allocated.  Used by every per-frame UBO / ring
   // buffer (lighting ring, lighting constant ring, instance-model ring, wide-
   // line quad slots), which all share the same create+map+rollback shape.
   bool createMappedBuffer(VkDeviceSize size, VkBufferUsageFlags usage,
-                          VkBuffer & buffer, VkDeviceMemory & memory,
+                          VkBuffer & buffer, VmaAllocation & memory,
                           void ** mapped);
-  // Defer destruction of a buffer + its memory to the deferred-destruction
+  // Defer destruction of a buffer + its allocation to the deferred-destruction
   // ring (the submission that may still reference it must drain first).  Null
   // handles are ignored, so callers need not pre-check.
-  void deferDestroyBufferMemory(VkBuffer buffer, VkDeviceMemory memory);
+  void deferDestroyBufferMemory(VkBuffer buffer, VmaAllocation memory);
   // Ensure the per-instance model-matrix buffer holds at least `bytes`
   // (HOST_VISIBLE | HOST_COHERENT, persistently mapped).  Recreates + remaps
   // on growth; the old buffer is released through the deferred ring.
@@ -933,7 +864,7 @@ private:
   // vkDestroyBuffer would otherwise race once workers record in parallel.
   bool ensureInstanceModelRingCapacity();
   bool growLightingUbo(uint32_t minSlots);
-  bool swapLightingBuffer(VkBuffer newBuffer, VkDeviceMemory newMemory,
+  bool swapLightingBuffer(VkBuffer newBuffer, VmaAllocation newMemory,
                           void * newMapped, uint32_t newSlotsPerFrame);
   bool prepareLightingSlots(uint32_t neededDraws);
   void beginFrame();
@@ -947,22 +878,19 @@ private:
   void releaseFrameResources();
 
   // --- Owned device ------------------------------------------------------
+  VkInstance instance = VK_NULL_HANDLE;
   VkPhysicalDevice physicalDevice = VK_NULL_HANDLE;
   VkDevice device = VK_NULL_HANDLE;
   VkQueue queue = VK_NULL_HANDLE;
   uint32_t queueFamilyIndex = 0;
   const VkAllocationCallbacks * allocator = nullptr;
+  // Vulkan Memory Allocator, created in initialize() and destroyed at
+  // shutdown().  Owns the texture-image device memory.
+  VmaAllocator vmaAllocator = nullptr;
   // Cached physical-device memory-properties picker (shared helper); bound to
   // physicalDevice in initialize().  Replaces the old per-backend
   // deviceMemoryProperties + deviceMemoryPropertiesValid cache.
   SoVulkanShared::MemoryProperties memProps;
-
-  // Sub-allocator for the high-churn transient resources (texture image memory
-  // and texture staging buffers), so each upload does not vkAllocateMemory /
-  // vkFreeMemory against the driver (slow, and counts against
-  // maxMemoryAllocationCount).  Enabled by FC_VULKAN_MEM_POOL (off by default);
-  // when disabled the legacy per-resource allocate path is used.
-  std::unique_ptr<SoVulkanMemPool> memPool;
 
   // --- Device capabilities (probed once in initialize()) -----------------
   // VkPhysicalDeviceFeatures::fillModeNonSolid gates the wireframe/points
@@ -978,6 +906,13 @@ private:
   // UNORM).  VK_FORMAT_R8G8B8A8_UNORM (the fallback) is a required format.
   bool sampledR8 = false;
   bool sampledR8G8 = false;
+  // VK_EXT_pipeline_creation_feedback enabled by the app; gates the optional
+  // pipeline-cache-hit / creation-cost log (FC_VULKAN_PIPELINE_FEEDBACK).
+  bool hasPipelineCreationFeedback = false;
+
+  // Per-pass GPU timestamps (FC_VULKAN_GPU_TIMING).  Lazily initialized on the
+  // first instrumented frame; a no-op when disabled or unsupported.
+  SoVulkanGpuTimers gpuTimers;
 
   VkCommandPool commandPool = VK_NULL_HANDLE;
   // One command buffer and fence per in-flight frame slot.  The own-queue
@@ -1091,7 +1026,7 @@ private:
   // in-flight frame keep each draw's uniform data stable until its frame
   // completes.
   VkBuffer lightingBuffer = VK_NULL_HANDLE;
-  VkDeviceMemory lightingMemory = VK_NULL_HANDLE;
+  VmaAllocation lightingMemory = nullptr;
   void * lightingMapped = nullptr;
   VkDeviceSize uboSlotStride = 0;
   uint32_t uboSlotsPerFrame = 0;
@@ -1105,7 +1040,7 @@ private:
   // buffer serves ordinary non-instanced draws.  Grows on demand; freed in
   // shutdown().
   VkBuffer instanceModelBuffer = VK_NULL_HANDLE;
-  VkDeviceMemory instanceModelMemory = VK_NULL_HANDLE;
+  VmaAllocation instanceModelMemory = nullptr;
   void * instanceModelMapped = nullptr;
   VkDeviceSize instanceModelCapacity = 0;
   // Per-frame pre-conversion of the frame camera matrices (double -> float).
@@ -1127,7 +1062,7 @@ private:
   // every draw that shares a handle binds the same slot through its dynamic
   // offset, so the 8-light setup is computed once, not per draw.
   VkBuffer lightingConstBuffer = VK_NULL_HANDLE;
-  VkDeviceMemory lightingConstMemory = VK_NULL_HANDLE;
+  VmaAllocation lightingConstMemory = nullptr;
   void * lightingConstMapped = nullptr;
   VkDeviceSize lightingConstStride = 0;
   uint32_t lightingConstMaxSlots = 0;
@@ -1183,7 +1118,7 @@ private:
   // the staged pixel data, so a failure at any point leaves one buffer to
   // clean up rather than N per-upload allocations to chase.
   VkBuffer stagingPoolBuffer = VK_NULL_HANDLE;
-  VkDeviceMemory stagingPoolMemory = VK_NULL_HANDLE;
+  VmaAllocation stagingPoolAllocation = nullptr;
   void * stagingPoolMapped = nullptr;
   VkDeviceSize stagingPoolCapacity = 0;
   // Running byte cursor into stagingPoolBuffer for the current frame's
@@ -1194,7 +1129,7 @@ private:
   // Texture binding (set 0, binding 1).  A 1x1 white fallback texture is
   // bound whenever a command carries no embedded SoTextureData.
   VkImage whiteImage = VK_NULL_HANDLE;
-  VkDeviceMemory whiteImageMemory = VK_NULL_HANDLE;
+  VmaAllocation whiteImageAllocation = nullptr;
   VkImageView whiteImageView = VK_NULL_HANDLE;
   VkSampler whiteSampler = VK_NULL_HANDLE;
   VkDescriptorSet whiteDescriptorSet = VK_NULL_HANDLE;
@@ -1246,81 +1181,11 @@ private:
   // pass/framebuffer without duplicating the cache bookkeeping.
   SoVulkanRenderPassCache renderPasses;
 
-  // Pipeline cache: keyed by the retained state that affects the created
+  // Pipeline store: keyed by the retained state that affects the created
   // pipeline.  Vulkan pipelines are immutable, so every topology/fill/depth/
-  // blend/sample-count combination gets its own entry.  PipelineKey and
-  // PipelineKeyHash are defined near the top of this class so VulkanCachedCommand
-  // can store a resolved key.
-  struct PipelineKeyHash
-  {
-    size_t operator()(const PipelineKey & key) const
-    {
-      size_t hash = std::hash<uintptr_t>()(
-        reinterpret_cast<uintptr_t>(key.renderPass));
-      hash = hashCombine(hash, std::hash<uint32_t>()(key.topology));
-      hash = hashCombine(hash, std::hash<uint32_t>()(key.fillMode));
-      hash = hashCombine(hash, std::hash<uint32_t>()(key.cullMode));
-      hash = hashCombine(hash, std::hash<uint32_t>()(key.ccwFrontFace));
-      hash = hashCombine(hash, std::hash<uint32_t>()(key.depthTestEnable));
-      hash = hashCombine(hash, std::hash<uint32_t>()(key.depthWriteEnable));
-      hash = hashCombine(hash, std::hash<uint32_t>()(key.depthFunction));
-      hash = hashCombine(hash, std::hash<uint32_t>()(key.depthBiasEnable));
-      hash = hashCombine(hash, std::hash<float>()(key.depthBiasConstantFactor));
-      hash = hashCombine(hash, std::hash<float>()(key.depthBiasSlopeFactor));
-      hash = hashCombine(hash, std::hash<uint32_t>()(key.blendEnable));
-      hash = hashCombine(hash, std::hash<uint32_t>()(key.blendSrcRGB));
-      hash = hashCombine(hash, std::hash<uint32_t>()(key.blendDstRGB));
-      hash = hashCombine(hash, std::hash<uint32_t>()(key.blendSrcAlpha));
-      hash = hashCombine(hash, std::hash<uint32_t>()(key.blendDstAlpha));
-      hash = hashCombine(hash, std::hash<uint32_t>()(key.blendEquationRGB));
-      hash = hashCombine(hash, std::hash<uint32_t>()(key.blendEquationAlpha));
-      hash = hashCombine(hash, std::hash<uint32_t>()(key.stencilEnable));
-      hash = hashCombine(hash, std::hash<uint32_t>()(key.stencilFunction));
-      hash = hashCombine(hash, std::hash<uint32_t>()(key.stencilReference));
-      hash = hashCombine(hash, std::hash<uint32_t>()(key.stencilCompareMask));
-      hash = hashCombine(hash, std::hash<uint32_t>()(key.stencilWriteMask));
-      hash = hashCombine(hash, std::hash<uint32_t>()(key.stencilFailOp));
-      hash = hashCombine(hash, std::hash<uint32_t>()(key.stencilZFailOp));
-      hash = hashCombine(hash, std::hash<uint32_t>()(key.stencilZPassOp));
-      hash = hashCombine(hash, std::hash<uint32_t>()(key.sampleCount));
-      hash = hashCombine(hash, std::hash<uint32_t>()(key.wideLine));
-      hash = hashCombine(hash, std::hash<uint32_t>()(key.wideLineInstanced));
-      return hash;
-    }
-  };
-
-  std::unordered_map<PipelineKey, VkPipeline, PipelineKeyHash> pipelineCache;
-
-  // Persistent pipeline cache.  vkCreateGraphicsPipelines() is passed this
-  // handle so the driver can reuse shader/state blobs across the many variant
-  // pipelines the backend creates lazily on the draw path.  Without a cache
-  // (VK_NULL_HANDLE) the first appearance of each state combination on a
-  // frame stutters.  Created once in initialize(), destroyed in shutdown().
-  VkPipelineCache pipelineCacheHandle = VK_NULL_HANDLE;
-
-  // Background pipeline cache: keyed on the render pass and sample count only
-  // (the gradient pipeline has no retained per-command state).
-  struct BackgroundPipelineKey {
-    VkRenderPass renderPass = VK_NULL_HANDLE;
-    uint32_t sampleCount = 1;
-    bool operator==(const BackgroundPipelineKey & other) const
-    {
-      return renderPass == other.renderPass &&
-             sampleCount == other.sampleCount;
-    }
-  };
-  struct BackgroundPipelineKeyHash
-  {
-    size_t operator()(const BackgroundPipelineKey & key) const
-    {
-      size_t hash = std::hash<uintptr_t>()(
-        reinterpret_cast<uintptr_t>(key.renderPass));
-      hash = hashCombine(hash, std::hash<uint32_t>()(key.sampleCount));
-      return hash;
-    }
-  };
-  std::unordered_map<BackgroundPipelineKey, VkPipeline,
-                     BackgroundPipelineKeyHash> backgroundPipelineCache;
+  // blend/sample-count combination gets its own entry.  The key types and the
+  // persistent VkPipelineCache handle live in SoVulkanPipelineCache.
+  SoVulkanPipelineCache pipelines;
 
   // The wide-line quad-expansion scratch (clip cache, per-vertex distance,
   // quad vertices) lives in thread_local vectors inside expandWideLines(): the
@@ -1369,6 +1234,17 @@ private:
   std::unordered_map<const SoRenderCommand *, size_t> commandToCache;
   std::vector<VulkanCachedTexture> textureCache;
   std::unordered_map<const SoRenderCommand *, size_t> commandToTexture;
+
+  // True while this backend is used only to composite overlays/residual
+  // geometry over a ray-traced frame (set by setOverlayCompositeMode()).  Lets
+  // updateGeometryCache() sweep stale entries on overlays-only frames so the
+  // traced triangle geometry the RT backend owns is not kept resident here as
+  // well.
+  bool overlayCompositeMode = false;
+  // Monotonic visit stamp for the overlay-composite sweep (see
+  // VulkanCachedCommand::compositeEpoch).  Bumped once per overlays-only pass
+  // while overlayCompositeMode is set.
+  uint32_t overlayCompositeEpoch = 0;
 
   // Reusable batch-key bucket map for recordFrame()'s opaque batching pass.
   // Previously a fresh std::unordered_map per frame; reused via clear() so an

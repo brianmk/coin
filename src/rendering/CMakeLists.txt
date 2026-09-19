@@ -19,9 +19,10 @@ set(COIN_RENDERING_FILES
 if(COIN_BUILD_VULKAN_RENDERER)
 	list(APPEND COIN_RENDERING_FILES
 		SoVulkanConfig.cpp
+		SoVulkanGpuTimers.cpp
 		SoVulkanRenderBackend/SoVulkanRenderBackendCore.cpp
 		SoVulkanRenderBackend/SoVulkanRenderPassCache.cpp
-		SoVulkanRenderBackend/SoVulkanMemPool.cpp
+		SoVulkanRenderBackend/SoVulkanPipelineCache.cpp
 		SoVulkanRenderBackend/SoVulkanRenderBackendPipeline.cpp
 		SoVulkanRenderBackend/SoVulkanRenderBackendGeometry.cpp
 		SoVulkanRenderBackend/SoVulkanRenderBackendTexture.cpp
@@ -36,6 +37,8 @@ if(COIN_BUILD_VULKAN_RENDERER)
 		SoRTXRenderBackend/SoRTXRenderBackendBuffers.cpp
 		SoRTXRenderBackend/SoRTXRenderBackendPathTracing.cpp
 		SoRTXRenderBackend/SoRTXRenderBackendDenoise.cpp
+		SoRTXRenderBackend/SoRTXRenderBackendPick.cpp
+		third_party/vma/vk_mem_alloc_impl.cpp
 	)
 endif()
 

@@ -39,7 +39,7 @@ VulkanPushConstants
 packPushConstants(const SoRenderCommand & command,
                   const VulkanCachedCommand & entry,
                   const float * uniformColorOverride,
-                  const float * projFloats, const float dpr,
+                  const float dpr,
                   const float stippleFactor, const float stipplePatternBits,
                   const bool wideLine,
                   const float lineWidthPx = 0.0f,
@@ -47,7 +47,6 @@ packPushConstants(const SoRenderCommand & command,
                   const float viewportHeightPx = 0.0f)
 {
   VulkanPushConstants push {};
-  std::memcpy(push.proj, projFloats, sizeof(float) * 16);
   const SbVec4f & color = command.material.diffuse;
   const bool useOverrideColor = uniformColorOverride != nullptr;
   push.color[0] = useOverrideColor ? uniformColorOverride[0] : color[0];
@@ -476,12 +475,16 @@ SoVulkanRenderBackend::updateLightingUniforms(const SoDrawList & drawlist,
                                               const SoRenderCommand & command,
                                               const SoRenderParams & params,
                                               const VkDeviceSize uboOffset,
-                                              const bool unlit)
+                                              const bool unlit,
+                                              const float * projFloats)
 {
-  // Per-draw block only: view/model and the per-material fields.  The
+  // Per-draw block only: view/model/material and the projection matrix.  The
   // lighting constant block lives in set 0 and is written once per frame by
   // updateLightingSetup().
   VulkanDrawUbo ubo {};
+  if (projFloats) {
+    std::memcpy(ubo.proj, projFloats, sizeof(float) * 16);
+  }
 
   SbMat m;
   // Overlay-pass geometry that spans the whole frame viewport (the
@@ -768,10 +771,6 @@ SoVulkanRenderBackend::recordDrawCommand(const SoDrawList & drawlist,
                          entry.indexOffset, VK_INDEX_TYPE_UINT32);
   }
 
-  this->updateLightingUniforms(drawlist, command, params, uboOffset,
-                               uniformColorOverride != nullptr);
-  vkBackendTrace(this->uboFrameIndex, "draw.uboWrite", "slot=%u", slotIndex);
-
   SbMat projValue;
   // Overlay-pass geometry that carries its own camera and viewport (the
   // navigation cube sub-scene) uses its own projection; overlay geometry
@@ -788,6 +787,12 @@ SoVulkanRenderBackend::recordDrawCommand(const SoDrawList & drawlist,
     // main pass projects every command with the frame camera.
     std::memcpy(projValue, this->frameProjFloats, sizeof(float) * 16);
   }
+  // The projection matrix now lives in the per-draw DrawBlock UBO (not the
+  // push constants), so the UBO must be written after projValue is resolved.
+  this->updateLightingUniforms(drawlist, command, params, uboOffset,
+                               uniformColorOverride != nullptr,
+                               &projValue[0][0]);
+  vkBackendTrace(this->uboFrameIndex, "draw.uboWrite", "slot=%u", slotIndex);
   if (COIN_VULKAN_ENV_FLAG("FC_VULKAN_OVERLAY_CAM_DEBUG")
       && command.pass == SO_RENDERPASS_OVERLAY
       && command.state.raster.scissorEnabled
@@ -839,7 +844,7 @@ SoVulkanRenderBackend::recordDrawCommand(const SoDrawList & drawlist,
   }
   const SbVec2s lineViewportSize = params.viewport.getViewportSizePixels();
   const VulkanPushConstants push = packPushConstants(
-    command, entry, uniformColorOverride, &projValue[0][0], this->frameDpr,
+    command, entry, uniformColorOverride, this->frameDpr,
     stippleFactor, stipplePatternBits, useWideLine,
     std::max(1.0f, command.state.raster.lineWidth) * this->frameDpr,
     static_cast<float>(lineViewportSize[0] > 0 ? lineViewportSize[0] : 1),
@@ -1106,14 +1111,15 @@ SoVulkanRenderBackend::recordCommandBatch(const SoDrawList & drawlist,
   }
 
   this->updateLightingUniforms(drawlist, command, params, uboOffset,
-                               uniformColorOverride != nullptr);
+                               uniformColorOverride != nullptr,
+                               this->frameProjFloats);
 
   // Push constants (group-constant).  Batches are recorded only from the main
   // (non-overlay) passes, so every command projects with the frame camera and
   // the wide-line/stipple fields are unused (mirrors recordDrawCommand's
   // frameCameraOverlay=false, non-wide-line branch).
   const VulkanPushConstants push = packPushConstants(
-    command, entryRef, uniformColorOverride, this->frameProjFloats,
+    command, entryRef, uniformColorOverride,
     this->frameDpr, /*stippleFactor*/ 0.0f, /*stipplePatternBits*/ 0.0f,
     /*wideLine*/ false);
 
