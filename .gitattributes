@@ -5,3 +5,12 @@ Makefile.in linguist-generated
 Makefile.am linguist-generated
 ltmain.sh linguist-generated
 install-sh linguist-generated
+
+# The Vulkan shader sources and their generated SPIR-V headers are hashed and
+# compared byte-for-byte (tools/rendering/check_spirv_stamps.py and the
+# coin_check_vulkan_spirv target), so they must be byte-identical on every
+# platform.  Pin LF: a Windows checkout otherwise rewrites them to CRLF, which
+# changes the SHA-256 of every shader and makes every committed stamp look
+# stale.
+*.glsl text eol=lf
+*.spv.h text eol=lf
