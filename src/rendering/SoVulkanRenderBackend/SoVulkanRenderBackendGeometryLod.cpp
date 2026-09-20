@@ -151,45 +151,6 @@ SoVulkanRenderBackend::subPixelSlotFor(const VulkanCachedCommand & entry) const
   return &s;
 }
 
-void
-SoVulkanRenderBackend::destroySubPixelResources(VulkanCachedCommand & entry)
-{
-  for (VulkanCachedCommand::VulkanSubPixelSlot & s : entry.subPixelSlots) {
-    if (s.indexBuffer != VK_NULL_HANDLE) {
-      vmaDestroyBuffer(this->vmaAllocator, s.indexBuffer, s.indexMemory);
-      s.indexBuffer = VK_NULL_HANDLE;
-      s.indexMemory = nullptr;
-    }
-    if (s.indirectBuffer != VK_NULL_HANDLE) {
-      vmaDestroyBuffer(this->vmaAllocator, s.indirectBuffer, s.indirectMemory);
-      s.indirectBuffer = VK_NULL_HANDLE;
-      s.indirectMemory = nullptr;
-    }
-  }
-  entry.subPixelSlots.clear();
-  entry.subPixelHash = 0;
-}
-
-void
-SoVulkanRenderBackend::deferDestroySubPixelResources(VulkanCachedCommand & entry)
-{
-  if (entry.subPixelSlots.empty()) return;
-  std::vector<VulkanCachedCommand::VulkanSubPixelSlot> slots =
-    std::move(entry.subPixelSlots);
-  VmaAllocator vma = this->vmaAllocator;
-  this->deferDestroy([vma, slots]() mutable {
-    for (VulkanCachedCommand::VulkanSubPixelSlot & s : slots) {
-      if (s.indexBuffer != VK_NULL_HANDLE) {
-        vmaDestroyBuffer(vma, s.indexBuffer, s.indexMemory);
-      }
-      if (s.indirectBuffer != VK_NULL_HANDLE) {
-        vmaDestroyBuffer(vma, s.indirectBuffer, s.indirectMemory);
-      }
-    }
-  });
-  entry.subPixelHash = 0;
-}
-
 bool
 SoVulkanRenderBackend::allocateSubPixelDescriptorSet(VkDescriptorSet & set)
 {
@@ -420,12 +381,12 @@ SoVulkanRenderBackend::recordGeometryLodPrepass(VkCommandBuffer cb,
       }
     }
     if (!isSubPixelEligible(command)) continue;
-    const auto found = this->commandToCache.find(&command);
-    if (found == this->commandToCache.end()) continue;
-    VulkanCachedCommand & entry = this->gpuCache[found->second];
+    VulkanCachedCommand * entryPtr = this->geometryCache.find(&command);
+    if (entryPtr == nullptr) continue;
+    VulkanCachedCommand & entry = *entryPtr;
 
     if (entry.subPixelHash != entry.contentHash) {
-      this->deferDestroySubPixelResources(entry);
+      this->geometryCache.deferDestroySubPixelResources(entry);
       entry.subPixelHash = entry.contentHash;
     }
     if (!this->ensureSubPixelSlot(entry, command, slot)) {

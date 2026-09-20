@@ -319,6 +319,14 @@ SoVulkanRenderBackend::initialize(const SoRenderBackendInitParams & params)
                                  &this->buffers);
   this->geometryArena.setDeferCallback(
     [this](std::function<void()> && fn) { this->deferDestroy(std::move(fn)); });
+  // The geometry cache borrows the arena and the buffer factory, and routes
+  // entry destruction through the deferred-destruction ring.
+  this->geometryCache.initialize(this->vmaAllocator, &this->buffers,
+                                 &this->geometryArena);
+  this->geometryCache.setDeferCallback(
+    [this](std::function<void()> && fn) { this->deferDestroy(std::move(fn)); });
+  this->geometryCache.setErrorSink(
+    [this](const char * m) { this->emitError(m); });
 
   if (!this->createDescriptorSetLayout()) {
     this->emitError("failed to create Vulkan descriptor set layout");
@@ -602,9 +610,9 @@ SoVulkanRenderBackend::recordJobWorker(const size_t workerIndex)
       }
       else {
         for (const SoRenderCommand * command : job.wideLineCommands) {
-          const auto found = this->commandToCache.find(command);
-          if (found == this->commandToCache.end()) continue;
-          VulkanCachedCommand & entry = this->gpuCache[found->second];
+          VulkanCachedCommand * entryPtr = this->geometryCache.find(command);
+          if (entryPtr == nullptr) continue;
+          VulkanCachedCommand & entry = *entryPtr;
           this->expandWideLinesFor(entry, *command, *job.params,
                                    command->pass == SO_RENDERPASS_OVERLAY);
         }
@@ -1214,87 +1222,6 @@ void
 SoVulkanRenderBackend::deferDestroy(std::function<void()> && fn)
 {
   this->pendingDestroys.deferAt(this->uboFrameIndex, std::move(fn));
-}
-
-void
-SoVulkanRenderBackend::deferDestroyCacheEntry(VulkanCachedCommand & entry)
-{
-  if (entry.vertexBuffer == VK_NULL_HANDLE &&
-      entry.indexBuffer == VK_NULL_HANDLE &&
-      entry.sharedBlockId == 0 &&
-      entry.instancedLineBuffer == VK_NULL_HANDLE &&
-      entry.subPixelSlots.empty() &&
-      entry.wideLineBuffers.empty()) {
-    entry = VulkanCachedCommand();
-    return;
-  }
-  if (entry.sharedBlockId != 0) {
-    const uint32_t sharedBlockId = entry.sharedBlockId;
-    std::vector<VulkanCachedCommand::VulkanWideLineBuffer> wideLine =
-      std::move(entry.wideLineBuffers);
-    std::vector<VulkanCachedCommand::VulkanSubPixelSlot> subPixel =
-      std::move(entry.subPixelSlots);
-    const VkBuffer instancedLineBuffer = entry.instancedLineBuffer;
-    const VmaAllocation instancedLineMemory = entry.instancedLineMemory;
-    VmaAllocator vma = this->vmaAllocator;
-    this->deferDestroy([vma, wideLine, subPixel, instancedLineBuffer,
-                        instancedLineMemory]() mutable {
-      for (VulkanCachedCommand::VulkanWideLineBuffer & slot : wideLine) {
-        slot.destroy(vma);
-      }
-      for (VulkanCachedCommand::VulkanSubPixelSlot & slot : subPixel) {
-        if (slot.indexBuffer != VK_NULL_HANDLE) {
-          vmaDestroyBuffer(vma, slot.indexBuffer, slot.indexMemory);
-        }
-        if (slot.indirectBuffer != VK_NULL_HANDLE) {
-          vmaDestroyBuffer(vma, slot.indirectBuffer, slot.indirectMemory);
-        }
-      }
-      if (instancedLineBuffer != VK_NULL_HANDLE) {
-        vmaDestroyBuffer(vma, instancedLineBuffer, instancedLineMemory);
-      }
-    });
-    this->geometryArena.deferReleaseBlock(sharedBlockId);
-    entry = VulkanCachedCommand();
-    return;
-  }
-  VmaAllocator vma = this->vmaAllocator;
-  const VkBuffer vertexBuffer = entry.vertexBuffer;
-  const VmaAllocation vertexMemory = entry.vertexMemory;
-  const VkBuffer indexBuffer = entry.indexBuffer;
-  const VmaAllocation indexMemory = entry.indexMemory;
-  const VkBuffer instancedLineBuffer = entry.instancedLineBuffer;
-  const VmaAllocation instancedLineMemory = entry.instancedLineMemory;
-  std::vector<VulkanCachedCommand::VulkanWideLineBuffer> wideLine =
-    std::move(entry.wideLineBuffers);
-  std::vector<VulkanCachedCommand::VulkanSubPixelSlot> subPixel =
-    std::move(entry.subPixelSlots);
-  this->deferDestroy(
-    [vma, vertexBuffer, vertexMemory, indexBuffer,
-     indexMemory, instancedLineBuffer, instancedLineMemory, wideLine,
-     subPixel]() mutable {
-      for (VulkanCachedCommand::VulkanWideLineBuffer & slot : wideLine) {
-        slot.destroy(vma);
-      }
-      for (VulkanCachedCommand::VulkanSubPixelSlot & slot : subPixel) {
-        if (slot.indexBuffer != VK_NULL_HANDLE) {
-          vmaDestroyBuffer(vma, slot.indexBuffer, slot.indexMemory);
-        }
-        if (slot.indirectBuffer != VK_NULL_HANDLE) {
-          vmaDestroyBuffer(vma, slot.indirectBuffer, slot.indirectMemory);
-        }
-      }
-      if (instancedLineBuffer != VK_NULL_HANDLE) {
-        vmaDestroyBuffer(vma, instancedLineBuffer, instancedLineMemory);
-      }
-      if (indexBuffer != VK_NULL_HANDLE) {
-        vmaDestroyBuffer(vma, indexBuffer, indexMemory);
-      }
-      if (vertexBuffer != VK_NULL_HANDLE) {
-        vmaDestroyBuffer(vma, vertexBuffer, vertexMemory);
-      }
-    });
-  entry = VulkanCachedCommand();
 }
 
 void

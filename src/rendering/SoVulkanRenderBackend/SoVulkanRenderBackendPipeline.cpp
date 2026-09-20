@@ -366,10 +366,7 @@ SoVulkanRenderBackend::getOrCreatePipeline(const SoRenderCommand & command,
   // recordCommandBatch) pass it in to skip the commandToCache lookup here.
   VulkanCachedCommand * entry = cacheEntry;
   if (entry == nullptr) {
-    const auto cmdEntry = this->commandToCache.find(&command);
-    if (cmdEntry != this->commandToCache.end()) {
-      entry = &this->gpuCache[cmdEntry->second];
-    }
+    entry = this->geometryCache.find(&command);
   }
   if (entry && entry->hasResolvedPipeline && entry->resolvedKey == key) {
     pipeline = entry->resolvedPipeline;

@@ -882,9 +882,9 @@ SoVulkanRenderBackend::buildWorkItems(const SoDrawList & drawlist,
   // geometry cache computed when the buffer was uploaded (a map lookup) instead
   // of re-walking every vertex stream.
   auto contentHashOf = [this](const SoRenderCommand & c) -> uint64_t {
-    const auto it = this->commandToCache.find(&c);
-    if (it == this->commandToCache.end()) return 0;
-    return this->gpuCache[it->second].contentHash;
+    const VulkanCachedCommand * entry = this->geometryCache.find(&c);
+    if (entry == nullptr) return 0;
+    return entry->contentHash;
   };
 
   uint32_t nextSlot = 0;
@@ -907,7 +907,7 @@ SoVulkanRenderBackend::buildWorkItems(const SoDrawList & drawlist,
         const SoRenderCommand & command = drawlist.getCommand(index);
         if (command.pass == SO_RENDERPASS_OVERLAY) continue;
         if (command.pass != SO_RENDERPASS_TRANSPARENT) continue;
-        if (!this->findCachedDrawable(command)) continue;
+        if (!this->geometryCache.findDrawable(command)) continue;
         VulkanWorkItem item;
         item.single = &command;
         item.count = 1;
@@ -938,7 +938,7 @@ SoVulkanRenderBackend::buildWorkItems(const SoDrawList & drawlist,
           // The expansion is the dominant per-frame CPU cost on edge-heavy
           // scenes, and routing it through the workers is what parallelizes
           // it (previously it ran inline on the recording thread).
-          if (!this->findCachedDrawable(command)) continue;
+          if (!this->geometryCache.findDrawable(command)) continue;
           VulkanWorkItem item;
           item.single = &command;
           item.count = 1;
@@ -947,7 +947,7 @@ SoVulkanRenderBackend::buildWorkItems(const SoDrawList & drawlist,
           out.push_back(item);
           continue;
         }
-        const VulkanCachedCommand * cached = this->findCachedDrawable(command);
+        const VulkanCachedCommand * cached = this->geometryCache.findDrawable(command);
         if (!cached) continue;
         buckets[vkBatchKey(command, cached->contentHash)].push_back(&command);
       }
@@ -1023,7 +1023,7 @@ SoVulkanRenderBackend::buildWorkItems(const SoDrawList & drawlist,
             continue;
           }
         }
-        if (!this->findCachedDrawable(command)) continue;
+        if (!this->geometryCache.findDrawable(command)) continue;
         const bool lineTopo = topo == SO_TOPOLOGY_LINES ||
           topo == SO_TOPOLOGY_LINE_STRIP;
         const bool triTopo = topo == SO_TOPOLOGY_TRIANGLES ||
@@ -1050,7 +1050,7 @@ SoVulkanRenderBackend::buildWorkItems(const SoDrawList & drawlist,
     const SoRenderCommand & command = drawlist.getCommand(i);
     if (command.pass == SO_RENDERPASS_OVERLAY) continue;
     if (command.state.depth.enabled) continue;
-    if (!this->findCachedDrawable(command)) continue;
+    if (!this->geometryCache.findDrawable(command)) continue;
     VulkanWorkItem item;
     item.single = &command;
     item.count = 1;
@@ -1074,10 +1074,7 @@ SoVulkanRenderBackend::buildWorkItems(const SoDrawList & drawlist,
         // Pass the cache entry so the warmed key matches the one the record
         // path builds (it depends on the command's wide-line instance buffer).
         VulkanCachedCommand * entry = nullptr;
-        const auto found = this->commandToCache.find(cmd);
-        if (found != this->commandToCache.end()) {
-          entry = &this->gpuCache[found->second];
-        }
+        entry = this->geometryCache.find(cmd);
         VkPipeline warmed = VK_NULL_HANDLE;
         this->getOrCreatePipeline(*cmd, *tgt, renderPass, warmed,
                                   false, -1, false, entry);

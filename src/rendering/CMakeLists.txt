@@ -26,6 +26,7 @@ if(COIN_BUILD_VULKAN_RENDERER)
 		SoVulkanSamplerCache.cpp
 		SoVulkanStagingPool.cpp
 		SoVulkanGeometryArena.cpp
+		SoVulkanGeometryCache.cpp
 		SoVulkanRenderBackend/SoVulkanRenderBackendCore.cpp
 		SoVulkanRenderBackend/SoVulkanRenderPassCache.cpp
 		SoVulkanRenderBackend/SoVulkanPipelineCache.cpp
@@ -97,6 +98,7 @@ set(COIN_RENDERING_INTERNAL_FILES
 	SoVulkanSamplerCache.h
 	SoVulkanStagingPool.h
 	SoVulkanGeometryArena.h
+	SoVulkanGeometryCache.h
 	SoVulkanRenderBackend.h
 	SoVulkanRenderBackend/SoVulkanRenderBackendP.h
 	SoVulkanRenderBackend/SoVulkanRenderPassCache.h
