@@ -643,8 +643,8 @@ SoVulkanRenderBackend::recordDrawCommand(const SoDrawList & drawlist,
     }
     return;
   }
-  const auto found = this->commandToCache.find(&command);
-  if (found == this->commandToCache.end()) {
+  VulkanCachedCommand * entryPtr = this->geometryCache.find(&command);
+  if (entryPtr == nullptr) {
     if (SoVulkanConfig::get().debug.backendDebug) {
       fprintf(stderr, "[VKBE] cmd %p pass=%d skip: no gpu cache entry\n",
               (const void*)&command, static_cast<int>(command.pass));
@@ -655,7 +655,7 @@ SoVulkanRenderBackend::recordDrawCommand(const SoDrawList & drawlist,
       (command.geometry.topology == SO_TOPOLOGY_LINES ||
        command.geometry.topology == SO_TOPOLOGY_LINE_STRIP ||
        command.geometry.topology == SO_TOPOLOGY_POINTS)) {
-    const VulkanCachedCommand & entryTmp = this->gpuCache[found->second];
+    const VulkanCachedCommand & entryTmp = *entryPtr;
     fprintf(stderr,
             "[VKBE] line/point cmd=%p pass=%d topo=%d verts=%u "
             "diffuse=(%.2f,%.2f,%.2f,%.2f) colorKey=%d shading=%d "
@@ -671,7 +671,7 @@ SoVulkanRenderBackend::recordDrawCommand(const SoDrawList & drawlist,
             static_cast<unsigned>(command.state.raster.linePattern),
             static_cast<int>(command.state.raster.fillMode));
   }
-  VulkanCachedCommand & entry = this->gpuCache[found->second];
+  VulkanCachedCommand & entry = *entryPtr;
   if (entry.vertexBuffer == VK_NULL_HANDLE) {
     if (SoVulkanConfig::get().debug.backendDebug) {
       fprintf(stderr, "[VKBE] cmd %p pass=%d skip: vertexBuffer null\n",
@@ -1068,12 +1068,12 @@ SoVulkanRenderBackend::recordCommandBatch(const SoDrawList & drawlist,
       command.geometry.vertexCount == 0) {
     return false;
   }
-  const auto found = this->commandToCache.find(&command);
-  if (found == this->commandToCache.end()) return false;
+  const VulkanCachedCommand * entryPtr = this->geometryCache.find(&command);
+  if (entryPtr == nullptr) return false;
   // Fragile: only guaranteed-correct side paths (pipeline + descriptor + push +
   // non-instanced vertex geometry) batch.  Wide-line expands per command on the
   // CPU, so it is not batchable here.
-  const VulkanCachedCommand & entryRef = this->gpuCache[found->second];
+  const VulkanCachedCommand & entryRef = *entryPtr;
   if (entryRef.vertexBuffer == VK_NULL_HANDLE) return false;
 
   if (isWideLine(command, fillModeOverride, this->interactionLodActive)) {

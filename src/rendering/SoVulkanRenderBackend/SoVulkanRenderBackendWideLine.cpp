@@ -680,9 +680,9 @@ SoVulkanRenderBackend::prepareWideLineBuffers(const SoDrawList & drawlist)
     if (!isWideLine(command, -1, this->interactionLodActive)) continue;
     const SoGeometryDesc & geometry = command.geometry;
     if (!geometry.positions || geometry.vertexCount == 0) continue;
-    const auto found = this->commandToCache.find(&command);
-    if (found == this->commandToCache.end()) continue;
-    VulkanCachedCommand & entry = this->gpuCache[found->second];
+    VulkanCachedCommand * entryPtr = this->geometryCache.find(&command);
+    if (entryPtr == nullptr) continue;
+    VulkanCachedCommand & entry = *entryPtr;
     if (entry.vertexBuffer == VK_NULL_HANDLE) continue;
 
     // GPU-instanced wide line: build the static endpoint stream (once) and
@@ -786,13 +786,12 @@ SoVulkanRenderBackend::expandWideLinesParallel(const SoDrawList & drawlist,
     if (!command.geometry.positions || command.geometry.vertexCount == 0) {
       continue;
     }
-    const auto found = this->commandToCache.find(&command);
-    if (found == this->commandToCache.end()) continue;
-    if (this->gpuCache[found->second].vertexBuffer == VK_NULL_HANDLE) continue;
+    const VulkanCachedCommand * entryPtr = this->geometryCache.find(&command);
+    if (entryPtr == nullptr || entryPtr->vertexBuffer == VK_NULL_HANDLE) continue;
     // Drawn by the GPU-instanced path: the vertex shader expands the segment,
     // so there is nothing to expand on the CPU.
     if (isInstancedWideLine(command) &&
-        this->gpuCache[found->second].instancedLineBuffer != VK_NULL_HANDLE) {
+        entryPtr->instancedLineBuffer != VK_NULL_HANDLE) {
       continue;
     }
     // A single dominant non-stippled LINE_LIST command (a lattice edge set)
@@ -818,9 +817,9 @@ SoVulkanRenderBackend::expandWideLinesParallel(const SoDrawList & drawlist,
   // Expand the large commands first, on this (owner) thread; each split
   // dispatch joins before the next, so the pool is idle when it runs.
   for (const SoRenderCommand * command : splitCmds) {
-    const auto found = this->commandToCache.find(command);
-    if (found == this->commandToCache.end()) continue;
-    VulkanCachedCommand & entry = this->gpuCache[found->second];
+    VulkanCachedCommand * entryPtr = this->geometryCache.find(command);
+    if (entryPtr == nullptr) continue;
+    VulkanCachedCommand & entry = *entryPtr;
     SbMat projValue;
     this->resolveCommandProj(*command, params, false, projValue);
     this->expandWideLinesSplit(entry, *command, params, projValue,
@@ -832,8 +831,7 @@ SoVulkanRenderBackend::expandWideLinesParallel(const SoDrawList & drawlist,
   if (W <= 1 || this->recordWorkers.empty()) {
     // Serial fallback (single core, or the pool failed to build).
     for (const SoRenderCommand * command : wideLines) {
-      const auto found = this->commandToCache.find(command);
-      VulkanCachedCommand & entry = this->gpuCache[found->second];
+      VulkanCachedCommand & entry = *this->geometryCache.find(command);
       this->expandWideLinesFor(entry, *command, params,
                                command->pass == SO_RENDERPASS_OVERLAY);
     }
@@ -872,9 +870,9 @@ SoVulkanRenderBackend::expandWideLinesParallel(const SoDrawList & drawlist,
   {
     const ParallelRecordJob & job = this->recordJobs[0];
     for (const SoRenderCommand * command : job.wideLineCommands) {
-      const auto found = this->commandToCache.find(command);
-      if (found == this->commandToCache.end()) continue;
-      VulkanCachedCommand & entry = this->gpuCache[found->second];
+      VulkanCachedCommand * entryPtr = this->geometryCache.find(command);
+      if (entryPtr == nullptr) continue;
+      VulkanCachedCommand & entry = *entryPtr;
       this->expandWideLinesFor(entry, *command, params,
                                command->pass == SO_RENDERPASS_OVERLAY);
     }
