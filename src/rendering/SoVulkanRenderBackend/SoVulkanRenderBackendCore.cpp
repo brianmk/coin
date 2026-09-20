@@ -313,6 +313,12 @@ SoVulkanRenderBackend::initialize(const SoRenderBackendInitParams & params)
   this->buffers.initialize(this->device, this->vmaAllocator, this->allocator,
                            this->queue, this->commandPool,
                            [this](const char * m) { this->emitError(m); });
+  // The geometry arena borrows the same handles and the buffer factory, and
+  // routes block release through the deferred-destruction ring.
+  this->geometryArena.initialize(this->device, this->vmaAllocator,
+                                 &this->buffers);
+  this->geometryArena.setDeferCallback(
+    [this](std::function<void()> && fn) { this->deferDestroy(std::move(fn)); });
 
   if (!this->createDescriptorSetLayout()) {
     this->emitError("failed to create Vulkan descriptor set layout");
@@ -1248,7 +1254,7 @@ SoVulkanRenderBackend::deferDestroyCacheEntry(VulkanCachedCommand & entry)
         vmaDestroyBuffer(vma, instancedLineBuffer, instancedLineMemory);
       }
     });
-    this->deferReleaseGeometryBlock(sharedBlockId);
+    this->geometryArena.deferReleaseBlock(sharedBlockId);
     entry = VulkanCachedCommand();
     return;
   }

@@ -219,8 +219,8 @@ SoVulkanRenderBackend::shutdown()
   // cache; textureCache.destroy() below releases them (and the staging pool)
   // synchronously now that the queue is idle.
   this->invalidateCache();
-  this->destroyAllGeometryBlocks();
-  // invalidateCache()/destroyAllGeometryBlocks() release their cached command
+  this->geometryArena.destroyAll();
+  // invalidateCache()/geometryArena.destroyAll() release their cached command
   // buffers (vertex/index/instanced-line/sub-pixel) through deferDestroy(),
   // because a frame may still have referenced them when they were evicted.
   // The queue is idle here, so flush that batch now; without it those buffers

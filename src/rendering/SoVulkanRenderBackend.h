@@ -24,6 +24,7 @@ VK_DEFINE_HANDLE(VmaAllocation)
 #include "rendering/SoVulkanBufferFactory.h"
 #include "rendering/SoVulkanFrameRing.h"
 #include "rendering/SoVulkanTextureCache.h"
+#include "rendering/SoVulkanGeometryArena.h"
 
 #include <Inventor/rendering/SoVulkanRenderTarget.h>
 
@@ -399,25 +400,10 @@ private:
                             uint32_t blockId);
   void destroyCacheEntry(VulkanCachedCommand & entry);
 
-  struct VulkanGeometryBlock {
-    VkBuffer buffer = VK_NULL_HANDLE;
-    VmaAllocation memory = nullptr;
-    void * mapped = nullptr;
-    VkDeviceSize capacity = 0;
-    VkDeviceSize used = 0;
-    uint32_t refCount = 0;
-  };
-
-  uint32_t allocateGeometryBlock(VkDeviceSize capacity);
-  bool allocateGeometryArena(uint32_t blockId, VkDeviceSize size,
-                             VkDeviceSize & offset);
-  // Unmap + destroy the buffer + free the memory of a geometry block and
-  // reset it to the empty state.  Shared by releaseGeometryBlock() and
-  // destroyAllGeometryBlocks(), which previously repeated the teardown.
-  void releaseGeometryBlockResources(VulkanGeometryBlock & block);
-  void releaseGeometryBlock(uint32_t blockId);
-  void deferReleaseGeometryBlock(uint32_t blockId);
-  void destroyAllGeometryBlocks();
+  // --- Geometry arena ---------------------------------------------------
+  // The shared vertex/index blocks the geometry cache carves per-command
+  // ranges out of live in the SoVulkanGeometryArena collaborator
+  // (this->geometryArena); see SoVulkanGeometryArena.h.
 
   // --- Texture cache ----------------------------------------------------
   // Texture state and the staging->image upload path live in the
@@ -1183,12 +1169,7 @@ private:
   // is still valid.  Always created lazily on first use.
   SoVulkanSamplerCache samplerCache;
 
-  std::vector<VulkanGeometryBlock> geometryBlocks;
-  // Released blocks are kept as reusable ids so a geometry-change burst does
-  // not grow geometryBlocks without bound; releaseGeometryBlock() returns an
-  // id here once its refCount drops to 0.
-  std::vector<uint32_t> freeGeometryBlockIds;
-  VkDeviceSize nextGeometryBlockCapacity = 256u * 1024u;
+  SoVulkanGeometryArena geometryArena;
 
   // Reusable scratch packing buffer for uploadGeometry().  Resized but never
   // reallocated across successive uploads, so the interleaved repack does not

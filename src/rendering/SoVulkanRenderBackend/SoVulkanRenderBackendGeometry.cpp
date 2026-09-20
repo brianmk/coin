@@ -45,12 +45,6 @@ bool vkGeometryBreadcrumbEnabled()
   return SoVulkanShared::breadcrumbsEnabled();
 }
 
-VkDeviceSize alignGeometryUpload(VkDeviceSize bytes)
-{
-  const VkDeviceSize alignment = 64;
-  return ((bytes + alignment - 1) / alignment) * alignment;
-}
-
 // Encode a float to a half (binary16).  Ranges outside the finite half range
 // clamp to +/-inf; CAD texcoords are in [0,1] so this is exact in practice.
 static inline uint16_t floatToHalf(float value)
@@ -328,10 +322,11 @@ SoVulkanRenderBackend::uploadGeometryShared(VulkanCachedCommand & entry,
                                             const SoRenderCommand & command,
                                             uint32_t blockId)
 {
-  if (blockId == 0 || blockId > this->geometryBlocks.size()) {
+  auto * blockPtr = this->geometryArena.block(blockId);
+  if (blockPtr == nullptr) {
     return false;
   }
-  VulkanGeometryBlock & block = this->geometryBlocks[blockId - 1];
+  SoVulkanGeometryArena::Block & block = *blockPtr;
   if (block.buffer == VK_NULL_HANDLE || block.mapped == nullptr) {
     return false;
   }
@@ -350,11 +345,11 @@ SoVulkanRenderBackend::uploadGeometryShared(VulkanCachedCommand & entry,
 
   VkDeviceSize vertexOffset = 0;
   VkDeviceSize indexOffset = 0;
-  if (!this->allocateGeometryArena(blockId, vertexBytes, vertexOffset)) {
+  if (!this->geometryArena.allocate(blockId, vertexBytes, vertexOffset)) {
     return false;
   }
   if (indexBytes != 0 &&
-      !this->allocateGeometryArena(blockId, indexBytes, indexOffset)) {
+      !this->geometryArena.allocate(blockId, indexBytes, indexOffset)) {
     return false;
   }
 
@@ -383,7 +378,7 @@ void
 SoVulkanRenderBackend::destroyCacheEntry(VulkanCachedCommand & entry)
 {
   if (entry.sharedBlockId != 0) {
-    this->releaseGeometryBlock(entry.sharedBlockId);
+    this->geometryArena.releaseBlock(entry.sharedBlockId);
   }
   else {
     if (entry.indexBuffer) {
@@ -426,126 +421,6 @@ SoVulkanRenderBackend::invalidateCache()
   this->gpuCache.clear();
   this->commandToCache.clear();
   this->textureCache.invalidate();
-}
-
-uint32_t
-SoVulkanRenderBackend::allocateGeometryBlock(VkDeviceSize capacity)
-{
-  capacity = alignGeometryUpload(std::max<VkDeviceSize>(capacity, 64));
-  if (capacity == 0) {
-    return 0;
-  }
-
-  VkBuffer buffer = VK_NULL_HANDLE;
-  VmaAllocation memory = nullptr;
-  void * mapped = nullptr;
-  if (!this->buffers.createMapped(
-        capacity,
-        VK_BUFFER_USAGE_VERTEX_BUFFER_BIT |
-          VK_BUFFER_USAGE_INDEX_BUFFER_BIT | VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
-        buffer, memory, &mapped)) {
-    return 0;
-  }
-
-  VulkanGeometryBlock block {};
-  block.buffer = buffer;
-  block.memory = memory;
-  block.mapped = mapped;
-  block.capacity = capacity;
-  block.used = 0;
-  block.refCount = 0;
-  if (!this->freeGeometryBlockIds.empty()) {
-    const uint32_t recycled = this->freeGeometryBlockIds.back();
-    this->freeGeometryBlockIds.pop_back();
-    this->geometryBlocks[recycled - 1] = block;
-    this->nextGeometryBlockCapacity =
-      std::min<VkDeviceSize>(this->nextGeometryBlockCapacity * 2u, 16u * 1024u * 1024u);
-    return recycled;
-  }
-  this->geometryBlocks.push_back(block);
-
-  this->nextGeometryBlockCapacity =
-    std::min<VkDeviceSize>(this->nextGeometryBlockCapacity * 2u, 16u * 1024u * 1024u);
-  return static_cast<uint32_t>(this->geometryBlocks.size());
-}
-
-bool
-SoVulkanRenderBackend::allocateGeometryArena(uint32_t blockId, VkDeviceSize size,
-                                             VkDeviceSize & offset)
-{
-  offset = 0;
-  if (blockId == 0 || blockId > this->geometryBlocks.size() || size == 0) {
-    return false;
-  }
-  VulkanGeometryBlock & block = this->geometryBlocks[blockId - 1];
-  if (block.buffer == VK_NULL_HANDLE || block.mapped == nullptr) {
-    return false;
-  }
-  const VkDeviceSize aligned = alignGeometryUpload(size);
-  if (block.used + aligned > block.capacity) {
-    return false;
-  }
-  offset = block.used;
-  block.used += aligned;
-  return true;
-}
-
-void
-SoVulkanRenderBackend::releaseGeometryBlockResources(VulkanGeometryBlock & block)
-{
-  if (block.buffer != VK_NULL_HANDLE) {
-    // vmaDestroyBuffer releases the buffer, its memory and the persistent host
-    // mapping together, so no explicit vkUnmapMemory is needed.
-    vmaDestroyBuffer(this->vmaAllocator, block.buffer, block.memory);
-    block.buffer = VK_NULL_HANDLE;
-  }
-  block.memory = nullptr;
-  block.mapped = nullptr;
-  block.capacity = 0;
-  block.used = 0;
-  block.refCount = 0;
-}
-
-void
-SoVulkanRenderBackend::releaseGeometryBlock(uint32_t blockId)
-{
-  if (blockId == 0 || blockId > this->geometryBlocks.size()) {
-    return;
-  }
-  VulkanGeometryBlock & block = this->geometryBlocks[blockId - 1];
-  if (block.buffer == VK_NULL_HANDLE) {
-    return;
-  }
-  if (block.refCount > 0) {
-    --block.refCount;
-  }
-  if (block.refCount > 0) {
-    return;
-  }
-  this->releaseGeometryBlockResources(block);
-  this->freeGeometryBlockIds.push_back(blockId);
-}
-
-void
-SoVulkanRenderBackend::deferReleaseGeometryBlock(uint32_t blockId)
-{
-  if (blockId == 0) {
-    return;
-  }
-  this->deferDestroy([this, blockId]() {
-    this->releaseGeometryBlock(blockId);
-  });
-}
-
-void
-SoVulkanRenderBackend::destroyAllGeometryBlocks()
-{
-  for (VulkanGeometryBlock & block : this->geometryBlocks) {
-    this->releaseGeometryBlockResources(block);
-  }
-  this->geometryBlocks.clear();
-  this->freeGeometryBlockIds.clear();
-  this->nextGeometryBlockCapacity = 256u * 1024u;
 }
 
 void
@@ -651,7 +526,7 @@ SoVulkanRenderBackend::updateGeometryCache(const SoDrawList & drawlist,
     static_cast<VkDeviceSize>(8u * 1024u * 1024u);
   if (retainedUploads > 1 && retainedUploadBytes > 0 &&
       retainedUploadBytes <= VK_GEOMETRY_BATCH_HOST_LIMIT) {
-    sharedBlockId = this->allocateGeometryBlock(retainedUploadBytes + 4096u);
+    sharedBlockId = this->geometryArena.allocateBlock(retainedUploadBytes + 4096u);
   }
 
   // Make sure the descriptor pool can hold one set per distinct texture in
@@ -721,7 +596,7 @@ SoVulkanRenderBackend::updateGeometryCache(const SoDrawList & drawlist,
   }
 
   if (sharedBlockId != 0 && sharedUploads == 0) {
-    this->releaseGeometryBlock(sharedBlockId);
+    this->geometryArena.releaseBlock(sharedBlockId);
   }
 
   // Evict entries that were not visited this frame: their command has
