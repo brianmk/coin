@@ -279,6 +279,17 @@ if(HAVE_EGL)
 			VulkanRenderManagerTest vulkan/vulkan-rendermanager-test.cpp
 			VulkanRenderManagerVisibilityTest vulkan/vulkan-rendermanager-visibility-test.cpp
 			VulkanLightStabilityTest vulkan/vulkan-light-stability-test.cpp
+			VulkanBackendAlphaTestTest vulkan/vulkan-backend-alpha-test-test.cpp
+			VulkanBackendBlendingTest vulkan/vulkan-backend-blending-test.cpp
+			VulkanBackendDepthFunctionTest vulkan/vulkan-backend-depth-function-test.cpp
+			VulkanBackendFillModeTest vulkan/vulkan-backend-fill-mode-test.cpp
+			VulkanBackendLightVariantsTest vulkan/vulkan-backend-light-variants-test.cpp
+			VulkanBackendSortedOrderTest vulkan/vulkan-backend-sorted-order-test.cpp
+			VulkanBackendStripTopologyTest vulkan/vulkan-backend-strip-topology-test.cpp
+			VulkanBackendTextureTest vulkan/vulkan-backend-texture-test.cpp
+			VulkanBackendTransparencyTest vulkan/vulkan-backend-transparency-test.cpp
+			VulkanBackendUniformPackingTest vulkan/vulkan-backend-uniform-packing-test.cpp
+			VulkanBackendVertexColorTest vulkan/vulkan-backend-vertex-color-test.cpp
 		)
 		list(LENGTH VULKAN_TESTS VULKAN_TEST_ITEMS)
 		math(EXPR VULKAN_TEST_PAIRS "${VULKAN_TEST_ITEMS} / 2")
