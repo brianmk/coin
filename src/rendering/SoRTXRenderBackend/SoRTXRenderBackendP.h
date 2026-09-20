@@ -104,6 +104,32 @@ inline void checkDenoiseDownsampleLayout() {
                 "DenoiseDownsamplePush must match DenoiseDownsample layout");
 }
 
+// Push constants for the AMD FidelityFX DNSR prefilter compute pass
+// (FsrPrefilter.glsl).  Mirrors the std430 push_constant block: a uvec2 screen
+// size followed by a reserved uvec2 so the block is 16 bytes.
+struct alignas(16) FsrPush {
+  uint32_t screen[2] = {0, 0};
+  uint32_t pad[2] = {0, 0};
+};
+inline void checkFsrLayout() {
+  static_assert(sizeof(FsrPush) == 16,
+                "FsrPush must match the FsrPrefilter push_constant block");
+}
+
+// Push constants for the DNSR temporal resolve pass (FsrResolveTemporal.glsl):
+// the world-space camera origin (for the disocclusion depth test), the working
+// resolution and the accumulation cap.
+struct alignas(16) FsrTemporalPush {
+  float cameraPos[4] = {0.0f, 0.0f, 0.0f, 1.0f};
+  uint32_t screen[2] = {0, 0};
+  float maxSamples = 256.0f;
+  float pad = 0.0f;
+};
+inline void checkFsrTemporalLayout() {
+  static_assert(sizeof(FsrTemporalPush) == 32,
+                "FsrTemporalPush must match the FsrResolveTemporal push block");
+}
+
 constexpr int SBT_GROUP_COUNT = 5; // raygen, miss, shadow miss, chit, shadow chit
 
 // SO_MAX_SHADER_LIGHTS is mirrored as a literal [8] in every shader's

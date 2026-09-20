@@ -336,8 +336,16 @@ SoRTXRenderBackend::getPathTracingRefining(void) const
   // they must NOT keep the surface busy-looping.
   if (this->rtxViewMode == RtxViewMode::RtxModeAmbientOcclusion ||
       this->rtxViewMode == RtxViewMode::RtxModeEnvironment) return FALSE;
+  // A pending denoise (including a denoiser switch re-armed on an already
+  // converged accumulation) and an in-flight async OIDN worker must also keep
+  // frames coming: the device-local filters run in updateDenoise() after the
+  // frame submit, and the async OIDN result is only copied back and published
+  // on a LATER frame.  Without this the loop idles the moment the run converges,
+  // so the switched filter launches (or the worker finishes) but its result is
+  // never published and the viewport stays on the raw accumulation.
   return this->ptEnabled &&
-    (this->ptAccumulating || this->ptIdleFrames < this->ptSettleFrames);
+    (this->ptAccumulating || this->ptIdleFrames < this->ptSettleFrames ||
+     this->ptDenoisePending || this->oidnWorkerRunning);
 }
 
 uint32_t
@@ -458,6 +466,17 @@ SoRTXRenderBackend::setDenoiserFilter(const char * denoiser)
   this->denoiseResultReady = FALSE;
   this->ptDenoisePending = FALSE;
   ++this->ptRunGeneration;
+  // Switching the filter must not lose the accumulated image.  If the run has
+  // already converged, the accumulation is a valid denoiser input, so label the
+  // denoise cache stale and re-run the NEW filter against it.  Without this the
+  // converged-idle state machine never re-triggers a denoise, so after a switch
+  // the viewport keeps presenting the raw (undenoised) accumulation -- e.g.
+  // selecting RTX on a converged view ran no denoiser at all.  A mid-run switch
+  // (still accumulating) needs no re-arm: the run reaches its target and denoises
+  // with the new filter on its own.
+  if (pref != DenoiseNone && this->ptConverged) {
+    this->ptDenoisePending = TRUE;
+  }
 }
 
 void

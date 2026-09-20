@@ -308,6 +308,11 @@ if(COIN_BUILD_VULKAN_RENDERER)
       data/shaders/vulkan/rt/PresentFragment.glsl frag rt)
     coin_embed_vulkan_spirv(vulkan_rt_denoisedownsample
       data/shaders/vulkan/rt/DenoiseDownsample.glsl comp rt)
+    # AMD FidelityFX DNSR denoiser (the "fsr" path-tracing denoiser slot).
+    coin_embed_vulkan_spirv(vulkan_rt_fsrprefilter
+      data/shaders/vulkan/rt/FsrPrefilter.glsl comp rt)
+    coin_embed_vulkan_spirv(vulkan_rt_fsrresolvetemporal
+      data/shaders/vulkan/rt/FsrResolveTemporal.glsl comp rt)
     # Single-ray GPU pick for the RTX viewport (Vulkan/RTX only).
     coin_embed_vulkan_spirv(vulkan_rt_pick
       data/shaders/vulkan/rt/Pick.glsl comp rt)

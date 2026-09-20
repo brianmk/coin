@@ -45,6 +45,7 @@ if(COIN_BUILD_VULKAN_RENDERER)
 		SoRTXRenderBackend/SoRTXRenderBackendBuffers.cpp
 		SoRTXRenderBackend/SoRTXRenderBackendPathTracing.cpp
 		SoRTXRenderBackend/SoRTXRenderBackendDenoise.cpp
+		SoRTXRenderBackend/SoRTXRenderBackendFsr.cpp
 		SoRTXRenderBackend/SoRTXRenderBackendPick.cpp
 		third_party/vma/vk_mem_alloc_impl.cpp
 	)
