@@ -239,6 +239,12 @@ SoVulkanRenderBackend::initialize(const SoRenderBackendInitParams & params)
   this->renderPasses.setDeferredDestroy([this](std::function<void()> && fn) {
     this->deferDestroy(std::move(fn));
   });
+  // Offscreen HDR intermediate cache (see renderExternalHdr): same device and
+  // deferred-destruction wiring as the main render-pass cache.
+  this->hdrPasses.setDevice(this->device, this->allocator);
+  this->hdrPasses.setDeferredDestroy([this](std::function<void()> && fn) {
+    this->deferDestroy(std::move(fn));
+  });
 
   // Vulkan Memory Allocator: owns the texture-image device memory.  The
   // allocator sub-allocates from large blocks, so per-texture creation does

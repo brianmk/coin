@@ -235,6 +235,10 @@ SoVulkanRenderBackend::shutdown()
   // The render-pass/framebuffer cache owns the current pass + framebuffer;
   // releasing it after the deferred destroys flush above (queue is idle).
   this->renderPasses.destroyAll();
+  // HDR output resources (offscreen intermediate + output pipeline); the queue
+  // is idle, so release the deferred intermediate and flush it below.
+  this->destroyHdrOutputResources();
+  this->flushAllPendingDestroys();
   if (this->subPixelCullPipeline != VK_NULL_HANDLE) {
     vkDestroyPipeline(this->device, this->subPixelCullPipeline, this->allocator);
     this->subPixelCullPipeline = VK_NULL_HANDLE;

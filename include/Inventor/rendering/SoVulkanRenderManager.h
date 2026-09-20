@@ -253,6 +253,27 @@ public:
                         VkFramebuffer framebuffer);
 
   /*!
+    \brief HDR output variant of renderExternal() for the raster path.
+
+    Renders the scene into a backend-owned linear RGBA16F intermediate and
+    presents it into \a outputPass / \a outputFramebuffer with the exposure +
+    PQ transform.  Unlike renderExternal(), the caller must NOT have begun a
+    render pass; the manager owns the pass lifecycle.  The caller still owns
+    the command buffer's begin/end and submission.
+
+    Only valid when ray tracing is inactive and HDR output is enabled; the
+    application checks both before choosing this entry point.
+  */
+  SbBool renderExternalHdr(SbBool clearwindow,
+                           SbBool clearzbuffer,
+                           VkCommandBuffer commandBuffer,
+                           VkRenderPass outputPass,
+                           VkFramebuffer outputFramebuffer);
+
+  //! Whether the raster HDR output path is active (ray tracing off + HDR on).
+  SbBool isHdrRasterActive() const;
+
+  /*!
     \brief Select the ray-tracing backend for the next render() calls.
 
     Ray tracing requires a Vulkan 1.2+ device with VK_KHR_acceleration_structure
@@ -403,6 +424,10 @@ public:
   //! Denoiser upscale factor (>= 1); forwarded to the RT backend and applied
   //! on the next buffer create.
   void setPathTracingDenoiserScale(float scale);
+
+  //! HDR10 (PQ) output for the present pass; forwarded to the RT backend.
+  //! \a exposure is the linear scale mapping scene-white to the PQ peak.
+  void setHdrOutput(SbBool enabled, float exposure);
 
   SoVulkanRenderBackend * getBackend(void) const;
 

@@ -739,6 +739,9 @@ SoVulkanRenderManager::setViewSettings(const SoVulkanViewSettings & settings)
   this->setPointsOverlay(settings.pointsOverlay ? TRUE : FALSE);
   this->setTessellationOverlay(settings.tessellationOverlay ? TRUE : FALSE);
   this->setEdgeColor(settings.edgeColor);
+  // Raster HDR output transform (no-op when disabled).
+  this->pimpl->backend.setHdrOutput(settings.hdrOutput ? TRUE : FALSE,
+                                    settings.hdrExposure);
 
   // The RTX-forwarded fields are only meaningful once the RT backend exists;
   // applying them earlier emits the "not initialized" warnings.  A raster-only
@@ -760,6 +763,8 @@ SoVulkanRenderManager::setViewSettings(const SoVulkanViewSettings & settings)
                                    ? nullptr
                                    : settings.pathTracingDenoiser.c_str());
     this->setPathTracingDenoiserScale(settings.pathTracingDenoiserScale);
+    this->setHdrOutput(settings.hdrOutput ? TRUE : FALSE,
+                       settings.hdrExposure);
     // Re-apply the interaction-LOD state: the RT backend starts with it off,
     // so a bring-up after this state was set (device re-init / lazy RT build)
     // must pick it up.  Idempotent (the setter early-returns when unchanged).
@@ -1195,6 +1200,16 @@ SoVulkanRenderManager::setPathTracingDenoiserScale(const float scale)
 }
 
 void
+SoVulkanRenderManager::setHdrOutput(SbBool enabled, float exposure)
+{
+  this->pimpl->withRtx("SoVulkanRenderManager::setHdrOutput",
+                       "setting ignored",
+                       [enabled, exposure](SoRTXRenderBackend & rtx) {
+                         rtx.setHdrOutput(enabled, exposure);
+                       });
+}
+
+void
 SoVulkanRenderManager::setRenderTarget(void * target)
 {
   this->pimpl->renderTarget = target;
@@ -1304,6 +1319,42 @@ SoVulkanRenderManager::renderExternal(SbBool clearwindow,
     vkRenderBreadcrumbSince(backendBcStart, 5000, "renderExternal rasterBackend end");
   }
   return TRUE;
+}
+
+SbBool
+SoVulkanRenderManager::renderExternalHdr(SbBool clearwindow,
+                                         SbBool clearzbuffer,
+                                         VkCommandBuffer commandBuffer,
+                                         VkRenderPass outputPass,
+                                         VkFramebuffer outputFramebuffer)
+{
+  SoRenderParams params;
+  SoDrawList * drawlist = nullptr;
+  if (!this->pimpl->prepareRenderParams(clearwindow, clearzbuffer, drawlist,
+                                        params)) {
+    return FALSE;
+  }
+  params.frame = ++this->pimpl->frameOrdinal;
+  // The HDR output path is raster-only; the RT modes present through their own
+  // pass (see PresentFragment.glsl).
+  this->pimpl->backend.setOverlayCompositeMode(FALSE);
+  if (!this->pimpl->backend.renderExternalHdr(*drawlist, params, commandBuffer,
+                                              outputPass, outputFramebuffer)) {
+    SoDebugError::postWarning("SoVulkanRenderManager::renderExternalHdr",
+                              "backend HDR render failed (%d draw commands)",
+                              drawlist->getNumCommands());
+    return FALSE;
+  }
+  return TRUE;
+}
+
+SbBool
+SoVulkanRenderManager::isHdrRasterActive() const
+{
+  return (this->pimpl->viewSettings.hdrOutput
+          && !this->getRayTracingActive())
+    ? TRUE
+    : FALSE;
 }
 
 uint64_t

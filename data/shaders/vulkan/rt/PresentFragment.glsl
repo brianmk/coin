@@ -41,6 +41,29 @@ layout(push_constant) uniform PresentPush {
 
 layout(location = 0) out vec4 fragColor;
 
+// Final output transform.  With HDR off (pc.u_denoise.z < 0.5) the color is
+// clamped to [0,1] exactly as before, so SDR output is unchanged.  With HDR on
+// the linear scene radiance is scaled by pc.u_denoise.w (which maps scene-white
+// to the PQ peak of 10000 cd/m^2; 0.02 ~= 200 cd/m^2 reference white) and
+// encoded with the SMPTE ST 2084 (PQ) transfer function, BT.2020 primaries.
+// The swapchain is VK_FORMAT_A2B10G10R10_UNORM_PACK32 with the surface tagged
+// Bt2100Pq, so the compositor maps it onto the HDR output.
+vec4 presentColor(vec3 linearColor)
+{
+    if (pc.u_denoise.z < 0.5) {
+        return vec4(clamp(linearColor, 0.0, 1.0), 1.0);
+    }
+    const float m1 = 2610.0 / 16384.0;
+    const float m2 = 2523.0 / 4096.0 * 128.0;
+    const float c1 = 3424.0 / 4096.0;
+    const float c2 = 2413.0 / 4096.0 * 32.0;
+    const float c3 = 2392.0 / 4096.0 * 32.0;
+    vec3 L = max(linearColor, vec3(0.0)) * pc.u_denoise.w;
+    vec3 Lp = pow(L, vec3(m1));
+    vec3 pq = pow((c1 + c2 * Lp) / (1.0 + c3 * Lp), vec3(m2));
+    return vec4(clamp(pq, 0.0, 1.0), 1.0);
+}
+
 // Scene depth (Vulkan [0,1]) of the first-bounce hit at the current pixel.
 // The raygen stores the hit world position in positions[].xyz with the ray
 // distance in .w (a 1e7 sentinel means "miss", i.e. background).  Project it
@@ -72,8 +95,8 @@ void main()
     gl_FragDepth = sceneDepth(px, idx);
 
     if (pc.u_present.z < 0.5) {
-        fragColor =
-          texture(u_rtImage, viewportCoord / textureSize(u_rtImage, 0));
+        fragColor = presentColor(
+          texture(u_rtImage, viewportCoord / textureSize(u_rtImage, 0)).rgb);
         return;
     }
 
@@ -86,7 +109,7 @@ void main()
         if (scale < 1.5) {
             vec4 d = denoised[idx];
             if (d.a > 0.5) {
-                fragColor = vec4(clamp(d.rgb, 0.0, 1.0), 1.0);
+                fragColor = presentColor(d.rgb);
                 return;
             }
         }
@@ -104,7 +127,7 @@ void main()
             vec4 d11 = denoised[q1.y * lw + q1.x];
             vec4 d = mix(mix(d00, d10, f.x), mix(d01, d11, f.x), f.y);
             if (d.a > 0.5) {
-                fragColor = vec4(clamp(d.rgb, 0.0, 1.0), 1.0);
+                fragColor = presentColor(d.rgb);
                 return;
             }
         }
@@ -112,7 +135,7 @@ void main()
 
     vec4 c0 = accum[idx];
     if (c0.a <= 0.0) {
-        fragColor = vec4(0.0);
+        fragColor = presentColor(vec3(0.0));
         return;
     }
     vec3 col0 = c0.rgb / c0.a;
@@ -139,5 +162,5 @@ void main()
             wsum += w;
         }
     }
-    fragColor = vec4(clamp(sum / max(wsum, 1.0e-6), 0.0, 1.0), 1.0);
+    fragColor = presentColor(sum / max(wsum, 1.0e-6));
 }

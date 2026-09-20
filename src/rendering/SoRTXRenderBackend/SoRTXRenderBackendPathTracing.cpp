@@ -1048,8 +1048,8 @@ SoRTXRenderBackend::recordTraceAndPresent(const SoRenderParams & params,
     (this->denoiseResultReady && (this->ptAccumulating || this->ptConverged))
       ? 1.0f : 0.0f,
     this->denoiseEffectiveScale,
-    0.0f,
-    0.0f};
+    this->hdrOutput ? 1.0f : 0.0f,
+    this->hdrExposure};
   if (SoVulkanConfig::get().rtxDebug.denoiseTiming) {
     fprintf(stderr,
             "[DENOISE-STATE] ord=%u frame=%u accum=%d pend=%d ready=%d "

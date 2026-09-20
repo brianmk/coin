@@ -279,6 +279,12 @@ if(COIN_BUILD_VULKAN_RENDERER)
       data/shaders/vulkan/visual/BackgroundVertex.glsl vert)
     coin_embed_vulkan_spirv(vulkan_background_fragment
       data/shaders/vulkan/visual/BackgroundFragment.glsl frag)
+    # HDR output pass (raster path): presents the linear RGBA16F intermediate
+    # to the swapchain with the exposure + PQ/clamp transform.
+    coin_embed_vulkan_spirv(vulkan_output_vertex
+      data/shaders/vulkan/output/OutputVertex.glsl vert)
+    coin_embed_vulkan_spirv(vulkan_output_fragment
+      data/shaders/vulkan/output/OutputFragment.glsl frag)
 
     # Ray-tracing backend shaders.  These pass the "rt" output subdirectory so
     # the generated headers land in src/rendering/vulkan/rt/ where the backend

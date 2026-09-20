@@ -100,6 +100,35 @@ public:
                                VkRenderPass renderPass);
 
   /*!
+    \brief HDR output variant of renderExternal() for the raster path.
+
+    Renders the scene into a backend-owned linear RGBA16F intermediate and then
+    presents it into the caller's \a outputPass / \a outputFramebuffer with the
+    exposure + transfer-function transform (SMPTE ST 2084 / PQ).  Doing the
+    encode once, after all geometry and transparency have blended in linear
+    light, is what makes the output color-correct; see
+    data/shaders/vulkan/output/OutputFragment.glsl.
+
+    Unlike renderExternal(), the caller must NOT have begun a render pass: this
+    method owns the whole pass lifecycle (offscreen pass, barrier, output pass).
+    The caller still owns the command buffer's begin/end and the submission.
+
+    The intermediate is recreated when the target extent changes; the output
+    pipeline is cached per \a outputPass (the swapchain render pass changes with
+    the color format).
+  */
+  SbBool renderExternalHdr(const SoDrawList & drawlist,
+                           const SoRenderParams & params,
+                           VkCommandBuffer commandBuffer,
+                           VkRenderPass outputPass,
+                           VkFramebuffer outputFramebuffer);
+
+  //! Enable/disable the HDR output transform (see renderExternalHdr()).
+  //! \a exposure is the linear scale mapping scene-white to the PQ peak
+  //! (0.02 ~= 200 cd/m^2 reference white).
+  void setHdrOutput(SbBool enabled, float exposure);
+
+  /*!
     \brief Composite only the overlay pass (e.g. the navigation cube) into
     the render target.
 
@@ -601,6 +630,26 @@ private:
   const SoVulkanRenderTarget * validateRenderTarget(
       const SoRenderParams & params) const;
 
+  // --- HDR output pass (raster path) -------------------------------------
+  // Ensure the linear RGBA16F intermediate matches `outputTarget`'s extent and
+  // is ready to render into; fills outTarget/outPass/outFramebuffer.  Recreates
+  // the image (and its render pass/framebuffer) when the extent changes.
+  bool ensureHdrIntermediate(const SoVulkanRenderTarget & outputTarget,
+                             SoVulkanRenderTarget & outTarget,
+                             VkRenderPass & outPass,
+                             VkFramebuffer & outFramebuffer);
+  // Lazily create the output pipeline for `outputPass` (keyed on the pass,
+  // which encodes the swapchain color format + sample count).
+  bool ensureOutputPipeline(VkRenderPass outputPass, VkPipeline & outPipeline);
+  // Allocate/refresh the descriptor set bound to the intermediate image view.
+  bool ensureOutputDescriptorSet(VkImageView source, VkDescriptorSet & outSet);
+  // Release the intermediate image + depth and the offscreen pass/framebuffer
+  // (deferred through the frame ring).  Keeps the pipelines/layouts/sampler.
+  void releaseHdrIntermediate();
+  // Release the intermediate image/pipeline/descriptor resources (device must
+  // still be valid).
+  void destroyHdrOutputResources();
+
   // --- Vulkan resource helpers -------------------------------------------
   // Buffer creation lives in the SoVulkanBufferFactory collaborator (this->
   // buffers); see SoVulkanBufferFactory.h.
@@ -928,6 +977,39 @@ private:
   // SoVulkanRenderPassCache so the backend records a frame with the current
   // pass/framebuffer without duplicating the cache bookkeeping.
   SoVulkanRenderPassCache renderPasses;
+
+  // --- HDR output pass (raster path) -------------------------------------
+  // When hdrOutput is set, renderExternalHdr() renders the scene into a linear
+  // RGBA16F intermediate (hdrColorImage) and presents it into the caller's
+  // swapchain framebuffer with the exposure + PQ transform.  The intermediate
+  // render pass/framebuffer are created through a dedicated cache so they do
+  // not disturb renderPasses (which the internal path owns).
+  bool hdrOutput = false;
+  float hdrExposure = 0.02f;
+  SoVulkanRenderPassCache hdrPasses;
+  VkImage hdrColorImage = VK_NULL_HANDLE;
+  VmaAllocation hdrColorMemory = nullptr;
+  VkImageView hdrColorView = VK_NULL_HANDLE;
+  VkImage hdrDepthImage = VK_NULL_HANDLE;
+  VmaAllocation hdrDepthMemory = nullptr;
+  VkImageView hdrDepthView = VK_NULL_HANDLE;
+  VkExtent2D hdrExtent {0, 0};
+  // Output-pass shaders and pipeline, keyed per output render pass (the pass
+  // changes with the swapchain color format).
+  VkShaderModule outputVertexModule = VK_NULL_HANDLE;
+  VkShaderModule outputFragmentModule = VK_NULL_HANDLE;
+  VkDescriptorSetLayout outputSetLayout = VK_NULL_HANDLE;
+  VkPipelineLayout outputPipelineLayout = VK_NULL_HANDLE;
+  std::unordered_map<VkRenderPass, VkPipeline> outputPipelines;
+  // Append-only descriptor pools (a set is never freed while a frame may
+  // reference it), mirroring descriptorPools/subPixelDescriptorPools.
+  std::vector<VkDescriptorPool> outputDescriptorPools;
+  uint32_t outputDescriptorSetCount = 0;
+  VkDescriptorSet outputDescriptorSet = VK_NULL_HANDLE;
+  VkSampler outputSampler = VK_NULL_HANDLE;
+  // Sample count of the caller's output pass, set before ensureOutputPipeline()
+  // so the output pipeline matches the pass's MSAA state.
+  VkSampleCountFlagBits hdrOutputPassSampleCount = VK_SAMPLE_COUNT_1_BIT;
 
   // Pipeline store: keyed by the retained state that affects the created
   // pipeline.  Vulkan pipelines are immutable, so every topology/fill/depth/

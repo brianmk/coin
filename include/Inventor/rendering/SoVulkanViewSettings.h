@@ -52,6 +52,16 @@ struct SoVulkanViewSettings {
   bool tessellationOverlay = false;
   SbColor4f edgeColor {0.05f, 0.05f, 0.05f, 1.0f};
 
+  //! HDR10 output: encode the final swapchain write as SMPTE ST 2084 (PQ) with
+  //! BT.2020 primaries.  Set only when the application both requested HDR and
+  //! the swapchain actually came up with a 10-bit HDR format (the application
+  //! owns that decision; the backend just encodes).  A linear pre-scale of the
+  //! scene radiance is applied before the PQ transfer function.
+  bool hdrOutput = false;
+  //! Linear exposure/gain applied to the scene radiance before the PQ encode
+  //! (1.0 = unchanged).  Ignored when hdrOutput is false.
+  float hdrExposure = 1.0f;
+
   bool operator==(const SoVulkanViewSettings & other) const
   {
     return viewMode == other.viewMode && envMap == other.envMap
@@ -68,7 +78,9 @@ struct SoVulkanViewSettings {
       && wireframeOverlay == other.wireframeOverlay
       && pointsOverlay == other.pointsOverlay
       && tessellationOverlay == other.tessellationOverlay
-      && edgeColor == other.edgeColor;
+      && edgeColor == other.edgeColor
+      && hdrOutput == other.hdrOutput
+      && hdrExposure == other.hdrExposure;
   }
   bool operator!=(const SoVulkanViewSettings & other) const
   {

@@ -415,6 +415,18 @@ SoRTXRenderBackend::setPathTracingDenoiseEnabled(SbBool enabled)
 }
 
 void
+SoRTXRenderBackend::setHdrOutput(SbBool enabled, float exposure)
+{
+  // Presentation-only state: no buffer/pipeline rebuild needed, the next
+  // present pass picks it up from the push constants.  Guard the exposure
+  // against zero/negative values, which would black out the image.
+  this->hdrOutput = enabled;
+  if (exposure > 0.0f) {
+    this->hdrExposure = exposure;
+  }
+}
+
+void
 SoRTXRenderBackend::setDenoiserFilter(const char * denoiser)
 {
   if (!denoiser || denoiser[0] == '\0') return;
