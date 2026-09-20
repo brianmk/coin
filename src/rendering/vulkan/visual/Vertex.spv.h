@@ -1,3 +1,4 @@
+// coin-spirv source=visual/Vertex.glsl source-sha256=2a2d654b8e1e15bc3b683c92d931b76e9853d11fb7d08631d6045dd23b4a4a97 generator-sha256=c2b9b4bba4cce7604d816678c21c5cd3b1891e420524402edd2b23dee34adf54
 	// 1116.4.0
 	 #pragma once
 const uint32_t coin_vulkan_visual_vertex_spirv[] = {

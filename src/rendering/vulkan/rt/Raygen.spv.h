@@ -1,3 +1,4 @@
+// coin-spirv source=rt/Raygen.glsl source-sha256=be5dd29b9fcbe11a323a01b09139285f34fffc76e86ff89b361f6d258a9b0c9b generator-sha256=c2b9b4bba4cce7604d816678c21c5cd3b1891e420524402edd2b23dee34adf54
 	// 1116.4.0
 	 #pragma once
 const uint32_t coin_vulkan_rt_raygen_spirv[] = {

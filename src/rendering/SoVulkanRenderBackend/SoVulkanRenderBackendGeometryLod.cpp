@@ -266,7 +266,7 @@ SoVulkanRenderBackend::ensureSubPixelSlot(VulkanCachedCommand & entry,
     }
     const VkDeviceSize indexBytes =
       static_cast<VkDeviceSize>(elementCount) * sizeof(uint32_t);
-    if (!this->createBufferDeviceLocal(
+    if (!this->buffers.createDeviceLocal(
           indexBytes,
           VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_INDEX_BUFFER_BIT,
           s.indexBuffer, s.indexMemory, nullptr)) {
@@ -285,7 +285,7 @@ SoVulkanRenderBackend::ensureSubPixelSlot(VulkanCachedCommand & entry,
     // Host-visible: the command is 20 bytes and rewritten in place by the
     // compute atomic, so a device-local staging copy would only add a
     // synchronous queue drain on first use.
-    if (!this->createBuffer(sizeof(icmd),
+    if (!this->buffers.create(sizeof(icmd),
                             VK_BUFFER_USAGE_STORAGE_BUFFER_BIT |
                               VK_BUFFER_USAGE_INDIRECT_BUFFER_BIT |
                               VK_BUFFER_USAGE_TRANSFER_DST_BIT,
@@ -375,7 +375,7 @@ SoVulkanRenderBackend::recordGeometryLodPrepass(VkCommandBuffer cb,
   const int num = drawlist.getNumCommands();
   if (num == 0) return;
 
-  const bool debug = COIN_VULKAN_ENV_FLAG("FC_VULKAN_BACKEND_DEBUG");
+  const bool debug = SoVulkanConfig::get().debug.backendDebug;
 
   // Dump the command list once per process.  An atomic exchange makes the
   // once-guard thread-safe (the prepass is single-threaded today, but the
@@ -541,7 +541,7 @@ SoVulkanRenderBackend::beginExternalPrepass(const SoDrawList & drawlist,
                                             const bool lod,
                                             ExternalFrameTiming * timing)
 {
-  const bool wantTextures = !this->pendingUploads.empty();
+  const bool wantTextures = this->textureCache.hasPendingUploads();
   const bool wantLod = lod && this->externalGeometryLodActive(params);
   if (!wantTextures && !wantLod) return VK_NULL_HANDLE;
 
@@ -582,11 +582,11 @@ SoVulkanRenderBackend::beginExternalPrepass(const SoDrawList & drawlist,
   // Record the copies and the dispatches into the transient buffer.  The
   // host-side finalize (view/sampler/descriptor creation + content stamp) is
   // deliberately deferred until after a successful vkEndCommandBuffer(): if
-  // the buffer cannot be completed, pendingUploads must stay populated so the
-  // caller's one-shot fallback still uploads the textures.  Finalizing first
+  // the buffer cannot be completed, the pending list must stay populated so
+  // the caller's one-shot fallback still uploads the textures.  Finalizing first
   // would clear the list and leave the images empty.
   if (wantTextures) {
-    this->recordPendingTextureUploadsInto(cb);
+    this->textureCache.recordPendingInto(cb);
   }
   const double texEnd = timing ? SoVulkanShared::steadyNowMs() : 0.0;
   if (timing) timing->texMs = texEnd - recordT0;
@@ -607,7 +607,7 @@ SoVulkanRenderBackend::beginExternalPrepass(const SoDrawList & drawlist,
   // The copies are now recorded, so the descriptor sets the draw path binds
   // can be created and the content identity stamped.
   if (wantTextures) {
-    this->finalizePendingTextureUploads();
+    this->textureCache.finalizePending();
   }
   return cb;
 }
@@ -634,20 +634,13 @@ SoVulkanRenderBackend::submitExternalPrepass(VkCommandBuffer commandBuffer,
   if (timing) timing->lodMs = SoVulkanShared::steadyNowMs() - submitT0;
   if (!submitted || !waited) {
     // The copies in the transient buffer never completed, so the texture
-    // entries finalizePendingTextureUploads() stamped still hold their
-    // (empty) images.  Un-stamp them so prepareGeometryTextures() re-prepares
-    // the upload on the next frame instead of sampling the empty image
-    // forever.  The already-recorded frame cannot be repaired.
-    for (const size_t index : this->finalizedTextureIndices) {
-      if (index < this->textureCache.size()) {
-        this->textureCache[index].pixelsKey = nullptr;
-      }
-    }
+    // entries finalizePending() stamped still hold their (empty) images.
+    // Un-stamp them so the upload is re-prepared next frame.
+    this->textureCache.unStampFinalized();
     SoDebugError::postWarning("SoVulkanRenderBackend::submitExternalPrepass",
                               "external pre-pass transient submit%s failed; "
                               "texture uploads will be retried next frame",
                               submitted ? " wait" : "");
   }
-  this->finalizedTextureIndices.clear();
   return submitted && waited;
 }

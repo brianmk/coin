@@ -1567,7 +1567,7 @@ SbBool
     return FALSE;
   }
   this->ptLastFrame = params.frame;
-  if (COIN_VULKAN_ENV_FLAG("FC_VULKAN_BLACK_DEBUG")) {
+  if (SoVulkanConfig::get().debug.blackDebug) {
     fprintf(stderr,
             "[BLACKRT] rtx renderExternal frame=%d acc=%d frameIndex=%u "
             "idleFrames=%u settle=%u enabled=%d samples=%u\n",
@@ -1605,8 +1605,7 @@ SbBool
   // makes the AS writes visible to the trace recorded below, so no explicit
   // synchronization with the caller's buffer is required.
   const bool wantTiming = [] {
-    static const bool enabled =
-      SoVulkanShared::envFlagEnabled("FC_VULKAN_FRAME_TIMING");
+    static const bool enabled = SoVulkanConfig::get().debug.frameTiming;
     return enabled;
   }();
   const double t0 = wantTiming ? vkNowMs() : 0.0;

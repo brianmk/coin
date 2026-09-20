@@ -1,3 +1,4 @@
+// coin-spirv source=geometry-lod/SubPixelCull.glsl source-sha256=49cf42304f73d0a766b8b248c6034f40729b8d7ac872178e736f617ad84608f1 generator-sha256=c2b9b4bba4cce7604d816678c21c5cd3b1891e420524402edd2b23dee34adf54
 	// 1116.4.0
 	 #pragma once
 const uint32_t coin_vulkan_geometry_lod_subpixel_cull_spirv[] = {

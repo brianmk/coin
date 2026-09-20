@@ -840,7 +840,7 @@ SoRTXRenderBackend::updateDenoise()
           return;
         }
 
-        if (COIN_VULKAN_ENV_FLAG("FC_VULKAN_BLACK_DEBUG")) {
+        if (SoVulkanConfig::get().debug.blackDebug) {
           float * dbg = static_cast<float *>(this->denoiseStagingPtr);
           // The color/albedo regions the worker read.  On the GPU-prepared path
           // the working set lives at the scaled/lower region (4*gbStride, k*outStride

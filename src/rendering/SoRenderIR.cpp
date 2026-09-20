@@ -1,6 +1,12 @@
 // src/rendering/SoRenderIR.cpp
 
 #include "rendering/SoRenderIRP.h"
+// SoVulkanConfig is a C++17 header (std::optional) and is only compiled into
+// a build with the Vulkan renderer.  The IR itself is core and is built in
+// legacy-only configurations, so it must not pull the Vulkan config in then.
+#if COIN_BUILD_VULKAN_RENDERER
+#include "rendering/SoVulkanConfig.h"
+#endif
 
 #include <Inventor/C/tidbits.h>
 #include <Inventor/elements/SoDepthBufferElement.h>
@@ -379,7 +385,13 @@ SoDrawList::restrikeLighting(const SbMatrix & prevView, const SbMatrix & newView
 namespace {
 bool lightFreshDbgEnabled()
 {
-  static const bool enabled = std::getenv("FC_VULKAN_LIGHTFRESH_DBG") != nullptr;
+#if COIN_BUILD_VULKAN_RENDERER
+  static const bool enabled = SoVulkanConfig::get().debug.lightFreshDebug;
+#else
+  // FC_VULKAN_LIGHTFRESH_DBG is read through the Vulkan config, which a
+  // legacy-only build does not compile; the trace is off there.
+  static const bool enabled = false;
+#endif
   return enabled;
 }
 void lightFreshDbgMat(const char * name, const SbMatrix & m)

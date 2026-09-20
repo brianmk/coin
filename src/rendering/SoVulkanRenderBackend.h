@@ -19,6 +19,11 @@ VK_DEFINE_HANDLE(VmaAllocation)
 #include "rendering/SoVulkanRenderBackend/SoVulkanRecordContext.h"
 #include "rendering/SoVulkanRenderBackend/SoVulkanRenderPassCache.h"
 #include "rendering/SoVulkanGpuTimers.h"
+#include "rendering/SoVulkanSamplerCache.h"
+#include "rendering/SoVulkanStagingPool.h"
+#include "rendering/SoVulkanBufferFactory.h"
+#include "rendering/SoVulkanFrameRing.h"
+#include "rendering/SoVulkanTextureCache.h"
 
 #include <Inventor/rendering/SoVulkanRenderTarget.h>
 
@@ -174,39 +179,7 @@ struct VulkanCachedCommand {
   bool hasResolvedPipeline = false;
 };
 
-/*! \brief Cached GPU texture for one retained command's SoTextureData. */
-struct VulkanCachedTexture {
-  VkImage image = VK_NULL_HANDLE;
-  // Backing device memory, owned by the VMA allocator.  The image and its
-  // allocation are created and destroyed together (vmaCreateImage /
-  // vmaDestroyImage); no separate VkDeviceMemory handle is kept.
-  VmaAllocation allocation = nullptr;
-  VkImageView view = VK_NULL_HANDLE;
-  VkSampler sampler = VK_NULL_HANDLE;
-  VkDescriptorSet descriptorSet = VK_NULL_HANDLE;
-  // Pool the descriptor set was allocated from (pools are append-only, so
-  // the set must be returned to this pool, not the currently active one).
-  VkDescriptorPool descriptorPool = VK_NULL_HANDLE;
-
-  // Command that last touched this entry (per-frame arena pointer; used
-  // only as an identity key for map rebuilds after cache eviction).
-  const SoRenderCommand * commandKey = nullptr;
-
-  // Identity of the last upload.
-  const unsigned char * pixelsKey = nullptr;
-  int width = 0;
-  int height = 0;
-  int numComponents = 0;
-  SoTextureFilter minFilter = SO_TEXTURE_FILTER_NEAREST;
-  SoTextureFilter magFilter = SO_TEXTURE_FILTER_NEAREST;
-  SoTextureWrap wrapS = SO_TEXTURE_WRAP_CLAMP_TO_EDGE;
-  SoTextureWrap wrapT = SO_TEXTURE_WRAP_CLAMP_TO_EDGE;
-  SoTextureModel model = SO_TEXTURE_MODEL_MODULATE;
-  uint32_t cacheGeneration = 0;
-  // Content hash of the uploaded pixels (sampled): pixel-pointer identity
-  // alone cannot detect in-place edits, which would serve stale textures.
-  uint64_t contentHash = 0;
-};
+// VulkanCachedTexture is defined in SoVulkanTextureCache.h (included above).
 
 /*! \brief Minimal Vulkan executor for retained DrawList IR. */
 class SoVulkanRenderBackend : public SoRenderBackend {
@@ -447,30 +420,10 @@ private:
   void destroyAllGeometryBlocks();
 
   // --- Texture cache ----------------------------------------------------
-  bool createWhiteTexture();
-  void invalidateTextureCache();
-  void destroyTextureEntry(VulkanCachedTexture & entry);
-  VulkanCachedTexture & getOrCreateTexture(const SoRenderCommand * command);
-
-  // One texture waiting for its GPU-side upload (staging copy).  The host
-  // side (image, memory, staging buffer) is prepared up front; the copies
-  // for all pending uploads are recorded either into the current frame's
-  // command buffer (own-queue path) or a single transient command buffer
-  // (external path) and submitted once per frame.  The cache index (not a
-  // pointer) identifies the entry, but eviction may compact the cache after
-  // preparation, so the command pointer is retained to re-resolve the index
-  // before the upload is consumed.
-  struct PendingTextureUpload {
-    size_t index = 0;
-    const SoRenderCommand * command = nullptr;
-    const SoTextureData * texture = nullptr;
-    // Byte offset into the shared staging pool buffer (stagingPoolBuffer)
-    // where this upload's pixels were staged.  All pending uploads in a frame
-    // share one host-visible allocation, so a failure leaves a single buffer
-    // to clean up instead of N per-upload stagings.
-    VkDeviceSize stagingOffset = 0;
-    VkDeviceSize stagingBytes = 0;
-  };
+  // Texture state and the staging->image upload path live in the
+  // SoVulkanTextureCache collaborator (this->textureCache); see
+  // SoVulkanTextureCache.h.  The shared set-1 descriptor pool and the
+  // deferred-destruction ring stay here and are handed to it as callbacks.
 
   // One resolvable draw unit of the frame's worklist, produced by
   // buildWorkItems().  buildWorkItems() walks the sorted order, buckets
@@ -526,43 +479,10 @@ private:
                             VkFramebuffer framebuffer);
   VkCommandBuffer workerSecondary(uint32_t frameSlot, uint32_t worker);
   VkCommandBuffer parallelCurrentSecondary(uint32_t worker);
-  bool prepareTextureUpload(VulkanCachedTexture & entry,
-                            const SoTextureData & texture,
-                            VkDeviceSize & stagingOffset,
-                            VkDeviceSize & stagingBytes);
-  void recordTextureUpload(VkCommandBuffer commandBuffer,
-                           const VulkanCachedTexture & entry,
-                           const SoTextureData & texture,
-                           VkBuffer staging,
-                           VkDeviceSize stagingOffset);
-  bool finalizeTexture(VulkanCachedTexture & entry,
-                       const SoTextureData & texture);
-  // Record the pending staging -> image copies into \a commandBuffer (which
-  // must not be inside a render pass) and finalize the host-side resources
-  // (view, sampler, descriptor set, content stamp) so the draw path can bind
-  // them.  Shared by the own-queue path (the frame command buffer) and the
-  // external pre-pass (a transient command buffer); both callers then submit
-  // the buffer that carries the copies.
-  void recordPendingTextureUploadsInto(VkCommandBuffer commandBuffer);
-  bool recordPendingTextureUploads();
-  void finalizePendingTextureUploads();
-  // Legacy one-shot fallback for the external path: submits the copies in a
-  // dedicated command buffer and drains the queue.  Only used when the
-  // external pre-pass could not allocate its transient command buffer.
-  SoVulkan::Result flushPendingTextureUploadsExternal();
-  bool createSampler(SoTextureFilter minFilter, SoTextureFilter magFilter,
-                     SoTextureWrap wrapS, SoTextureWrap wrapT,
-                     VkSampler & sampler);
-  // Format actually used for an N-component SoTextureData image.  VK_FORMAT_
-  // R8_UNORM / R8G8_UNORM / R8G8B8_UNORM are not guaranteed to be sampleable
-  // (they are optional formats), so when the device lacks SAMPLED_IMAGE
-  // support the upload is expanded to R8G8B8A8_UNORM on the host with the
-  // per-channel values matching the native sampling semantics.
-  VkFormat effectiveTextureFormat(const int numComponents) const;
+  // Allocate a set-1 descriptor (draw UBO + texture) from the shared pool.
   bool allocateTextureDescriptorSet(VkImageView view, VkSampler sampler,
                                     VkDescriptorSet & set);
   bool ensureDescriptorPoolSpace();
-  VkDescriptorSet resolveTextureSet(const SoRenderCommand & command);
 
   // --- Render recording ---------------------------------------------------
   // Every record* helper below takes the VulkanRecordContext it records
@@ -698,7 +618,7 @@ private:
   // Returns VK_NULL_HANDLE when there is nothing to record, or when the
   // transient buffer could not be prepared.  When it returns null while
   // texture uploads were pending, the caller must fall back to
-  // flushPendingTextureUploadsExternal() so the textures still upload.
+  // SoVulkanTextureCache::flushExternal() so the textures still upload.
   VkCommandBuffer beginExternalPrepass(const SoDrawList & drawlist,
                                        const SoRenderParams & params,
                                        bool lod,
@@ -800,7 +720,7 @@ private:
   // Shared prologue of renderExternal()/renderExternalOverlay(): validate the
   // common preconditions and target, advance the frame (matrices, frame
   // boundary, lighting setup, geometry cache) and stage any changed textures
-  // into pendingUploads (consumed by the caller's pre-pass).  Returns the
+  // in the texture cache (consumed by the caller's pre-pass).  Returns the
   // validated target, or nullptr after emitting the caller-specific error.
   // `reserveCompositeSlots` reserves the countCompositeCommands() lighting
   // slots the overlay path needs (the full path reserves inside recordFrame()).
@@ -818,38 +738,8 @@ private:
       const SoRenderParams & params) const;
 
   // --- Vulkan resource helpers -------------------------------------------
-  // Create a buffer + VMA allocation and, when `data` is non-null, fill it
-  // through a one-time host mapping.  On failure buffer/allocation are left
-  // null.
-  bool createBuffer(VkDeviceSize size,
-                    VkBufferUsageFlags usage,
-                    VkBuffer & buffer,
-                    VmaAllocation & memory,
-                    const void * data);
-  // Device-local variant of createBuffer() for retained static geometry.
-  // Uses a transient staging buffer + one-shot transfer and waits for the
-  // copy to complete, so it is only meant for the rare geometry-change
-  // path, never the steady-state per-frame path.
-  bool createBufferDeviceLocal(VkDeviceSize size,
-                               VkBufferUsageFlags usage,
-                               VkBuffer & buffer,
-                               VmaAllocation & memory,
-                               const void * data);
-  // Create a buffer backed by memory with the desired properties.  When
-  // `data` is non-null the host-visible contents are filled.  On failure
-  // buffer/allocation are left null.
-  bool createBufferWithProperties(VkDeviceSize size, VkBufferUsageFlags usage,
-                                  VkMemoryPropertyFlags desiredProperties,
-                                  VkBuffer & buffer, VmaAllocation & memory,
-                                  const void * data = nullptr);
-  // Create a HOST_VISIBLE | HOST_COHERENT buffer and establish its persistent
-  // mapping in one step.  On any failure buffer/allocation are left null and
-  // *mapped null, with nothing allocated.  Used by every per-frame UBO / ring
-  // buffer (lighting ring, lighting constant ring, instance-model ring, wide-
-  // line quad slots), which all share the same create+map+rollback shape.
-  bool createMappedBuffer(VkDeviceSize size, VkBufferUsageFlags usage,
-                          VkBuffer & buffer, VmaAllocation & memory,
-                          void ** mapped);
+  // Buffer creation lives in the SoVulkanBufferFactory collaborator (this->
+  // buffers); see SoVulkanBufferFactory.h.
   // Defer destruction of a buffer + its allocation to the deferred-destruction
   // ring (the submission that may still reference it must drain first).  Null
   // handles are ignored, so callers need not pre-check.
@@ -869,6 +759,12 @@ private:
   bool growLightingUbo(uint32_t minSlots);
   bool swapLightingBuffer(VkBuffer newBuffer, VmaAllocation newMemory,
                           void * newMapped, uint32_t newSlotsPerFrame);
+  // Replace the lighting constant ring buffer (the set-0 UBO) after a
+  // maxFramesInFlight change, repointing its descriptor set at the new buffer
+  // and deferring the old one.  Waits for in-flight submissions first, for the
+  // same reason swapLightingBuffer() does.
+  bool swapLightingConstBuffer(VkBuffer newBuffer, VmaAllocation newMemory,
+                               void * newMapped);
   bool prepareLightingSlots(uint32_t neededDraws);
   void beginFrame();
   void flushPendingDestroys();
@@ -890,6 +786,9 @@ private:
   // Vulkan Memory Allocator, created in initialize() and destroyed at
   // shutdown().  Owns the texture-image device memory.
   VmaAllocator vmaAllocator = nullptr;
+  // Shared buffer-creation helpers, borrowing the handles above.  Initialized
+  // in initialize() once the command pool exists.
+  SoVulkanBufferFactory buffers;
 
   // --- Device capabilities (probed once in initialize()) -----------------
   // VkPhysicalDeviceFeatures::fillModeNonSolid gates the wireframe/points
@@ -914,16 +813,14 @@ private:
   SoVulkanGpuTimers gpuTimers;
 
   VkCommandPool commandPool = VK_NULL_HANDLE;
-  // One command buffer and fence per in-flight frame slot.  The own-queue
-  // path (render()) submits slot N's buffer and signals slot N's fence;
-  // beginFrame() waits the fence before reusing the slot's UBO ring half,
-  // command buffer, and deferred-destruction batch.  The external path
-  // records into the caller's command buffer and never signals these
-  // fences; frameFencePending stays false for those slots so beginFrame()
-  // never waits on them.
-  std::vector<VkCommandBuffer> frameCommandBuffers;
-  std::vector<VkFence> frameFences;
-  std::vector<uint8_t> frameFencePending;
+  // One command buffer and fence per in-flight frame slot (this->frameRing).
+  // The own-queue path (render()) submits slot N's buffer and signals slot N's
+  // fence; beginFrame() waits the fence before reusing the slot's UBO ring
+  // half, command buffer, and deferred-destruction batch.  The external path
+  // records into the caller's command buffer and never signals these fences;
+  // the ring's pending flag stays false for those slots so beginFrame() never
+  // waits on them.
+  SoVulkanFrameRing frameRing;
   // Secondary command buffers for M1c/M1d: one per in-flight frame slot per
   // worker, used to record the render-order-independent opaque pass inside an
   // already-begun render pass (RENDER_PASS_CONTINUE), then
@@ -948,6 +845,13 @@ private:
   // thread and workers 1..N-1 are spawned threads, all joined in shutdown().
   bool parallelRecordEnabled = false;
   uint32_t maxRecordWorkers = 1;
+  // True when the device was created with VK_EXT_nested_command_buffer and
+  // nestedCommandBufferRendering, so a subpass may begin with
+  // VK_SUBPASS_CONTENTS_INLINE_AND_SECONDARY_COMMAND_BUFFERS_EXT and both
+  // record inline commands and execute secondaries.  False (the default, and
+  // the offscreen/test case where the caps are unavailable) forces plain
+  // INLINE contents and disables secondary recording.
+  bool nestedCommandBufferEnabled = false;
   // Interaction LOD for this frame (see SoRenderParams::interactionLod): wide
   // lines are drawn as plain 1px GPU lines instead of being expanded into
   // quads on the CPU.  Latched from the frame params at the top of recordFrame
@@ -1055,6 +959,13 @@ private:
   float frameDpr = 1.0f;
   void cacheFrameMatrices(const SoRenderParams & params);
 
+  // Unique SoLightingHandle slots per in-flight frame in the lighting
+  // constant ring.  updateLightingSetup() clamps the distinct-handle count to
+  // this; the ring depth is maxFramesInFlight, so the total slot count is
+  // maxFramesInFlight * kLightingConstSlotsPerFrame.  The depth must track
+  // maxFramesInFlight or a frame's ring base would alias another frame's.
+  static constexpr uint32_t kLightingConstSlotsPerFrame = 8;
+
   // Lighting constant ring (set 0, binding 0, dynamic offset).  Holds a few
   // slots per in-flight frame, one per distinct SoLightingHandle the frame
   // references.  Each unique block is written once per frame (updateLightingSetup);
@@ -1101,43 +1012,12 @@ private:
   SbBool tessellationOverlay = FALSE;
   SbColor4f edgeColor = SbColor4f(0.05f, 0.05f, 0.05f, 1.0f);
 
-  // Texture uploads gathered during updateGeometryCache().  On the own-queue
-  // path they are recorded into the frame command buffer (no separate
-  // submit); on the external path they are recorded into the transient
-  // pre-pass command buffer (beginExternalPrepass), which the caller submits
-  // once alongside the geometry-LOD dispatches.  Indices are re-resolved from
-  // the command pointers after cache eviction compacts the texture cache.
-  std::vector<PendingTextureUpload> pendingUploads;
-
-  // Texture-cache indices finalized (and content-stamped) by the last
-  // finalizePendingTextureUploads() call.  The external pre-pass uses this to
-  // un-stamp them if its submit fails, so the copies are retried next frame
-  // rather than the draws sampling never-uploaded images.
-  std::vector<size_t> finalizedTextureIndices;
-
-  // Persistent host-visible staging buffer that coalesces every pending
-  // texture upload of a frame into one buffer write (and, on the external
-  // fallback, one submit), instead of allocating a fresh transient staging
-  // buffer per pending upload per frame.  Grows on demand and is reused across
-  // frames; released at shutdown().  Its mapped pointer is the single owner of
-  // the staged pixel data, so a failure at any point leaves one buffer to
-  // clean up rather than N per-upload allocations to chase.
-  VkBuffer stagingPoolBuffer = VK_NULL_HANDLE;
-  VmaAllocation stagingPoolAllocation = nullptr;
-  void * stagingPoolMapped = nullptr;
-  VkDeviceSize stagingPoolCapacity = 0;
-  // Running byte cursor into stagingPoolBuffer for the current frame's
-  // pending uploads; reset to 0 at the start of each flush/record pass.
-  VkDeviceSize stagingPoolCursor = 0;
-  bool ensureStagingPoolSize(VkDeviceSize required);
-
-  // Texture binding (set 0, binding 1).  A 1x1 white fallback texture is
-  // bound whenever a command carries no embedded SoTextureData.
-  VkImage whiteImage = VK_NULL_HANDLE;
-  VmaAllocation whiteImageAllocation = nullptr;
-  VkImageView whiteImageView = VK_NULL_HANDLE;
-  VkSampler whiteSampler = VK_NULL_HANDLE;
-  VkDescriptorSet whiteDescriptorSet = VK_NULL_HANDLE;
+  // Per-command texture entries, the staging pool and the white fallback
+  // texture.  Uploads gathered during updateGeometryCache() are recorded into
+  // the frame command buffer (own-queue path) or the external pre-pass's
+  // transient buffer; eviction and index re-resolution happen inside the
+  // cache's sweep().
+  SoVulkanTextureCache textureCache;
 
   VkShaderModule vertexModule = VK_NULL_HANDLE;
   VkShaderModule fragmentModule = VK_NULL_HANDLE;
@@ -1237,8 +1117,6 @@ private:
 
   std::vector<VulkanCachedCommand> gpuCache;
   std::unordered_map<const SoRenderCommand *, size_t> commandToCache;
-  std::vector<VulkanCachedTexture> textureCache;
-  std::unordered_map<const SoRenderCommand *, size_t> commandToTexture;
 
   // True while this backend is used only to composite overlays/residual
   // geometry over a ray-traced frame (set by setOverlayCompositeMode()).  Lets
@@ -1269,17 +1147,11 @@ private:
   std::vector<uint64_t> loadScratch;
   std::vector<VkCommandBuffer> executeScratch;
 
-  // Packed sampler-state key: minFilter | magFilter << 2 | wrapS << 4 | wrapT << 6.
-  typedef uint8_t SamplerKey;
-  static SamplerKey samplerKey(SoTextureFilter minFilter,
-                               SoTextureFilter magFilter,
-                               SoTextureWrap wrapS, SoTextureWrap wrapT);
   // Sampler cache so textures sharing filter/wrap state reuse one VkSampler
-  // instead of creating one per texture entry.  Owned here; destroyed at
-  // shutdown() after the texture cache.  Always created lazily on first use.
-  std::unordered_map<SamplerKey, VkSampler> samplerCache;
-  VkSampler cachedSampler(SoTextureFilter minFilter, SoTextureFilter magFilter,
-                          SoTextureWrap wrapS, SoTextureWrap wrapT);
+  // instead of creating one per texture entry.  Owned by this collaborator;
+  // initialized in initialize() and destroyed at shutdown() while the device
+  // is still valid.  Always created lazily on first use.
+  SoVulkanSamplerCache samplerCache;
 
   std::vector<VulkanGeometryBlock> geometryBlocks;
   // Released blocks are kept as reusable ids so a geometry-change burst does

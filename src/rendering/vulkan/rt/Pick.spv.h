@@ -1,3 +1,4 @@
+// coin-spirv source=rt/Pick.glsl source-sha256=c8654bbbe84b6b011b42442f54c878c2581fe3fa4db6d6cfcc324442d3d20fbf generator-sha256=c2b9b4bba4cce7604d816678c21c5cd3b1891e420524402edd2b23dee34adf54
 	// 1116.4.0
 	 #pragma once
 const uint32_t coin_vulkan_rt_pick_spirv[] = {

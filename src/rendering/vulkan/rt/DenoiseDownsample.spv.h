@@ -1,3 +1,4 @@
+// coin-spirv source=rt/DenoiseDownsample.glsl source-sha256=006a67b81e704dab5dab97d8ef9c7bbf0783a57a85db767f8884ba075fa3bbc0 generator-sha256=c2b9b4bba4cce7604d816678c21c5cd3b1891e420524402edd2b23dee34adf54
 	// 1116.4.0
 	 #pragma once
 const uint32_t coin_vulkan_rt_denoisedownsample_spirv[] = {

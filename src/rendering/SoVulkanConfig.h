@@ -25,6 +25,7 @@
 
 #include <cstdint>
 #include <optional>
+#include <string>
 
 namespace SoVulkanConfig {
 
@@ -131,6 +132,57 @@ struct Raster {
   //! Force CPU wide-line quad expansion (A/B comparison / driver escape).
   //! FC_VULKAN_WLINE_CPU; default off.
   bool wideLineCpu = false;
+  //! Serial wide-line expansion (no worker pool).  FC_VULKAN_WLINE_SERIAL;
+  //! default off.
+  bool wideLineSerial = false;
+  //! Decal-vs-clear raster pipeline (A/B comparison).  FC_VULKAN_RASTER_DECAL;
+  //! default off.
+  bool rasterDecal = false;
+  //! Full-target-clear fast path.  FC_VULKAN_RP_CLEAR; default off.
+  bool rpClear = false;
+  //! Force the wireframe (shaded-with-edges) overlay on.  FC_VULKAN_WIREFRAME;
+  //! default off.
+  bool wireframe = false;
+  //! Force the points overlay on.  FC_VULKAN_POINTS; default off.
+  bool points = false;
+  //! Force the tessellation/edge overlay on.  FC_VULKAN_TESS; default off.
+  bool tessellation = false;
+  //! Hex (RRGGBB) edge-color override for the overlays; empty = unset.
+  //! FC_VULKAN_EDGE_COLOR.
+  std::string edgeColor;
+  //! Per-command vertex budget.  FC_VULKAN_MAX_VERTEX_COUNT; 0 = the compiled
+  //! default (see VULKAN_MAX_VERTEX_COUNT in SoVulkanRenderBackendP.h).
+  uint32_t maxVertexCount = 0;
+};
+
+// General renderer diagnostics shared by the raster and RT backends.  These
+// change logging/tracing only, never rendered output.  Each field documents
+// the flag it resolves and its opt-out semantics.
+struct Debug {
+  //! FC_VULKAN_BACKEND_DEBUG: per-command draw/material/color logs.
+  bool backendDebug = false;
+  //! FC_VULKAN_BLACK_DEBUG: black-frame / lost-draw detection logs.
+  bool blackDebug = false;
+  //! FC_VULKAN_MATRIX_DUMP: per-frame matrix dumps.
+  bool matrixDump = false;
+  //! FC_VULKAN_OVERLAY_CAM_DEBUG: overlay-camera diagnostics.
+  bool overlayCamDebug = false;
+  //! FC_VULKAN_FRAME_TIMING: host frame-timing breakdown.
+  bool frameTiming = false;
+  //! FC_VULKAN_BREADCRUMBS: GUI-side Vulkan breadcrumb trace.
+  bool breadcrumbs = false;
+  //! FC_VULKAN_CLIP_DEBUG: [CLIP] clipping trace.
+  bool clipDebug = false;
+  //! FC_VULKAN_CLIP_VERBOSE: per-25-frame verbose clip lines.
+  bool clipVerbose = false;
+  //! FC_VULKAN_IR_REPLAY: retained-IR replay (default on).
+  bool irReplay = true;
+  //! FC_VULKAN_TRACE: per-step recording traces.  Presence-only.
+  bool trace = false;
+  //! FC_VULKAN_LIGHTREPLAY_DBG: lighting-replay diagnostics.  Presence-only.
+  bool lightReplayDebug = false;
+  //! FC_VULKAN_LIGHTFRESH_DBG: light-freshness diagnostics.  Presence-only.
+  bool lightFreshDebug = false;
 };
 
 // Vulkan diagnostic tooling.  All default off and must be zero-cost (or
@@ -161,6 +213,7 @@ struct Config {
   Concurrency concurrency;
   Raster raster;
   Diagnostics diagnostics;
+  Debug debug;
 };
 
 /*!
