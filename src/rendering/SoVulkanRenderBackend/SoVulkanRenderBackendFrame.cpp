@@ -395,19 +395,19 @@ SoVulkanRenderBackend::validateRenderTarget(const SoRenderParams & params) const
   return target;
 }
 
-const SoVulkanRenderTarget *
-SoVulkanRenderBackend::prepareExternalFrame(
+bool
+SoVulkanRenderBackend::beginFramePlan(
     const SoDrawList & drawlist, const SoRenderParams & params,
-    VkCommandBuffer commandBuffer, VkRenderPass renderPass,
-    const char * caller, const bool overlaysOnly,
-    const bool reserveCompositeSlots, ExternalFrameTiming * timing)
+    const char * caller, const bool overlaysOnly, const bool external,
+    const bool reserveCompositeSlots, FramePlan & plan,
+    ExternalFrameTiming * timing)
 {
   if (!this->isInitialized()) {
     char msg[128];
     std::snprintf(msg, sizeof(msg), "%s called before backend initialization",
                   caller);
     this->emitError(msg);
-    return nullptr;
+    return false;
   }
   if (!params.renderTarget) {
     char msg[192];
@@ -415,24 +415,13 @@ SoVulkanRenderBackend::prepareExternalFrame(
                   "%s called without a SoVulkanRenderTarget in "
                   "SoRenderParams::renderTarget", caller);
     this->emitError(msg);
-    return nullptr;
-  }
-  if (commandBuffer == VK_NULL_HANDLE || renderPass == VK_NULL_HANDLE) {
-    char msg[160];
-    std::snprintf(msg, sizeof(msg),
-                  "%s called without a command buffer and render pass",
-                  caller);
-    this->emitError(msg);
-    return nullptr;
+    return false;
   }
   const SoVulkanRenderTarget * target = this->validateRenderTarget(params);
-  if (target == nullptr) return nullptr;
-
-  // External passes are caller-supplied LOAD render passes, so no attachment
-  // is cleared by a loadOp here: recordClear() must emit vkCmdClearAttachments.
-  this->renderPasses.setClearedByLoad(false, false);
+  if (target == nullptr) return false;
 
   this->cacheFrameMatrices(params);
+
   const bool wantCpuTiming = timing != nullptr;
   double t0 = wantCpuTiming ? SoVulkanShared::steadyNowMs() : 0.0;
   this->beginFrame();
@@ -449,18 +438,68 @@ SoVulkanRenderBackend::prepareExternalFrame(
   }
   // The composite path never goes through recordFrame(), so it must reserve
   // the lighting slots its overlay/residual draws consume here; otherwise the
-  // cursor keeps climbing across frames and overflows the ring.
+  // cursor keeps climbing across frames and overflows the ring.  The full path
+  // reserves its slots inside recordFrame() instead.
   if (reserveCompositeSlots &&
       !this->prepareLightingSlots(countCompositeCommands(drawlist))) {
     this->emitError("failed to reserve lighting UBO slots");
-    return nullptr;
+    return false;
   }
+
+  plan.target = target;
+  plan.overlaysOnly = overlaysOnly;
+  plan.external = external;
+  return true;
+}
+
+bool
+SoVulkanRenderBackend::recordFramePlan(const SoDrawList & drawlist,
+                                       const SoRenderParams & params,
+                                       const FramePlan & plan,
+                                       VkRenderPass renderPass,
+                                       VkFramebuffer framebuffer,
+                                       VulkanRecordContext & ctx)
+{
+  if (plan.overlaysOnly) {
+    this->recordTracedComposite(drawlist, params, *plan.target, renderPass, ctx);
+    this->recordOverlayBlock(drawlist, params, *plan.target, renderPass, ctx);
+    return true;
+  }
+  return this->recordFrame(drawlist, params, *plan.target, renderPass, ctx,
+                           framebuffer);
+}
+
+bool
+SoVulkanRenderBackend::prepareExternalFrame(
+    const SoDrawList & drawlist, const SoRenderParams & params,
+    VkCommandBuffer commandBuffer, VkRenderPass renderPass,
+    const char * caller, const bool overlaysOnly,
+    const bool reserveCompositeSlots, FramePlan & plan,
+    ExternalFrameTiming * timing)
+{
+  if (commandBuffer == VK_NULL_HANDLE || renderPass == VK_NULL_HANDLE) {
+    char msg[160];
+    std::snprintf(msg, sizeof(msg),
+                  "%s called without a command buffer and render pass",
+                  caller);
+    this->emitError(msg);
+    return false;
+  }
+  if (!this->beginFramePlan(drawlist, params, caller, overlaysOnly,
+                            /*external*/ true, reserveCompositeSlots, plan,
+                            timing)) {
+    return false;
+  }
+
+  // External passes are caller-supplied LOAD render passes, so no attachment
+  // is cleared by a loadOp here: recordClear() must emit vkCmdClearAttachments.
+  this->renderPasses.setClearedByLoad(false, false);
   // Changed textures are now staged in the texture cache; the caller's
   // beginExternalPrepass() records the copies into its transient command
   // buffer (or falls back to SoVulkanTextureCache::flushExternal() when that
   // buffer cannot be allocated).  No flush here: it would need its own
   // submission and queue drain, and the caller already submits the pre-pass.
-  return target;
+  return true;
 }
 
 SbBool
@@ -468,16 +507,6 @@ SoVulkanRenderBackend::renderInternal(const SoDrawList & drawlist,
                                       const SoRenderParams & params,
                                       const bool overlaysOnly)
 {
-  if (!this->isInitialized()) {
-    this->emitError("render called before backend initialization");
-    return FALSE;
-  }
-  if (!params.renderTarget) {
-    this->emitError(
-      "render called without a SoVulkanRenderTarget in "
-      "SoRenderParams::renderTarget");
-    return FALSE;
-  }
   this->debugValidateDrawList(drawlist);
   vkBackendTrace(this->uboFrameIndex, "renderInternal.enter",
                  "overlaysOnly=%d cmds=%d",
@@ -489,11 +518,8 @@ SoVulkanRenderBackend::renderInternal(const SoDrawList & drawlist,
                        overlaysOnly ? 1 : 0);
   }
 
-  const SoVulkanRenderTarget * target = this->validateRenderTarget(params);
-  if (target == nullptr) return FALSE;
-
-  this->cacheFrameMatrices(params);
-
+  // A composite (overlays-only) frame with no overlay commands is a no-op:
+  // return before the frame boundary so the ring cursor does not advance.
   if (overlaysOnly) {
     bool hasOverlay = false;
     for (int i = 0; i < drawlist.getNumCommands(); ++i) {
@@ -506,12 +532,18 @@ SoVulkanRenderBackend::renderInternal(const SoDrawList & drawlist,
   }
 
   // One frame boundary: advances the ring cursor and releases resources
-  // deferred maxFramesInFlight frames ago.
-  this->beginFrame();
-
-  // Write the lighting constant block(s) into the ring once per frame so the
-  // shared lighting setup is referenced, not re-derived, per draw.
-  this->updateLightingSetup(drawlist);
+  // deferred maxFramesInFlight frames ago, then writes the lighting setup and
+  // updates the geometry cache.  Composite frames also reserve the ring slots
+  // their overlay/residual draws consume here; the full path reserves inside
+  // recordFrame().
+  FramePlan plan;
+  if (!this->beginFramePlan(drawlist, params, "render", overlaysOnly,
+                            /*external*/ false,
+                            /*reserveCompositeSlots*/ overlaysOnly, plan,
+                            nullptr)) {
+    return FALSE;
+  }
+  const SoVulkanRenderTarget & target = *plan.target;
 
   // Render passes are cached by their attachment identity (formats, sample
   // count, image layouts, load ops), not by the target's images: swapchain
@@ -522,11 +554,11 @@ SoVulkanRenderBackend::renderInternal(const SoDrawList & drawlist,
   // which is cheaper than a separate vkCmdClearAttachments region clear.
   const bool wantRpClear = SoVulkanConfig::get().raster.rpClear;
   const bool fullTargetClear =
-    wantRpClear && this->isFullTargetClear(params, *target);
+    wantRpClear && this->isFullTargetClear(params, target);
   const bool clearWindow = (params.flags & SO_PARAM_CLEAR_WINDOW) != 0;
   const bool clearDepth = (params.flags & SO_PARAM_CLEAR_DEPTH) != 0;
-  const bool hasDepth = target->depthImageView != VK_NULL_HANDLE &&
-                        target->depthFormat != VK_FORMAT_UNDEFINED;
+  const bool hasDepth = target.depthImageView != VK_NULL_HANDLE &&
+                        target.depthFormat != VK_FORMAT_UNDEFINED;
   const VkAttachmentLoadOp colorLoadOp =
     (fullTargetClear && clearWindow)
       ? VK_ATTACHMENT_LOAD_OP_CLEAR
@@ -535,7 +567,7 @@ SoVulkanRenderBackend::renderInternal(const SoDrawList & drawlist,
     (fullTargetClear && hasDepth && clearDepth)
       ? VK_ATTACHMENT_LOAD_OP_CLEAR
       : VK_ATTACHMENT_LOAD_OP_LOAD;
-  this->renderPasses.getOrCreateRenderPass(*target, colorLoadOp,
+  this->renderPasses.getOrCreateRenderPass(target, colorLoadOp,
                                            depthLoadOp);
   // Stash whether the pass cleared each attachment so recordClear() can skip
   // the redundant vkCmdClearAttachments, and (below) so the begin info carries
@@ -545,18 +577,6 @@ SoVulkanRenderBackend::renderInternal(const SoDrawList & drawlist,
     depthLoadOp == VK_ATTACHMENT_LOAD_OP_CLEAR);
   if (this->renderPasses.currentRenderPass() == VK_NULL_HANDLE) {
     this->emitError("failed to create Vulkan render pass");
-    return FALSE;
-  }
-
-  this->updateGeometryCache(drawlist, overlaysOnly,
-                            params.geometryContentUnchanged);
-
-  // Composite renders skip recordFrame(), so reserve the ring slots here;
-  // beginFrame() above already advanced the frame cursor.  This covers both
-  // the OVERLAY commands and the non-triangle residual geometry.
-  if (overlaysOnly &&
-      !this->prepareLightingSlots(countCompositeCommands(drawlist))) {
-    this->emitError("failed to reserve lighting UBO slots");
     return FALSE;
   }
 
@@ -579,7 +599,7 @@ SoVulkanRenderBackend::renderInternal(const SoDrawList & drawlist,
   // submission may still reference it (the per-frame vkQueueWaitIdle is gone,
   // so only the current slot's fence has been waited by beginFrame()).
   if (!this->renderPasses.ensureFramebuffer(
-        target, this->renderPasses.currentRenderPass())) {
+        &target, this->renderPasses.currentRenderPass())) {
     this->emitError("failed to create Vulkan framebuffer");
     // The one-shot command buffer was begun above and never submitted; an
     // implicit reset only happens on submission, so reset it explicitly or
@@ -608,7 +628,7 @@ SoVulkanRenderBackend::renderInternal(const SoDrawList & drawlist,
   rpbi.renderPass = this->renderPasses.currentRenderPass();
   rpbi.framebuffer = framebuffer;
   rpbi.renderArea.offset = {0, 0};
-  rpbi.renderArea.extent = target->extent;
+  rpbi.renderArea.extent = target.extent;
   // When the render pass clears an attachment via its loadOp (full-target
   // clear fast path), the clear value must be supplied here.  clearValueCount
   // maps one-to-one to the attachment indices (0 = color, 1 = depth).
@@ -647,21 +667,9 @@ SoVulkanRenderBackend::renderInternal(const SoDrawList & drawlist,
   this->gpuTimers.beginScope(this->currentCommandBuffer(), "renderPass");
 
   this->recordContext.buffer = this->currentCommandBuffer();
-  bool recorded = true;
-  if (overlaysOnly) {
-    this->recordTracedComposite(drawlist, params, *target,
-                                this->renderPasses.currentRenderPass(),
-                                this->recordContext);
-    this->recordOverlayBlock(drawlist, params, *target,
-                             this->renderPasses.currentRenderPass(),
-                             this->recordContext);
-  }
-  else {
-    recorded = this->recordFrame(drawlist, params, *target,
-                                 this->renderPasses.currentRenderPass(),
-                                 this->recordContext,
-                                 this->renderPasses.framebuffer());
-  }
+  const bool recorded = this->recordFramePlan(
+    drawlist, params, plan, this->renderPasses.currentRenderPass(),
+    this->renderPasses.framebuffer(), this->recordContext);
   this->recordContext.buffer = VK_NULL_HANDLE;
 
   this->gpuTimers.endScope(this->currentCommandBuffer());
@@ -722,11 +730,13 @@ SoVulkanRenderBackend::renderExternal(const SoDrawList & drawlist,
 
   const bool wantCpuTiming = vkBackendFrameTimingEnabled();
   ExternalFrameTiming timing;
-  const SoVulkanRenderTarget * target = this->prepareExternalFrame(
-    drawlist, params, commandBuffer, renderPass, "renderExternal",
-    /*overlaysOnly*/ false, /*reserveCompositeSlots*/ false,
-    wantCpuTiming ? &timing : nullptr);
-  if (target == nullptr) return FALSE;
+  FramePlan plan;
+  if (!this->prepareExternalFrame(
+        drawlist, params, commandBuffer, renderPass, "renderExternal",
+        /*overlaysOnly*/ false, /*reserveCompositeSlots*/ false, plan,
+        wantCpuTiming ? &timing : nullptr)) {
+    return FALSE;
+  }
 
   // The M1c/M1d secondary path records with RENDER_PASS_CONTINUE inheritance,
   // which needs the framebuffer matching the caller's pass + swapchain image.
@@ -767,8 +777,8 @@ SoVulkanRenderBackend::renderExternal(const SoDrawList & drawlist,
   const double recordT0 = wantCpuTiming ? vkBackendRenderNowMs() : 0.0;
   const long recordBcStart = vkBackendRenderBreadcrumbEnabled() ? vkBackendRenderNowUs() : 0;
   this->recordContext.buffer = commandBuffer;
-  const bool recorded = this->recordFrame(drawlist, params, *target, renderPass,
-                                          this->recordContext, framebuffer);
+  const bool recorded = this->recordFramePlan(
+    drawlist, params, plan, renderPass, framebuffer, this->recordContext);
   vkBackendRenderBreadcrumbSince(recordBcStart, 5000, "renderExternal recordFrame end");
   this->recordContext.buffer = VK_NULL_HANDLE;
   const double recordEnd = wantCpuTiming ? vkBackendRenderNowMs() : 0.0;
@@ -807,11 +817,13 @@ SoVulkanRenderBackend::renderExternalOverlay(const SoDrawList & drawlist,
 
   const bool wantCpuTiming = vkBackendFrameTimingEnabled();
   ExternalFrameTiming timing;
-  const SoVulkanRenderTarget * target = this->prepareExternalFrame(
-    drawlist, params, commandBuffer, renderPass, "renderExternalOverlay",
-    /*overlaysOnly*/ true, /*reserveCompositeSlots*/ true,
-    wantCpuTiming ? &timing : nullptr);
-  if (target == nullptr) return FALSE;
+  FramePlan plan;
+  if (!this->prepareExternalFrame(
+        drawlist, params, commandBuffer, renderPass, "renderExternalOverlay",
+        /*overlaysOnly*/ true, /*reserveCompositeSlots*/ true, plan,
+        wantCpuTiming ? &timing : nullptr)) {
+    return FALSE;
+  }
 
   // The composite path is a raster overlay inside the caller's (RT) pass, so
   // it has no geometry-LOD pre-pass; it still routes any pending texture
@@ -832,10 +844,8 @@ SoVulkanRenderBackend::renderExternalOverlay(const SoDrawList & drawlist,
 
   const double recordT0 = wantCpuTiming ? vkBackendRenderNowMs() : 0.0;
   this->recordContext.buffer = commandBuffer;
-  this->recordTracedComposite(drawlist, params, *target, renderPass,
-                              this->recordContext);
-  this->recordOverlayBlock(drawlist, params, *target, renderPass,
-                           this->recordContext);
+  this->recordFramePlan(drawlist, params, plan, renderPass, VK_NULL_HANDLE,
+                        this->recordContext);
   this->recordContext.buffer = VK_NULL_HANDLE;
   const double recordEnd = wantCpuTiming ? vkBackendRenderNowMs() : 0.0;
   this->submitExternalPrepass(prepass, wantCpuTiming ? &timing : nullptr);

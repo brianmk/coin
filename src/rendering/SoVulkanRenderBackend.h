@@ -717,20 +717,50 @@ private:
                    VulkanRecordContext & ctx,
                    VkFramebuffer inheritFramebuffer);
 
+  // Per-frame plan shared by every render entry point.  beginFramePlan()
+  // resolves the target and the frame kind once, so the internal and external
+  // paths stop re-deriving (and re-validating) the same setup, and
+  // recordFramePlan() dispatches the record step from the same decision.
+  struct FramePlan {
+    const SoVulkanRenderTarget * target = nullptr;
+    bool overlaysOnly = false;
+    bool external = false;
+  };
+
+  // Shared frame prologue of renderInternal()/renderExternal()/
+  // renderExternalOverlay(): validate the target, cache the frame matrices,
+  // advance the frame boundary, write the lighting setup, update the geometry
+  // cache and -- when `reserveCompositeSlots` -- reserve the
+  // countCompositeCommands() lighting slots the overlay path consumes (the
+  // full path reserves inside recordFrame()).  Fills `plan`; returns false
+  // after emitting the caller-specific error.  A non-null `timing` receives
+  // the setup/geom sub-phase durations for the [RTDBG] line (tex/lod are filled
+  // by beginExternalPrepass()).
+  bool beginFramePlan(const SoDrawList & drawlist,
+                      const SoRenderParams & params, const char * caller,
+                      bool overlaysOnly, bool external,
+                      bool reserveCompositeSlots, FramePlan & plan,
+                      ExternalFrameTiming * timing);
+
+  // Record the frame described by `plan`: the composite (traced overlay +
+  // overlay block) recorders for an overlays-only frame, the full opaque/
+  // transparent frame otherwise.  Returns false only when the full record
+  // failed.
+  bool recordFramePlan(const SoDrawList & drawlist,
+                       const SoRenderParams & params, const FramePlan & plan,
+                       VkRenderPass renderPass, VkFramebuffer framebuffer,
+                       VulkanRecordContext & ctx);
+
   // Shared prologue of renderExternal()/renderExternalOverlay(): validate the
-  // common preconditions and target, advance the frame (matrices, frame
-  // boundary, lighting setup, geometry cache) and stage any changed textures
-  // in the texture cache (consumed by the caller's pre-pass).  Returns the
-  // validated target, or nullptr after emitting the caller-specific error.
-  // `reserveCompositeSlots` reserves the countCompositeCommands() lighting
-  // slots the overlay path needs (the full path reserves inside recordFrame()).
-  // A non-null `timing` receives the setup/geom sub-phase durations for the
-  // [RTDBG] line (tex/lod are filled by beginExternalPrepass()).
-  const SoVulkanRenderTarget * prepareExternalFrame(
+  // caller-owned command buffer/render pass, run beginFramePlan() and mark the
+  // caller's LOAD render pass as not cleared-by-load (recordClear() must emit
+  // vkCmdClearAttachments).  Fills `plan`; returns false after emitting the
+  // caller-specific error.
+  bool prepareExternalFrame(
       const SoDrawList & drawlist, const SoRenderParams & params,
       VkCommandBuffer commandBuffer, VkRenderPass renderPass,
       const char * caller, bool overlaysOnly, bool reserveCompositeSlots,
-      ExternalFrameTiming * timing);
+      FramePlan & plan, ExternalFrameTiming * timing);
   // Validate params.renderTarget (non-null, image views set, non-zero extent),
   // emitting "invalid Vulkan render target" on failure.  Used by every render
   // entry point.
