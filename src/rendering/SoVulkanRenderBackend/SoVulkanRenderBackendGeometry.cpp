@@ -152,19 +152,20 @@ SoVulkanRenderBackend::updateGeometryCache(const SoDrawList & drawlist,
       entry.vertexStride == vertexStride &&
       entry.texcoordStride == geometry.texcoordStride;
     // Change detection:
-    //  - Retained geometry (SoGeometryDesc::retained): the producer guarantees
-    //    the stream pointers change exactly when the content changes (shape
-    //    tessellation reallocates the buffers on rebuild), so pointer/count
-    //    identity alone is a correct change detector.  A per-frame content hash
-    //    is redundant and doing it defeats the retained contract those
-    //    producers rely on.  Skip the FNV walk entirely here.
     //  - Replayed frames (geometryContentUnchanged): no traversal ran, so
-    //    pointer-identical geometry is bit-identical; also skip.
-    //  - Otherwise (per-frame arena streams that rewrite the same pointer in
-    //    place, e.g. per-vertex colors): fall back to the sampled content hash
-    //    to catch in-place edits.
-    const bool pointerIdentitySufficient =
-      geometry.retained || geometryContentUnchanged;
+    //    pointer-identical geometry is bit-identical; skip the FNV walk.
+    //  - Otherwise: always fall back to the sampled content hash.  This covers
+    //    both per-frame arena streams that rewrite the same pointer in place
+    //    (e.g. per-vertex colors) AND retained buffers that a producer edits in
+    //    place.  The retained producer is NOT guaranteed to reallocate on
+    //    rebuild: FreeCAD's SoBrepEdgeSet updates its coordinate/edge fields in
+    //    place (same pointer, same counts, new data), so pointer/count identity
+    //    alone reported the geometry unchanged after a Part::Box edit -- the
+    //    vertex buffer was not re-uploaded and, because the wide-line instance
+    //    buffer is keyed on this entry's content hash, the object's wide edges
+    //    stayed at the pre-edit geometry.  The hash is bounded (sampled), and it
+    //    now runs only on re-traverse frames, since a replayed frame skips it.
+    const bool pointerIdentitySufficient = geometryContentUnchanged;
     const bool geometryMatches = identityMatches &&
       (pointerIdentitySufficient ||
        entry.contentHash == hashGeometryContent(geometry));

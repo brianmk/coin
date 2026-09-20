@@ -188,6 +188,9 @@ SoRTXRenderBackend::updatePathTracingState(const SoDrawList & /*drawlist*/,
     this->ptConverged = FALSE;
     this->ptWasMoving = FALSE;
     this->ptDenoisePending = FALSE;
+    // Invalidate any in-flight async denoise: its result is for a run that no
+    // longer exists.
+    ++this->ptRunGeneration;
   }
   else if (this->ptStartLatch) {
     // The start flag: reset the accumulation and begin a fresh progressive
@@ -201,6 +204,8 @@ SoRTXRenderBackend::updatePathTracingState(const SoDrawList & /*drawlist*/,
     this->ptDenoisePending = FALSE;
     this->denoiseResultReady = FALSE;
     this->ptForceFullResolve = TRUE;
+    // A fresh run supersedes any in-flight async denoise result.
+    ++this->ptRunGeneration;
   }
   else if (backgroundChanged || sceneChanged || (viewChanged && !this->haveLastView)) {
     // A scene edit invalidates the history (surface colors may be stale
@@ -217,6 +222,8 @@ SoRTXRenderBackend::updatePathTracingState(const SoDrawList & /*drawlist*/,
     this->ptDenoisePending = FALSE;
     this->denoiseResultReady = FALSE;
     this->ptForceFullResolve = TRUE;
+    // Scene/background edit: any in-flight async denoise result is now stale.
+    ++this->ptRunGeneration;
   }
   else if (viewChanged) {
     // --- Reset-on-move ---------------------------------------------------
@@ -237,6 +244,10 @@ SoRTXRenderBackend::updatePathTracingState(const SoDrawList & /*drawlist*/,
     this->ptDenoisePending = FALSE;
     this->denoiseResultReady = FALSE;
     this->ptForceFullResolve = TRUE;
+    // Camera move: the in-flight async denoise result is for the old pose and
+    // must not be published against the new one (it would freeze the new view
+    // on the stale denoised image).
+    ++this->ptRunGeneration;
   }
   else if (this->ptAccumulating) {
     // --- Accumulate-while-static -----------------------------------------

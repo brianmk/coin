@@ -283,7 +283,14 @@ SoRTXRenderBackend::createPathTracingBuffers(uint32_t width, uint32_t height)
   // VK_ERROR_DEVICE_LOST for) and poisons the whole frame.
   if (width == 0 || height == 0) return true;
   if (this->accumBuffer != VK_NULL_HANDLE &&
-      this->ptBufferWidth == width && this->ptBufferHeight == height) {
+      this->ptBufferWidth == width && this->ptBufferHeight == height &&
+      !this->denoiseKindDirty) {
+    // Same resolution and no denoiser change: nothing to rebuild.  A
+    // denoiseKindDirty set by setDenoiserFilter()/setDenoiserScale() MUST fall
+    // through here: otherwise the early return skips createDenoiseBackend()
+    // below, the newly selected denoiser never builds its filter/staging, and
+    // the view keeps the previous denoiser's denoisedBuffer (binding 5) on
+    // screen -- the stale/black image a runtime OIDN<->RTX switch produced.
     return true;
   }
   // Release the old buffers (deferred: the previous frame's submission may

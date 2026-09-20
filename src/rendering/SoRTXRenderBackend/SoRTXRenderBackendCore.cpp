@@ -61,6 +61,8 @@ SoRTXRenderBackend::setPathTracingEnabled(SbBool enabled)
   this->haveLastView = FALSE;
   this->haveLastCameraVersion = FALSE;
   this->lastCameraVersion = 0;
+  // Invalidate any in-flight async denoise result for the disabled run.
+  ++this->ptRunGeneration;
 }
 
 SbBool
@@ -86,6 +88,8 @@ SoRTXRenderBackend::setViewMode(RtxViewMode mode)
   this->haveLastView = FALSE;
   this->haveLastCameraVersion = FALSE;
   this->lastCameraVersion = 0;
+  // Invalidate any in-flight async denoise result for the previous view mode.
+  ++this->ptRunGeneration;
 }
 
 SoRTXRenderBackend::RtxViewMode
@@ -308,6 +312,8 @@ SoRTXRenderBackend::setPathTracingStart(SbBool start)
     this->ptStartLatch = FALSE;
     this->ptAccumulating = FALSE;
     this->ptIdleFrames = 0;
+    // Stop request: an in-flight async denoise result is now stale.
+    ++this->ptRunGeneration;
   }
 }
 
@@ -416,14 +422,30 @@ SoRTXRenderBackend::setDenoiserFilter(const char * denoiser)
   // the current choice alone so a stale pref value never silently disables
   // the denoiser.  createDenoiseBackend() resolves the kind from this store
   // on the next buffer (re)creation.
-  if (std::strcmp(denoiser, "rtx") == 0) this->denoiseKindPref = DenoiseRtx;
-  else if (std::strcmp(denoiser, "oidn") == 0) this->denoiseKindPref = DenoiseOidn;
-  else if (std::strcmp(denoiser, "fsr") == 0) this->denoiseKindPref = DenoiseFsr;
-  else if (std::strcmp(denoiser, "none") == 0) this->denoiseKindPref = DenoiseNone;
+  DenoiseKind pref;
+  if (std::strcmp(denoiser, "rtx") == 0) pref = DenoiseRtx;
+  else if (std::strcmp(denoiser, "oidn") == 0) pref = DenoiseOidn;
+  else if (std::strcmp(denoiser, "fsr") == 0) pref = DenoiseFsr;
+  else if (std::strcmp(denoiser, "none") == 0) pref = DenoiseNone;
   else return;
-  this->denoiseKind = this->denoiseKindPref;
+  // Idempotent: the display-settings blob is re-pushed wholesale on any
+  // Vulkan pref change, so re-applying the SAME denoiser must not force a
+  // backend teardown or invalidate a valid result.
+  if (this->denoiseKindExplicit && pref == this->denoiseKindPref) return;
+  this->denoiseKindPref = pref;
+  this->denoiseKind = pref;
   this->denoiseKindDirty = true;
   this->denoiseKindExplicit = true;
+  // A denoiser SWITCH invalidates any published or in-flight result: the
+  // denoisedBuffer (present binding 5) holds the PREVIOUS filter's output, so
+  // presenting it after the switch would freeze the view on that stale image
+  // until the new filter republishes (and, if the new filter never runs -- e.g.
+  // RTX selected on a build without a ready OptiX interop -- indefinitely).
+  // Also supersede an in-flight async OIDN worker so it cannot copy the old
+  // filter's result into the new denoiser's buffer.
+  this->denoiseResultReady = FALSE;
+  this->ptDenoisePending = FALSE;
+  ++this->ptRunGeneration;
 }
 
 void
