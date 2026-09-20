@@ -965,15 +965,15 @@ SoVulkanRenderBackend::recordDrawCommand(const SoDrawList & drawlist,
   }
 
   // Bind the per-instance model matrix (binding 1, rate INSTANCE) for the
-  // visual and GPU-instanced wide-line paths; both read the transform from
-  // the attribute rather than the UBO.  The model is written into a
-  // per-command ring slot at the SAME element index the draw UBO uses, so the
-  // GPU reads this draw's transform even though recording completes before
-  // execution (a single shared offset would collapse every draw onto the
-  // last-committed model).  A batched group writes a run of
-  // [slotIndex .. slotIndex+N) elements and draws instanceCount=N.  The
-  // CPU-expanded wide-line path does not use binding 1.
-  if (useInstancedWideLine || !useWideLine) {
+  // visual path; it reads the transform from the attribute rather than the
+  // UBO.  The model is written into a per-command ring slot at the SAME
+  // element index the draw UBO uses, so the GPU reads this draw's transform
+  // even though recording completes before execution (a single shared offset
+  // would collapse every draw onto the last-committed model).  A batched
+  // group writes a run of [slotIndex .. slotIndex+N) elements and draws
+  // instanceCount=N.  Both wide-line pipelines read the transform from the
+  // per-draw DrawBlock UBO (draw.u_model), so neither binds binding 1.
+  if (!useWideLine) {
     const VkDeviceSize instElement =
       static_cast<VkDeviceSize>((this->uboFrameIndex % this->maxFramesInFlight) *
         this->uboSlotsPerFrame + slotIndex);

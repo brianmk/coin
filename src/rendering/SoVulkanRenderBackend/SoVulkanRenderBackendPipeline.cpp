@@ -435,10 +435,10 @@ SoVulkanRenderBackend::getOrCreatePipeline(const SoRenderCommand & command,
   binding[0].inputRate = key.wideLineInstanced
     ? VK_VERTEX_INPUT_RATE_INSTANCE : VK_VERTEX_INPUT_RATE_VERTEX;
   // Binding 1: the per-instance model matrix, four R32G32B32A32 rows advanced
-  // per instance (rate INSTANCE).  Used by the visual pipelines and by the
-  // GPU-instanced wide-line pipeline.  The CPU-expanded wide-line pipeline
-  // keeps its own single-binding layout.
-  if (!key.wideLine || key.wideLineInstanced) {
+  // per instance (rate INSTANCE).  Used by the visual pipelines only; the
+  // wide-line pipelines (CPU-expanded and GPU-instanced) read the transform
+  // from the per-draw DrawBlock UBO instead, so neither declares binding 1.
+  if (!key.wideLine) {
     binding[1].binding = 1;
     binding[1].stride = sizeof(float) * 16; // mat4, 4 x vec4
     binding[1].inputRate = VK_VERTEX_INPUT_RATE_INSTANCE;
@@ -495,26 +495,23 @@ SoVulkanRenderBackend::getOrCreatePipeline(const SoRenderCommand & command,
   wideLineAttributes[2].format = VK_FORMAT_R32_SFLOAT;
   wideLineAttributes[2].offset = 32;
 
-  // GPU-instanced wide-line layout: the segment endpoints/colors at binding 0
-  // (locations 0..3) and the per-instance model matrix at binding 1
-  // (locations 4..7, matching the visual pass).
-  VkVertexInputAttributeDescription instancedLineAttributes[8] {};
+  // GPU-instanced wide-line layout: one instance per segment, four vec4
+  // (p0, p1, c0, c1) at binding 0 (locations 0..3).  The model matrix comes
+  // from the per-draw DrawBlock UBO (draw.u_model), so there is no binding-1
+  // attribute.
+  VkVertexInputAttributeDescription instancedLineAttributes[4] {};
   instancedLineAttributes[0] = { 0, 0, VK_FORMAT_R32G32B32A32_SFLOAT, 0 };
   instancedLineAttributes[1] = { 1, 0, VK_FORMAT_R32G32B32A32_SFLOAT, 16 };
   instancedLineAttributes[2] = { 2, 0, VK_FORMAT_R32G32B32A32_SFLOAT, 32 };
   instancedLineAttributes[3] = { 3, 0, VK_FORMAT_R32G32B32A32_SFLOAT, 48 };
-  instancedLineAttributes[4] = { 4, 1, VK_FORMAT_R32G32B32A32_SFLOAT, 0 };
-  instancedLineAttributes[5] = { 5, 1, VK_FORMAT_R32G32B32A32_SFLOAT, 16 };
-  instancedLineAttributes[6] = { 6, 1, VK_FORMAT_R32G32B32A32_SFLOAT, 32 };
-  instancedLineAttributes[7] = { 7, 1, VK_FORMAT_R32G32B32A32_SFLOAT, 48 };
 
   VkPipelineVertexInputStateCreateInfo vertexInput {};
   vertexInput.sType =
     VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO;
   vertexInput.pVertexBindingDescriptions = binding;
   if (key.wideLineInstanced) {
-    vertexInput.vertexBindingDescriptionCount = 2u;
-    vertexInput.vertexAttributeDescriptionCount = 8u;
+    vertexInput.vertexBindingDescriptionCount = 1u;
+    vertexInput.vertexAttributeDescriptionCount = 4u;
     vertexInput.pVertexAttributeDescriptions = instancedLineAttributes;
   }
   else if (key.wideLine) {
