@@ -851,6 +851,18 @@ private:
   //! ptAccumulating set so the G-buffer readback is recorded; updateDenoise
   //! consumes the latch and then drops to converged-idle.
   SbBool ptDenoisePending = FALSE;
+  //! Monotonic generation of the progressive run.  Bumped on every reset or
+  //! restart (start latch, camera/scene/background change, disable).  The
+  //! async OIDN worker snapshots this at launch; the host-side filter runs for
+  //! tens of milliseconds, during which the user can move the camera and reset
+  //! the run.  On completion a result whose generation no longer matches
+  //! belongs to a superseded run and must be discarded instead of published --
+  //! otherwise the copy-back + convergeAfterDenoise() freeze the NEW view on
+  //! the OLD run's denoised buffer (black/stale objects).  The synchronous
+  //! RTX/OptiX path cannot outlive its frame, so it needs no such guard.
+  uint32_t ptRunGeneration = 0;
+  //! The ptRunGeneration the in-flight OIDN worker was launched for.
+  uint32_t oidnLaunchGeneration = 0;
   // Temporal reprojection (FC_VULKAN_PT_TEMPORAL); the world->clip matrix
   // of the previous frame's camera for the history reprojection test.
   SbBool ptTemporalEnabled = TRUE;

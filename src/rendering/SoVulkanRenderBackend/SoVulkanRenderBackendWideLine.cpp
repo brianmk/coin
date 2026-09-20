@@ -171,7 +171,14 @@ SoVulkanRenderBackend::expandWideLines(VulkanCachedCommand & entry,
     }
   };
   SbMat view;
-  if (wlineOverlay) {
+  // Match updateLightingUniforms()/resolveCommandProj(): a self-camera overlay
+  // (the NaviCube sub-scene) uses the command's own view, but a frame-camera
+  // overlay (the selection/preselection highlight spanning the frame viewport)
+  // and every main-pass command use the frame view.  Selecting the view on
+  // `pass == OVERLAY` alone transformed a frame-camera overlay with the scene
+  // camera's recorded matrix, which lags one frame behind navigation, so its
+  // wide lines stayed at the previous camera pose after a move.
+  if (wlineOverlay && !isFrameCameraOverlay(command, params)) {
     command.viewMatrix.getValue(view);
   }
   else {
@@ -222,12 +229,19 @@ SoVulkanRenderBackend::expandWideLines(VulkanCachedCommand & entry,
   // The quad expansion (clip transform + per-segment geometry + distance
   // accumulation below) is the dominant per-frame CPU cost for line and edge
   // heavy scenes, and on a retained (replayed) draw list with an unchanged
-  // camera the positions, view, projection, width and viewport are
+  // camera the positions, model, view, projection, width and viewport are
   // byte-identical every frame -- so the already-expanded quads in this slot
   // are still exact.  Key the slot on the authoritative geometry content hash
   // (the same one updateGeometryCache uses, so in-place edits invalidate here
-  // too) plus view/proj/width/viewport; on a match reuse the buffer instead of
-  // re-expanding and re-uploading it.
+  // too) plus model/view/proj/width/viewport; on a match reuse the buffer
+  // instead of re-expanding and re-uploading it.
+  //
+  // The model matrix MUST be in the key: the quads are expanded into clip
+  // space (mvp bakes in the object transform), so an object that is moved /
+  // rotated while its geometry content hash is unchanged would otherwise reuse
+  // quads transformed by the old model -- its wide lines stayed at the
+  // previous location while the filled geometry (which applies the live model
+  // in the shader) moved.
   if (entry.wideLineBuffers.size() < this->maxFramesInFlight) {
     entry.wideLineBuffers.resize(this->maxFramesInFlight);
   }
@@ -240,6 +254,8 @@ SoVulkanRenderBackend::expandWideLines(VulkanCachedCommand & entry,
   for (int r = 0; r < 4; ++r) {
     for (int c = 0; c < 4; ++c) {
       uint32_t bits;
+      std::memcpy(&bits, &model[r][c], sizeof(bits));
+      mixWide(bits);
       std::memcpy(&bits, &view[r][c], sizeof(bits));
       mixWide(bits);
       std::memcpy(&bits, &proj[r][c], sizeof(bits));
@@ -944,7 +960,8 @@ SoVulkanRenderBackend::expandWideLinesSplit(VulkanCachedCommand & entry,
   }
   VulkanCachedCommand::VulkanWideLineBuffer & slot =
     entry.wideLineBuffers[this->uboFrameIndex % this->maxFramesInFlight];
-  // Same fingerprint as expandWideLines(), so the inline call made by
+  // Same fingerprint as expandWideLines() (including the model matrix, which
+  // the clip-space quads bake in), so the inline call made by
   // recordDrawCommand() during the record pass is a cache hit and does not
   // re-expand.
   uint64_t wfp = entry.contentHash;
@@ -954,6 +971,8 @@ SoVulkanRenderBackend::expandWideLinesSplit(VulkanCachedCommand & entry,
   for (int r = 0; r < 4; ++r) {
     for (int c = 0; c < 4; ++c) {
       uint32_t bits;
+      std::memcpy(&bits, &model[r][c], sizeof(bits));
+      mixWide(bits);
       std::memcpy(&bits, &view[r][c], sizeof(bits));
       mixWide(bits);
       std::memcpy(&bits, &proj[r][c], sizeof(bits));

@@ -26,8 +26,10 @@
 #include <array>
 #include <chrono>
 #include <cmath>
+#include <cstdlib>
 #include <cstring>
 #include <string>
+#include <thread>
 #include <rendering/SoRTXRenderBackend/SoRTXRenderBackendP.h>
 
 #include "vk_mem_alloc.h"
@@ -797,6 +799,25 @@ SoRTXRenderBackend::updateDenoise()
     this->oidnWorkerDone = FALSE;
     this->oidnWorkerRunning = FALSE;
     this->oidnWorkerFailed = FALSE;
+    if (this->oidnLaunchGeneration != this->ptRunGeneration) {
+      // The run this worker was launched for was reset or restarted while the
+      // CPU filter ran (a camera/scene/background change, a fresh start, or a
+      // mode switch).  The staging output is the OLD view's denoised image;
+      // publishing it here would copy it into denoisedBuffer and then
+      // convergeAfterDenoise() would freeze the NEW view on that stale (often
+      // black/partly-background) image and abort the new accumulation.  Drop
+      // the result and let the current run proceed to its own target (or the
+      // settle counter auto-restart it).  The worker is joined and its flags
+      // cleared above, so the staging block is free for the next readback.
+      this->denoiseResultReady = FALSE;
+      if (SoVulkanConfig::get().rtxDebug.denoiseTiming) {
+        fprintf(stderr,
+                "[DENOISE] OIDN async worker DISCARDED stale result "
+                "(launched gen=%u, current gen=%u)\n",
+                this->oidnLaunchGeneration, this->ptRunGeneration);
+      }
+      return;
+    }
     if (workerFailed) {
       // The worker reported an OIDN error, so the staging output region is
       // black/invalid.  Do not copy it into the present buffer or publish it
@@ -889,8 +910,8 @@ SoRTXRenderBackend::updateDenoise()
         this->convergeAfterDenoise();
       }
       if (SoVulkanConfig::get().rtxDebug.denoiseTiming) {
-        fprintf(stderr, "[DENOISE] OIDN async worker published (%ux%u)\n",
-                w, h);
+        fprintf(stderr, "[DENOISE] OIDN async worker published (%ux%u gen=%u)\n",
+                w, h, this->ptRunGeneration);
       }
     }
     else {
@@ -1075,6 +1096,12 @@ SoRTXRenderBackend::updateDenoise()
       // the life of the backend (mapped once in createDenoiseBackend()).
       const uint64_t pixels = static_cast<uint64_t>(w) * h;
       this->oidnReadbackPending = FALSE;
+      // Snapshot the run this worker denoises for.  The CPU filter runs for
+      // tens of milliseconds, so the user can move the camera (or edit the
+      // scene) and reset the run before it finishes; the completion handler
+      // compares this against ptRunGeneration and discards a superseded result
+      // instead of publishing it against the new view.
+      this->oidnLaunchGeneration = this->ptRunGeneration;
       this->oidnWorkerRunning = TRUE;
       this->oidnWorkerDone = FALSE;
       this->oidnWorkerFailed = FALSE;
@@ -1084,6 +1111,15 @@ SoRTXRenderBackend::updateDenoise()
       this->oidnWorker = std::thread([this, color, albedo, normal, motion, out,
                                       w, h, pixels, scaled, gbW, gbH]() {
         const auto wStart = std::chrono::steady_clock::now();
+        // Test hook: widen the worker's in-flight window so a camera move can
+        // be timed to land inside it deterministically (see the generation
+        // guard above).  Zero-cost when unset.
+        if (const char * delay = SoVulkanShared::envString("FC_VULKAN_PT_OIDN_DELAY_MS")) {
+          const int ms = std::atoi(delay);
+          if (ms > 0) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(ms));
+          }
+        }
         // Effective OIDN input pointers.  At native resolution (scale 1) the
         // filter reads the full-res G-buffer regions directly.  At reduced
         // scale the readback staged full-res G-buffers; downsample them into
@@ -1227,7 +1263,8 @@ SoRTXRenderBackend::updateDenoise()
       // in-shader edge-stopped mean; the denoised result is published on the
       // frame that observes oidnWorkerDone (copy-back + converge below).
       if (SoVulkanConfig::get().rtxDebug.denoiseTiming) {
-        fprintf(stderr, "[DENOISE] OIDN async worker launched (%ux%u)\n", w, h);
+        fprintf(stderr, "[DENOISE] OIDN async worker launched (%ux%u gen=%u)\n",
+                w, h, this->ptRunGeneration);
       }
       return;
     }
