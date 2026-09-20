@@ -1,4 +1,4 @@
-// coin-spirv source=wide-line/WideLineInstancedVertex.glsl source-sha256=c73017a12983b7a42cab6c1a532fdf7f43c1e01c2c465739418aa48b51478845 generator-sha256=c2b9b4bba4cce7604d816678c21c5cd3b1891e420524402edd2b23dee34adf54
+// coin-spirv source=wide-line/WideLineInstancedVertex.glsl source-sha256=6ad39a4eb69811813e303a9ae6495528b6fc1ed9037d932c979e57d72ad5ab6d generator-sha256=c2b9b4bba4cce7604d816678c21c5cd3b1891e420524402edd2b23dee34adf54
 	// 1116.4.0
 	 #pragma once
 const uint32_t coin_vulkan_wide_line_instanced_vertex_spirv[] = {
