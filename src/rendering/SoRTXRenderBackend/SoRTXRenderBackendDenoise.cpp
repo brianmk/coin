@@ -146,10 +146,20 @@ SoRTXRenderBackend::configureOidnFilter()
     this->emitError("OIDN denoiser: failed to create RT filter");
     return false;
   }
-  // RT filter: HDR path-tracer radiance, use the albedo + normal guides, at
-  // interactive quality (the denoiser runs each accumulated frame).
+  // RT filter: HDR path-tracer radiance, guided by the (clean, first-hit)
+  // albedo + normal G-buffers.  HIGH quality: the denoiser runs exactly once
+  // per run, on the final accumulated frame (denoise-at-target), and the work
+  // is offloaded to the async worker, so the extra cost is hidden behind the
+  // still-accumulating present instead of costing interactive frame rate.
   oidnSetFilterBool(this->oidnFilter, "hdr", true);
-  oidnSetFilterInt(this->oidnFilter, "quality", OIDN_QUALITY_BALANCED);
+  oidnSetFilterInt(this->oidnFilter, "quality", OIDN_QUALITY_HIGH);
+  // Our albedo/normal guides are the first-hit G-buffer, i.e. noise-free, but
+  // OIDN's RT filter defaults cleanAux=false and therefore PREFILTERS them.
+  // Prefiltering clean guides blurs them, which weakens the edge-stopping
+  // between adjacent surfaces and leaves the denoised output mottled/under-
+  // denoised.  Declaring them clean skips the prefilter and denoises far more
+  // aggressively while keeping edges sharp.
+  oidnSetFilterBool(this->oidnFilter, "cleanAux", true);
   return true;
 #else
   return false;
@@ -247,6 +257,33 @@ SoRTXRenderBackend::createDenoiseBackend()
   // NOT reset it to 1.0 -- createDenoiseBackend() is re-entered on every
   // (re)create and would otherwise clobber the user's scale.
 
+  // The albedo G-buffer (present/RT binding 14) is written UNCONDITIONALLY by
+  // the path tracer (PathTrace.glsl writes albedos[index] on every traced
+  // pixel), so it must exist and be bound whenever the tracer runs -- even with
+  // no denoiser.  It used to be created only on the denoiser paths below, so
+  // switching to DenoiseNone freed it (destroyDenoiser) and left binding 14
+  // pointing at the freed buffer; the next trace then wrote freed device
+  // memory, which the driver reports as VK_ERROR_DEVICE_LOST (the "only edges"
+  // fallback).  Create it here, before the DenoiseNone early return, so the
+  // binding is always valid; the guarded creation below then becomes a no-op.
+  {
+    const VkDeviceSize gbBytes =
+      static_cast<VkDeviceSize>(this->ptBufferWidth) * this->ptBufferHeight * 16;
+    if (this->albedoBuffer == VK_NULL_HANDLE) {
+      if (!this->createDeviceLocalBuffer(
+            gbBytes, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT |
+              VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
+            this->albedoBuffer, this->albedoMemory)) {
+        this->emitError("failed to create albedo G-buffer");
+        return false;
+      }
+      if (!this->updateDescriptors()) {
+        this->emitError("failed to refresh descriptors for albedo buffer");
+        return false;
+      }
+    }
+  }
+
   if (this->denoiseKind == DenoiseNone || !this->ptEnabled) {
     return true;
   }
@@ -272,7 +309,9 @@ SoRTXRenderBackend::createDenoiseBackend()
   // device into CUDA-Vulkan interop images and runs OptiX entirely on the
   // GPU, so skip the host-coherent block (several image-sized regions is the
   // exact allocation that can run the driver out of host-visible memory) and
-  // only allocate it for the host-side OIDN/FSR backends.
+  // only allocate it for the host-side OIDN backend.  The FSR/DNSR pass is
+  // also device-local (it reads the G-buffers directly), so it takes the same
+  // no-staging path.
   const VkDeviceSize pixelBytes = 4 * sizeof(float);
   // Denoiser working resolution (scaled by denoiseScale) -- the size of the
   // OIDN filter inputs/output and of the denoisedBuffer the present pass
@@ -290,7 +329,7 @@ SoRTXRenderBackend::createDenoiseBackend()
   const VkDeviceSize gbBytes =
     static_cast<VkDeviceSize>(this->ptBufferWidth) * this->ptBufferHeight *
     pixelBytes;
-  if (this->denoiseKind != DenoiseRtx) {
+  if (this->denoiseKind != DenoiseRtx && this->denoiseKind != DenoiseFsr) {
     const VkDeviceSize totalBytes = gbBytes * 4 + (scaled ? 5 : 1) * imageBytes;
     if (!this->createHostVisibleBuffer(
           totalBytes, VK_BUFFER_USAGE_TRANSFER_DST_BIT |
@@ -418,13 +457,29 @@ SoRTXRenderBackend::createDenoiseBackend()
 
   if (this->denoiseKind == DenoiseFsr) {
 #if COIN_BUILD_FSR_DENOISER
-    // FSR setup would go here once the AMD FFX SDK is wired into the build.
+    // The DNSR prefilter runs on the GPU over the device-local G-buffers (no
+    // host staging), so it only needs its pipeline + descriptor set.  A
+    // failure degrades to OIDN exactly like the RTX path.
+    if (this->createFsrPipeline()) {
+      this->denoiserActive = true;
+    }
+    else {
+      this->emitError("FSR denoiser unavailable; degrading to OIDN");
+      this->destroyFsrResources();
+      this->denoiseKind = DenoiseOidn;
+#if COIN_BUILD_OIDN
+      if (!this->configureOidnFilter()) {
+        this->emitError("OIDN fallback unavailable; disabling denoise");
+        this->denoiseKind = DenoiseNone;
+      }
 #endif
-    // FSR is not implemented (the SDK is an optional drop-in; see CMakeLists).
-    // Keep the degradation OUTSIDE the build guard so selecting "fsr" always
-    // falls back to OIDN with a message instead of leaving the denoiser
-    // inactive: with denoiseKind still FSR the configured check below matches
-    // neither OIDN nor RTX and the denoiser turns off (raw grainy output).
+    }
+#else
+    // FSR not built: degrade to OIDN with a message.  Keep the degradation
+    // OUTSIDE the build guard so selecting "fsr" always falls back to OIDN
+    // instead of leaving the denoiser inactive (with denoiseKind still FSR the
+    // configured check below matches neither OIDN nor RTX and the denoiser
+    // turns off, showing raw grainy output).
     this->emitError("AMD FSR denoiser is not built in; falling back to OIDN");
     this->denoiseKind = DenoiseOidn;
 #if COIN_BUILD_OIDN
@@ -432,6 +487,7 @@ SoRTXRenderBackend::createDenoiseBackend()
       this->emitError("OIDN fallback unavailable; disabling denoise");
       this->denoiseKind = DenoiseNone;
     }
+#endif
 #endif
   }
 
@@ -446,6 +502,9 @@ SoRTXRenderBackend::createDenoiseBackend()
 #endif
 #if COIN_BUILD_RTX_DENOISER
   if (this->denoiseKind == DenoiseRtx && this->rtxDenoiser) configured = true;
+#endif
+#if COIN_BUILD_FSR_DENOISER
+  if (this->denoiseKind == DenoiseFsr && this->fsrPipelineReady) configured = true;
 #endif
   if (!configured) {
     if (SoVulkanConfig::get().rtxDebug.denoiserDebug) {
@@ -610,6 +669,10 @@ void
 SoRTXRenderBackend::recordDenoiseReadback(VkCommandBuffer cmd)
 {
   if (!this->denoiserActive) return;
+  // The FSR/DNSR pass reads the device-local G-buffers directly (no host
+  // staging), so it needs no readback recorded here; its dispatch happens in
+  // updateDenoise() after the frame's queue wait.
+  if (this->denoiseKind == DenoiseFsr) return;
   // Input copies are FULL path-tracing resolution (the raygen writes the
   // accum/albedo/normal/motion G-buffers at the viewport size); only the
   // denoiser's internal working set and output are scaled.  ptBufferWidth/Height
@@ -1047,6 +1110,28 @@ SoRTXRenderBackend::updateDenoise()
   }
 #endif
 
+#if COIN_BUILD_FSR_DENOISER
+  // FSR (DNSR prefilter) path: a single device-local GPU compute pass over the
+  // path tracer's G-buffers at native path-tracing resolution, so there is no
+  // host staging and no scaling.  The pass writes denoisedBuffer directly.
+  if (this->denoiseKind == DenoiseFsr && this->fsrPipelineReady) {
+    const uint32_t w = this->ptBufferWidth;
+    const uint32_t h = this->ptBufferHeight;
+    const double t0 = std::chrono::duration<double>(
+      std::chrono::steady_clock::now().time_since_epoch()).count();
+    const bool ok = this->dispatchFsrDenoise(w, h);
+    this->denoiseResultReady = ok ? TRUE : FALSE;
+    this->convergeAfterDenoise();
+    if (SoVulkanConfig::get().rtxDebug.denoiseTiming) {
+      const double t1 = std::chrono::duration<double>(
+        std::chrono::steady_clock::now().time_since_epoch()).count();
+      fprintf(stderr, "[DENOISE] kind=3 FSR prefilter took %.1f ms (%ux%u)\n",
+              (t1 - t0) * 1000.0, w, h);
+    }
+    return;
+  }
+#endif
+
   if (this->denoiseColorBuf == VK_NULL_HANDLE || this->denoiseStagingPtr == nullptr) {
     this->denoiseResultReady = FALSE;
     this->convergeAfterDenoise();
@@ -1393,6 +1478,10 @@ SoRTXRenderBackend::destroyDenoiser()
 #if COIN_BUILD_RTX_DENOISER
   this->teardownRtxDenoiser();
 #endif
+
+  // FSR/DNSR pipeline, layout, module and descriptor set.  Defined
+  // unconditionally (inert when COIN_BUILD_FSR_DENOISER=0).
+  this->destroyFsrResources();
 
   this->denoiserActive = false;
   this->denoiseKind = DenoiseNone;

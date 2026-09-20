@@ -1356,6 +1356,57 @@ private:
   PFN_vkGetSemaphoreFdKHR vkGetSemaphoreFdKHR = nullptr;
 #endif
 
+  // --- AMD FidelityFX DNSR backend ----------------------------------------
+  // The "fsr" denoiser slot runs the DNSR denoiser on the GPU over the path
+  // tracer's device-local G-buffers (accum / sums-of-squares / normal /
+  // position), so unlike OIDN it needs no host-visible staging.  Two stages:
+  // a spatial prefilter (FsrPrefilter.glsl) and a temporal reproject+resolve
+  // (FsrResolveTemporal.glsl) that consumes the motion buffer and keeps
+  // radiance/variance/sample-count history.  createFsrPipeline() builds both
+  // descriptor sets + pipelines and the intermediate/history buffers;
+  // dispatchFsrDenoise() records both passes and writes denoisedBuffer.  The
+  // bodies are compiled out when COIN_BUILD_FSR_DENOISER=0, so the declarations
+  // stay unguarded (mirroring the OIDN/RTX pattern).
+  //
+  // Prefilter (spatial) stage.
+  VkDescriptorSetLayout fsrSetLayout = VK_NULL_HANDLE;
+  VkPipelineLayout fsrPipelineLayout = VK_NULL_HANDLE;
+  VkPipeline fsrPipeline = VK_NULL_HANDLE;
+  VkDescriptorSet fsrDescriptorSet = VK_NULL_HANDLE;
+  VkShaderModule fsrModule = VK_NULL_HANDLE;
+  // Temporal reproject + resolve stage.
+  VkDescriptorSetLayout fsrTemporalSetLayout = VK_NULL_HANDLE;
+  VkPipelineLayout fsrTemporalPipelineLayout = VK_NULL_HANDLE;
+  VkPipeline fsrTemporalPipeline = VK_NULL_HANDLE;
+  VkDescriptorSet fsrTemporalDescriptorSet = VK_NULL_HANDLE;
+  VkShaderModule fsrTemporalModule = VK_NULL_HANDLE;
+  // Device-local intermediate (prefilter output) and history buffers.  The
+  // radiance/variance/sample-count history is double-buffered: the temporal
+  // resolve reads the previous frame's history from one slot and writes the
+  // new history to the other, so a pixel write cannot race a reprojected read
+  // in the same dispatch (no aliasing).
+  VkBuffer fsrPrefilterRad = VK_NULL_HANDLE;
+  VmaAllocation fsrPrefilterRadMem = VK_NULL_HANDLE;
+  VkBuffer fsrPrefilterVar = VK_NULL_HANDLE;
+  VmaAllocation fsrPrefilterVarMem = VK_NULL_HANDLE;
+  VkBuffer fsrHistRad[2] = {VK_NULL_HANDLE, VK_NULL_HANDLE};
+  VmaAllocation fsrHistRadMem[2] = {VK_NULL_HANDLE, VK_NULL_HANDLE};
+  VkBuffer fsrHistVar[2] = {VK_NULL_HANDLE, VK_NULL_HANDLE};
+  VmaAllocation fsrHistVarMem[2] = {VK_NULL_HANDLE, VK_NULL_HANDLE};
+  // The history sample count is packed into fsrHistRad[].w (radiance only uses
+  // .rgb), so no separate per-pixel count buffer is allocated.
+  VkBuffer fsrHistPos = VK_NULL_HANDLE;
+  VmaAllocation fsrHistPosMem = VK_NULL_HANDLE;
+  VkBuffer fsrHistNrm = VK_NULL_HANDLE;
+  VmaAllocation fsrHistNrmMem = VK_NULL_HANDLE;
+  //! Index of the current (previous-frame) history slot; the resolve reads
+  //! [fsrHistIndex] and writes [1 - fsrHistIndex], then flips.
+  int fsrHistIndex = 0;
+  //! World-space camera origin of the frame being denoised (for the temporal
+  //! disocclusion depth test).
+  float fsrCameraPos[3] = {0.0f, 0.0f, 0.0f};
+  bool fsrPipelineReady = false;
+
   //! Create the per-backend denoiser resources (called by createPathTracingBuffers).
   bool createDenoiseBackend();
   //! Record the device->host readback of the G-buffers on \a cmd.
@@ -1409,6 +1460,18 @@ private:
   //! Defined unconditionally in SoRTXRenderBackendDenoise.cpp (body compiled
   //! out when COIN_BUILD_RTX_DENOISER=0), so the declaration is unguarded.
   void teardownRtxDenoiser();
+
+  // --- AMD FidelityFX DNSR backend (see the member block above) -----------
+  //! Build the FSR descriptor set + compute pipeline from the embedded
+  //! FsrPrefilter SPIR-V.  Defined unconditionally in SoRTXRenderBackendFsr.cpp
+  //! (body compiled out when COIN_BUILD_FSR_DENOISER=0).
+  bool createFsrPipeline();
+  //! Release the FSR pipeline/layout/descriptor set/shader module.
+  void destroyFsrResources();
+  //! Run the FSR denoise pass over the device-local G-buffers at \a w x \a h
+  //! and write the result into denoisedBuffer.  Returns false (and leaves
+  //! denoiseResultReady clear) when the pass cannot be recorded.
+  bool dispatchFsrDenoise(uint32_t w, uint32_t h);
 };
 
 #endif // COIN_SORTXRENDERBACKEND_H

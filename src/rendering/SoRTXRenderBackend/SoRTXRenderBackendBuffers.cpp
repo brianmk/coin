@@ -518,8 +518,11 @@ SoRTXRenderBackend::createPathTracingBuffers(uint32_t width, uint32_t height)
   // downsamples them (see recordDenoiseReadback / updateDenoise); only the
   // host-side OIDN/FSR backends support scaling -- the RTX interop path stays
   // native (scale 1) because it reads the G-buffers device-to-device and
-  // needs a GPU downsample that does not exist there.
-  const float scale = (this->denoiseKindPref != DenoiseRtx)
+  // needs a GPU downsample that does not exist there.  The FSR/DNSR pass is
+  // also device-local and native-resolution (it filters the full-res
+  // G-buffers), so it stays scale 1 as well.
+  const float scale = (this->denoiseKindPref != DenoiseRtx &&
+                       this->denoiseKindPref != DenoiseFsr)
     ? this->denoiseScale : 1.0f;
   this->denoiseEffectiveScale = scale;
   this->denoiseWidth = std::max(1u, static_cast<uint32_t>(

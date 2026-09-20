@@ -287,7 +287,7 @@ SoRTXRenderBackend::createDescriptorPool()
   sizes[3].type = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
   sizes[3].descriptorCount = ring * 2;
   sizes[4].type = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
-  sizes[4].descriptorCount = ring * 24 + 16;
+  sizes[4].descriptorCount = ring * 24 + 41;
 
   VkDescriptorPoolCreateInfo ci {};
   ci.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
@@ -296,8 +296,9 @@ SoRTXRenderBackend::createDescriptorPool()
   ci.flags = this->hasUpdateAfterBind
     ? VK_DESCRIPTOR_POOL_CREATE_UPDATE_AFTER_BIND_BIT
     : 0;
-  // ring RT sets + ring present sets + 1 denoise set + 1 GPU-pick set.
-  ci.maxSets = ring * 2 + 2;
+  // ring RT sets + ring present sets + 1 denoise set + 1 GPU-pick set + 2 FSR
+  // denoise sets (prefilter + temporal).
+  ci.maxSets = ring * 2 + 4;
   ci.poolSizeCount = 5;
   ci.pPoolSizes = sizes;
   return vkCreateDescriptorPool(this->device, &ci, this->allocator,
@@ -735,7 +736,17 @@ SoRTXRenderBackend::updateDescriptors()
     presentPositionWrite.pBufferInfo = &positionInfo;
     writes.push_back(presentPositionWrite);
   }
-  if (this->denoisedBuffer != VK_NULL_HANDLE) {
+  // Binding 5 must ALWAYS carry a valid buffer: the present shader declares
+  // DenoisedBuffer as a statically-used storage buffer, and a slot left
+  // unwritten keeps a stale handle from a previously freed denoised buffer
+  // (the descriptor ring is reused).  When no denoiser is active fall back to
+  // the accumulation buffer; the shader only reads binding 5 when the denoise
+  // flag (u_denoise.x) is set, which cannot happen with a null denoisedBuffer.
+  if (this->denoisedBuffer == VK_NULL_HANDLE &&
+      this->accumBuffer != VK_NULL_HANDLE) {
+    denoisedInfo.buffer = this->accumBuffer;
+  }
+  if (denoisedInfo.buffer != VK_NULL_HANDLE) {
     VkWriteDescriptorSet presentDenoisedWrite {};
     presentDenoisedWrite.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
     presentDenoisedWrite.dstSet = presentSet;
@@ -812,6 +823,9 @@ SoRTXRenderBackend::updateDescriptors()
   else {
     this->denoiseDownsampleValid = false;
   }
+  // The FSR/DNSR descriptor sets are bound once in createFsrPipeline() (their
+  // buffers are stable for the life of the denoiser and re-created together on
+  // a resize), so there is nothing to refresh here.
   return true;
 }
 

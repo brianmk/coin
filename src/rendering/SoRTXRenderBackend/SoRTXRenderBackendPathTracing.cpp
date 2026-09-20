@@ -703,6 +703,13 @@ SoRTXRenderBackend::recordAccelerationStructures(
     frame.cameraPos[2] = frame.viewInverse[14];
     frame.cameraPos[3] = 1.0f;
 
+    // Snapshot the world-space camera origin for the FSR/DNSR temporal pass,
+    // which needs it to reconstruct per-pixel linear depth for the
+    // disocclusion test (the dispatch runs after this frame is submitted).
+    this->fsrCameraPos[0] = frame.cameraPos[0];
+    this->fsrCameraPos[1] = frame.cameraPos[1];
+    this->fsrCameraPos[2] = frame.cameraPos[2];
+
     const SbVec2s & vpSize = params.viewport.getViewportSizePixels();
     frame.viewport[0] = static_cast<float>(vpSize[0]);
     frame.viewport[1] = static_cast<float>(vpSize[1]);
@@ -947,8 +954,12 @@ SoRTXRenderBackend::recordAccelerationStructures(
   // (ptDenoisePending).  Every other accumulating frame presents the in-shader
   // edge-stopped running mean, so it needs no G-buffer readback; copying every
   // frame only to denoise a changing partial is the churn the denoise-at-target
-  // design removes.
-  if (this->denoiserActive && this->ptEnabled && this->ptAccumulating &&
+  // design removes.  A CONVERGED run also qualifies: a denoiser switch re-arms
+  // ptDenoisePending to re-run the new filter on the already-converged
+  // accumulation (setDenoiserFilter), and the host-side filters still need the
+  // G-buffer readback for that one frame.
+  if (this->denoiserActive && this->ptEnabled &&
+      (this->ptAccumulating || this->ptConverged) &&
       this->ptDenoisePending && !this->oidnWorkerRunning) {
     this->recordDenoiseReadback(cmd);
   }
