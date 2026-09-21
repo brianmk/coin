@@ -741,7 +741,8 @@ SoVulkanRenderManager::setViewSettings(const SoVulkanViewSettings & settings)
   this->setEdgeColor(settings.edgeColor);
   // Raster HDR output transform (no-op when disabled).
   this->pimpl->backend.setHdrOutput(settings.hdrOutput ? TRUE : FALSE,
-                                    settings.hdrExposure);
+                                    settings.hdrExposure,
+                                    settings.hdrToneMap);
 
   // The RTX-forwarded fields are only meaningful once the RT backend exists;
   // applying them earlier emits the "not initialized" warnings.  A raster-only
@@ -764,7 +765,8 @@ SoVulkanRenderManager::setViewSettings(const SoVulkanViewSettings & settings)
                                    : settings.pathTracingDenoiser.c_str());
     this->setPathTracingDenoiserScale(settings.pathTracingDenoiserScale);
     this->setHdrOutput(settings.hdrOutput ? TRUE : FALSE,
-                       settings.hdrExposure);
+                       settings.hdrExposure,
+                       settings.hdrToneMap);
     // Re-apply the interaction-LOD state: the RT backend starts with it off,
     // so a bring-up after this state was set (device re-init / lazy RT build)
     // must pick it up.  Idempotent (the setter early-returns when unchanged).
@@ -1200,12 +1202,12 @@ SoVulkanRenderManager::setPathTracingDenoiserScale(const float scale)
 }
 
 void
-SoVulkanRenderManager::setHdrOutput(SbBool enabled, float exposure)
+SoVulkanRenderManager::setHdrOutput(SbBool enabled, float exposure, int toneMap)
 {
   this->pimpl->withRtx("SoVulkanRenderManager::setHdrOutput",
                        "setting ignored",
-                       [enabled, exposure](SoRTXRenderBackend & rtx) {
-                         rtx.setHdrOutput(enabled, exposure);
+                       [enabled, exposure, toneMap](SoRTXRenderBackend & rtx) {
+                         rtx.setHdrOutput(enabled, exposure, toneMap);
                        });
 }
 

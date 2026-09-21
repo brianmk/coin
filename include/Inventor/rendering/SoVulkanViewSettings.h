@@ -61,6 +61,13 @@ struct SoVulkanViewSettings {
   //! Linear exposure/gain applied to the scene radiance before the PQ encode
   //! (1.0 = unchanged).  Ignored when hdrOutput is false.
   float hdrExposure = 1.0f;
+  //! HDR tone-mapping operator applied between the exposure and the PQ encode
+  //! (ignored when hdrOutput is false): 0 = clip (no tone map, the pre-tone-map
+  //! behavior), 1 = Reinhard, 2 = ACES, 3 = Hable.  The exposure is a plain
+  //! linear pre-scale (the reference convention), so the operators differ in
+  //! brightness/contrast as documented by their sources.  See tonemap() in
+  //! data/shaders/vulkan/output/OutputFragment.glsl and rt/PresentFragment.glsl.
+  int hdrToneMap = 1;
 
   bool operator==(const SoVulkanViewSettings & other) const
   {
@@ -80,7 +87,8 @@ struct SoVulkanViewSettings {
       && tessellationOverlay == other.tessellationOverlay
       && edgeColor == other.edgeColor
       && hdrOutput == other.hdrOutput
-      && hdrExposure == other.hdrExposure;
+      && hdrExposure == other.hdrExposure
+      && hdrToneMap == other.hdrToneMap;
   }
   bool operator!=(const SoVulkanViewSettings & other) const
   {

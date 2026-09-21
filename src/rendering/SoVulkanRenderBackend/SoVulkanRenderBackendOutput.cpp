@@ -30,12 +30,13 @@
 using namespace CoinVulkanDetail;
 
 void
-SoVulkanRenderBackend::setHdrOutput(SbBool enabled, float exposure)
+SoVulkanRenderBackend::setHdrOutput(SbBool enabled, float exposure, int toneMap)
 {
   this->hdrOutput = enabled != FALSE;
   if (exposure > 0.0f) {
     this->hdrExposure = exposure;
   }
+  this->hdrToneMap = toneMap;
 }
 
 // Release the intermediate image + depth and the offscreen render
@@ -548,7 +549,7 @@ SoVulkanRenderBackend::renderExternalHdr(const SoDrawList & drawlist,
                           this->outputPipelineLayout, 0, 1,
                           &this->outputDescriptorSet, 0, nullptr);
   const float push[4] = {this->hdrOutput ? 1.0f : 0.0f, this->hdrExposure,
-                         0.0f, 0.0f};
+                         static_cast<float>(this->hdrToneMap), 0.0f};
   vkCmdPushConstants(commandBuffer, this->outputPipelineLayout,
                      VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(push), push);
 

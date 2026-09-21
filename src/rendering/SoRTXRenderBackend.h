@@ -333,11 +333,12 @@ public:
     When \a enabled, the present pass encodes its linear radiance as SMPTE
     ST 2084 (PQ) with BT.2020 primaries, scaled by \a exposure (the linear
     factor mapping scene-white to the PQ peak of 10000 cd/m^2; 0.02 ~= 200
-    cd/m^2 reference white).  The application sets this only when the swapchain
+    cd/m^2 reference white) and shaped by \a toneMap (0 = clip, 1 = Reinhard,
+    2 = ACES, 3 = Hable).  The application sets this only when the swapchain
     is actually a 10-bit HDR format, so the backend just encodes.  When
     disabled the output is clamped to [0,1] as before (SDR, bit-identical).
   */
-  void setHdrOutput(SbBool enabled, float exposure);
+  void setHdrOutput(SbBool enabled, float exposure, int toneMap);
 
   /*!
     \brief Select the denoiser backend by name ("rtx", "oidn", "fsr",
@@ -825,9 +826,12 @@ private:
   // Whether the edge-stopping denoise present pass is active.
   SbBool ptDenoise = TRUE;
   // HDR10 (PQ) output: see setHdrOutput().  hdrExposure is the linear scale
-  // mapping scene-white to the PQ peak (0.02 ~= 200 cd/m^2 reference white).
+  // mapping scene-white to the PQ peak (0.02 ~= 200 cd/m^2 reference white);
+  // hdrToneMap is the tone-mapping operator (0 = clip, 1 = Reinhard,
+  // 2 = ACES, 3 = Hable).
   SbBool hdrOutput = FALSE;
   float hdrExposure = 0.02f;
+  int hdrToneMap = 1;
   // Adaptive sampling state (see updateAdaptiveStats()).
   SbBool ptAdaptiveEnabled = TRUE;
   uint32_t ptAdaptiveMinSamples = 4;

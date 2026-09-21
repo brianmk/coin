@@ -7,19 +7,20 @@
 //     BT.2020 + ST 2084 (PQ) color space, or
 //   - an SDR swapchain (8-bit), in which case the output is clamped to [0,1].
 //
-// Doing the transfer function here, once, after all geometry/transparency has
-// blended in linear light, is what makes the pipeline color-correct: blending
-// and MSAA resolve happen on linear radiance, and only the final displayed
-// value is encoded.
+// Doing the exposure, tone map and transfer function here, once, after all
+// geometry/transparency has blended in linear light, is what makes the pipeline
+// color-correct: blending and MSAA resolve happen on linear radiance, and only
+// the final displayed value is encoded.
 
 #version 450
 
 layout(set = 0, binding = 0) uniform sampler2D u_source;
 
 layout(push_constant) uniform OutputPush {
-    // x = HDR output (0 = clamp to [0,1], 1 = PQ encode)
-    // y = linear exposure/gain applied before the PQ encode
-    // z, w = reserved
+    // x = HDR output (0 = clamp to [0,1], 1 = exposure + tone map + PQ encode)
+    // y = linear exposure/gain applied before the tone map
+    // z = tone-mapping operator (see tonemap(); 0 = clip)
+    // w = reserved
     vec4 u_params;
 } pc;
 
@@ -38,6 +39,69 @@ vec3 linear_to_pq(vec3 L)
     return pow((c1 + c2 * Lp) / (1.0 + c3 * Lp), vec3(m2));
 }
 
+// --- Tone-mapping operators ------------------------------------------------
+// Applied to the exposure-scaled linear luminance, exactly the reference
+// convention (a plain linear pre-scale, then the curve), with input and output
+// in PQ-normalized linear units (1.0 = 10000 cd/m^2).  All four are the
+// published, matrix-free forms: the HDR swapchain is tagged BT.2020 without a
+// primaries conversion, so operators that bake in a gamut transform (the ACES
+// RRT/ODT sRGB<->AP1 matrices, AgX's Rec.2020 matrices) would be inconsistent
+// with the pipeline.
+//
+//   0 = Clip      hard clamp at the PQ peak (the pre-tone-map behavior)
+//   1 = Reinhard  simple Reinhard (Reinhard et al. 2002); neutral, linear at 0
+//   2 = ACES      Narkowicz's ACES filmic fit (2016); lifts midtones
+//   3 = Hable     Uncharted 2 filmic curve (Hable 2010); strong shoulder
+
+vec3 tonemap_clip(vec3 L)
+{
+    return clamp(L, 0.0, 1.0);
+}
+
+// https://www.cs.utah.edu/docs/techreports/2002/pdf/UUCS-02-001.pdf
+vec3 tonemap_reinhard(vec3 L)
+{
+    return L / (1.0 + L);
+}
+
+// https://knarkowicz.wordpress.com/2016/01/06/aces-filmic-tone-mapping-curve/
+vec3 tonemap_aces(vec3 x)
+{
+    const float a = 2.51;
+    const float b = 0.03;
+    const float c = 2.43;
+    const float d = 0.59;
+    const float e = 0.14;
+    return clamp((x * (a * x + b)) / (x * (c * x + d) + e), 0.0, 1.0);
+}
+
+// Uncharted 2 (Hable), http://filmicworlds.com/blog/filmic-tonemapping-operators/:
+// the raw curve, normalized by its value at the 11.2 white point.
+vec3 tonemap_hable(vec3 x)
+{
+    const float A = 0.15;
+    const float B = 0.50;
+    const float C = 0.10;
+    const float D = 0.20;
+    const float E = 0.02;
+    const float F = 0.30;
+    const float W = 11.2;
+    vec3 v = x * 2.0;
+    vec3 num = v * (A * v + C * B) + D * E;
+    vec3 den = v * (A * v + B) + D * F;
+    float wnum = W * (A * W + C * B) + D * E;
+    float wden = W * (A * W + B) + D * F;
+    return clamp((num / den - E / F) / (wnum / wden - E / F), 0.0, 1.0);
+}
+
+vec3 tonemap(vec3 L, int mode)
+{
+    if (mode == 1) return tonemap_reinhard(L);
+    if (mode == 2) return tonemap_aces(L);
+    if (mode == 3) return tonemap_hable(L);
+    return tonemap_clip(L);
+}
+
 void main()
 {
     // gl_FragCoord is in framebuffer pixels; the intermediate has the same
@@ -51,5 +115,6 @@ void main()
         return;
     }
     vec3 L = max(c, vec3(0.0)) * pc.u_params.y;
-    fragColor = vec4(clamp(linear_to_pq(L), 0.0, 1.0), 1.0);
+    vec3 mapped = tonemap(L, int(pc.u_params.z + 0.5));
+    fragColor = vec4(clamp(linear_to_pq(mapped), 0.0, 1.0), 1.0);
 }

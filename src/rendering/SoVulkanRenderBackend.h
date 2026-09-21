@@ -125,8 +125,9 @@ public:
 
   //! Enable/disable the HDR output transform (see renderExternalHdr()).
   //! \a exposure is the linear scale mapping scene-white to the PQ peak
-  //! (0.02 ~= 200 cd/m^2 reference white).
-  void setHdrOutput(SbBool enabled, float exposure);
+  //! (0.02 ~= 200 cd/m^2 reference white) and \a toneMap selects the
+  //! tone-mapping operator (0 = clip, 1 = Reinhard, 2 = ACES, 3 = Hable).
+  void setHdrOutput(SbBool enabled, float exposure, int toneMap);
 
   /*!
     \brief Composite only the overlay pass (e.g. the navigation cube) into
@@ -986,6 +987,9 @@ private:
   // not disturb renderPasses (which the internal path owns).
   bool hdrOutput = false;
   float hdrExposure = 0.02f;
+  // Tone-mapping operator applied before the PQ encode (0 = clip, 1 = Reinhard,
+  // 2 = ACES, 3 = Hable); see OutputFragment.glsl.
+  int hdrToneMap = 1;
   SoVulkanRenderPassCache hdrPasses;
   VkImage hdrColorImage = VK_NULL_HANDLE;
   VmaAllocation hdrColorMemory = nullptr;

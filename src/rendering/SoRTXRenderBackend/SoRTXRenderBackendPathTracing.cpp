@@ -1046,7 +1046,7 @@ SoRTXRenderBackend::recordTraceAndPresent(const SoRenderParams & params,
   const bool pathTraceMode =
     this->rtxViewMode == RtxViewMode::RtxModePathTrace;
   const bool accumBufferValid = this->ptAccumulating || this->ptConverged;
-  const float presentPush[12] = {
+  const float presentPush[16] = {
     static_cast<float>(size[0]),
     static_cast<float>(size[1]),
     pathTraceMode && this->ptEnabled && this->ptDenoise && accumBufferValid
@@ -1060,7 +1060,11 @@ SoRTXRenderBackend::recordTraceAndPresent(const SoRenderParams & params,
       ? 1.0f : 0.0f,
     this->denoiseEffectiveScale,
     this->hdrOutput ? 1.0f : 0.0f,
-    this->hdrExposure};
+    this->hdrExposure,
+    static_cast<float>(this->hdrToneMap),
+    0.0f,
+    0.0f,
+    0.0f};
   if (SoVulkanConfig::get().rtxDebug.denoiseTiming) {
     fprintf(stderr,
             "[DENOISE-STATE] ord=%u frame=%u accum=%d pend=%d ready=%d "

@@ -423,7 +423,7 @@ SoRTXRenderBackend::setPathTracingDenoiseEnabled(SbBool enabled)
 }
 
 void
-SoRTXRenderBackend::setHdrOutput(SbBool enabled, float exposure)
+SoRTXRenderBackend::setHdrOutput(SbBool enabled, float exposure, int toneMap)
 {
   // Presentation-only state: no buffer/pipeline rebuild needed, the next
   // present pass picks it up from the push constants.  Guard the exposure
@@ -432,6 +432,7 @@ SoRTXRenderBackend::setHdrOutput(SbBool enabled, float exposure)
   if (exposure > 0.0f) {
     this->hdrExposure = exposure;
   }
+  this->hdrToneMap = toneMap;
 }
 
 void

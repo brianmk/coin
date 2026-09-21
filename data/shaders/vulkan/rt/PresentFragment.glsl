@@ -37,17 +37,74 @@ layout(push_constant) uniform PresentPush {
     vec4 u_present;  // x = width, y = height, z = denoiseOn, w = frameIndex
     vec4 u_origin;   // x = viewport origin x, y = viewport origin y (pixels)
     vec4 u_denoise;  // x = OIDN result available (sample denoised buffer)
+                     // y = denoise upscale factor, z = HDR output, w = exposure
+    vec4 u_tone;     // x = tone-mapping operator (0 = clip), yzw reserved
 } pc;
 
 layout(location = 0) out vec4 fragColor;
 
+// Tone-mapping operators for the HDR path, mirroring
+// data/shaders/vulkan/output/OutputFragment.glsl (kept in sync by hand: the two
+// backends own separate shaders and glslangValidator does not resolve shared
+// includes here).  Input and output are PQ-normalized linear luminance
+// (1.0 = 10000 cd/m^2) with the exposure already applied; the operators are the
+// published matrix-free forms (0 = clip, 1 = Reinhard, 2 = ACES, 3 = Hable).
+vec3 tonemap_clip(vec3 L)
+{
+    return clamp(L, 0.0, 1.0);
+}
+
+// https://www.cs.utah.edu/docs/techreports/2002/pdf/UUCS-02-001.pdf
+vec3 tonemap_reinhard(vec3 L)
+{
+    return L / (1.0 + L);
+}
+
+// https://knarkowicz.wordpress.com/2016/01/06/aces-filmic-tone-mapping-curve/
+vec3 tonemap_aces(vec3 x)
+{
+    const float a = 2.51;
+    const float b = 0.03;
+    const float c = 2.43;
+    const float d = 0.59;
+    const float e = 0.14;
+    return clamp((x * (a * x + b)) / (x * (c * x + d) + e), 0.0, 1.0);
+}
+
+// Uncharted 2 (Hable), http://filmicworlds.com/blog/filmic-tonemapping-operators/.
+vec3 tonemap_hable(vec3 x)
+{
+    const float A = 0.15;
+    const float B = 0.50;
+    const float C = 0.10;
+    const float D = 0.20;
+    const float E = 0.02;
+    const float F = 0.30;
+    const float W = 11.2;
+    vec3 v = x * 2.0;
+    vec3 num = v * (A * v + C * B) + D * E;
+    vec3 den = v * (A * v + B) + D * F;
+    float wnum = W * (A * W + C * B) + D * E;
+    float wden = W * (A * W + B) + D * F;
+    return clamp((num / den - E / F) / (wnum / wden - E / F), 0.0, 1.0);
+}
+
+vec3 tonemap(vec3 L, int mode)
+{
+    if (mode == 1) return tonemap_reinhard(L);
+    if (mode == 2) return tonemap_aces(L);
+    if (mode == 3) return tonemap_hable(L);
+    return tonemap_clip(L);
+}
+
 // Final output transform.  With HDR off (pc.u_denoise.z < 0.5) the color is
 // clamped to [0,1] exactly as before, so SDR output is unchanged.  With HDR on
 // the linear scene radiance is scaled by pc.u_denoise.w (which maps scene-white
-// to the PQ peak of 10000 cd/m^2; 0.02 ~= 200 cd/m^2 reference white) and
-// encoded with the SMPTE ST 2084 (PQ) transfer function, BT.2020 primaries.
-// The swapchain is VK_FORMAT_A2B10G10R10_UNORM_PACK32 with the surface tagged
-// Bt2100Pq, so the compositor maps it onto the HDR output.
+// to the PQ peak of 10000 cd/m^2; 0.02 ~= 200 cd/m^2 reference white),
+// tone-mapped by pc.u_tone.x and encoded with the SMPTE ST 2084 (PQ) transfer
+// function, BT.2020 primaries.  The swapchain is
+// VK_FORMAT_A2B10G10R10_UNORM_PACK32 with the surface tagged Bt2100Pq, so the
+// compositor maps it onto the HDR output.
 vec4 presentColor(vec3 linearColor)
 {
     if (pc.u_denoise.z < 0.5) {
@@ -59,7 +116,8 @@ vec4 presentColor(vec3 linearColor)
     const float c2 = 2413.0 / 4096.0 * 32.0;
     const float c3 = 2392.0 / 4096.0 * 32.0;
     vec3 L = max(linearColor, vec3(0.0)) * pc.u_denoise.w;
-    vec3 Lp = pow(L, vec3(m1));
+    vec3 mapped = tonemap(L, int(pc.u_tone.x + 0.5));
+    vec3 Lp = pow(mapped, vec3(m1));
     vec3 pq = pow((c1 + c2 * Lp) / (1.0 + c3 * Lp), vec3(m2));
     return vec4(clamp(pq, 0.0, 1.0), 1.0);
 }

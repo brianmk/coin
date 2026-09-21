@@ -426,8 +426,10 @@ public:
   void setPathTracingDenoiserScale(float scale);
 
   //! HDR10 (PQ) output for the present pass; forwarded to the RT backend.
-  //! \a exposure is the linear scale mapping scene-white to the PQ peak.
-  void setHdrOutput(SbBool enabled, float exposure);
+  //! \a exposure is the linear scale mapping scene-white to the PQ peak and
+  //! \a toneMap selects the tone-mapping operator (0 = clip, 1 = Reinhard,
+  //! 2 = ACES, 3 = Hable).
+  void setHdrOutput(SbBool enabled, float exposure, int toneMap);
 
   SoVulkanRenderBackend * getBackend(void) const;
 
