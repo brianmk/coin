@@ -926,13 +926,16 @@ SoRTXRenderBackend::updateGeometryCache(const SoDrawList & drawlist)
     // above identical, so none of {cacheChanged, asTransformChanged} would
     // fire -- and because the path tracer's scene-change signal IS
     // cacheChanged (see updatePathTracingState), a converged run would keep
-    // its stale accumulation until the camera moved.  The material buffer is
-    // still re-uploaded each frame with the new values, so this only needs to
-    // flag the scene change so the tracer restarts; no cache entry is rebuilt.
+    // its stale accumulation until the camera moved.  A material-only change
+    // never moves or reshapes geometry, so it is tracked separately in
+    // materialChanged: the AS phase stays clean (no TLAS/BLAS rebuild) and
+    // only the material buffer is re-uploaded; the accumulation restarts so
+    // the new colour is re-traced.  Also covers the selection/preselection
+    // highlight on shapes whose command is NOT promoted to the overlay pass.
     {
       const uint64_t mh = hashMaterial(command.material);
       if (mh != 0 && mh != entryPtr->materialHash) {
-        this->cacheChanged = true;
+        this->materialChanged = true;
         if (SoVulkanConfig::get().rtxDebug.rtGeo) {
           fprintf(stderr, "[GCR] MATERIAL cmd=%p pass=%d vc=%u old=%016llx new=%016llx\n",
                   static_cast<const void *>(&command),
