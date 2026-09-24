@@ -482,13 +482,16 @@ void main()
         // Physically-based dielectric glass (Path Tracing Max): Fresnel split
         // between specular reflection and Snell refraction, total internal
         // reflection above the critical angle, and Beer-Lambert absorption
-        // through the medium.  The smooth interface is a delta BSDF, so the
-        // reflection lobe's sampling probability equals its contribution and
-        // its throughput is left unchanged; the refracted lobe is additionally
-        // filtered by the material's Transparency (1 - alpha) so a clearer
-        // material passes proportionally more of the light behind it (unlike
-        // the thin-glass composite below, whose 1 - alpha splits the surface
-        // shading from the transmitted ray).
+        // through the medium.  The smooth interface is a delta BSDF, so each
+        // lobe's sampling probability equals its contribution and its
+        // throughput is left unchanged.
+        //
+        // Material Transparency filters the refracted light: a clearer
+        // material (higher Transparency, lower alpha) passes proportionally
+        // more of what is behind it.  The factor is applied ONCE per body, on
+        // entry into the dielectric -- not on every interface -- so a solid
+        // pane (front + back interface) transmits Transparency, not its
+        // square.  The specular reflection is unaffected.
         if (dielectric) {
             vec3 I = rayDir;
             // traceClosest() orients the normal toward the ray origin, so the
@@ -522,25 +525,33 @@ void main()
                     transmitted = true;
                 }
             }
-            // Material Transparency filters the refracted light only: a clearer
-            // material (higher Transparency, lower alpha) passes proportionally
-            // more of what is behind it, while the specular reflection is
-            // unaffected.
-            if (transmitted) {
+            // Material Transparency filters the refracted light once per
+            // dielectric body: apply it only on the air -> glass entry
+            // transmission, so a solid pane transmits (1 - alpha) rather than
+            // (1 - alpha)^2.  The specular reflection is unaffected.
+            if (transmitted && entering) {
                 weight *= (1.0 - alpha);
             }
-            // Track the medium and its absorption coefficient.  First-order
+            // Track the medium and its absorption coefficient.  Only a
+            // transmitted ray changes medium; a reflected / total-internal
+            // reflection ray stays on its current side.  First-order
             // Beer-Lambert model: the material colour is the target
             // transmittance, so its complement is the density that scales the
-            // absorption strength.
-            if (entering) {
-                insideGlass = true;
-                glassSigma =
-                  (vec3(1.0) - clamp(mat.diffuse.rgb, 0.0, 1.0)) * glassAbsorb;
-            }
-            else {
-                insideGlass = false;
-                glassSigma = vec3(0.0);
+            // absorption strength.  Scale that density by the opacity (alpha)
+            // so a near-clear material (Transparency ~ 1) adds almost no colour
+            // absorption -- the Transparency value alone decides how much light
+            // gets through.
+            if (transmitted) {
+                if (entering) {
+                    insideGlass = true;
+                    glassSigma =
+                      (vec3(1.0) - clamp(mat.diffuse.rgb, 0.0, 1.0)) *
+                      glassAbsorb * alpha;
+                }
+                else {
+                    insideGlass = false;
+                    glassSigma = vec3(0.0);
+                }
             }
             lastPdf = 1.0;  // delta interface
             rayOrigin = h.pos + newDir * 0.001;
