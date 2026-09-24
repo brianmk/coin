@@ -68,6 +68,19 @@ public:
   void setViewportRegion(const SbViewportRegion & vp);
   const SbViewportRegion & getViewportRegion(void) const { return this->vpRegion; }
 
+  /*!
+    \brief Whether base point sets record their geometry during traversal.
+
+    FreeCAD's BRep vertex markers (Part's SoBrepPointSet) emit their base
+    points unconditionally, which shows the shape vertices as dots even when
+    the viewer's "show vertices" preference is off.  A shape node can consult
+    this flag to skip its base geometry; highlight/selection overlays are
+    emitted by a different node and are unaffected.  Defaults to true so a
+    caller that does not set it keeps the historical behaviour.
+  */
+  void setModelPointsVisible(bool on);
+  bool modelPointsVisible() const;
+
   // Standard entry points, mirroring SoGLRenderAction
   virtual void apply(SoNode * root) override;
   virtual void apply(SoPath * path) override;

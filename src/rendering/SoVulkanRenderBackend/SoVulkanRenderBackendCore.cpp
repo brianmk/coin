@@ -169,6 +169,12 @@ SoVulkanRenderBackend::setTessellationOverlay(SbBool enabled)
 }
 
 void
+SoVulkanRenderBackend::setEdgeOverlayVisible(SbBool enabled)
+{
+  this->edgeOverlayVisible = enabled;
+}
+
+void
 SoVulkanRenderBackend::setEdgeColor(const SbColor4f & color)
 {
   this->edgeColor = color;

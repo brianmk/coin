@@ -762,6 +762,14 @@ private:
   VmaAllocation normalMemory = VK_NULL_HANDLE;
   VkBuffer positionBuffer = VK_NULL_HANDLE;
   VmaAllocation positionMemory = VK_NULL_HANDLE;
+  // Stable edge-overlay occlusion depth (vec4 per pixel: xyz = first-bounce
+  // world position of the un-jittered centre sample, w = ray distance;
+  // w > 1e6 = miss).  Deliberately NOT part of the ping-ponged position
+  // history: it is written only on the stable frame of a run, so the present
+  // pass projects a constant scene depth for the raster edge overlay's
+  // hidden-line removal instead of a depth that flickers along silhouettes.
+  VkBuffer stableDepthBuffer = VK_NULL_HANDLE;
+  VmaAllocation stableDepthMemory = VK_NULL_HANDLE;
   // Adaptive sampling: per-pixel radiance sums-of-squares (variance test)
   // and a per-frame host-readable active-pixel counter.
   VkBuffer sumSqBuffer = VK_NULL_HANDLE;

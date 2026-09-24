@@ -71,7 +71,7 @@ SoRTXRenderBackend::createDescriptorSetLayout()
   // rays and writes the image/accum/G-buffers, the miss shader samples the
   // frame UBO, and the closest-hit shader reads materials, the frame UBO
   // and the triangle-normal pool.
-  VkDescriptorSetLayoutBinding bindings[16] {};
+  VkDescriptorSetLayoutBinding bindings[17] {};
   bindings[0].binding = 0;
   bindings[0].descriptorType = VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR;
   bindings[0].descriptorCount = 1;
@@ -155,6 +155,16 @@ SoRTXRenderBackend::createDescriptorSetLayout()
   bindings[15].stageFlags = VK_SHADER_STAGE_RAYGEN_BIT_KHR |
     VK_SHADER_STAGE_COMPUTE_BIT;
 
+  // Stable edge-overlay occlusion depth (binding 16): first-bounce hit of the
+  // un-jittered centre sample, written by the raygen/compute tracer and read
+  // by the present pass to derive the raster edge overlay's depth.  Kept out
+  // of the ping-ponged position history so it stays constant across a run.
+  bindings[16].binding = 16;
+  bindings[16].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+  bindings[16].descriptorCount = 1;
+  bindings[16].stageFlags = VK_SHADER_STAGE_RAYGEN_BIT_KHR |
+    VK_SHADER_STAGE_COMPUTE_BIT;
+
   // UPDATE_AFTER_BIND binding flags when the device supports (and the
   // embedding enabled) descriptor indexing: every binding here is rewritten
   // while a caller-owned frame may still reference the set, which is otherwise
@@ -183,9 +193,9 @@ SoRTXRenderBackend::createDescriptorSetLayout()
 
   VkDescriptorSetLayoutCreateInfo ci {};
   ci.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
-  ci.bindingCount = 16;
+  ci.bindingCount = 17;
   ci.pBindings = bindings;
-  attachBindingFlags(ci, 16);
+  attachBindingFlags(ci, 17);
   if (this->hasUpdateAfterBind) {
     // Binding 0 is the TLAS: acceleration-structure update-after-bind is a
     // separate feature (VkPhysicalDeviceAccelerationStructureFeaturesKHR) that
@@ -205,7 +215,9 @@ SoRTXRenderBackend::createDescriptorSetLayout()
   // produced a result for the current frame).  Binding 6 is the traced
   // camera's view/projection (world->view->clip) so the present pass can
   // write scene depth for the raster composite overlay's edge occlusion.
-  VkDescriptorSetLayoutBinding presentBindings[6] {};
+  // Binding 7 is the stable edge-overlay occlusion depth (see the RT set
+  // layout above), read by sceneDepth() in PresentFragment.glsl.
+  VkDescriptorSetLayoutBinding presentBindings[7] {};
   presentBindings[0].binding = 1;
   presentBindings[0].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
   presentBindings[0].descriptorCount = 1;
@@ -220,12 +232,16 @@ SoRTXRenderBackend::createDescriptorSetLayout()
   presentBindings[5].descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
   presentBindings[5].descriptorCount = 1;
   presentBindings[5].stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
+  presentBindings[6].binding = 7;
+  presentBindings[6].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+  presentBindings[6].descriptorCount = 1;
+  presentBindings[6].stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
 
   VkDescriptorSetLayoutCreateInfo pci {};
   pci.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
-  pci.bindingCount = 6;
+  pci.bindingCount = 7;
   pci.pBindings = presentBindings;
-  attachBindingFlags(pci, 6);
+  attachBindingFlags(pci, 7);
   if (vkCreateDescriptorSetLayout(this->device, &pci, this->allocator,
                                   &this->presentSetLayout) != VK_SUCCESS) {
     return false;
@@ -287,7 +303,9 @@ SoRTXRenderBackend::createDescriptorPool()
   sizes[3].type = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
   sizes[3].descriptorCount = ring * 2;
   sizes[4].type = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
-  sizes[4].descriptorCount = ring * 24 + 41;
+  // 13 storage buffers per RT set, 4 per present set; +one stable-depth slot
+  // in each (bindings 16 and 7).
+  sizes[4].descriptorCount = ring * 26 + 41;
 
   VkDescriptorPoolCreateInfo ci {};
   ci.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
@@ -511,6 +529,10 @@ SoRTXRenderBackend::updateDescriptors()
   motionInfo.buffer = this->motionBuffer;
   motionInfo.offset = 0;
   motionInfo.range = VK_WHOLE_SIZE;
+  VkDescriptorBufferInfo stableDepthInfo {};
+  stableDepthInfo.buffer = this->stableDepthBuffer;
+  stableDepthInfo.offset = 0;
+  stableDepthInfo.range = VK_WHOLE_SIZE;
   VkDescriptorBufferInfo denoisedInfo {};
   denoisedInfo.buffer = this->denoisedBuffer;
   denoisedInfo.offset = 0;
@@ -693,6 +715,16 @@ SoRTXRenderBackend::updateDescriptors()
     motionWrite.pBufferInfo = &motionInfo;
     writes.push_back(motionWrite);
   }
+  if (this->stableDepthBuffer != VK_NULL_HANDLE) {
+    VkWriteDescriptorSet stableDepthWrite {};
+    stableDepthWrite.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+    stableDepthWrite.dstSet = rtSet;
+    stableDepthWrite.dstBinding = 16;
+    stableDepthWrite.descriptorCount = 1;
+    stableDepthWrite.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+    stableDepthWrite.pBufferInfo = &stableDepthInfo;
+    writes.push_back(stableDepthWrite);
+  }
 
   VkWriteDescriptorSet presentWrite {};
   presentWrite.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
@@ -735,6 +767,22 @@ SoRTXRenderBackend::updateDescriptors()
     presentPositionWrite.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
     presentPositionWrite.pBufferInfo = &positionInfo;
     writes.push_back(presentPositionWrite);
+  }
+  // Binding 7 must ALWAYS carry a valid buffer: the present shader declares
+  // StableDepthBuffer as a statically-used storage buffer.  Fall back to the
+  // position G-buffer if the stable buffer does not exist yet.
+  if (this->stableDepthBuffer == VK_NULL_HANDLE) {
+    stableDepthInfo.buffer = this->positionBuffer;
+  }
+  if (stableDepthInfo.buffer != VK_NULL_HANDLE) {
+    VkWriteDescriptorSet presentStableWrite {};
+    presentStableWrite.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+    presentStableWrite.dstSet = presentSet;
+    presentStableWrite.dstBinding = 7;
+    presentStableWrite.descriptorCount = 1;
+    presentStableWrite.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+    presentStableWrite.pBufferInfo = &stableDepthInfo;
+    writes.push_back(presentStableWrite);
   }
   // Binding 5 must ALWAYS carry a valid buffer: the present shader declares
   // DenoisedBuffer as a statically-used storage buffer, and a slot left

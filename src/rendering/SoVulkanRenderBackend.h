@@ -195,6 +195,10 @@ public:
   void setWireframeOverlay(SbBool enabled);
   void setPointsOverlay(SbBool enabled);
   void setTessellationOverlay(SbBool enabled);
+  //! Show/hide the model's feature-edge lines (non-triangle line residue) in
+  //! the raster main pass and the ray-tracing composite.  Screen-space
+  //! SO_RENDERPASS_OVERLAY geometry (nav cube, axes) is unaffected.
+  void setEdgeOverlayVisible(SbBool enabled);
   void setEdgeColor(const SbColor4f & color);
 
   /*!
@@ -910,6 +914,10 @@ private:
   // Configured through the manager; never part of the shared render params.
   SbBool wireframeOverlay = FALSE;
   SbBool pointsOverlay = FALSE;
+  // Model feature-edge visibility: when FALSE the non-triangle line residue is
+  // skipped in the raster main pass and the ray-tracing composite (the
+  // navigation cube and other SO_RENDERPASS_OVERLAY geometry still draw).
+  SbBool edgeOverlayVisible = TRUE;
   // Debug overlay: re-draw the triangle commands in polygon-LINES mode so
   // the raw tessellation (triangle edges) is visible on top of the shaded
   // geometry.  Distinct from the wireframe/edge overlay, which draws only

@@ -158,10 +158,15 @@ public:
   void setWireframeOverlay(SbBool enabled);
   void setPointsOverlay(SbBool enabled);
   void setTessellationOverlay(SbBool enabled);
+  //! Show/hide the model's feature-edge lines in every Vulkan mode (raster
+  //! main pass and the ray-tracing composite).  Container/scene overlays are
+  //! unaffected.
+  void setEdgeOverlay(SbBool enabled);
   void setEdgeColor(const SbColor4f & color);
   SbBool getWireframeOverlay(void) const;
   SbBool getPointsOverlay(void) const;
   SbBool getTessellationOverlay(void) const;
+  SbBool getEdgeOverlay(void) const;
   const SbColor4f & getEdgeColor(void) const;
 
   /*!

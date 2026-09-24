@@ -315,11 +315,13 @@ SoRTXRenderBackend::createPathTracingBuffers(uint32_t width, uint32_t height)
     const VmaAllocation posHistMem = this->positionHistoryMemory;
     const VkBuffer motion = this->motionBuffer;
     const VmaAllocation motionMem = this->motionMemory;
+    const VkBuffer stableDepth = this->stableDepthBuffer;
+    const VmaAllocation stableDepthMem = this->stableDepthMemory;
     this->deferDestroy([vma, accum, accumMem, normal,
                         normalMem, position, positionMem, sumSq, sumSqMem,
                         counter, counterMem, accumHist, accumHistMem,
                         sumSqHist, sumSqHistMem, posHist, posHistMem,
-                        motion, motionMem]() {
+                        motion, motionMem, stableDepth, stableDepthMem]() {
       vmaDestroyBuffer(vma, accum, accumMem);
       vmaDestroyBuffer(vma, normal, normalMem);
       vmaDestroyBuffer(vma, position, positionMem);
@@ -329,6 +331,7 @@ SoRTXRenderBackend::createPathTracingBuffers(uint32_t width, uint32_t height)
       vmaDestroyBuffer(vma, sumSqHist, sumSqHistMem);
       vmaDestroyBuffer(vma, posHist, posHistMem);
       vmaDestroyBuffer(vma, motion, motionMem);
+      vmaDestroyBuffer(vma, stableDepth, stableDepthMem);
     });
     this->accumBuffer = VK_NULL_HANDLE;
     this->accumMemory = nullptr;
@@ -349,6 +352,8 @@ SoRTXRenderBackend::createPathTracingBuffers(uint32_t width, uint32_t height)
     this->positionHistoryMemory = nullptr;
     this->motionBuffer = VK_NULL_HANDLE;
     this->motionMemory = nullptr;
+    this->stableDepthBuffer = VK_NULL_HANDLE;
+    this->stableDepthMemory = nullptr;
     this->ptHistoryValid = FALSE;
     this->ptReprojectFrame = FALSE;
   }
@@ -468,10 +473,16 @@ SoRTXRenderBackend::createPathTracingBuffers(uint32_t width, uint32_t height)
                                      this->sumSqHistoryMemory) ||
       !this->createDeviceLocalBuffer(bytes, usage,
                                      this->positionHistoryBuffer,
-                                     this->positionHistoryMemory)) {
+                                     this->positionHistoryMemory) ||
+      // Stable edge-overlay occlusion depth: a full-res vec4 per pixel, never
+      // swapped with the history (see the header comment).
+      !this->createDeviceLocalBuffer(bytes, usage,
+                                     this->stableDepthBuffer,
+                                     this->stableDepthMemory)) {
     vmaDestroyBuffer(this->vmaAllocator, this->accumHistoryBuffer, this->accumHistoryMemory);
     vmaDestroyBuffer(this->vmaAllocator, this->sumSqHistoryBuffer, this->sumSqHistoryMemory);
     vmaDestroyBuffer(this->vmaAllocator, this->positionHistoryBuffer, this->positionHistoryMemory);
+    vmaDestroyBuffer(this->vmaAllocator, this->stableDepthBuffer, this->stableDepthMemory);
     vmaDestroyBuffer(this->vmaAllocator, this->activeCounterBuffer, this->activeCounterMemory);
     vmaDestroyBuffer(this->vmaAllocator, this->sumSqBuffer, this->sumSqMemory);
     vmaDestroyBuffer(this->vmaAllocator, this->positionBuffer, this->positionMemory);
@@ -484,6 +495,8 @@ SoRTXRenderBackend::createPathTracingBuffers(uint32_t width, uint32_t height)
     this->sumSqHistoryMemory = VK_NULL_HANDLE;
     this->positionHistoryBuffer = VK_NULL_HANDLE;
     this->positionHistoryMemory = VK_NULL_HANDLE;
+    this->stableDepthBuffer = VK_NULL_HANDLE;
+    this->stableDepthMemory = VK_NULL_HANDLE;
     this->activeCounterBuffer = VK_NULL_HANDLE;
     this->activeCounterMemory = VK_NULL_HANDLE;
     this->activeCounterMapped = nullptr;
@@ -556,6 +569,7 @@ SoRTXRenderBackend::createPathTracingBuffers(uint32_t width, uint32_t height)
     freeBuffer(this->sumSqHistoryBuffer, this->sumSqHistoryMemory);
     freeBuffer(this->positionHistoryBuffer, this->positionHistoryMemory);
     freeBuffer(this->motionBuffer, this->motionMemory);
+    freeBuffer(this->stableDepthBuffer, this->stableDepthMemory);
     this->ptBufferWidth = 0;
     this->ptBufferHeight = 0;
     this->ptHistoryValid = FALSE;

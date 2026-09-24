@@ -77,6 +77,7 @@ public:
 
   SoIRBuffer geometryPool;
   SbList<SoIRRenderAction::PrimitiveCollector *> collectorStack;
+  bool modelPointsVisible = true;
 };
 
 #define PRIVATE(obj) (obj->pimpl)
@@ -167,6 +168,18 @@ SoIRRenderAction::~SoIRRenderAction()
 {
   delete PRIVATE(this);
   PRIVATE(this) = NULL;
+}
+
+void
+SoIRRenderAction::setModelPointsVisible(const bool on)
+{
+  PRIVATE(this)->modelPointsVisible = on;
+}
+
+bool
+SoIRRenderAction::modelPointsVisible() const
+{
+  return PRIVATE(this)->modelPointsVisible;
 }
 
 void

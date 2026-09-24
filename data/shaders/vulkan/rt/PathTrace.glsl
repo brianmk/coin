@@ -140,6 +140,16 @@ layout(set = 0, binding = 14, std430) buffer AlbedoBuffer { vec4 albedos[]; };
 // guide; the previous frame's camera comes from u_prevViewProj.
 layout(set = 0, binding = 15, std430) buffer MotionBuffer { vec4 motions[]; };
 
+// Stable occlusion depth for the raster edge-overlay composite: the first-
+// bounce hit of the un-jittered centre sample (world position in xyz, ray
+// distance in w; w > 1.0e6 marks a miss).  Unlike the position G-buffer this
+// is NOT ping-ponged with the reprojection history, so it stays valid for the
+// whole accumulation run and the present pass derives a deterministic scene
+// depth for hidden-line removal that does not flicker along silhouettes.
+layout(set = 0, binding = 16, std430) buffer StableDepthBuffer {
+    vec4 stableDepth[];
+};
+
 const int COIN_MAX_LIGHTS = 8;
 
 
@@ -161,6 +171,18 @@ void main()
     const float accumulating = frame.u_state.z;
     const int maxBounces = int(clamp(frame.u_state.w, 1.0, 16.0));
     const int index = int(px.y * uint(max(frame.u_viewport.x, 1.0)) + px.x);
+
+    // Stable primary sample: the first frame of an accumulation run (and every
+    // non-accumulating preview frame) traces an un-jittered centre ray.  Its
+    // first-bounce hit is written to the G-buffers and is NOT overwritten by
+    // the later jittered samples.  The present pass derives the raster
+    // edge-overlay occlusion depth from these G-buffers, so anchoring them to
+    // the centre sample makes that depth deterministic (hidden-line removal
+    // stays, but it no longer flickers along silhouettes as the jitter sweep
+    // crosses on and off the surface).  The shading ray still uses the jitter,
+    // so silhouette anti-aliasing is unchanged.
+    const bool stablePrimary =
+      !(ptEnabled > 0.5 && accumulating > 0.5) || frameIndex == 0u;
 
     // Adaptive sampling: once enough samples accumulated, a pixel whose
     // relative variance fell below the threshold is converged and skips
@@ -191,9 +213,11 @@ void main()
         }
     }
 
-    // Primary ray with per-frame sub-pixel jitter while accumulating.
+    // Primary ray with per-frame sub-pixel jitter while accumulating.  The
+    // first frame of a run is left at the centre sample so the stable G-buffer
+    // (see stablePrimary above) is seeded from a deterministic ray.
     vec2 jitter = vec2(0.5);
-    if (ptEnabled > 0.5 && accumulating > 0.5) {
+    if (ptEnabled > 0.5 && accumulating > 0.5 && frameIndex != 0u) {
         jitter = hash2(px.x, px.y, frameIndex);
     }
     vec2 uv = (vec2(px) + jitter) / max(frame.u_viewport.xy, vec2(1.0));
@@ -304,6 +328,10 @@ void main()
         else {
             rgb = envRadiance(dir);
         }
+        // Seed the stable occlusion depth for the raster edge overlay (this
+        // preview path returns before the main loop, which owns it otherwise).
+        stableDepth[index] =
+          h.hit ? vec4(h.pos, h.t) : vec4(0.0, 0.0, 0.0, 1.0e7);
         imageStore(storageImage, ivec2(px), clamp(vec4(rgb, 1.0), 0.0, 1.0));
         // Mirror into the accumulation G-buffer so the edge-stopping present
         // path (which reads accum when the denoise toggle is up) shows the
@@ -348,6 +376,10 @@ void main()
                 rgb = envRadiance(dir);
             }
         }
+        // Seed the stable occlusion depth for the raster edge overlay (this
+        // preview path returns before the main loop, which owns it otherwise).
+        stableDepth[index] =
+          h.hit ? vec4(h.pos, h.t) : vec4(0.0, 0.0, 0.0, 1.0e7);
         imageStore(storageImage, ivec2(px), clamp(vec4(rgb, 1.0), 0.0, 1.0));
         return;
     }
@@ -389,6 +421,10 @@ void main()
                 positions[index] = vec4(0.0, 0.0, 0.0, 1.0e7);
                 albedos[index] = vec4(0.0);
                 motions[index] = vec4(0.0);
+                // Stable edge-overlay occlusion depth (see stablePrimary).
+                if (stablePrimary) {
+                    stableDepth[index] = vec4(0.0, 0.0, 0.0, 1.0e7);
+                }
             }
             break;
         }
@@ -397,6 +433,13 @@ void main()
             // G-buffer for the denoiser (visible surface only).
             normals[index] = vec4(h.normal, 1.0);
             positions[index] = vec4(h.pos, h.t);
+            // Stable edge-overlay occlusion depth: written only by the
+            // un-jittered centre sample so the composite's depth test does not
+            // flicker along silhouettes.  This buffer is NOT ping-ponged with
+            // the history, so it persists for the whole accumulation run.
+            if (stablePrimary) {
+                stableDepth[index] = vec4(h.pos, h.t);
+            }
             // Screen-space motion vector for the temporal denoiser.  Project
             // the current hit through the previous frame's camera to find
             // where it appeared last frame, then subtract the current NDC.
