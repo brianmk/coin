@@ -939,6 +939,7 @@ endmacro()
 coin_check_gl_headers()
 
 if(APPLE AND NOT COIN_BUILD_MAC_X11)
+  check_include_file(OpenGL/glu.h HAVE_OPENGL_GLU_H)
   check_include_file(OpenGL/CGLCurrent.h HAVE_OPENGL_CGLCURRENT_H)
 endif()
 

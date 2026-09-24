@@ -93,6 +93,13 @@ target_include_directories(CoinTests PRIVATE
 	${PROJECT_BINARY_DIR}/include
 	${COIN_TARGET_INCLUDE_DIRECTORIES}
 )
+if(NOT WIN32)
+	target_sources(CoinTests PRIVATE GLUWrapperTest.cpp)
+	target_include_directories(CoinTests PRIVATE
+		${PROJECT_SOURCE_DIR}/src
+		${PROJECT_BINARY_DIR}/src
+	)
+endif()
 if (USE_PTHREAD)
 	target_link_libraries(CoinTests pthread)
 endif()
