@@ -41,7 +41,7 @@ struct SoVulkanViewSettings {
   //! for dielectric surfaces (transparency > 0) and the Beer-Lambert
   //! absorption strength derived from the material colour.
   float pathTracingGlassIor = 1.5f;
-  float pathTracingGlassAbsorption = 0.2f;
+  float pathTracingGlassAbsorption = 0.1f;
 
   //! Viewport background (solid or gradient).
   SbColor4f backgroundColor {0.0f, 0.0f, 0.0f, 1.0f};

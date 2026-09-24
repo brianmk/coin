@@ -822,7 +822,7 @@ private:
   //! Physically-based glass parameters (RtxModePathTraceMax): dielectric IOR
   //! and the Beer-Lambert absorption strength.  See setPathTracingGlass().
   float ptGlassIor = 1.5f;
-  float ptGlassAbsorption = 0.2f;
+  float ptGlassAbsorption = 0.1f;
   //! Bounce count used while interaction LOD is engaged (single bounce: the
   //! cheapest still-correct transport for a moving preview).
   uint32_t ptInteractionBounces = 1;

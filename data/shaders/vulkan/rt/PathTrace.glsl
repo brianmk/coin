@@ -483,9 +483,12 @@ void main()
         // between specular reflection and Snell refraction, total internal
         // reflection above the critical angle, and Beer-Lambert absorption
         // through the medium.  The smooth interface is a delta BSDF, so the
-        // chosen lobe's sampling probability equals its contribution and the
-        // throughput is left unchanged (unlike the thin-glass composite below,
-        // which weights the transmitted ray by 1 - alpha).
+        // reflection lobe's sampling probability equals its contribution and
+        // its throughput is left unchanged; the refracted lobe is additionally
+        // filtered by the material's Transparency (1 - alpha) so a clearer
+        // material passes proportionally more of the light behind it (unlike
+        // the thin-glass composite below, whose 1 - alpha splits the surface
+        // shading from the transmitted ray).
         if (dielectric) {
             vec3 I = rayDir;
             // traceClosest() orients the normal toward the ray origin, so the
@@ -502,6 +505,7 @@ void main()
             f0 *= f0;
             float R = f0 + (1.0 - f0) * pow(1.0 - cosI, 5.0);
             vec3 newDir;
+            bool transmitted = false;
             if (sin2T > 1.0) {
                 // Total internal reflection: all energy reflects.
                 newDir = reflect(I, n);
@@ -515,7 +519,15 @@ void main()
                 else {
                     float cosT = sqrt(max(1.0 - sin2T, 0.0));
                     newDir = normalize(eta * I + (eta * cosI - cosT) * n);
+                    transmitted = true;
                 }
+            }
+            // Material Transparency filters the refracted light only: a clearer
+            // material (higher Transparency, lower alpha) passes proportionally
+            // more of what is behind it, while the specular reflection is
+            // unaffected.
+            if (transmitted) {
+                weight *= (1.0 - alpha);
             }
             // Track the medium and its absorption coefficient.  First-order
             // Beer-Lambert model: the material colour is the target
