@@ -85,19 +85,6 @@ public:
   //! Framebuffer cached for the current target identity.
   VkFramebuffer framebuffer() const { return framebuffer_; }
 
-  //! Whether the current render pass clears the color attachment via its loadOp.
-  bool colorClearedByLoad() const { return colorCleared_; }
-
-  //! Whether the current render pass clears the depth attachment via its loadOp.
-  bool depthClearedByLoad() const { return depthCleared_; }
-
-  //! Set the current pass's clear-by-load flags (per frame / external pass).
-  void setClearedByLoad(bool color, bool depth)
-  {
-    colorCleared_ = color;
-    depthCleared_ = depth;
-  }
-
 private:
   // Immutable render-pass identity.  Created once per unique combination and
   // reused across targets that share the definition (so the pipeline cache
@@ -170,8 +157,6 @@ private:
     passCache_;
   //! Render pass used by the current frame (looked up from passCache_).
   VkRenderPass renderPass_ = VK_NULL_HANDLE;
-  bool colorCleared_ = false;
-  bool depthCleared_ = false;
 
   //! Framebuffer cached for the current target identity (image views +
   //! extent + render pass).

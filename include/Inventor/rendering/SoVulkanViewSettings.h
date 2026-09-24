@@ -58,9 +58,13 @@ struct SoVulkanViewSettings {
   //! owns that decision; the backend just encodes).  A linear pre-scale of the
   //! scene radiance is applied before the PQ transfer function.
   bool hdrOutput = false;
-  //! Linear exposure/gain applied to the scene radiance before the PQ encode
-  //! (1.0 = unchanged).  Ignored when hdrOutput is false.
-  float hdrExposure = 1.0f;
+  //! Linear exposure/gain applied to the scene radiance before the PQ encode.
+  //! The default matches the backends' reference-white convention: 0.02 maps
+  //! scene-white (radiance 1.0) to ~200 cd/m² rather than to the PQ peak
+  //! (10000 cd/m²), so a caller that pushes a default-constructed settings
+  //! blob does not silently render ~50x too bright.  Ignored when hdrOutput is
+  //! false.
+  float hdrExposure = 0.02f;
   //! HDR tone-mapping operator applied between the exposure and the PQ encode
   //! (ignored when hdrOutput is false): 0 = clip (no tone map, the pre-tone-map
   //! behavior), 1 = Reinhard, 2 = ACES, 3 = Hable.  The exposure is a plain

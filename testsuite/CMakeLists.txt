@@ -274,6 +274,7 @@ if(HAVE_EGL)
 			VulkanBackendStencilTest vulkan/vulkan-backend-stencil-test.cpp
 			VulkanBackendTessOverlayTest vulkan/vulkan-backend-tess-overlay-test.cpp
 			VulkanBackendMaterialTest vulkan/vulkan-backend-material-test.cpp
+			VulkanBackendHdrTest vulkan/vulkan-backend-hdr-test.cpp
 			VulkanBackendRetainedChangeTest vulkan/vulkan-backend-retained-change-test.cpp
 			VulkanBackendParallelTest vulkan/vulkan-backend-parallel-test.cpp
 			VulkanRenderManagerTest vulkan/vulkan-rendermanager-test.cpp

@@ -594,9 +594,15 @@ SoVulkanRenderBackend::submitExternalPrepass(VkCommandBuffer commandBuffer,
   vkFreeCommandBuffers(this->device, this->commandPool, 1, &commandBuffer);
   if (timing) timing->lodMs = SoVulkanShared::steadyNowMs() - submitT0;
   if (!submitted || !waited) {
-    // The copies in the transient buffer never completed, so the texture
-    // entries finalizePending() stamped still hold their (empty) images.
-    // Un-stamp them so the upload is re-prepared next frame.
+    // The frame was already recorded above and the caller owns its
+    // submission, so this frame's compacted indirect draws cannot be swapped
+    // back to full-detail draws here: the full-detail fallback only exists
+    // for the pre-record failure of beginExternalPrepass() (null transient
+    // buffer, no slot stamped).  A submit failure this late means the queue
+    // or device is gone, so all we can do is un-stamp the texture entries
+    // finalizePending() marked so they re-prepare next frame (the LOD slots
+    // need no equivalent: subPixelSlotFor() gates on the frame ordinal, which
+    // has already advanced, so they are never reused un-compacted).
     this->textureCache.unStampFinalized();
     SoDebugError::postWarning("SoVulkanRenderBackend::submitExternalPrepass",
                               "external pre-pass transient submit%s failed; "

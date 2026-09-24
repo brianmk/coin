@@ -402,7 +402,7 @@ SoVulkanRenderBackend::validateRenderTarget(const SoRenderParams & params) const
 bool
 SoVulkanRenderBackend::beginFramePlan(
     const SoDrawList & drawlist, const SoRenderParams & params,
-    const char * caller, const bool overlaysOnly, const bool external,
+    const char * caller, const bool overlaysOnly,
     const bool reserveCompositeSlots, FramePlan & plan,
     ExternalFrameTiming * timing)
 {
@@ -452,7 +452,6 @@ SoVulkanRenderBackend::beginFramePlan(
 
   plan.target = target;
   plan.overlaysOnly = overlaysOnly;
-  plan.external = external;
   return true;
 }
 
@@ -490,14 +489,14 @@ SoVulkanRenderBackend::prepareExternalFrame(
     return false;
   }
   if (!this->beginFramePlan(drawlist, params, caller, overlaysOnly,
-                            /*external*/ true, reserveCompositeSlots, plan,
-                            timing)) {
+                            reserveCompositeSlots, plan, timing)) {
     return false;
   }
 
   // External passes are caller-supplied LOAD render passes, so no attachment
   // is cleared by a loadOp here: recordClear() must emit vkCmdClearAttachments.
-  this->renderPasses.setClearedByLoad(false, false);
+  this->frameColorClearedByLoad_ = false;
+  this->frameDepthClearedByLoad_ = false;
   // Changed textures are now staged in the texture cache; the caller's
   // beginExternalPrepass() records the copies into its transient command
   // buffer (or falls back to SoVulkanTextureCache::flushExternal() when that
@@ -522,17 +521,15 @@ SoVulkanRenderBackend::renderInternal(const SoDrawList & drawlist,
                        overlaysOnly ? 1 : 0);
   }
 
-  // A composite (overlays-only) frame with no overlay commands is a no-op:
+  // A composite (overlays-only) frame with nothing to composite is a no-op:
   // return before the frame boundary so the ring cursor does not advance.
-  if (overlaysOnly) {
-    bool hasOverlay = false;
-    for (int i = 0; i < drawlist.getNumCommands(); ++i) {
-      if (drawlist.getCommand(i).pass == SO_RENDERPASS_OVERLAY) {
-        hasOverlay = true;
-        break;
-      }
-    }
-    if (!hasOverlay) return TRUE;
+  // countCompositeCommands() covers both the OVERLAY commands and the
+  // non-triangle OPAQUE/TRANSPARENT residue (BRep edge lines, point markers)
+  // that recordTracedComposite() draws, so the guard must not test OVERLAY
+  // commands alone: an RT frame with visible edges but no overlay scene would
+  // otherwise drop the residue.
+  if (overlaysOnly && countCompositeCommands(drawlist) == 0) {
+    return TRUE;
   }
 
   // One frame boundary: advances the ring cursor and releases resources
@@ -542,7 +539,6 @@ SoVulkanRenderBackend::renderInternal(const SoDrawList & drawlist,
   // recordFrame().
   FramePlan plan;
   if (!this->beginFramePlan(drawlist, params, "render", overlaysOnly,
-                            /*external*/ false,
                             /*reserveCompositeSlots*/ overlaysOnly, plan,
                             nullptr)) {
     return FALSE;
@@ -576,9 +572,10 @@ SoVulkanRenderBackend::renderInternal(const SoDrawList & drawlist,
   // Stash whether the pass cleared each attachment so recordClear() can skip
   // the redundant vkCmdClearAttachments, and (below) so the begin info carries
   // the matching clear values.
-  this->renderPasses.setClearedByLoad(
-    colorLoadOp == VK_ATTACHMENT_LOAD_OP_CLEAR,
-    depthLoadOp == VK_ATTACHMENT_LOAD_OP_CLEAR);
+  this->frameColorClearedByLoad_ =
+    colorLoadOp == VK_ATTACHMENT_LOAD_OP_CLEAR;
+  this->frameDepthClearedByLoad_ =
+    depthLoadOp == VK_ATTACHMENT_LOAD_OP_CLEAR;
   if (this->renderPasses.currentRenderPass() == VK_NULL_HANDLE) {
     this->emitError("failed to create Vulkan render pass");
     return FALSE;
@@ -638,14 +635,14 @@ SoVulkanRenderBackend::renderInternal(const SoDrawList & drawlist,
   // maps one-to-one to the attachment indices (0 = color, 1 = depth).
   VkClearValue clearValues[2];
   uint32_t clearValueCount = 0;
-  if (this->renderPasses.colorClearedByLoad()) {
+  if (this->frameColorClearedByLoad_) {
     clearValues[0].color.float32[0] = params.clearColor[0];
     clearValues[0].color.float32[1] = params.clearColor[1];
     clearValues[0].color.float32[2] = params.clearColor[2];
     clearValues[0].color.float32[3] = params.clearColor[3];
     clearValueCount = 1;
   }
-  if (this->renderPasses.depthClearedByLoad()) {
+  if (this->frameDepthClearedByLoad_) {
     clearValues[clearValueCount].depthStencil.depth = params.clearDepth;
     clearValues[clearValueCount].depthStencil.stencil = 0;
     ++clearValueCount;
@@ -732,6 +729,18 @@ SoVulkanRenderBackend::renderExternal(const SoDrawList & drawlist,
 
   this->debugValidateDrawList(drawlist);
 
+  // The M1c/M1d secondary path records with RENDER_PASS_CONTINUE inheritance,
+  // which needs the framebuffer matching the caller's pass + swapchain image.
+  // The caller owns the pass/framebuffer pair (e.g. QVulkanWindow's
+  // defaultRenderPass()/currentFramebuffer(), whose MSAA pass carries a
+  // resolve attachment the backend cannot guess), so the framebuffer is
+  // threaded in rather than fabricated here.  Validated before the frame
+  // boundary advances so a bad call cannot consume a ring slot.
+  if (framebuffer == VK_NULL_HANDLE) {
+    this->emitError("renderExternal called without a framebuffer");
+    return FALSE;
+  }
+
   const bool wantCpuTiming = vkBackendFrameTimingEnabled();
   ExternalFrameTiming timing;
   FramePlan plan;
@@ -739,17 +748,6 @@ SoVulkanRenderBackend::renderExternal(const SoDrawList & drawlist,
         drawlist, params, commandBuffer, renderPass, "renderExternal",
         /*overlaysOnly*/ false, /*reserveCompositeSlots*/ false, plan,
         wantCpuTiming ? &timing : nullptr)) {
-    return FALSE;
-  }
-
-  // The M1c/M1d secondary path records with RENDER_PASS_CONTINUE inheritance,
-  // which needs the framebuffer matching the caller's pass + swapchain image.
-  // The caller owns the pass/framebuffer pair (e.g. QVulkanWindow's
-  // defaultRenderPass()/currentFramebuffer(), whose MSAA pass carries a
-  // resolve attachment the backend cannot guess), so the framebuffer is
-  // threaded in rather than fabricated here.
-  if (framebuffer == VK_NULL_HANDLE) {
-    this->emitError("renderExternal called without a framebuffer");
     return FALSE;
   }
 
@@ -1001,9 +999,6 @@ SoVulkanRenderBackend::buildWorkItems(const SoDrawList & drawlist,
     // the feature edges are not double-painted.
     if (!transparent && (wireframeFillMode >= 0 || tessellationOverlay)) {
       const bool isEdgeOverlay = (wireframeFillMode == SoDrawStyleElement::LINES);
-      const int redrawFillMode = tessellationOverlay
-        ? SoDrawStyleElement::LINES
-        : wireframeFillMode;
       for (int i = 0; i < drawlist.getNumCommands(); ++i) {
         const int index = orderedIndex(i);
         const SoRenderCommand & command = drawlist.getCommand(index);
@@ -1012,35 +1007,27 @@ SoVulkanRenderBackend::buildWorkItems(const SoDrawList & drawlist,
         if (!command.geometry.positions || command.geometry.vertexCount == 0)
           continue;
         const SoPrimitiveTopology topo = command.geometry.topology;
-        // For the edge overlay, restrict to commands that are themselves line
-        // primitives; skip triangles so tessellation edges never render.
-        if (isEdgeOverlay) {
-          if (topo != SO_TOPOLOGY_LINES &&
-              topo != SO_TOPOLOGY_LINE_STRIP) {
-            continue;
-          }
-        }
-        // For the debug tessellation overlay, restrict to triangle commands.
-        if (tessellationOverlay) {
-          if (topo != SO_TOPOLOGY_TRIANGLES &&
-              topo != SO_TOPOLOGY_TRIANGLE_STRIP) {
-            continue;
-          }
-        }
-        if (!this->geometryCache.findDrawable(command)) continue;
         const bool lineTopo = topo == SO_TOPOLOGY_LINES ||
           topo == SO_TOPOLOGY_LINE_STRIP;
         const bool triTopo = topo == SO_TOPOLOGY_TRIANGLES ||
           topo == SO_TOPOLOGY_TRIANGLE_STRIP;
+        // The debug tessellation overlay re-draws triangle commands in
+        // polygon-LINES so the raw triangulation shows.
         const bool tessHit = tessellationOverlay && triTopo;
-        if (isEdgeOverlay && !lineTopo && !tessHit) continue;
-        if (wireframeFillMode < 0 && !tessHit) continue;
+        // The LINES (edge) overlay re-draws only line primitives (B-Rep feature
+        // edges).  When the edge and tessellation overlays are BOTH active their
+        // union is redrawn: triangles via the tessellation branch, feature lines
+        // via the edge branch.  A POINTS overlay re-draws every visible opaque
+        // primitive.
+        const bool edgeHit = isEdgeOverlay && lineTopo;
+        const bool pointsHit = wireframeFillMode >= 0 && !isEdgeOverlay;
+        if (!tessHit && !edgeHit && !pointsHit) continue;
+        if (!this->geometryCache.findDrawable(command)) continue;
         VulkanWorkItem item;
         item.single = &command;
         item.count = 1;
-        item.fillModeOverride = redrawFillMode;
         item.fillModeOverride =
-          tessHit ? SoDrawStyleElement::LINES : wireframeFillMode;
+          (tessHit || edgeHit) ? SoDrawStyleElement::LINES : wireframeFillMode;
         item.uniformColorOverride = overlayColor;
         item.slotBase = nextSlot++;
         out.push_back(item);
@@ -1210,8 +1197,8 @@ SoVulkanRenderBackend::recordFrame(const SoDrawList & drawlist,
     logBlackFrameStats(drawlist, params, blackFrame++, -1);
   }
   this->applyViewport(params, target, ctx);
-  this->recordClear(params, target, this->renderPasses.colorClearedByLoad(),
-                    this->renderPasses.depthClearedByLoad(), ctx);
+  this->recordClear(params, target, this->frameColorClearedByLoad_,
+                    this->frameDepthClearedByLoad_, ctx);
   this->recordBackground(params, target, renderPass, ctx);
   // The background pass overrides the viewport/scissor for its own draw;
   // restore the viewport from params before recording geometry so draws

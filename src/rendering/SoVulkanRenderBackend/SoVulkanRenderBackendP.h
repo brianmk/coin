@@ -90,14 +90,9 @@ namespace CoinVulkanDetail {
   inline int s_debugFrame = 0;
   inline uint32_t s_debugPushCount = 0;
   inline int s_dumpCmdCount = 0;
-  inline int s_lightLog = 0;
 
 // Number of per-draw lighting UBO slots a frame will consume.  A command is
 // recorded once in its own pass, again when the wireframe/point/tessellation
-// overlay redraw is active (opaque commands only), and overlay commands are
-// recorded a second time in the overlay block.  recordDrawCommand() bails
-// out before claiming a slot for skipped commands, so this worst case is a
-// safe upper bound.
 // overlay redraw is active (opaque commands only; the tessellation overlay
 // redraws triangle commands, the LINES overlay line commands, the POINTS
 // overlay everything), and overlay commands are recorded a second time in the
