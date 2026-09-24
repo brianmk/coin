@@ -912,6 +912,11 @@ SoRTXRenderBackend::updateGeometryCache(const SoDrawList & drawlist)
       if (std::memcmp(entryPtr->transformBits, m,
                       sizeof(entryPtr->transformBits)) != 0) {
         this->asTransformChanged = true;
+        // The visible scene changed (an object moved): restart the path-tracing
+        // accumulation/denoiser, not just the TLAS.  Kept separate from
+        // asTransformChanged so the internal BLAS-compaction TLAS re-point
+        // (which sets asTransformChanged too) does not reset a converged run.
+        this->sceneTransformChanged = true;
         if (SoVulkanConfig::get().rtxDebug.rtGeo) {
           fprintf(stderr, "[GCR] TRANSFORM cmd=%p pass=%d vc=%u\n",
                   static_cast<const void *>(&command),

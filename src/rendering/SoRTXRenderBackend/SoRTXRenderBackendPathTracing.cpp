@@ -71,7 +71,17 @@ SoRTXRenderBackend::updatePathTracingState(const SoDrawList & /*drawlist*/,
       this->lastViewportWidth != static_cast<uint32_t>(vpSize[0]) ||
       this->lastViewportHeight != static_cast<uint32_t>(vpSize[1]);
   }
-  const bool sceneChanged = this->cacheChanged;
+  // An instance-transform change (an object moved) invalidates the same
+  // accumulated history as a geometry-content change: the per-pixel radiance
+  // was gathered against the old placement, so carrying it forward blends the
+  // old and new positions.  sceneTransformChanged is set only by the real
+  // transform-change detector in updateGeometryCache(); unlike
+  // asTransformChanged it is NOT also raised for an internal BLAS compaction
+  // (which re-points the TLAS but leaves the scene identical), so it cannot
+  // restart a converged run spuriously.  Camera motion sets neither.
+  const bool sceneChanged = this->cacheChanged || this->sceneTransformChanged;
+  // One-shot: consumed here (AS rebuild reads asTransformChanged, not this).
+  this->sceneTransformChanged = false;
   // Material-only change (recolour/transparency or a highlight override on a
   // command that was not promoted to the overlay pass): the geometry and the
   // acceleration structures are unchanged, so this restarts the accumulation

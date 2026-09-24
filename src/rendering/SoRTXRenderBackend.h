@@ -1049,8 +1049,18 @@ private:
   //! move, discards the denoise history) so the new colour is re-traced.
   bool materialChanged = false;
   //! Set by updateGeometryCache() when any cached traced command's model
-  //! matrix changed (object moved) while the geometry content did not.
+  //! matrix changed (object moved) while the geometry content did not.  Also
+  //! raised by an internal BLAS compaction to force the TLAS to re-point at
+  //! the compacted addresses, so it is an "AS must rebuild" signal, not a
+  //! "the visible scene changed" one.
   bool asTransformChanged = false;
+  //! Set only by the real model-matrix change detector in
+  //! updateGeometryCache() (an object actually moved).  This is the
+  //! path-tracing scene-change signal for instance transforms: it restarts
+  //! the accumulation/denoiser (the per-pixel history was gathered at the old
+  //! placement), and is deliberately NOT raised by the BLAS-compaction
+  //! TLAS-repoint above.  Consumed (cleared) by updatePathTracingState().
+  bool sceneTransformChanged = false;
   //! Computed each frame in recordAccelerationStructures(): true when the
   //! acceleration structures must be (re)built this frame (geometry content
   //! OR an instance transform changed).  When false the TLAS/NEE/material
