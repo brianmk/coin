@@ -72,6 +72,11 @@ SoRTXRenderBackend::updatePathTracingState(const SoDrawList & /*drawlist*/,
       this->lastViewportHeight != static_cast<uint32_t>(vpSize[1]);
   }
   const bool sceneChanged = this->cacheChanged;
+  // Material-only change (recolour/transparency or a highlight override on a
+  // command that was not promoted to the overlay pass): the geometry and the
+  // acceleration structures are unchanged, so this restarts the accumulation
+  // but must NOT force an AS rebuild.
+  const bool materialChanged = this->materialChanged;
 
   // Background / environment change detection.  The viewport gradient, sky and
   // sun drive the environment radiance but NEVER the acceleration structures,
@@ -207,7 +212,8 @@ SoRTXRenderBackend::updatePathTracingState(const SoDrawList & /*drawlist*/,
     // A fresh run supersedes any in-flight async denoise result.
     ++this->ptRunGeneration;
   }
-  else if (backgroundChanged || sceneChanged || (viewChanged && !this->haveLastView)) {
+  else if (backgroundChanged || sceneChanged || materialChanged
+           || (viewChanged && !this->haveLastView)) {
     // A scene edit invalidates the history (surface colors may be stale
     // even where positions match), a background/environment change changes
     // the environment radiance, and the very first frame has nothing to
@@ -322,10 +328,11 @@ SoRTXRenderBackend::updatePathTracingState(const SoDrawList & /*drawlist*/,
   if (SoVulkanConfig::get().rtxDebug.rtDebug && this->ptEnabled) {
     fprintf(stderr,
             "[RTDBG] ptState frame=%u viewChanged=%d sceneChanged=%d "
-            "bgChanged=%d latch=%d accum=%d frameIndex=%u idle=%u "
+            "matChanged=%d bgChanged=%d latch=%d accum=%d frameIndex=%u idle=%u "
             "reproject=%d\n",
             params.frame,
             viewChanged ? 1 : 0, sceneChanged ? 1 : 0,
+            materialChanged ? 1 : 0,
             backgroundChanged ? 1 : 0, this->ptStartLatch ? 1 : 0,
             this->ptAccumulating ? 1 : 0, this->ptFrameIndex,
             this->ptIdleFrames, this->ptReprojectFrame ? 1 : 0);
@@ -633,14 +640,20 @@ SoRTXRenderBackend::recordAccelerationStructures(
     (this->descriptorSetIndex + 1) % this->descriptorRingSize;
 
   bool asRebuilt = false;
-  if (this->asDirty || cullRebuild) {
-    if (this->asDirty) {
-      // Emissive-triangle pool for NEE.  Rebuilt only when the AS is dirty so
-      // the baked object-to-world transforms stay fresh on transform-only
-      // edits (which refit BLASes instead of rebuilding geometry).  Runs
-      // before updateMaterials(), which carries the pool offsets into the
-      // RTMaterial records.  A failed (partial) pool aborts the AS phase
-      // rather than tracing with missing emitter records.
+  // A material-only change (materialChanged) needs the NEE pool refreshed
+  // (emissive may have changed) and the material buffer re-uploaded, but the
+  // geometry, BLASes and TLAS are untouched, so buildTlas() must NOT run for
+  // it.  asDirty still drives a full geometry+AS rebuild; cullRebuild only
+  // re-records the TLAS.  Consuming materialChanged here (the state machine
+  // already read it) keeps a recolour from paying a per-hover TLAS build.
+  const bool needMaterials = this->asDirty || this->materialChanged;
+  const bool needTlas = this->asDirty || cullRebuild;
+  if (needMaterials || needTlas) {
+    if (needMaterials) {
+      // Emissive-triangle pool for NEE.  Runs before updateMaterials(),
+      // which carries the pool offsets into the RTMaterial records.  A failed
+      // (partial) pool aborts the AS phase rather than tracing with missing
+      // emitter records.
       if (!this->buildNeePool(drawlist)) {
         this->emitError(
           "recordAccelerationStructures: failed to build NEE pool");
@@ -651,12 +664,15 @@ SoRTXRenderBackend::recordAccelerationStructures(
 
     // TLAS build (instances reference the BLASes built above).  The TLAS
     // handle may change here, so refresh the binding-0 descriptor before the
-    // trace phase runs.
-    if (!this->buildTlas(drawlist, params, cmd)) {
-      this->emitError("recordAccelerationStructures: failed to build TLAS");
-      return false;
+    // trace phase runs.  Skipped for a material-only change.
+    if (needTlas) {
+      if (!this->buildTlas(drawlist, params, cmd)) {
+        this->emitError("recordAccelerationStructures: failed to build TLAS");
+        return false;
+      }
+      asRebuilt = true;
     }
-    asRebuilt = true;
+    this->materialChanged = false;
   }
 
   // Repopulate the current ring slot every frame (the index just moved).  This

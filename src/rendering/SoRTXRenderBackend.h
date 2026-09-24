@@ -1025,6 +1025,13 @@ private:
   //! Set by updateGeometryCache() when any cached command's geometry
   //! identity changed and a BLAS rebuild is pending this frame.
   bool cacheChanged = false;
+  //! Set by updateGeometryCache() when only a cached command's material
+  //! changed (recolour/transparency).  Unlike cacheChanged this does NOT
+  //! dirty the acceleration structures -- the geometry is identical, so the
+  //! TLAS/BLAS phase is skipped and only the material buffer is re-uploaded.
+  //! It still restarts the path-tracing accumulation (and, unlike a camera
+  //! move, discards the denoise history) so the new colour is re-traced.
+  bool materialChanged = false;
   //! Set by updateGeometryCache() when any cached traced command's model
   //! matrix changed (object moved) while the geometry content did not.
   bool asTransformChanged = false;
