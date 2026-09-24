@@ -46,6 +46,8 @@ layout(set = 0, binding = 2, std140) uniform FrameBlock {
     vec4  u_envRoomFloor;  // room cove: rgb = floor color, w = floor Y (rel camera)
     vec4  u_envRoomCeil;   // room cove: rgb = ceiling color, w = ceiling Y (rel cam)
     vec4  u_envRoomScale;  // room cove: x = half extent (world units)
+    vec4  u_glass;         // path-tracing max: x = dielectric IOR,
+                           // y = Beer-Lambert absorption strength
 } frame;
 
 // std430 mirror of the C++ RTMaterial record; one per draw command, indexed
@@ -215,7 +217,7 @@ void main()
         dir = normalize((frame.u_viewInverse * vec4(dirView, 0.0)).xyz);
     }
 
-    if (frame.u_state.y > 3.5) {
+    if (frame.u_state.y > 3.5 && frame.u_state.y < 4.5) {
         // Debug path (u_state.y == 4): trace, then write the payload.
         HitInfo h = traceClosest(origin, dir, 1e30);
         imageStore(storageImage, ivec2(px),
@@ -357,6 +359,17 @@ void main()
     vec3 rayDir = dir;
     float lastPdf = 1.0; // pdf of the direction that brought us to this hit
 
+    // Physically-based dielectric glass (Path Tracing Max, u_state.y == 5):
+    // whether this frame uses the dielectric BSDF, which medium the ray is
+    // currently travelling in, and that medium's Beer-Lambert absorption
+    // coefficient (0 in air).  In every other mode these stay inert so the
+    // thin-glass path is unchanged.
+    const bool maxMode = frame.u_state.y > 4.5;
+    const float glassIor = max(frame.u_glass.x, 1.0);
+    const float glassAbsorb = max(frame.u_glass.y, 0.0);
+    bool insideGlass = false;
+    vec3 glassSigma = vec3(0.0);
+
     for (int bounce = 0; bounce < maxBounces; ++bounce) {
         HitInfo h = traceClosest(rayOrigin, rayDir, 1e30);
 
@@ -411,6 +424,13 @@ void main()
             albedos[index] = vec4(mat.diffuse.rgb, 1.0);
         }
 
+        // Beer-Lambert absorption (Path Tracing Max): the segment just
+        // travelled was inside the current dielectric medium, so attenuate the
+        // throughput by exp(-sigma * distance) before this hit contributes.
+        if (maxMode && insideGlass) {
+            weight *= exp(-glassSigma * h.t);
+        }
+
         // Emissive surfaces terminate the path.  With NEE enabled the
         // emission arrives through the emissive-triangle sampling below, so
         // a BSDF hit here is double counting unless the balance heuristic
@@ -440,15 +460,104 @@ void main()
         // sampling.  The emissive term also covers the primary ray: the
         // directly visible surface still receives area-light light.
         float alpha = clamp(mat.diffuse.a, 0.0, 1.0);
-        radiance += weight * alpha * coin_rtx_directLighting(h.pos, h.normal, rayDir, mat);
-        if (frame.u_nee.y > 0.5) {
-            radiance += weight * alpha * coin_rtx_neeEmissive(
-              h.pos, h.normal, mat,
-              hash3(px.x, px.y, frameIndex + uint(bounce) * 727u + 11u));
+        // Path Tracing Max (u_state.y == 5) treats every transparent surface
+        // (alpha < 1) as a smooth dielectric.  Its reflection/refraction is
+        // handled by the dielectric block below, so the diffuse direct-lighting
+        // term is skipped to avoid double counting the interface response.
+        // Opaque surfaces and the other modes keep the normal shading.
+        const bool dielectric = maxMode && (alpha < 1.0);
+        if (!dielectric) {
+            radiance += weight * alpha *
+                        coin_rtx_directLighting(h.pos, h.normal, rayDir, mat);
+            if (frame.u_nee.y > 0.5) {
+                radiance += weight * alpha * coin_rtx_neeEmissive(
+                  h.pos, h.normal, mat,
+                  hash3(px.x, px.y, frameIndex + uint(bounce) * 727u + 11u));
+            }
         }
 
         vec3 n = normalize(h.normal);
         vec3 albedo = mat.diffuse.rgb;
+
+        // Physically-based dielectric glass (Path Tracing Max): Fresnel split
+        // between specular reflection and Snell refraction, total internal
+        // reflection above the critical angle, and Beer-Lambert absorption
+        // through the medium.  The smooth interface is a delta BSDF, so each
+        // lobe's sampling probability equals its contribution and its
+        // throughput is left unchanged.
+        //
+        // Material Transparency filters the refracted light: a clearer
+        // material (higher Transparency, lower alpha) passes proportionally
+        // more of what is behind it.  The factor is applied ONCE per body, on
+        // entry into the dielectric -- not on every interface -- so a solid
+        // pane (front + back interface) transmits Transparency, not its
+        // square.  The specular reflection is unaffected.
+        if (dielectric) {
+            vec3 I = rayDir;
+            // traceClosest() orients the normal toward the ray origin, so the
+            // ray always enters the surface: cosI = -dot(I, n) > 0.
+            bool entering = !insideGlass;
+            float etaI = entering ? 1.0 : glassIor;
+            float etaT = entering ? glassIor : 1.0;
+            float eta = etaI / etaT;
+            float cosI = clamp(dot(-I, n), 0.0, 1.0);
+            float sin2T = eta * eta * (1.0 - cosI * cosI);
+            // Schlick Fresnel: near-normal reflectance from the IOR contrast,
+            // -> 1 at grazing incidence.
+            float f0 = (etaI - etaT) / (etaI + etaT);
+            f0 *= f0;
+            float R = f0 + (1.0 - f0) * pow(1.0 - cosI, 5.0);
+            vec3 newDir;
+            bool transmitted = false;
+            if (sin2T > 1.0) {
+                // Total internal reflection: all energy reflects.
+                newDir = reflect(I, n);
+            }
+            else {
+                float rnd = hash2(px.x, px.y,
+                                  frameIndex + uint(bounce) * 911u + 13u).x;
+                if (rnd < R) {
+                    newDir = reflect(I, n);
+                }
+                else {
+                    float cosT = sqrt(max(1.0 - sin2T, 0.0));
+                    newDir = normalize(eta * I + (eta * cosI - cosT) * n);
+                    transmitted = true;
+                }
+            }
+            // Material Transparency filters the refracted light once per
+            // dielectric body: apply it only on the air -> glass entry
+            // transmission, so a solid pane transmits (1 - alpha) rather than
+            // (1 - alpha)^2.  The specular reflection is unaffected.
+            if (transmitted && entering) {
+                weight *= (1.0 - alpha);
+            }
+            // Track the medium and its absorption coefficient.  Only a
+            // transmitted ray changes medium; a reflected / total-internal
+            // reflection ray stays on its current side.  First-order
+            // Beer-Lambert model: the material colour is the target
+            // transmittance, so its complement is the density that scales the
+            // absorption strength.  Scale that density by the opacity (alpha)
+            // so a near-clear material (Transparency ~ 1) adds almost no colour
+            // absorption -- the Transparency value alone decides how much light
+            // gets through.
+            if (transmitted) {
+                if (entering) {
+                    insideGlass = true;
+                    glassSigma =
+                      (vec3(1.0) - clamp(mat.diffuse.rgb, 0.0, 1.0)) *
+                      glassAbsorb * alpha;
+                }
+                else {
+                    insideGlass = false;
+                    glassSigma = vec3(0.0);
+                }
+            }
+            lastPdf = 1.0;  // delta interface
+            rayOrigin = h.pos + newDir * 0.001;
+            rayDir = normalize(newDir);
+            continue;
+        }
 
         // Thin-glass transmission: a translucent surface (diffuse alpha below
         // 1, FreeCAD Transparency) shades only its opaque (alpha) fraction and

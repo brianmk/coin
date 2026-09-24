@@ -19,6 +19,9 @@
     1 = RtxModeAmbientOcclusion  single-sample AO preview, no accumulation
     2 = RtxModePathTrace    accumulating multi-bounce path tracer
     3 = RtxModeEnvironment  single-sample procedural IBL preview
+    4 = RtxModePathTraceMax accumulating path tracer with physically-based
+        dielectric glass (Fresnel + Snell refraction + total internal
+        reflection + Beer-Lambert absorption)
 
   This header is always available (it has no Vulkan dependency) so an
   application can name the type even in a build without the Vulkan renderer.
@@ -28,6 +31,7 @@ enum class SoVulkanViewMode : int {
   RtxModeAmbientOcclusion = 1,
   RtxModePathTrace = 2,
   RtxModeEnvironment = 3,
+  RtxModePathTraceMax = 4,
 };
 
 #endif // COIN_SOVULKANVIEWMODE_H

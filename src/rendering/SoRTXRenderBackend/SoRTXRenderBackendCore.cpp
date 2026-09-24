@@ -99,6 +99,27 @@ SoRTXRenderBackend::getViewMode(void) const
 }
 
 void
+SoRTXRenderBackend::setPathTracingGlass(const float ior, const float absorption)
+{
+  if (this->ptGlassIor == ior && this->ptGlassAbsorption == absorption) return;
+  this->ptGlassIor = ior;
+  this->ptGlassAbsorption = absorption;
+  // A changed IOR/absorption changes the traced image (glass bends and tints
+  // differently), so restart the accumulation from a clean slate.  The
+  // geometry and acceleration structures are unaffected, so no AS rebuild is
+  // requested here -- the next path-tracing state update sees the new frame
+  // constants and re-starts the run.
+  this->ptAccumulating = FALSE;
+  this->ptStartLatch = FALSE;
+  this->ptFrameIndex = 0;
+  this->ptIdleFrames = 0;
+  this->ptConverged = FALSE;
+  this->ptDenoisePending = FALSE;
+  this->denoiseResultReady = FALSE;
+  ++this->ptRunGeneration;
+}
+
+void
 SoRTXRenderBackend::setEnvIntensity(const float intensity)
 {
   this->envIntensity = intensity;

@@ -200,7 +200,9 @@ public:
     state machine.  RtxModeAmbientOcclusion engages the ray tracer as a
     real-time single-sample preview that traces occlusion rays per pixel
     (u_state.y == 2) without accumulation or denoising; RtxModePathTrace is
-    the full accumulating path tracer (u_state.y == 1).  RtxModeOff leaves
+    the full accumulating path tracer (u_state.y == 1); RtxModePathTraceMax is
+    the same accumulating tracer extended with physically-based dielectric
+    glass (u_state.y == 5).  RtxModeOff leaves
     ptEnabled untouched (callers that want raster set ptEnabled false instead).
   */
   //! Shared with the embedding application (see SoVulkanViewMode.h).  Kept as
@@ -285,6 +287,16 @@ public:
     default before initialize().
   */
   void setPathTracingBounces(uint32_t bounces);
+
+  /*!
+    \brief Physically-based glass parameters for RtxModePathTraceMax.
+
+    Any material with transparency (alpha < 1) is treated as a smooth
+    dielectric with index of refraction \a ior (1.5 = window glass).  Beer-
+    Lambert absorption is derived from the material colour, scaled by
+    \a absorption (0 = perfectly clear).  Ignored by the other view modes.
+  */
+  void setPathTracingGlass(float ior, float absorption);
 
   /*!
     \brief Enable/disable interaction LOD (quality reduction while the camera
@@ -807,6 +819,10 @@ private:
   //! Bounce count requested by the settings; ptMaxBounces is derived from
   //! this and the interaction-LOD state (see setInteractionLod).
   uint32_t ptMaxBouncesBase = 4;
+  //! Physically-based glass parameters (RtxModePathTraceMax): dielectric IOR
+  //! and the Beer-Lambert absorption strength.  See setPathTracingGlass().
+  float ptGlassIor = 1.5f;
+  float ptGlassAbsorption = 0.1f;
   //! Bounce count used while interaction LOD is engaged (single bounce: the
   //! cheapest still-correct transport for a moving preview).
   uint32_t ptInteractionBounces = 1;
@@ -1033,8 +1049,18 @@ private:
   //! move, discards the denoise history) so the new colour is re-traced.
   bool materialChanged = false;
   //! Set by updateGeometryCache() when any cached traced command's model
-  //! matrix changed (object moved) while the geometry content did not.
+  //! matrix changed (object moved) while the geometry content did not.  Also
+  //! raised by an internal BLAS compaction to force the TLAS to re-point at
+  //! the compacted addresses, so it is an "AS must rebuild" signal, not a
+  //! "the visible scene changed" one.
   bool asTransformChanged = false;
+  //! Set only by the real model-matrix change detector in
+  //! updateGeometryCache() (an object actually moved).  This is the
+  //! path-tracing scene-change signal for instance transforms: it restarts
+  //! the accumulation/denoiser (the per-pixel history was gathered at the old
+  //! placement), and is deliberately NOT raised by the BLAS-compaction
+  //! TLAS-repoint above.  Consumed (cleared) by updatePathTracingState().
+  bool sceneTransformChanged = false;
   //! Computed each frame in recordAccelerationStructures(): true when the
   //! acceleration structures must be (re)built this frame (geometry content
   //! OR an instance transform changed).  When false the TLAS/NEE/material

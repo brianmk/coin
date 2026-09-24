@@ -764,6 +764,8 @@ SoVulkanRenderManager::setViewSettings(const SoVulkanViewSettings & settings)
                                    ? nullptr
                                    : settings.pathTracingDenoiser.c_str());
     this->setPathTracingDenoiserScale(settings.pathTracingDenoiserScale);
+    this->setPathTracingGlass(settings.pathTracingGlassIor,
+                              settings.pathTracingGlassAbsorption);
     this->setHdrOutput(settings.hdrOutput ? TRUE : FALSE,
                        settings.hdrExposure,
                        settings.hdrToneMap);
@@ -1202,6 +1204,17 @@ SoVulkanRenderManager::setPathTracingDenoiserScale(const float scale)
 }
 
 void
+SoVulkanRenderManager::setPathTracingGlass(const float ior,
+                                           const float absorption)
+{
+  this->pimpl->withRtx("SoVulkanRenderManager::setPathTracingGlass",
+                       "setting ignored",
+                       [ior, absorption](SoRTXRenderBackend & rtx) {
+                         rtx.setPathTracingGlass(ior, absorption);
+                       });
+}
+
+void
 SoVulkanRenderManager::setHdrOutput(SbBool enabled, float exposure, int toneMap)
 {
   this->pimpl->withRtx("SoVulkanRenderManager::setHdrOutput",
@@ -1554,35 +1567,19 @@ SoVulkanRenderManagerP::setClippingPlanes(void)
   float zmin = box.getMin()[2];
   float zmax = box.getMax()[2];
 
-  // Vector-graphics zoom wall: a CAD camera must never clip into a solid.
-  // Once the nearest scene boundary comes within delta of the camera (or
-  // crosses behind it), back the *effective* camera out along the view
-  // direction so the nearest surface stays delta in front.  Zooming in then
-  // scales features continuously -- the near plane keeps hugging the
-  // surface -- until the wall is reached, where the view pins instead of
-  // showing the interior of the solid.  The shift is applied to the box
-  // here and to the view matrix in prepareRenderParams(); the shared camera
-  // node itself is never touched (the hidden GL viewer owns it).
-  //
-  // delta scales with the scene: 0.001 * clippingOffset yields 0.1% of the
-  // 1% diagonal offset, i.e. ~100000x magnification before the wall on a
-  // typical part -- deep enough for any practical CAD inspection while the
-  // near plane (delta, times the 0.1% slack below) stays strictly in front
-  // of the surface.
+  // The former vector-graphics "zoom wall" (and the near-plane clamp that
+  // supported it) is intentionally gone.  It backed the effective camera out
+  // and pinned the nearest bounding-box boundary at delta = 0.001 *
+  // clippingOffset whenever the camera was inside the scene bounding box --
+  // i.e. for any close view of a large model.  That forced computedNear down
+  // to ~delta while far stayed scene-sized, destroying a 24-bit depth buffer's
+  // precision across the model: opaque faces z-fight and resolve arbitrarily,
+  // so the interior shows through (Coin, whose auto-clip keeps near ~ far/2^12,
+  // renders the same view correctly).  Keep GL parity instead:
+  // coinComputeClippingPlanes() below applies the VARIABLE_NEAR_PLANE precision
+  // floor (farval / 2^12 for the default nearplanevalue), the same near plane
+  // the legacy GL SoRenderManagerP uses.
   float shiftZ = 0.0f;
-  // Only engage the wall when geometry actually spans the view direction:
-  // zmin < 0 means something is in front of the camera.  With the whole
-  // scene behind the camera (looking away), backing out would flip the
-  // view around -- leave the planes alone instead.
-  if (!box.isEmpty() && zmin < 0.0f) {
-    const float delta = clippingOffset * 0.001f;
-    shiftZ = zmax + delta;
-    if (shiftZ < 0.0f) {
-      shiftZ = 0.0f;
-    }
-    zmin -= shiftZ;
-    zmax -= shiftZ;
-  }
   this->cameraShiftZ = shiftZ;
 
   // Rebuild the box from the shifted z extent so the shared clipping core
@@ -1638,53 +1635,17 @@ SoVulkanRenderManagerP::setClippingPlanes(void)
     }
   }
 
-  // Never let the near plane fall beyond the closest geometry in front of the
-  // camera.  When zoomed in close, the 1% diagonal offset and the
-  // VARIABLE_NEAR_PLANE precision floor can push the near plane past nearby
-  // surfaces, clipping them during close-up rotation.  Only clamp while the
-  // camera is outside the bounding box (closest > 0) so the near plane always
-  // stays in front of the camera.
-  //
-  // closest is the distance to the nearest boundary of the *shifted* box
-  // (-zmax): with the zoom wall active it is delta, keeping the near plane
-  // in front of the pinned surface.  Reading the unshifted box here made the
-  // near plane fall behind the surface (camera inside -> closest < 0 ->
-  // near plane = clippingOffset >> delta) and cut into the solid.
-  const float closest = -zmax;
-  if (closest > 0.0f) {
-    if (nearval > closest) {
-      nearval = closest;
-    }
-    // The camera sits just outside the scene bounds: the 1% clipping offset
-    // can exceed the distance to the nearest geometry, pushing the near
-    // plane behind the camera (nearval <= 0).  A negative or zero near
-    // plane inverts the view volume and clips geometry that is actually in
-    // front of the camera; SoCamera::viewAll() can also leave the near
-    // plane at exactly 0.  Keep the near plane strictly in front of the
-    // camera and behind the closest geometry.
-    if (nearval <= 0.0f) {
-      nearval = SbMin(closest, clippingOffset);
-      if (nearval <= 0.0f) {
-        nearval = std::numeric_limits<float>::epsilon();
-      }
-    }
-  }
-  else if (zmin < 0.0f) {
-    // The camera is inside the scene bounds (zmin < 0 < zmax), so the
-    // bbox-derived nearval is negative.  A negative near plane inverts the
-    // projection and clips everything (nothing renders / object "cut away"),
-    // which is what FreeCAD's GL renderer avoids by keeping a small positive
-    // near plane.  Fall back to a small positive plane anchored on the
-    // clipping offset.
-    if (nearval < clippingOffset) {
-      nearval = clippingOffset;
-    }
-  }
-  // else: the whole scene is behind the camera (zmin >= 0).  Keep the signed
-  // negative near/far planes computed above -- this is the orthographic case
-  // the legacy GL manager renders as-is (SoRenderManagerP::setClippingPlanes
-  // has no positive-near fallback), and the ortho view volume extends behind
-  // the projection point to cover it.
+  // Do NOT lower the near plane to the nearest bounding-box boundary here.
+  // The previous clamp did that (to support the zoom wall above) and, for a
+  // large scene whose bounding box the camera sits inside, drove computedNear
+  // down to ~0.001 while far stayed ~45000.  That ~4e7:1 depth ratio leaves a
+  // 24-bit depth buffer with no usable precision across the model, so opaque
+  // faces z-fight and render see-through.  coinComputeClippingPlanes() has
+  // already raised the perspective near plane to the VARIABLE_NEAR_PLANE
+  // precision floor (farval / 2^12 for the default nearplanevalue), which is
+  // the same near plane the legacy GL SoRenderManagerP uses and which renders
+  // these close-up views correctly.  For an orthographic camera the shared
+  // core keeps the meaningful signed planes untouched.
 
   // The far plane can also land behind the camera (whole scene behind it) or
   // invert relative to near; keep the view volume well-formed.
