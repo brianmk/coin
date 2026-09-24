@@ -310,15 +310,8 @@ private:
     uint32_t slotBase = 0;
     bool transparent = false;
     bool recordToSecondary = false; // opaque pass → secondary cmd buffer (M1c)
-    bool overlayPass = false;      // SO_RENDERPASS_OVERLAY screen-space draw
     int fillModeOverride = -1;     // wireframe/point redraw fill mode, or -1
     const float * uniformColorOverride = nullptr;
-    // Pre-resolved per-item state so the record path (and parallel workers)
-    // avoid re-walking the pipeline cache / texture-set map / lighting map.
-    // Filled by buildWorkItems(); unused markers left null.
-    VkPipeline pipeline = VK_NULL_HANDLE;
-    VkDescriptorSet textureSet = VK_NULL_HANDLE;
-    uint32_t lightingDynamicOffset = 0;
   };
 
   bool buildWorkItems(const SoDrawList & drawlist,
@@ -588,7 +581,6 @@ private:
   struct FramePlan {
     const SoVulkanRenderTarget * target = nullptr;
     bool overlaysOnly = false;
-    bool external = false;
   };
 
   // Shared frame prologue of renderInternal()/renderExternal()/
@@ -602,9 +594,8 @@ private:
   // by beginExternalPrepass()).
   bool beginFramePlan(const SoDrawList & drawlist,
                       const SoRenderParams & params, const char * caller,
-                      bool overlaysOnly, bool external,
-                      bool reserveCompositeSlots, FramePlan & plan,
-                      ExternalFrameTiming * timing);
+                      bool overlaysOnly, bool reserveCompositeSlots,
+                      FramePlan & plan, ExternalFrameTiming * timing);
 
   // Record the frame described by `plan`: the composite (traced overlay +
   // overlay block) recorders for an overlays-only frame, the full opaque/
@@ -632,13 +623,16 @@ private:
       const SoRenderParams & params) const;
 
   // --- HDR output pass (raster path) -------------------------------------
-  // Ensure the linear RGBA16F intermediate matches `outputTarget`'s extent and
-  // is ready to render into; fills outTarget/outPass/outFramebuffer.  Recreates
-  // the image (and its render pass/framebuffer) when the extent changes.
+  // Ensure the per-frame linear RGBA16F intermediate ring matches `outputTarget`'s
+  // extent and is ready to render into; fills outTarget/outPass/outFramebuffer
+  // for the current frame's ring slot and outDescriptorSet with the set that
+  // samples it.  Recreates the images (and their render pass/framebuffers) when
+  // the extent or the in-flight-frame count changes.
   bool ensureHdrIntermediate(const SoVulkanRenderTarget & outputTarget,
                              SoVulkanRenderTarget & outTarget,
                              VkRenderPass & outPass,
-                             VkFramebuffer & outFramebuffer);
+                             VkFramebuffer & outFramebuffer,
+                             VkDescriptorSet & outDescriptorSet);
   // Lazily create the output pipeline for `outputPass` (keyed on the pass,
   // which encodes the swapchain color format + sample count).
   bool ensureOutputPipeline(VkRenderPass outputPass, VkPipeline & outPipeline);
@@ -979,6 +973,14 @@ private:
   // pass/framebuffer without duplicating the cache bookkeeping.
   SoVulkanRenderPassCache renderPasses;
 
+  // Per-frame clear-by-load flags for the pass being recorded.  Set by each
+  // frame entry point (recordFrame(), prepareExternalFrame(),
+  // renderExternalHdr()) before recordClear() consults them.  These describe
+  // the *current frame*, not any cached pass, so they live on the backend
+  // rather than on the render-pass cache.
+  bool frameColorClearedByLoad_ = false;
+  bool frameDepthClearedByLoad_ = false;
+
   // --- HDR output pass (raster path) -------------------------------------
   // When hdrOutput is set, renderExternalHdr() renders the scene into a linear
   // RGBA16F intermediate (hdrColorImage) and presents it into the caller's
@@ -991,12 +993,24 @@ private:
   // 2 = ACES, 3 = Hable); see OutputFragment.glsl.
   int hdrToneMap = 1;
   SoVulkanRenderPassCache hdrPasses;
-  VkImage hdrColorImage = VK_NULL_HANDLE;
-  VmaAllocation hdrColorMemory = nullptr;
-  VkImageView hdrColorView = VK_NULL_HANDLE;
-  VkImage hdrDepthImage = VK_NULL_HANDLE;
-  VmaAllocation hdrDepthMemory = nullptr;
-  VkImageView hdrDepthView = VK_NULL_HANDLE;
+  // One ring slot per in-flight frame: each owns the offscreen RGBA16F
+  // color/depth images, the framebuffer binding them, and the output
+  // descriptor set that samples the color view.  Ringing is required because
+  // QVulkanWindow keeps several frames in flight; without it, frame N+1's
+  // offscreen pass (which discards and rewrites the intermediate) could race
+  // frame N's output pass, which is still sampling it.
+  struct HdrFrame {
+    VkImage colorImage = VK_NULL_HANDLE;
+    VmaAllocation colorMemory = nullptr;
+    VkImageView colorView = VK_NULL_HANDLE;
+    VkImage depthImage = VK_NULL_HANDLE;
+    VmaAllocation depthMemory = nullptr;
+    VkImageView depthView = VK_NULL_HANDLE;
+    VkFramebuffer framebuffer = VK_NULL_HANDLE;
+    VkDescriptorSet outputDescriptorSet = VK_NULL_HANDLE;
+  };
+  std::vector<HdrFrame> hdrFrames;
+  VkRenderPass hdrRenderPass = VK_NULL_HANDLE;
   VkExtent2D hdrExtent {0, 0};
   // Output-pass shaders and pipeline, keyed per output render pass (the pass
   // changes with the swapchain color format).
@@ -1009,7 +1023,6 @@ private:
   // reference it), mirroring descriptorPools/subPixelDescriptorPools.
   std::vector<VkDescriptorPool> outputDescriptorPools;
   uint32_t outputDescriptorSetCount = 0;
-  VkDescriptorSet outputDescriptorSet = VK_NULL_HANDLE;
   VkSampler outputSampler = VK_NULL_HANDLE;
   // Sample count of the caller's output pass, set before ensureOutputPipeline()
   // so the output pipeline matches the pass's MSAA state.

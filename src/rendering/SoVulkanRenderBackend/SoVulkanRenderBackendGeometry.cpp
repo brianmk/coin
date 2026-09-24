@@ -247,11 +247,8 @@ SoVulkanRenderBackend::updateGeometryCache(const SoDrawList & drawlist,
         this->geometryCache.upload(entry, command);
       }
     }
-    entry.commandKey = &command;
-    entry.cacheGeneration = generation;
-    if (compositeSweep) {
-      entry.compositeEpoch = this->overlayCompositeEpoch;
-    }
+    this->geometryCache.markVisited(entry, &command, generation, compositeSweep,
+                                    this->overlayCompositeEpoch);
 
     // Texture lookup/content-change detection, defer-destroy of the stale
     // image and staging of a new upload all live in the cache.

@@ -21,10 +21,10 @@ class SoVulkanBufferFactory;
   \brief Cached GPU geometry for one retained SoRenderCommand.
 
   Vulkan buffers are packed per command: one interleaved vertex buffer (fixed
-  48-byte stride: position + normal + color + texcoord) and one optional
-  uint32 index buffer.  Unlike the GL backend, the Vulkan backend always uses
-  the same vertex layout so a single static vertex-input state can be shared
-  by every pipeline.
+  32-byte stride: position f32x3 + normal f32x3 + color R8G8B8A8 + texcoord
+  R16G16) and one optional uint32 index buffer.  Unlike the GL backend, the
+  Vulkan backend always uses the same vertex layout so a single static
+  vertex-input state can be shared by every pipeline.
 */
 struct VulkanCachedCommand {
   VkBuffer vertexBuffer = VK_NULL_HANDLE;
@@ -184,6 +184,14 @@ public:
   void destroyEntry(VulkanCachedCommand & entry);
   // destroyEntry() through the deferred-destruction ring.
   void deferDestroyEntry(VulkanCachedCommand & entry);
+  // Record that the entry was visited by the current frame: store the command
+  // identity used to rebuild the lookup map after eviction and stamp the visit
+  // so the matching sweep keeps it.  `composite` selects the overlay-composite
+  // epoch stamp (used while ray tracing owns the scene) instead of the
+  // draw-list generation.
+  void markVisited(VulkanCachedCommand & entry, const SoRenderCommand * command,
+                   uint32_t generation, bool composite,
+                   uint32_t compositeEpoch);
   // Drop every entry (synchronously); the backend's invalidateCache() calls
   // this next to SoVulkanTextureCache::invalidate().
   void invalidate();

@@ -9,6 +9,7 @@
 #include <Inventor/errors/SoDebugError.h>
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <chrono>
 #include <cmath>
 #include <cstring>
@@ -612,7 +613,21 @@ SoRTXRenderBackend::updateGeometryCache(const SoDrawList & drawlist)
     const SoRenderCommand & command = drawlist.getCommand(i);
     const SoGeometryDesc & geometry = command.geometry;
     if (!geometry.positions || geometry.vertexCount == 0 ||
-        geometry.vertexCount > MAX_VERTEX_COUNT) continue;
+        geometry.vertexCount > MAX_VERTEX_COUNT) {
+      // A silent drop leaves the command with no BLAS, so the whole object
+      // vanishes from the ray-traced image (indistinguishable from an empty
+      // scene).  Warn once per process; the raster backend uses the same cap.
+      if (geometry.positions && geometry.vertexCount > MAX_VERTEX_COUNT) {
+        static std::atomic<bool> warnedOversized {false};
+        if (!warnedOversized.exchange(true)) {
+          fprintf(stderr,
+                  "[RTDBG] command has %u vertices > %d cap; skipped in the "
+                  "ray-traced geometry cache (no BLAS)\n",
+                  geometry.vertexCount, MAX_VERTEX_COUNT);
+        }
+      }
+      continue;
+    }
     if (geometry.topology != SO_TOPOLOGY_TRIANGLES) continue;
 
     const uint32_t vertexStride = geometry.vertexStride

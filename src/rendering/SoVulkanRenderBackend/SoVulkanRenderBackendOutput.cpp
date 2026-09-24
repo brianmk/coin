@@ -24,6 +24,7 @@
 
 #include <Inventor/errors/SoDebugError.h>
 
+#include <algorithm>
 #include <cstdio>
 #include <vector>
 
@@ -39,32 +40,37 @@ SoVulkanRenderBackend::setHdrOutput(SbBool enabled, float exposure, int toneMap)
   this->hdrToneMap = toneMap;
 }
 
-// Release the intermediate image + depth and the offscreen render
-// pass/framebuffer.  Destruction is deferred through the frame ring (like every
-// other resource replaced mid-session) so an in-flight submission that still
-// references them drains first; hdrPasses' deferred hook queues the framebuffer.
+// Release the per-frame intermediate images/depth/framebuffers and the
+// offscreen render pass.  Destruction is deferred through the frame ring (like
+// every other resource replaced mid-session) so an in-flight submission that
+// still references them drains first.  The output descriptor sets are owned by
+// the append-only output descriptor pools and freed with them in
+// destroyHdrOutputResources(), not here.
 void
 SoVulkanRenderBackend::releaseHdrIntermediate()
 {
   const VkDevice dev = this->device;
   const VkAllocationCallbacks * alloc = this->allocator;
   VmaAllocator vma = this->vmaAllocator;
-  const VkImage color = this->hdrColorImage;
-  const VmaAllocation colorMem = this->hdrColorMemory;
-  const VkImageView colorView = this->hdrColorView;
-  const VkImage depth = this->hdrDepthImage;
-  const VmaAllocation depthMem = this->hdrDepthMemory;
-  const VkImageView depthView = this->hdrDepthView;
-  this->hdrColorImage = VK_NULL_HANDLE;
-  this->hdrColorMemory = nullptr;
-  this->hdrColorView = VK_NULL_HANDLE;
-  this->hdrDepthImage = VK_NULL_HANDLE;
-  this->hdrDepthMemory = nullptr;
-  this->hdrDepthView = VK_NULL_HANDLE;
-  this->hdrExtent = {0, 0};
-  if (color != VK_NULL_HANDLE || depth != VK_NULL_HANDLE) {
+  for (HdrFrame & f : this->hdrFrames) {
+    const VkImage color = f.colorImage;
+    const VmaAllocation colorMem = f.colorMemory;
+    const VkImageView colorView = f.colorView;
+    const VkImage depth = f.depthImage;
+    const VmaAllocation depthMem = f.depthMemory;
+    const VkImageView depthView = f.depthView;
+    const VkFramebuffer framebuffer = f.framebuffer;
+    f = HdrFrame {};
+    if (color == VK_NULL_HANDLE && depth == VK_NULL_HANDLE &&
+        framebuffer == VK_NULL_HANDLE && colorView == VK_NULL_HANDLE &&
+        depthView == VK_NULL_HANDLE) {
+      continue;
+    }
     this->deferDestroy([dev, alloc, vma, color, colorMem, colorView, depth,
-                        depthMem, depthView]() {
+                        depthMem, depthView, framebuffer]() {
+      if (framebuffer != VK_NULL_HANDLE) {
+        vkDestroyFramebuffer(dev, framebuffer, alloc);
+      }
       if (colorView != VK_NULL_HANDLE) {
         vkDestroyImageView(dev, colorView, alloc);
       }
@@ -79,6 +85,9 @@ SoVulkanRenderBackend::releaseHdrIntermediate()
       }
     });
   }
+  this->hdrFrames.clear();
+  this->hdrExtent = {0, 0};
+  this->hdrRenderPass = VK_NULL_HANDLE;
   this->hdrPasses.destroyAll();
 }
 
@@ -108,7 +117,6 @@ SoVulkanRenderBackend::destroyHdrOutputResources()
   }
   this->outputDescriptorPools.clear();
   this->outputDescriptorSetCount = 0;
-  this->outputDescriptorSet = VK_NULL_HANDLE;
   if (this->outputSampler != VK_NULL_HANDLE) {
     vkDestroySampler(this->device, this->outputSampler, this->allocator);
     this->outputSampler = VK_NULL_HANDLE;
@@ -129,7 +137,8 @@ SoVulkanRenderBackend::destroyHdrOutputResources()
 bool
 SoVulkanRenderBackend::ensureHdrIntermediate(
     const SoVulkanRenderTarget & outputTarget, SoVulkanRenderTarget & outTarget,
-    VkRenderPass & outPass, VkFramebuffer & outFramebuffer)
+    VkRenderPass & outPass, VkFramebuffer & outFramebuffer,
+    VkDescriptorSet & outDescriptorSet)
 {
   // One-time output-pass objects: descriptor set layout, pipeline layout and
   // sampler.  The pipeline itself is created per output render pass in
@@ -190,9 +199,18 @@ SoVulkanRenderBackend::ensureHdrIntermediate(
     return false;
   }
 
-  if (this->hdrColorImage == VK_NULL_HANDLE || this->hdrExtent.width != extent.width
-      || this->hdrExtent.height != extent.height) {
+  // Ring depth: one intermediate per in-flight frame, with one extra slot of
+  // margin over QVulkanWindow's swapchain-images-in-flight (the embedding sets
+  // maxFramesInFlight accordingly; see QuarterVulkanWidget).
+  const uint32_t slotCount = std::max(1u, this->maxFramesInFlight);
+  const bool rebuild = this->hdrFrames.size() != slotCount ||
+                       this->hdrExtent.width != extent.width ||
+                       this->hdrExtent.height != extent.height ||
+                       this->hdrRenderPass == VK_NULL_HANDLE;
+  if (rebuild) {
     this->releaseHdrIntermediate();
+    this->hdrFrames.resize(slotCount);
+    this->hdrExtent = extent;
 
     const VkFormat colorFormat = VK_FORMAT_R16G16B16A16_SFLOAT;
     const VkFormat depthFormat = VK_FORMAT_D32_SFLOAT;
@@ -218,70 +236,110 @@ SoVulkanRenderBackend::ensureHdrIntermediate(
                             nullptr) == VK_SUCCESS;
     };
 
-    if (!createImage(colorFormat,
-                     VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT,
-                     this->hdrColorImage, this->hdrColorMemory)) {
-      this->emitError("ensureHdrIntermediate: color image failed");
-      this->releaseHdrIntermediate();
-      return false;
+    // Build every ring slot's images/views and the output descriptor set that
+    // samples its color view.  A set is never freed while a frame may reference
+    // it, so each slot gets its own from the append-only pool.
+    for (HdrFrame & f : this->hdrFrames) {
+      if (!createImage(colorFormat,
+                       VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT |
+                         VK_IMAGE_USAGE_SAMPLED_BIT,
+                       f.colorImage, f.colorMemory)) {
+        this->emitError("ensureHdrIntermediate: color image failed");
+        this->releaseHdrIntermediate();
+        return false;
+      }
+      f.colorView = createImageView(this->device, f.colorImage, colorFormat,
+                                    VK_IMAGE_ASPECT_COLOR_BIT, this->allocator);
+      if (f.colorView == VK_NULL_HANDLE) {
+        this->emitError("ensureHdrIntermediate: color view failed");
+        this->releaseHdrIntermediate();
+        return false;
+      }
+      if (!createImage(depthFormat, VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT,
+                       f.depthImage, f.depthMemory)) {
+        this->emitError("ensureHdrIntermediate: depth image failed");
+        this->releaseHdrIntermediate();
+        return false;
+      }
+      f.depthView = createImageView(this->device, f.depthImage, depthFormat,
+                                    VK_IMAGE_ASPECT_DEPTH_BIT, this->allocator);
+      if (f.depthView == VK_NULL_HANDLE) {
+        this->emitError("ensureHdrIntermediate: depth view failed");
+        this->releaseHdrIntermediate();
+        return false;
+      }
+      if (!this->ensureOutputDescriptorSet(f.colorView,
+                                           f.outputDescriptorSet)) {
+        this->releaseHdrIntermediate();
+        return false;
+      }
     }
-    this->hdrColorView = createImageView(this->device, this->hdrColorImage,
-                                         colorFormat, VK_IMAGE_ASPECT_COLOR_BIT,
-                                         this->allocator);
-    if (this->hdrColorView == VK_NULL_HANDLE) {
-      this->emitError("ensureHdrIntermediate: color view failed");
-      this->releaseHdrIntermediate();
-      return false;
-    }
-    if (!createImage(depthFormat, VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT,
-                     this->hdrDepthImage, this->hdrDepthMemory)) {
-      this->emitError("ensureHdrIntermediate: depth image failed");
-      this->releaseHdrIntermediate();
-      return false;
-    }
-    this->hdrDepthView = createImageView(this->device, this->hdrDepthImage,
-                                         depthFormat, VK_IMAGE_ASPECT_DEPTH_BIT,
-                                         this->allocator);
-    if (this->hdrDepthView == VK_NULL_HANDLE) {
-      this->emitError("ensureHdrIntermediate: depth view failed");
-      this->releaseHdrIntermediate();
-      return false;
-    }
-    this->hdrExtent = extent;
 
-    // Bind the fresh view into the output descriptor set (a set is never freed
-    // while a frame may reference it, so a fresh one is allocated from an
-    // append-only pool).
-    if (!this->ensureOutputDescriptorSet(this->hdrColorView,
-                                         this->outputDescriptorSet)) {
+    // Shared offscreen render pass (identical for every slot: same formats,
+    // sample count and load ops).  The pass identity depends on whether a depth
+    // attachment is present, so derive it from a fully-populated slot target.
+    SoVulkanRenderTarget desc {};
+    desc.colorImage = this->hdrFrames[0].colorImage;
+    desc.colorImageView = this->hdrFrames[0].colorView;
+    desc.colorFormat = colorFormat;
+    desc.colorLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+    desc.depthImage = this->hdrFrames[0].depthImage;
+    desc.depthImageView = this->hdrFrames[0].depthView;
+    desc.depthFormat = depthFormat;
+    desc.depthLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
+    desc.extent = extent;
+    desc.sampleCount = VK_SAMPLE_COUNT_1_BIT;
+    this->hdrRenderPass = this->hdrPasses.getOrCreateRenderPass(
+      desc, VK_ATTACHMENT_LOAD_OP_CLEAR, VK_ATTACHMENT_LOAD_OP_CLEAR);
+    if (this->hdrRenderPass == VK_NULL_HANDLE) {
+      this->emitError("ensureHdrIntermediate: offscreen render pass failed");
       this->releaseHdrIntermediate();
       return false;
+    }
+
+    // One framebuffer per slot (created directly, not through hdrPasses, which
+    // caches a single "current" framebuffer and would thrash every frame).
+    for (HdrFrame & f : this->hdrFrames) {
+      VkImageView attachments[2] = {f.colorView, f.depthView};
+      VkFramebufferCreateInfo ci {};
+      ci.sType = VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO;
+      ci.renderPass = this->hdrRenderPass;
+      ci.attachmentCount = 2;
+      ci.pAttachments = attachments;
+      ci.width = extent.width;
+      ci.height = extent.height;
+      ci.layers = 1;
+      if (vkCreateFramebuffer(this->device, &ci, this->allocator,
+                              &f.framebuffer) != VK_SUCCESS) {
+        this->emitError("ensureHdrIntermediate: framebuffer failed");
+        this->releaseHdrIntermediate();
+        return false;
+      }
     }
   }
 
+  const uint32_t slot = this->uboFrameIndex % slotCount;
+  if (slot >= this->hdrFrames.size()) {
+    this->emitError("ensureHdrIntermediate: ring slot out of range");
+    return false;
+  }
+  HdrFrame & frame = this->hdrFrames[slot];
+
   outTarget = SoVulkanRenderTarget {};
-  outTarget.colorImage = this->hdrColorImage;
-  outTarget.colorImageView = this->hdrColorView;
+  outTarget.colorImage = frame.colorImage;
+  outTarget.colorImageView = frame.colorView;
   outTarget.colorFormat = VK_FORMAT_R16G16B16A16_SFLOAT;
   outTarget.colorLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
-  outTarget.depthImage = this->hdrDepthImage;
-  outTarget.depthImageView = this->hdrDepthView;
+  outTarget.depthImage = frame.depthImage;
+  outTarget.depthImageView = frame.depthView;
   outTarget.depthFormat = VK_FORMAT_D32_SFLOAT;
   outTarget.depthLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
   outTarget.extent = extent;
   outTarget.sampleCount = VK_SAMPLE_COUNT_1_BIT;
 
-  outPass = this->hdrPasses.getOrCreateRenderPass(
-    outTarget, VK_ATTACHMENT_LOAD_OP_CLEAR, VK_ATTACHMENT_LOAD_OP_CLEAR);
-  if (outPass == VK_NULL_HANDLE) {
-    this->emitError("ensureHdrIntermediate: offscreen render pass failed");
-    return false;
-  }
-  if (!this->hdrPasses.ensureFramebuffer(&outTarget, outPass)) {
-    this->emitError("ensureHdrIntermediate: offscreen framebuffer failed");
-    return false;
-  }
-  outFramebuffer = this->hdrPasses.framebuffer();
+  outPass = this->hdrRenderPass;
+  outFramebuffer = frame.framebuffer;
+  outDescriptorSet = frame.outputDescriptorSet;
   return outFramebuffer != VK_NULL_HANDLE;
 }
 
@@ -433,8 +491,9 @@ SoVulkanRenderBackend::renderExternalHdr(const SoDrawList & drawlist,
   SoVulkanRenderTarget hdrTarget;
   VkRenderPass hdrPass = VK_NULL_HANDLE;
   VkFramebuffer hdrFramebuffer = VK_NULL_HANDLE;
+  VkDescriptorSet hdrDescriptorSet = VK_NULL_HANDLE;
   if (!this->ensureHdrIntermediate(*outputTarget, hdrTarget, hdrPass,
-                                   hdrFramebuffer)) {
+                                   hdrFramebuffer, hdrDescriptorSet)) {
     return FALSE;
   }
 
@@ -457,8 +516,26 @@ SoVulkanRenderBackend::renderExternalHdr(const SoDrawList & drawlist,
     return FALSE;
   }
   // The offscreen pass clears via its loadOp, so recordClear() must skip the
-  // redundant vkCmdClearAttachments (recordClear consults this->renderPasses).
-  this->renderPasses.setClearedByLoad(true, true);
+  // redundant vkCmdClearAttachments (recordClear consults the backend's
+  // per-frame clear flags).
+  this->frameColorClearedByLoad_ = true;
+  this->frameDepthClearedByLoad_ = true;
+
+  // Record the frame's texture uploads and sub-pixel compaction dispatches
+  // into the caller's command buffer, ahead of the offscreen pass.  This path
+  // begins its own offscreen pass below, so unlike the SDR external path
+  // (renderExternal(), which cannot touch the caller's already-begun pass and
+  // must use the beginExternalPrepass() transient buffer) the transfer and
+  // compute commands can be recorded inline here.  Without this the staged
+  // uploads stay pending and are discarded next frame, leaving textured
+  // geometry on the white fallback descriptor, and the geometry LOD never runs.
+  if (this->textureCache.hasPendingUploads()) {
+    this->textureCache.recordPendingInto(commandBuffer);
+    this->textureCache.finalizePending();
+  }
+  if (this->externalGeometryLodActive(hdrParams)) {
+    this->recordGeometryLodPrepass(commandBuffer, drawlist, hdrParams);
+  }
 
   // --- Offscreen pass: scene -> linear RGBA16F ---------------------------
   // The intermediate starts UNDEFINED and the previous frame's output pass
@@ -467,12 +544,12 @@ SoVulkanRenderBackend::renderExternalHdr(const SoDrawList & drawlist,
   // oldLayout UNDEFINED is always legal and discards the previous contents,
   // which the CLEAR loadOp rewrites anyway.
   SoVulkanShared::imageTransition(
-    commandBuffer, this->hdrColorImage, VK_IMAGE_LAYOUT_UNDEFINED,
+    commandBuffer, hdrTarget.colorImage, VK_IMAGE_LAYOUT_UNDEFINED,
     VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, 0,
     VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
     VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT);
   SoVulkanShared::imageTransition(
-    commandBuffer, this->hdrDepthImage, VK_IMAGE_LAYOUT_UNDEFINED,
+    commandBuffer, hdrTarget.depthImage, VK_IMAGE_LAYOUT_UNDEFINED,
     VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL, 0,
     VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT,
     VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
@@ -504,7 +581,7 @@ SoVulkanRenderBackend::renderExternalHdr(const SoDrawList & drawlist,
 
   // --- Output pass: linear RGBA16F -> swapchain (PQ or clamp) ------------
   SoVulkanShared::imageTransition(
-    commandBuffer, this->hdrColorImage,
+    commandBuffer, hdrTarget.colorImage,
     VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
     VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
     VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT, VK_ACCESS_SHADER_READ_BIT,
@@ -547,7 +624,7 @@ SoVulkanRenderBackend::renderExternalHdr(const SoDrawList & drawlist,
                     outputPipeline);
   vkCmdBindDescriptorSets(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS,
                           this->outputPipelineLayout, 0, 1,
-                          &this->outputDescriptorSet, 0, nullptr);
+                          &hdrDescriptorSet, 0, nullptr);
   const float push[4] = {this->hdrOutput ? 1.0f : 0.0f, this->hdrExposure,
                          static_cast<float>(this->hdrToneMap), 0.0f};
   vkCmdPushConstants(commandBuffer, this->outputPipelineLayout,

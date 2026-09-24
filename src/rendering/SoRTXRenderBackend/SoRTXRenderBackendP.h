@@ -143,7 +143,13 @@ static_assert(SO_MAX_SHADER_LIGHTS == 8,
               "SO_MAX_SHADER_LIGHTS change requires regenerating the "
               "hardcoded [8] light arrays in the GLSL/Visual shaders");
 
-constexpr int MAX_VERTEX_COUNT = 10000000;
+// Largest vertex count a single command may trace.  Kept in lockstep with the
+// raster backend's ceiling (SoVulkanRenderBackendP.h MAX_VERTEX_COUNT): a
+// flat-shaded CAD mesh expands to 3 unique vertices per triangle, so a
+// Voron-class assembly reaches tens of millions of vertices in one command.
+// The old 10M ceiling silently gave such a command no BLAS, so it vanished
+// from ray-traced views while still rendering in the raster pass.
+constexpr int MAX_VERTEX_COUNT = 64000000;
 
 // FNV-1a content hash of a command's geometry, sampled so full-scene
 // hashing stays sub-millisecond.  The producer's geometry storage is a

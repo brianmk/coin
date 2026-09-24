@@ -175,6 +175,20 @@ SoVulkanGeometryCache::getOrCreate(const SoRenderCommand * command)
   return this->entries_.back();
 }
 
+void
+SoVulkanGeometryCache::markVisited(VulkanCachedCommand & entry,
+                                   const SoRenderCommand * command,
+                                   const uint32_t generation,
+                                   const bool composite,
+                                   const uint32_t compositeEpoch)
+{
+  entry.commandKey = command;
+  entry.cacheGeneration = generation;
+  if (composite) {
+    entry.compositeEpoch = compositeEpoch;
+  }
+}
+
 VulkanCachedCommand *
 SoVulkanGeometryCache::find(const SoRenderCommand * command)
 {

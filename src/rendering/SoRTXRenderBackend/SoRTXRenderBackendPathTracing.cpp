@@ -891,6 +891,16 @@ SoRTXRenderBackend::recordAccelerationStructures(
   // allowed inside one).  The raygen receives its frame state through the
   // 16-byte push constant block; the descriptor set stays as updated after
   // the TLAS (re)build above.
+  //
+  // The SBT raygen only implements the single-sample preview and the
+  // accumulating path trace; the ambient-occlusion (u_state.y == 2) and
+  // environment (== 3) previews exist only in the ray-query compute shader.
+  // So those two modes must run through the compute path even when the opt-in
+  // FC_VULKAN_RT_SBT pipeline is enabled, otherwise they silently render as a
+  // full multi-bounce path trace instead of their single-sample previews.
+  const bool sbtModeSupported =
+    this->rtxViewMode != RtxViewMode::RtxModeAmbientOcclusion &&
+    this->rtxViewMode != RtxViewMode::RtxModeEnvironment;
   if (this->tlas == VK_NULL_HANDLE) {
     // No traceable geometry (empty scene; the view's zero-scaled anchor cube
     // is filtered out upstream): the TLAS was never built and the descriptor
@@ -910,7 +920,7 @@ SoRTXRenderBackend::recordAccelerationStructures(
     vkCmdClearColorImage(cmd, this->storageImage, VK_IMAGE_LAYOUT_GENERAL,
                          &clearColor, 1, &fullRange);
   }
-  else if (this->useSbtPipeline) {
+  else if (this->useSbtPipeline && sbtModeSupported) {
     RTXRaygenPush raygenPush;
     raygenPush.frameIndex = this->ptFrameIndex;
     raygenPush.flags = (this->ptEnabled ? 1u : 0u) |

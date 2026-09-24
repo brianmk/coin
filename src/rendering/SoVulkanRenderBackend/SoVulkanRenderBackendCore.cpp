@@ -254,7 +254,7 @@ SoVulkanRenderBackend::initialize(const SoRenderBackendInitParams & params)
     allocatorInfo.physicalDevice = this->physicalDevice;
     allocatorInfo.device = this->device;
     allocatorInfo.instance = this->instance;
-    allocatorInfo.vulkanApiVersion = VK_API_VERSION_1_2;
+    allocatorInfo.vulkanApiVersion = deviceContext->apiVersion;
     allocatorInfo.pAllocationCallbacks = this->allocator;
     if (vmaCreateAllocator(&allocatorInfo, &this->vmaAllocator) != VK_SUCCESS) {
       this->emitError("SoVulkanRenderBackend: vmaCreateAllocator failed");
