@@ -29,6 +29,29 @@
 
 using namespace SoRTXBackend;
 
+// Model-matrix identity for the geometry cache.  Two commands with identical
+// vertex/index content but different model matrices -- e.g. two instances of
+// the same window/wall component at different placements -- must never be
+// allowed to claim the same cache entry.  If they do, each one writes its own
+// model matrix into the shared entry's transformBits (see the
+// instance-transform detector below) and reads the other's back the next
+// frame, so the detector reports a scene change every frame and restarts the
+// path-tracing accumulation/denoiser forever.  The draw-list is a per-frame
+// arena, so a hover-induced reallocation makes such twins miss the pointer map
+// and collide in the content-only re-key; requiring the matrix too keeps each
+// twin on its own entry.  SbMatrix is exactly float[4][4].
+//
+// The comparison is numeric (matricesNearlyEqual), NOT a raw bit compare: a
+// placement at z=0 can carry a translation component that alternates between
+// -0.0f and +0.0f between frames (bit patterns 0x80000000 vs 0x00000000) while
+// staying numerically zero.  A memcmp would treat the same placement as two
+// different ones, so the twins would once again collide -- and the detector's
+// own memcmp would fire every frame.
+inline bool sameModelMatrix(const float stored[16], const SbMatrix & m)
+{
+  return matricesNearlyEqual(stored, &m[0][0], 16);
+}
+
 bool
 SoRTXRenderBackend::ensureNormalPoolCapacity(VkDeviceSize bytes)
 {
@@ -673,7 +696,8 @@ SoRTXRenderBackend::updateGeometryCache(const SoDrawList & drawlist)
           e.indexCount == geometry.indexCount &&
           e.vertexStride == vertexStride &&
           ((e.idxKey != nullptr) == indexed) &&
-          e.changeSignal == signal;
+          e.changeSignal == signal &&
+          sameModelMatrix(e.transformBits, command.modelMatrix);
         if (sameGeometry) {
           e.cacheGeneration = frame;
           e.commandKey = &command;
@@ -689,7 +713,8 @@ SoRTXRenderBackend::updateGeometryCache(const SoDrawList & drawlist)
               e.vertexCount == geometry.vertexCount &&
               e.indexCount == geometry.indexCount &&
               e.vertexStride == vertexStride &&
-              ((e.idxKey != nullptr) == indexed)) {
+              ((e.idxKey != nullptr) == indexed) &&
+              sameModelMatrix(e.transformBits, command.modelMatrix)) {
             e.cacheGeneration = frame;
             e.commandKey = &command;
             this->commandToCache[&command] =
@@ -759,9 +784,54 @@ SoRTXRenderBackend::updateGeometryCache(const SoDrawList & drawlist)
     uint64_t hash = 0;
     RTXCachedGeometry * entryPtr = nullptr;
 
+    // The pointer map is keyed by the draw-list address, but the draw list is
+    // a per-frame arena: a reorder that keeps the command COUNT (a hover
+    // highlight inserting/moving commands) reuses the same addresses for
+    // different commands without evicting anything, so a plain find() can hand
+    // back an unrelated entry.  Trusting that entry is what mixed two objects'
+    // geometry/colour ("other planes change colour on hover") and set
+    // cacheChanged (restarting the accumulation) on every hover frame.  The
+    // validation below rejects a hit that is not provably this command's, after
+    // which the content re-key finds the real entry by (content hash, matrix).
+    bool pointerHit = false;
+    size_t pointerIdx = 0;
     const auto found = this->commandToCache.find(&command);
     if (found != this->commandToCache.end()) {
-      RTXCachedGeometry & entry = this->geometryCache[found->second];
+      RTXCachedGeometry & hitEntry = this->geometryCache[found->second];
+      // An entry is reusable only if it has not already been claimed this
+      // frame and either its placement matches (the common static case) or it
+      // is the same geometry at a new placement -- a moved object, which the
+      // transform detector below reports without rebuilding the BLAS.  The
+      // latter is NOT the same as a twin: if another entry already holds this
+      // content at the new placement, this pointer is stale (a reused slot),
+      // so drop the mapping and let the content re-key sort both out.
+      bool reusable = false;
+      if (hitEntry.cacheGeneration != frame) {
+        if (sameModelMatrix(hitEntry.transformBits, command.modelMatrix)) {
+          reusable = true;
+        }
+        else if (hitEntry.changeSignal == signal && hitEntry.contentHash != 0) {
+          reusable = true;
+          for (RTXCachedGeometry & e : this->geometryCache) {
+            if (&e == &hitEntry || e.cacheGeneration == frame) continue;
+            if (e.blas != VK_NULL_HANDLE && e.contentHash == hitEntry.contentHash &&
+                sameModelMatrix(e.transformBits, command.modelMatrix)) {
+              reusable = false;
+              break;
+            }
+          }
+        }
+      }
+      if (reusable) {
+        pointerHit = true;
+        pointerIdx = found->second;
+      }
+      else {
+        this->commandToCache.erase(found);
+      }
+    }
+    if (pointerHit) {
+      RTXCachedGeometry & entry = this->geometryCache[pointerIdx];
       hash = entry.contentHash;
       bool matches = entry.blas != VK_NULL_HANDLE &&
         entry.changeSignal == signal && entry.contentHash != 0;
@@ -769,7 +839,30 @@ SoRTXRenderBackend::updateGeometryCache(const SoDrawList & drawlist)
         hash = hashGeometry(geometry, vertexStride, indexed);
         matches = entry.blas != VK_NULL_HANDLE && entry.contentHash == hash;
       }
+      // A reorder that keeps the command count (e.g. a hover highlight) reuses
+      // an arena address for a different command -- often another face of the
+      // same object, so the model matrix matches and the pointer hit looks
+      // legitimate.  If this command's real entry already exists elsewhere
+      // (same content hash + placement), the hit is a stale slot: rebind to
+      // the real entry and leave this one for its own command, instead of
+      // overwriting it (which mixes the two objects' geometry/colour and sets
+      // cacheChanged, restarting the accumulation on every hover).
+      RTXCachedGeometry * alt = nullptr;
       if (!matches) {
+        for (RTXCachedGeometry & e : this->geometryCache) {
+          if (&e == &entry || e.cacheGeneration == frame) continue;
+          if (e.blas != VK_NULL_HANDLE && e.contentHash == hash &&
+              e.vertexCount == geometry.vertexCount &&
+              e.indexCount == geometry.indexCount &&
+              e.vertexStride == vertexStride &&
+              ((e.idxKey != nullptr) == indexed) &&
+              sameModelMatrix(e.transformBits, command.modelMatrix)) {
+            alt = &e;
+            break;
+          }
+        }
+      }
+      if (!matches && !alt) {
         // Split the identity: position-only changes (same topology) refit
         // the existing BLAS in place; index/topology changes destroy and
         // rebuild.
@@ -845,7 +938,15 @@ SoRTXRenderBackend::updateGeometryCache(const SoDrawList & drawlist)
         entry.vertexHash = vertexHash;
         entry.indexHash = indexHash;
       }
-      entryPtr = &entry;
+      if (alt) {
+        alt->changeSignal = signal;
+        this->commandToCache[&command] =
+          static_cast<size_t>(alt - this->geometryCache.data());
+        entryPtr = alt;
+      }
+      else {
+        entryPtr = &entry;
+      }
     }
     else {
       // The command pointer changed (draw-list storage reallocation or
@@ -860,7 +961,8 @@ SoRTXRenderBackend::updateGeometryCache(const SoDrawList & drawlist)
             e.vertexCount == geometry.vertexCount &&
             e.indexCount == geometry.indexCount &&
             e.vertexStride == vertexStride &&
-            ((e.idxKey != nullptr) == indexed)) {
+            ((e.idxKey != nullptr) == indexed) &&
+            sameModelMatrix(e.transformBits, command.modelMatrix)) {
           match = &e;
           break;
         }
@@ -903,14 +1005,22 @@ SoRTXRenderBackend::updateGeometryCache(const SoDrawList & drawlist)
     // Instance-transform change detection: a moved object (same geometry)
     // must rebuild the TLAS, but the camera never does.  Only the traced
     // opaque commands reach here, so a selection pass-flip (OPAQUE<->OVERLAY)
-    // of an unchanged object does not dirty the TLAS.  The SbMatrix storage
-    // is exactly float[4][4], so a 64-byte memcmp against the raw bits
-    // last seen is a cheaper, collision-free stand-in for the old FNV
-    // transform hash.
+    // of an unchanged object does not dirty the TLAS.
+    //
+    // The comparison must be numeric, not a bit compare.  A placement at z=0
+    // can carry a translation component that alternates between -0.0f and
+    // +0.0f between frames (0x80000000 vs 0x00000000) while remaining
+    // numerically zero; a 64-byte memcmp reads that as "the object moved" and
+    // sets sceneTransformChanged EVERY frame, so a converged run on a z=0 face
+    // never denoises while the cursor rests on it.  matricesNearlyEqual is the
+    // same epsilon-aware comparison the camera path uses for its own matrices
+    // (see SoRTXRenderBackendP.h), for exactly this reason.  A genuine move
+    // differs by far more than the epsilon, so it is still detected.
     {
       const float * m = &command.modelMatrix[0][0];
-      if (std::memcmp(entryPtr->transformBits, m,
-                      sizeof(entryPtr->transformBits)) != 0) {
+      const bool sameTransform =
+        matricesNearlyEqual(entryPtr->transformBits, m, 16);
+      if (!sameTransform) {
         this->asTransformChanged = true;
         // The visible scene changed (an object moved): restart the path-tracing
         // accumulation/denoiser, not just the TLAS.  Kept separate from
@@ -922,6 +1032,14 @@ SoRTXRenderBackend::updateGeometryCache(const SoDrawList & drawlist)
                   static_cast<const void *>(&command),
                   static_cast<int>(command.pass), geometry.vertexCount);
         }
+        std::memcpy(entryPtr->transformBits, m,
+                    sizeof(entryPtr->transformBits));
+      }
+      else if (std::memcmp(entryPtr->transformBits, m,
+                           sizeof(entryPtr->transformBits)) != 0) {
+        // Same transform numerically but different bits -- a signed-zero or
+        // last-bit oscillation.  Refresh the stored bits so later frames
+        // compare bit-for-bit too, but report NO scene change.
         std::memcpy(entryPtr->transformBits, m,
                     sizeof(entryPtr->transformBits));
       }
