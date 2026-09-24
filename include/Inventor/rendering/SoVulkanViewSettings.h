@@ -37,6 +37,11 @@ struct SoVulkanViewSettings {
   int pathTracingMaxSamples = 256;
   std::string pathTracingDenoiser;
   float pathTracingDenoiserScale = 1.0f;
+  //! Physically-based glass (RtxModePathTraceMax only): index of refraction
+  //! for dielectric surfaces (transparency > 0) and the Beer-Lambert
+  //! absorption strength derived from the material colour.
+  float pathTracingGlassIor = 1.5f;
+  float pathTracingGlassAbsorption = 0.2f;
 
   //! Viewport background (solid or gradient).
   SbColor4f backgroundColor {0.0f, 0.0f, 0.0f, 1.0f};
@@ -82,6 +87,8 @@ struct SoVulkanViewSettings {
       && pathTracingMaxSamples == other.pathTracingMaxSamples
       && pathTracingDenoiser == other.pathTracingDenoiser
       && pathTracingDenoiserScale == other.pathTracingDenoiserScale
+      && pathTracingGlassIor == other.pathTracingGlassIor
+      && pathTracingGlassAbsorption == other.pathTracingGlassAbsorption
       && backgroundColor == other.backgroundColor
       && backgroundGradient == other.backgroundGradient
       && backgroundTop == other.backgroundTop

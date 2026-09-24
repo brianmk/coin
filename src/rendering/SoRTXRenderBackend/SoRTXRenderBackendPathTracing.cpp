@@ -775,6 +775,8 @@ SoRTXRenderBackend::recordAccelerationStructures(
     //   2 = real-time ambient occlusion (single sample, occlusion rays)
     //   3 = environment / IBL preview (single sample, sky-lit)
     //   4 = debug constant fill (FC_VULKAN_RT_DEBUG_FILL)
+    //   5 = multi-bounce path tracing with physically-based dielectric glass
+    //       (RtxModePathTraceMax)
     // AO (mode 2) and the Environment preview (mode 3) are real-time
     // previews: they never accumulate, so they must also force the
     // accumulate flag off to keep the state machine honest.
@@ -782,7 +784,8 @@ SoRTXRenderBackend::recordAccelerationStructures(
       ? 4.0f
       : (this->rtxViewMode == RtxViewMode::RtxModeAmbientOcclusion ? 2.0f
          : (this->rtxViewMode == RtxViewMode::RtxModeEnvironment ? 3.0f
-            : (this->ptEnabled ? 1.0f : 0.0f)));
+            : (this->rtxViewMode == RtxViewMode::RtxModePathTraceMax ? 5.0f
+               : (this->ptEnabled ? 1.0f : 0.0f))));
     frame.state[2] = this->ptAccumulating ? 1.0f : 0.0f;
     frame.state[3] = static_cast<float>(this->ptMaxBounces);
 
@@ -861,6 +864,13 @@ SoRTXRenderBackend::recordAccelerationStructures(
     frame.envRoomCeil[3] = this->envRoomCeilY;
     frame.envRoomScale[0] = this->envRoomHalfExtent;
 
+    // Physically-based glass (RtxModePathTraceMax): x = dielectric IOR,
+    // y = Beer-Lambert absorption strength.  z/w unused.
+    frame.glass[0] = this->ptGlassIor;
+    frame.glass[1] = this->ptGlassAbsorption;
+    frame.glass[2] = 0.0f;
+    frame.glass[3] = 0.0f;
+
     std::memcpy(this->frameMapped, &frame, sizeof(frame));
 
     // Present frame UBO: the traced camera's world->view and view->clip
@@ -910,13 +920,16 @@ SoRTXRenderBackend::recordAccelerationStructures(
   //
   // The SBT raygen only implements the single-sample preview and the
   // accumulating path trace; the ambient-occlusion (u_state.y == 2) and
-  // environment (== 3) previews exist only in the ray-query compute shader.
-  // So those two modes must run through the compute path even when the opt-in
-  // FC_VULKAN_RT_SBT pipeline is enabled, otherwise they silently render as a
-  // full multi-bounce path trace instead of their single-sample previews.
+  // environment (== 3) previews exist only in the ray-query compute shader,
+  // and physically-based glass (RtxModePathTraceMax) is implemented only in the
+  // compute tracer.  So those three modes must run through the compute path
+  // even when the opt-in FC_VULKAN_RT_SBT pipeline is enabled, otherwise they
+  // silently render as a full multi-bounce path trace (AO/env) or fall back to
+  // the SBT raygen's thin-glass stand-in (max).
   const bool sbtModeSupported =
     this->rtxViewMode != RtxViewMode::RtxModeAmbientOcclusion &&
-    this->rtxViewMode != RtxViewMode::RtxModeEnvironment;
+    this->rtxViewMode != RtxViewMode::RtxModeEnvironment &&
+    this->rtxViewMode != RtxViewMode::RtxModePathTraceMax;
   if (this->tlas == VK_NULL_HANDLE) {
     // No traceable geometry (empty scene; the view's zero-scaled anchor cube
     // is filtered out upstream): the TLAS was never built and the descriptor
@@ -1070,7 +1083,8 @@ SoRTXRenderBackend::recordTraceAndPresent(const SoRenderParams & params,
   // here too.  This is the "screen goes black" guard: a preview or an invalid
   // (empty-cache) run falls through to the storage-image branch.
   const bool pathTraceMode =
-    this->rtxViewMode == RtxViewMode::RtxModePathTrace;
+    this->rtxViewMode == RtxViewMode::RtxModePathTrace ||
+    this->rtxViewMode == RtxViewMode::RtxModePathTraceMax;
   const bool accumBufferValid = this->ptAccumulating || this->ptConverged;
   const float presentPush[16] = {
     static_cast<float>(size[0]),

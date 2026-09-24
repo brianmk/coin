@@ -62,10 +62,12 @@ struct alignas(16) RTXFrameBlock {
   float envRoomFloor[4];  // room cove: rgb = floor color, w = floor Y (rel camera)
   float envRoomCeil[4];   // room cove: rgb = ceiling color, w = ceiling Y (rel cam)
   float envRoomScale[4];  // room cove: x = half extent (world units)
+  float glass[4];         // path-tracing max: x = dielectric IOR,
+                          // y = Beer-Lambert absorption strength
 };
 inline void checkRtlFrameBlockLayout() {
-  // 4 mat4 (view/viewInverse/projInverse/prevViewProj) + 14 vec4.
-  static_assert(sizeof(RTXFrameBlock) == 4 * 64 + 14 * 16,
+  // 4 mat4 (view/viewInverse/projInverse/prevViewProj) + 15 vec4.
+  static_assert(sizeof(RTXFrameBlock) == 4 * 64 + 15 * 16,
                 "RTXFrameBlock must match FrameBlock std140 layout");
 }
 

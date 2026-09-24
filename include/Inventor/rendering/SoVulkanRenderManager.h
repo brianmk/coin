@@ -425,6 +425,11 @@ public:
   //! on the next buffer create.
   void setPathTracingDenoiserScale(float scale);
 
+  //! Physically-based glass parameters for RtxModePathTraceMax: index of
+  //! refraction for dielectric surfaces and the Beer-Lambert absorption
+  //! strength; forwarded to the RT backend.
+  void setPathTracingGlass(float ior, float absorption);
+
   //! HDR10 (PQ) output for the present pass; forwarded to the RT backend.
   //! \a exposure is the linear scale mapping scene-white to the PQ peak and
   //! \a toneMap selects the tone-mapping operator (0 = clip, 1 = Reinhard,

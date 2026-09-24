@@ -764,6 +764,8 @@ SoVulkanRenderManager::setViewSettings(const SoVulkanViewSettings & settings)
                                    ? nullptr
                                    : settings.pathTracingDenoiser.c_str());
     this->setPathTracingDenoiserScale(settings.pathTracingDenoiserScale);
+    this->setPathTracingGlass(settings.pathTracingGlassIor,
+                              settings.pathTracingGlassAbsorption);
     this->setHdrOutput(settings.hdrOutput ? TRUE : FALSE,
                        settings.hdrExposure,
                        settings.hdrToneMap);
@@ -1198,6 +1200,17 @@ SoVulkanRenderManager::setPathTracingDenoiserScale(const float scale)
                        "setting ignored",
                        [scale](SoRTXRenderBackend & rtx) {
                          rtx.setDenoiserScale(scale);
+                       });
+}
+
+void
+SoVulkanRenderManager::setPathTracingGlass(const float ior,
+                                           const float absorption)
+{
+  this->pimpl->withRtx("SoVulkanRenderManager::setPathTracingGlass",
+                       "setting ignored",
+                       [ior, absorption](SoRTXRenderBackend & rtx) {
+                         rtx.setPathTracingGlass(ior, absorption);
                        });
 }
 
