@@ -1,16 +1,23 @@
 // data/shaders/vulkan/output/OutputFragment.glsl
 // Final output / display transform for the raster HDR path.
 //
-// Samples the linear scene-radiance intermediate (RGBA16F) and writes it to the
-// caller's swapchain framebuffer, which is either:
+// Samples the scene intermediate (RGBA16F) and writes it to the caller's
+// swapchain framebuffer, which is either:
 //   - an HDR10 swapchain (VK_FORMAT_A2B10G10R10_UNORM_PACK32) tagged with the
 //     BT.2020 + ST 2084 (PQ) color space, or
 //   - an SDR swapchain (8-bit), in which case the output is clamped to [0,1].
 //
-// Doing the exposure, tone map and transfer function here, once, after all
-// geometry/transparency has blended in linear light, is what makes the pipeline
-// color-correct: blending and MSAA resolve happen on linear radiance, and only
-// the final displayed value is encoded.
+// The intermediate is *display-referred sRGB*, not linear light: the visual and
+// background shaders write Coin/FreeCAD colors verbatim (see visual/Fragment.glsl
+// and visual/BackgroundFragment.glsl) and the SDR swapchain is a plain UNORM
+// format, so nothing in the scene pass ever linearizes.  The HDR branch below
+// therefore decodes sRGB to linear (BT.709 primaries + sRGB transfer) and
+// converts the primaries to BT.2020 before applying the exposure, tone map and
+// PQ encode.  Feeding the PQ inverse EOTF gamma-encoded values instead would
+// lift every midtone (while pinning white) and wash the image out.
+//
+// The SDR branch (HDR off) deliberately stays a plain clamp: it must reproduce
+// the pre-HDR, byte-identical SDR output.
 
 #version 450
 
@@ -38,6 +45,26 @@ vec3 linear_to_pq(vec3 L)
     vec3 Lp = pow(max(L, vec3(0.0)), vec3(m1));
     return pow((c1 + c2 * Lp) / (1.0 + c3 * Lp), vec3(m2));
 }
+
+// sRGB inverse EOTF (IEC 61966-2-1): display-referred sRGB code value ->
+// linear light.  The scene intermediate carries sRGB code values, so this
+// must run before any radiometric operation (exposure/PQ).
+vec3 srgb_to_linear(vec3 c)
+{
+    bvec3 low = lessThanEqual(c, vec3(0.04045));
+    vec3 lo = c / 12.92;
+    vec3 hi = pow((max(c, vec3(0.0)) + 0.055) / 1.055, vec3(2.4));
+    return mix(hi, lo, low);
+}
+
+// Linear BT.709 (the sRGB primaries) -> linear BT.2020, which is the gamut the
+// HDR10 swapchain is tagged with (Bt2100Pq).  Column-major GLSL mat3; the
+// matrix is the Linear709->Linear2020 matrix from ITU-R BT.2087.  White is
+// preserved (every row sums to 1), so it does not perturb the exposure.
+const mat3 kL709ToL2020 = mat3(
+    0.6274038959, 0.0690972894, 0.0163914389,
+    0.3292830384, 0.9195403951, 0.0880133079,
+    0.0433130657, 0.0113623156, 0.8955952532);
 
 // --- Tone-mapping operators ------------------------------------------------
 // Applied to the exposure-scaled linear luminance, exactly the reference
@@ -114,7 +141,10 @@ void main()
         fragColor = vec4(clamp(c, 0.0, 1.0), 1.0);
         return;
     }
-    vec3 L = max(c, vec3(0.0)) * pc.u_params.y;
+    // Decode the display-referred sRGB scene to linear light and convert the
+    // sRGB/BT.709 primaries to the BT.2020 gamut, then expose + tone map + PQ.
+    vec3 lin = kL709ToL2020 * srgb_to_linear(clamp(c, 0.0, 1.0));
+    vec3 L = lin * pc.u_params.y;
     vec3 mapped = tonemap(L, int(pc.u_params.z + 0.5));
     fragColor = vec4(clamp(linear_to_pq(mapped), 0.0, 1.0), 1.0);
 }

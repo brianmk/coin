@@ -4,12 +4,13 @@
 // transform: the exposure pre-scale, the four tone-mapping operators
 // (clip / Reinhard / ACES / Hable) and the SMPTE ST 2084 (PQ) HDR10 encode.
 //
-// The scene is rendered into the backend's linear RGBA16F intermediate and then
-// presented into a plain 8-bit caller-owned pass, so the whole HDR pipeline is
-// testable headlessly (no 10-bit swapchain needed).  The expected 8-bit output
-// is computed with the reference math mirrored from
-// data/shaders/vulkan/output/OutputFragment.glsl and compared within a small
-// tolerance (float precision + UNORM rounding).
+// The scene is rendered into the backend's RGBA16F intermediate (display-
+// referred sRGB, as the visual shaders write it) and then presented into a plain
+// 8-bit caller-owned pass, so the whole HDR pipeline is testable headlessly (no
+// 10-bit swapchain needed).  The expected 8-bit output is computed with the
+// reference math mirrored from data/shaders/vulkan/output/OutputFragment.glsl
+// (sRGB decode + exposure + tone map + PQ) and compared within a small tolerance
+// (float precision + UNORM rounding).
 
 #include "VulkanTestHarness.h"
 
@@ -36,6 +37,16 @@ float linear_to_pq(float L)
 }
 
 float clamp01(float v) { return std::min(std::max(v, 0.0f), 1.0f); }
+
+// sRGB inverse EOTF (IEC 61966-2-1), mirroring srgb_to_linear() in
+// OutputFragment.glsl.  The scene intermediate is display-referred sRGB, so the
+// HDR transform decodes it to linear light before the exposure/PQ.
+float srgb_to_linear(float c)
+{
+  const float v = clamp01(c);
+  return v <= 0.04045f ? v / 12.92f
+                       : std::pow((v + 0.055f) / 1.055f, 2.4f);
+}
 
 float tonemap(float L, int mode)
 {
@@ -70,10 +81,11 @@ float tonemap(float L, int mode)
   }
 }
 
-// Expected 8-bit output of the HDR display transform for linear radiance c.
+// Expected 8-bit output of the HDR display transform for display-referred sRGB
+// scene value c (decoded to linear light first, like the shader).
 int expectedHdrByte(float c, float exposure, int toneMap)
 {
-  const float mapped = tonemap(std::max(c, 0.0f) * exposure, toneMap);
+  const float mapped = tonemap(srgb_to_linear(c) * exposure, toneMap);
   return static_cast<int>(std::lround(linear_to_pq(mapped) * 255.0f));
 }
 
