@@ -880,6 +880,18 @@ SoVulkanRenderBackend::buildWorkItems(const SoDrawList & drawlist,
   const std::vector<int> & order = drawlist.getSortedOrder();
   out.clear();
 
+  // Model feature-edge visibility: when the edge overlay is toggled off, skip
+  // the non-triangle line commands (BRep edge lines, polylines) in the main
+  // pass.  Screen-space SO_RENDERPASS_OVERLAY geometry (nav cube, axes) and
+  // point markers are not edges and still draw.  The explicit debug
+  // wireframe/tessellation overlay redraw below is also left alone.
+  const auto edgeHidden = [this](const SoRenderCommand & c) {
+    if (this->edgeOverlayVisible) return false;
+    if (c.pass == SO_RENDERPASS_OVERLAY) return false;
+    return c.geometry.topology == SO_TOPOLOGY_LINES ||
+           c.geometry.topology == SO_TOPOLOGY_LINE_STRIP;
+  };
+
   // Geometry content identity for batching: reuse the cached content hash the
   // geometry cache computed when the buffer was uploaded (a map lookup) instead
   // of re-walking every vertex stream.
@@ -909,6 +921,7 @@ SoVulkanRenderBackend::buildWorkItems(const SoDrawList & drawlist,
         const SoRenderCommand & command = drawlist.getCommand(index);
         if (command.pass == SO_RENDERPASS_OVERLAY) continue;
         if (command.pass != SO_RENDERPASS_TRANSPARENT) continue;
+        if (edgeHidden(command)) continue;
         if (!this->geometryCache.findDrawable(command)) continue;
         VulkanWorkItem item;
         item.single = &command;
@@ -931,6 +944,7 @@ SoVulkanRenderBackend::buildWorkItems(const SoDrawList & drawlist,
         const SoRenderCommand & command = drawlist.getCommand(index);
         if (command.pass == SO_RENDERPASS_OVERLAY) continue;
         if (command.pass == SO_RENDERPASS_TRANSPARENT) continue;
+        if (edgeHidden(command)) continue;
         if (!command.state.depth.enabled) continue; // on-top annotation (later)
         if (isWideLine(command, -1, this->interactionLodActive)) {
           // CPU-expanded per command, so never batched.  It still goes into a
@@ -1547,6 +1561,13 @@ SoVulkanRenderBackend::recordTracedComposite(const SoDrawList & drawlist,
     const SoPrimitiveTopology topo = command.geometry.topology;
     if (topo == SO_TOPOLOGY_TRIANGLES) continue;
     if (topo == SO_TOPOLOGY_TRIANGLE_STRIP) continue;
+    // Edge-overlay toggle: skip the feature-edge line commands, keep point
+    // markers.  The traced surface itself is unaffected (it is the present
+    // pass's job); only this raster residue is gated.
+    if (!this->edgeOverlayVisible &&
+        (topo == SO_TOPOLOGY_LINES || topo == SO_TOPOLOGY_LINE_STRIP)) {
+      continue;
+    }
 
     [[maybe_unused]] const SoRasterState & raster = command.state.raster;
     // Apply the command's own viewport/scissor if it carries one, else the

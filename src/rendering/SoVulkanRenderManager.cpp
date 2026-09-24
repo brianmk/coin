@@ -302,6 +302,7 @@ public:
   SbBool wireframeOverlay = FALSE;
   SbBool pointsOverlay = FALSE;
   SbBool tessellationOverlay = FALSE;
+  SbBool edgeOverlay = TRUE;
   //! Interaction LOD state, forwarded to the RT backend.  Persisted here so a
   //! later RT-backend bring-up (setViewSettings/invalidateViewSettings) can
   //! re-apply it.
@@ -703,6 +704,12 @@ SoVulkanRenderManager::setPointsOverlay(SbBool enabled)
 {
   this->pimpl->pointsOverlay = enabled;
   this->pimpl->backend.setPointsOverlay(enabled);
+  // Whether Part's BRep point set emits its base vertex markers is decided
+  // during traversal, so the retained main draw list encodes it.  Invalidate
+  // the replay so toggling "show vertices" takes effect on the next frame
+  // instead of waiting for the scene graph to change.
+  this->pimpl->graphFingerprintValid = FALSE;
+  this->pimpl->sceneGraphDirty = TRUE;
 }
 
 void
@@ -710,6 +717,13 @@ SoVulkanRenderManager::setTessellationOverlay(SbBool enabled)
 {
   this->pimpl->tessellationOverlay = enabled;
   this->pimpl->backend.setTessellationOverlay(enabled);
+}
+
+void
+SoVulkanRenderManager::setEdgeOverlay(SbBool enabled)
+{
+  this->pimpl->edgeOverlay = enabled;
+  this->pimpl->backend.setEdgeOverlayVisible(enabled);
 }
 
 void
@@ -738,6 +752,7 @@ SoVulkanRenderManager::setViewSettings(const SoVulkanViewSettings & settings)
   this->setWireframeOverlay(settings.wireframeOverlay ? TRUE : FALSE);
   this->setPointsOverlay(settings.pointsOverlay ? TRUE : FALSE);
   this->setTessellationOverlay(settings.tessellationOverlay ? TRUE : FALSE);
+  this->setEdgeOverlay(settings.edgeOverlay ? TRUE : FALSE);
   this->setEdgeColor(settings.edgeColor);
   // Raster HDR output transform (no-op when disabled).
   this->pimpl->backend.setHdrOutput(settings.hdrOutput ? TRUE : FALSE,
@@ -798,6 +813,12 @@ SbBool
 SoVulkanRenderManager::getTessellationOverlay(void) const
 {
   return this->pimpl->tessellationOverlay;
+}
+
+SbBool
+SoVulkanRenderManager::getEdgeOverlay(void) const
+{
+  return this->pimpl->edgeOverlay;
 }
 
 const SbColor4f &
@@ -1895,6 +1916,12 @@ SoVulkanRenderManagerP::prepareRenderParams(SbBool clearwindow,
         }
         this->rootChildrenValid = TRUE;
       }
+        // Tell Part's BRep point set whether to emit its base vertex markers.
+        // The backend cannot distinguish them from any other point primitive,
+        // so the decision is made at traversal time (Sketcher/Points/Draft point
+        // primitives are different nodes and are unaffected).
+        action.setModelPointsVisible(this->pointsOverlay
+                                     || SoVulkanConfig::get().raster.points);
         const long applyT0 = wantCpuTiming ? vkRenderBreadcrumbNowUs() : 0;
         action.apply(root);
         if (wantCpuTiming) {
@@ -1960,6 +1987,8 @@ SoVulkanRenderManagerP::prepareRenderParams(SbBool clearwindow,
       this->overlayRootChildrenValid = TRUE;
     }
     this->overlayIrAction.setViewportRegion(this->viewportRegion);
+    this->overlayIrAction.setModelPointsVisible(this->pointsOverlay
+                                                || SoVulkanConfig::get().raster.points);
     if (oroot->getNumChildren() > 0) {
       // apply() resets the frame first (beginFrame), so the overlay action's
       // previous draw list/geometry pool is released before re-recording.

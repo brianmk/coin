@@ -1039,6 +1039,14 @@ SoRTXRenderBackend::shutdown()
   if (this->positionMemory != VK_NULL_HANDLE) {
     this->positionMemory = VK_NULL_HANDLE;
   }
+  if (this->stableDepthBuffer != VK_NULL_HANDLE) {
+    vmaDestroyBuffer(this->vmaAllocator, this->stableDepthBuffer,
+                     this->stableDepthMemory);
+    this->stableDepthBuffer = VK_NULL_HANDLE;
+  }
+  if (this->stableDepthMemory != VK_NULL_HANDLE) {
+    this->stableDepthMemory = VK_NULL_HANDLE;
+  }
   if (this->sumSqBuffer != VK_NULL_HANDLE) {
     vmaDestroyBuffer(this->vmaAllocator, this->sumSqBuffer, this->sumSqMemory);
     this->sumSqBuffer = VK_NULL_HANDLE;

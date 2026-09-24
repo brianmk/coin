@@ -52,6 +52,11 @@ struct SoVulkanViewSettings {
   //! Raster overlays.
   bool wireframeOverlay = false;
   bool pointsOverlay = false;
+  //! Show the model's feature-edge lines (BRep edges / polylines).  When
+  //! false the non-triangle line residue is skipped in the raster main pass
+  //! and in the ray-tracing composite, leaving only the shaded faces.  The
+  //! navigation cube and other SO_RENDERPASS_OVERLAY geometry are unaffected.
+  bool edgeOverlay = true;
   //! Debug overlay: re-draw the triangle commands in polygon-LINES so the
   //! raw tessellation is visible on top of the shaded geometry.
   bool tessellationOverlay = false;
@@ -95,6 +100,7 @@ struct SoVulkanViewSettings {
       && backgroundBottom == other.backgroundBottom
       && wireframeOverlay == other.wireframeOverlay
       && pointsOverlay == other.pointsOverlay
+      && edgeOverlay == other.edgeOverlay
       && tessellationOverlay == other.tessellationOverlay
       && edgeColor == other.edgeColor
       && hdrOutput == other.hdrOutput

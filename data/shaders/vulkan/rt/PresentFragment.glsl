@@ -23,6 +23,12 @@ layout(set = 0, binding = 3, std430) readonly buffer NormalBuffer { vec4 normals
 layout(set = 0, binding = 4, std430) readonly buffer PositionBuffer { vec4 positions[]; };
 layout(set = 0, binding = 5, std430) readonly buffer DenoisedBuffer { vec4 denoised[]; };
 
+// Stable occlusion depth for the raster edge-overlay composite: the first-
+// bounce hit of the path tracer's un-jittered centre sample (world position in
+// xyz, ray distance in w; w > 1.0e6 marks a miss).  Separate from the ping-ponged
+// position G-buffer (binding 4) so it is constant across the accumulation run.
+layout(set = 0, binding = 7, std430) readonly buffer StableDepthBuffer { vec4 stableDepth[]; };
+
 // View -> clip projection (forward) of the traced camera.  The present
 // pass writes the scene depth from the first-bounce hit position so the
 // raster composite overlay (BRep edge lines / point markers) can be depth
@@ -123,8 +129,11 @@ vec4 presentColor(vec3 linearColor)
 }
 
 // Scene depth (Vulkan [0,1]) of the first-bounce hit at the current pixel.
-// The raygen stores the hit world position in positions[].xyz with the ray
-// distance in .w (a 1e7 sentinel means "miss", i.e. background).  Project it
+// The raygen stores the stable (un-jittered centre-sample) hit world position
+// in stableDepth[].xyz with the ray distance in .w (a 1e7 sentinel means
+// "miss", i.e. background).  Using the stable buffer instead of the jittered
+// positions[] G-buffer keeps the edge-overlay depth test from flickering along
+// silhouettes.  Project it
 // through the traced camera exactly like the visual vertex shader
 // (clip.y is flipped but that does not affect Z), then apply the same
 // OpenGL->Vulkan depth remap: z_ndc = 0.5*(z_clip/w + 1).  The raster
@@ -134,7 +143,7 @@ vec4 presentColor(vec3 linearColor)
 // edge look the raster pipeline produces.
 float sceneDepth(ivec2 px, int idx)
 {
-    vec4 wpos = positions[idx];
+    vec4 wpos = stableDepth[idx];
     if (wpos.w > 1.0e6) {
         return 1.0; // no hit: background, edge geometry is unoccluded
     }

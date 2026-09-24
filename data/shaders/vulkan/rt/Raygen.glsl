@@ -66,6 +66,12 @@ layout(set = 0, binding = 4, std430) buffer AccumBuffer { vec4 accum[]; };
 layout(set = 0, binding = 5, std430) buffer NormalBuffer { vec4 normals[]; };
 layout(set = 0, binding = 6, std430) buffer PositionBuffer { vec4 positions[]; };
 
+// Stable occlusion depth for the raster edge-overlay composite (see
+// PathTrace.glsl): first-bounce hit of the un-jittered centre sample.
+layout(set = 0, binding = 16, std430) buffer StableDepthBuffer {
+    vec4 stableDepth[];
+};
+
 // Per-frame state for this stage (see SoRTXRenderBackend).
 layout(push_constant) uniform RaygenPush {
     uint u_frameIndex;  // progressive sample index (jitter seed)
@@ -188,9 +194,16 @@ void main()
     const int maxBounces = int(clamp(pc.u_maxBounces, 1u, 16u));
     const int index = int(px.y * uint(max(frame.u_viewport.x, 1.0)) + px.x);
 
-    // Primary ray with per-frame sub-pixel jitter while accumulating.
+    // Stable primary sample (see PathTrace.glsl): the first frame of a run and
+    // every non-accumulating preview frame trace an un-jittered centre ray and
+    // own the G-buffers, so the edge-overlay occlusion depth is deterministic.
+    const bool stablePrimary =
+      !(ptEnabled && accumulating) || frameIndex == 0u;
+
+    // Primary ray with per-frame sub-pixel jitter while accumulating.  The
+    // first frame of a run stays at the centre sample (stable G-buffer seed).
     vec2 jitter = vec2(0.5);
-    if (ptEnabled && accumulating) {
+    if (ptEnabled && accumulating && frameIndex != 0u) {
         jitter = hash2(px.x, px.y, frameIndex);
     }
     vec2 uv = (vec2(px) + jitter) / max(frame.u_viewport.xy, vec2(1.0));
@@ -248,6 +261,9 @@ void main()
             if (bounce == 0) {
                 normals[index] = vec4(-rayDir, 1.0);
                 positions[index] = vec4(0.0, 0.0, 0.0, 1.0e7);
+                if (stablePrimary) {
+                    stableDepth[index] = vec4(0.0, 0.0, 0.0, 1.0e7);
+                }
             }
             radiance += weight * payload.color.rgb;
             break;
@@ -257,6 +273,9 @@ void main()
             // G-buffer for the denoiser (visible surface only).
             normals[index] = payload.normal;
             positions[index] = payload.posT;
+            if (stablePrimary) {
+                stableDepth[index] = payload.posT;
+            }
         }
 
         RTMaterial mat = matBuffer.materials[payload.info.x];
