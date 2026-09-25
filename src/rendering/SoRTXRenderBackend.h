@@ -340,15 +340,16 @@ public:
   void setPathTracingDenoiseEnabled(SbBool enabled);
 
   /*!
-    \brief Enable HDR10 (PQ) output encoding for the present pass.
+    \brief Enable scRGB extended-linear HDR output for the present pass.
 
-    When \a enabled, the present pass encodes its linear radiance as SMPTE
-    ST 2084 (PQ) with BT.2020 primaries, scaled by \a exposure (the linear
-    factor mapping scene-white to the PQ peak of 10000 cd/m^2; 0.02 ~= 200
-    cd/m^2 reference white) and shaped by \a toneMap (0 = clip, 1 = Reinhard,
-    2 = ACES, 3 = Hable).  The application sets this only when the swapchain
-    is actually a 10-bit HDR format, so the backend just encodes.  When
-    disabled the output is clamped to [0,1] as before (SDR, bit-identical).
+    When \a enabled, the present pass writes scene-linear radiance scaled by
+    \a exposure (the diffuse-white gain; 1.0 presents linear 1.0 at the
+    compositor's reference white and values above 1.0 are HDR highlights) into
+    the FP16 swapchain, optionally shaped by \a toneMap (0 = clip/passthrough,
+    1 = Reinhard, 2 = ACES, 3 = Hable; the filmic curves compress into [0,1]).
+    The application sets this only when the swapchain is actually an FP16 HDR
+    format and the output is in an HDR mode.  When disabled the output is
+    clamped to [0,1] as before (SDR, bit-identical).
   */
   void setHdrOutput(SbBool enabled, float exposure, int toneMap);
 
@@ -849,13 +850,13 @@ private:
   uint32_t ptMaxSamples = 256;
   // Whether the edge-stopping denoise present pass is active.
   SbBool ptDenoise = TRUE;
-  // HDR10 (PQ) output: see setHdrOutput().  hdrExposure is the linear scale
-  // mapping scene-white to the PQ peak (0.02 ~= 200 cd/m^2 reference white);
-  // hdrToneMap is the tone-mapping operator (0 = clip, 1 = Reinhard,
+  // scRGB extended-linear output: see setHdrOutput().  hdrExposure is the
+  // diffuse-white gain (1.0 = the compositor's reference white); hdrToneMap is
+  // the optional highlight rolloff (0 = clip/passthrough, 1 = Reinhard,
   // 2 = ACES, 3 = Hable).
   SbBool hdrOutput = FALSE;
-  float hdrExposure = 0.02f;
-  int hdrToneMap = 1;
+  float hdrExposure = 1.0f;
+  int hdrToneMap = 0;
   // Adaptive sampling state (see updateAdaptiveStats()).
   SbBool ptAdaptiveEnabled = TRUE;
   uint32_t ptAdaptiveMinSamples = 4;

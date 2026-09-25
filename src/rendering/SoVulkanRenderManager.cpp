@@ -401,16 +401,14 @@ public:
 
 
   // Near/far planes computed by setClippingPlanes(), consumed by
-  // prepareRenderParams().  Deliberately NOT written back into
-  // SoCamera::nearDistance/farDistance: the camera node is shared with the
-  // hidden GL viewer (FreeCAD), whose SoRenderManager concurrently writes
-  // the same fields with its own GL-side values.  Reading those fields back
-  // to build the projection matrix races with the GL manager and
-  // intermittently renders with the wrong near plane -- the front face of
-  // the object clips away and the interior shows through while rotating.
-  // Keeping the Vulkan planes private to this manager makes the two
-  // renderers independent and gives CAD-grade zoom behavior on both axes
-  // (near plane hugs the closest geometry, far plane grows with distance).
+  // prepareRenderParams().  These are ALSO published onto the camera node's
+  // nearDistance/farDistance fields (see setClippingPlanes), exactly like the
+  // legacy GL SoRenderManagerP, because the CPU pick (SoRayPickAction) builds
+  // its view volume from those camera fields: a pick whose far plane stops
+  // short of the model can never hover/select it.  The private copies are kept
+  // so prepareRenderParams() reads back the exact values used for the pick even
+  // if a later navigation step overwrites the camera fields before the frame is
+  // recorded.
   float computedNear = 1.0f;
   float computedFar = 10.0f;
   // Camera back-off along the view direction applied by the zoom wall (see
@@ -1680,10 +1678,18 @@ SoVulkanRenderManagerP::setClippingPlanes(void)
   const float newfar = farval >= 0 ? farval * (1.0f + SLACK)
                                    : farval * (1.0f - SLACK);
 
-  // Store the planes privately; see the computedNear/computedFar comment in
-  // the pimpl declaration for why the camera fields must stay untouched.
+  // Store the planes privately (prepareRenderParams reads these back) and
+  // publish them onto the camera field, exactly as the legacy GL
+  // SoRenderManagerP::setClippingPlanes does (SoRenderManagerP.cpp:170,173).
+  // The camera node is the single authoritative view volume for every non-GL
+  // consumer; in particular SoRayPickAction (the CPU hover/select path in the
+  // raster Vulkan viewport) reads camera->nearDistance/farDistance, so without
+  // this write-back the pick uses the stale manager default far (10) and can
+  // never reach a scene-sized model such as BIMExample.
   this->computedNear = newnear;
   this->computedFar = newfar;
+  camera->nearDistance = newnear;
+  camera->farDistance = newfar;
 }
 
 SbBool

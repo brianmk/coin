@@ -43,18 +43,21 @@ layout(push_constant) uniform PresentPush {
     vec4 u_present;  // x = width, y = height, z = denoiseOn, w = frameIndex
     vec4 u_origin;   // x = viewport origin x, y = viewport origin y (pixels)
     vec4 u_denoise;  // x = OIDN result available (sample denoised buffer)
-                     // y = denoise upscale factor, z = HDR output, w = exposure
-    vec4 u_tone;     // x = tone-mapping operator (0 = clip), yzw reserved
+                     // y = denoise upscale factor, z = HDR output,
+                     // w = diffuse-white gain (1.0 = reference white)
+    vec4 u_tone;     // x = highlight rolloff (0 = clip, 1..3 = filmic), yzw reserved
 } pc;
 
 layout(location = 0) out vec4 fragColor;
 
-// Tone-mapping operators for the HDR path, mirroring
-// data/shaders/vulkan/output/OutputFragment.glsl (kept in sync by hand: the two
-// backends own separate shaders and glslangValidator does not resolve shared
-// includes here).  Input and output are PQ-normalized linear luminance
-// (1.0 = 10000 cd/m^2) with the exposure already applied; the operators are the
-// published matrix-free forms (0 = clip, 1 = Reinhard, 2 = ACES, 3 = Hable).
+// Optional highlight-rolloff operators for the HDR path.  Input and output are
+// scene-linear radiance (1.0 = the compositor's reference white) and the
+// published matrix-free forms are used (0 = clip/passthrough, 1 = Reinhard,
+// 2 = ACES, 3 = Hable).  Mode 0 leaves values above 1.0 as HDR highlights; the
+// filmic curves compress the result into [0,1].  This is the scRGB pipeline,
+// matching data/shaders/vulkan/output/OutputFragment.glsl (kept in sync by hand:
+// the two backends own separate shaders and glslangValidator does not resolve
+// shared includes here).
 vec3 tonemap_clip(vec3 L)
 {
     return clamp(L, 0.0, 1.0);
@@ -103,29 +106,44 @@ vec3 tonemap(vec3 L, int mode)
     return tonemap_clip(L);
 }
 
+// sRGB inverse EOTF (IEC 61966-2-1): display-referred sRGB code value ->
+// linear light.  The ray-traced pipeline - like the raster scene shaders -
+// works in Coin/FreeCAD's display-referred sRGB space: the path tracer copies
+// the raster lighting model and uploads the material/light/background colours
+// verbatim, and the accumulation is a display-referred sum.  The HDR branch
+// below must therefore linearise before writing the *linear* scRGB surface,
+// exactly as data/shaders/vulkan/output/OutputFragment.glsl does.  Treating
+// those display-referred values as scene-linear is what washed the
+// path-traced image out (a 0.5 mid-grey stayed 0.5 linear instead of 0.21).
+vec3 srgb_to_linear(vec3 c)
+{
+    bvec3 low = lessThanEqual(c, vec3(0.04045));
+    vec3 lo = c / 12.92;
+    vec3 hi = pow((max(c, vec3(0.0)) + 0.055) / 1.055, vec3(2.4));
+    return mix(hi, lo, low);
+}
+
 // Final output transform.  With HDR off (pc.u_denoise.z < 0.5) the color is
-// clamped to [0,1] exactly as before, so SDR output is unchanged.  With HDR on
-// the linear scene radiance is scaled by pc.u_denoise.w (which maps scene-white
-// to the PQ peak of 10000 cd/m^2; 0.02 ~= 200 cd/m^2 reference white),
-// tone-mapped by pc.u_tone.x and encoded with the SMPTE ST 2084 (PQ) transfer
-// function, BT.2020 primaries.  The swapchain is
-// VK_FORMAT_A2B10G10R10_UNORM_PACK32 with the surface tagged Bt2100Pq, so the
-// compositor maps it onto the HDR output.
+// clamped to [0,1] exactly as before, so SDR output is unchanged (the surface
+// is an sRGB UNORM format, so the display-referred value is written as-is).
+// With HDR on the display-referred color is decoded to linear light, optionally
+// shaped by the filmic rolloff pc.u_tone.x (0 = clip/passthrough), scaled by the
+// diffuse-white gain pc.u_denoise.w (1.0 lands diffuse white at the
+// compositor's reference white) and written to the FP16 scRGB surface, whose
+// extended range carries any >1.0 highlights; the compositor anchors the
+// reference white and maps the extended range onto the output.  The swapchain
+// is VK_FORMAT_R16G16B16A16_SFLOAT with the surface tagged extended-linear sRGB.
 vec4 presentColor(vec3 linearColor)
 {
     if (pc.u_denoise.z < 0.5) {
         return vec4(clamp(linearColor, 0.0, 1.0), 1.0);
     }
-    const float m1 = 2610.0 / 16384.0;
-    const float m2 = 2523.0 / 4096.0 * 128.0;
-    const float c1 = 3424.0 / 4096.0;
-    const float c2 = 2413.0 / 4096.0 * 32.0;
-    const float c3 = 2392.0 / 4096.0 * 32.0;
-    vec3 L = max(linearColor, vec3(0.0)) * pc.u_denoise.w;
-    vec3 mapped = tonemap(L, int(pc.u_tone.x + 0.5));
-    vec3 Lp = pow(mapped, vec3(m1));
-    vec3 pq = pow((c1 + c2 * Lp) / (1.0 + c3 * Lp), vec3(m2));
-    return vec4(clamp(pq, 0.0, 1.0), 1.0);
+    vec3 lin = srgb_to_linear(clamp(linearColor, 0.0, 1.0));
+    const int mode = int(pc.u_tone.x + 0.5);
+    if (mode != 0) {
+        lin = tonemap(lin, mode);
+    }
+    return vec4(max(lin * pc.u_denoise.w, vec3(0.0)), 1.0);
 }
 
 // Scene depth (Vulkan [0,1]) of the first-bounce hit at the current pixel.

@@ -4,10 +4,10 @@
 //
 // renderExternalHdr() renders the scene into a backend-owned RGBA16F
 // intermediate (display-referred sRGB, as the visual shaders write it) and then
-// presents it into the caller's swapchain framebuffer with the exposure + SMPTE
-// ST 2084 (PQ) transform.  Doing the encode once, after all geometry and
-// transparency have blended, keeps the display transform in one place; the
-// sRGB->linear decode and BT.709->BT.2020 gamut conversion happen there too (see
+// presents it into the caller's FP16 swapchain framebuffer as scRGB
+// extended-linear sRGB.  Doing the display transform once, after all geometry
+// and transparency have blended, keeps it in one place; the sRGB->linear decode
+// and the diffuse-white gain happen there too (see
 // data/shaders/vulkan/output/OutputFragment.glsl).
 //
 // The SDR path is unchanged: when HDR is off the manager uses renderExternal()
@@ -579,7 +579,7 @@ SoVulkanRenderBackend::renderExternalHdr(const SoDrawList & drawlist,
   this->recordContext.buffer = VK_NULL_HANDLE;
   vkCmdEndRenderPass(commandBuffer);
 
-  // --- Output pass: linear RGBA16F -> swapchain (PQ or clamp) ------------
+  // --- Output pass: RGBA16F -> swapchain (scRGB extended-linear or clamp) --
   SoVulkanShared::imageTransition(
     commandBuffer, hdrTarget.colorImage,
     VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
