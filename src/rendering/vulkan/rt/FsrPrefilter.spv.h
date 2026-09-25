@@ -1,5 +1,5 @@
 // coin-spirv source=rt/FsrPrefilter.glsl source-sha256=0b17b4af12661a3838bcef0cc019570f879b7fea7512d6ecf000967be9c78414 generator-sha256=c2b9b4bba4cce7604d816678c21c5cd3b1891e420524402edd2b23dee34adf54
-	// 1116.4.0
+	// 1116.6.0
 	 #pragma once
 const uint32_t coin_vulkan_rt_fsrprefilter_spirv[] = {
 	0x07230203,0x00010000,0x0008000b,0x000002db,0x00000000,0x00020011,0x00000001,0x0006000b,

@@ -102,11 +102,11 @@ public:
   /*!
     \brief HDR output variant of renderExternal() for the raster path.
 
-    Renders the scene into a backend-owned linear RGBA16F intermediate and then
-    presents it into the caller's \a outputPass / \a outputFramebuffer with the
-    exposure + transfer-function transform (SMPTE ST 2084 / PQ).  Doing the
-    encode once, after all geometry and transparency have blended in linear
-    light, is what makes the output color-correct; see
+    Renders the scene into a backend-owned RGBA16F intermediate and then
+    presents it into the caller's \a outputPass / \a outputFramebuffer as scRGB
+    extended-linear sRGB (the diffuse-white gain is applied there).  Doing the
+    display transform once, after all geometry and transparency have blended, is
+    what makes the output color-correct; see
     data/shaders/vulkan/output/OutputFragment.glsl.
 
     Unlike renderExternal(), the caller must NOT have begun a render pass: this
@@ -124,9 +124,9 @@ public:
                            VkFramebuffer outputFramebuffer);
 
   //! Enable/disable the HDR output transform (see renderExternalHdr()).
-  //! \a exposure is the linear scale mapping scene-white to the PQ peak
-  //! (0.02 ~= 200 cd/m^2 reference white) and \a toneMap selects the
-  //! tone-mapping operator (0 = clip, 1 = Reinhard, 2 = ACES, 3 = Hable).
+  //! \a exposure is the diffuse-white gain for the scRGB extended-linear
+  //! output (1.0 presents linear 1.0 at the compositor's reference white) and
+  //! \a toneMap is reserved for the raster path (it never tone-maps).
   void setHdrOutput(SbBool enabled, float exposure, int toneMap);
 
   /*!
@@ -990,16 +990,17 @@ private:
   bool frameDepthClearedByLoad_ = false;
 
   // --- HDR output pass (raster path) -------------------------------------
-  // When hdrOutput is set, renderExternalHdr() renders the scene into a linear
+  // When hdrOutput is set, renderExternalHdr() renders the scene into an
   // RGBA16F intermediate (hdrColorImage) and presents it into the caller's
-  // swapchain framebuffer with the exposure + PQ transform.  The intermediate
-  // render pass/framebuffer are created through a dedicated cache so they do
-  // not disturb renderPasses (which the internal path owns).
+  // swapchain framebuffer as scRGB extended-linear sRGB (diffuse white = 1.0).
+  // The intermediate render pass/framebuffer are created through a dedicated
+  // cache so they do not disturb renderPasses (which the internal path owns).
   bool hdrOutput = false;
-  float hdrExposure = 0.02f;
-  // Tone-mapping operator applied before the PQ encode (0 = clip, 1 = Reinhard,
-  // 2 = ACES, 3 = Hable); see OutputFragment.glsl.
-  int hdrToneMap = 1;
+  float hdrExposure = 1.0f;
+  // Unused by the raster path (it is already display-referred and never
+  // tone-maps); kept so the manager can share one settings struct with the RT
+  // backend.  See OutputFragment.glsl.
+  int hdrToneMap = 0;
   SoVulkanRenderPassCache hdrPasses;
   // One ring slot per in-flight frame: each owns the offscreen RGBA16F
   // color/depth images, the framebuffer binding them, and the output
