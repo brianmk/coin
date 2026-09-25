@@ -1562,6 +1562,17 @@ SoVulkanRenderManagerP::setClippingPlanes(void)
   }
   SbXfBox3f xbox = this->sceneWorldBBox;
 
+  // The camera-coupled ground grid lives in the per-frame decoration scene, not
+  // the main scene, so extend the clip box with the decoration bounds.  Without
+  // this the far plane stays scene-sized and the rasterizer clips the ground to
+  // a thin band.  SoGroundPlane sizes its footprint independently of the far
+  // plane, so including it here cannot feed back into the next frame.
+  if (this->decorationScene) {
+    SoGetBoundingBoxAction decorationbboxaction(this->viewportRegion);
+    decorationbboxaction.apply(this->decorationScene);
+    xbox.extendBy(decorationbboxaction.getXfBoundingBox());
+  }
+
   // Transform the world-space bounding box into camera coordinates.  The
   // managed scene graph is geometry-only (the camera is a separate member),
   // so the transform is built directly from the camera node: translate to
@@ -1688,8 +1699,18 @@ SoVulkanRenderManagerP::setClippingPlanes(void)
   // never reach a scene-sized model such as BIMExample.
   this->computedNear = newnear;
   this->computedFar = newfar;
-  camera->nearDistance = newnear;
-  camera->farDistance = newfar;
+  // Publish only on an actual change.  SoSFFloat::setValue() notifies the
+  // field's auditors unconditionally, and the active camera carries a node
+  // sensor on the FreeCAD side: an unconditional write here fires the sensor
+  // from inside the render, which requests another frame, which calls
+  // setClippingPlanes() again -- a redraw feedback loop that keeps the
+  // viewport rendering at full rate even while completely idle.
+  if (camera->nearDistance.getValue() != newnear) {
+    camera->nearDistance = newnear;
+  }
+  if (camera->farDistance.getValue() != newfar) {
+    camera->farDistance = newfar;
+  }
 }
 
 SbBool
