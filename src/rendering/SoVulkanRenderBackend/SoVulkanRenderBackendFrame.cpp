@@ -21,6 +21,7 @@
 
 #include <Inventor/elements/SoDrawStyleElement.h>
 #include <Inventor/errors/SoDebugError.h>
+#include <Inventor/nodes/SoNode.h>
 
 #include <algorithm>
 #include <chrono>
@@ -71,6 +72,24 @@ void vkBackendRenderBreadcrumbSince(long startUs, long thresholdUs, const char* 
 {
   SoVulkanShared::breadcrumbSince(vkBackendRenderBreadcrumbLogBudget,
                                   "[VKBACKEND]", startUs, thresholdUs, phase);
+}
+
+//! True when the command was produced by a Part feature-edge set
+//! (SoBrepEdgeSet).  SoRenderCommand::userData is the producing SoShape (set
+//! only in soshape_emit_ir_commands()).  The Part type is resolved by name so
+//! this library does not have to link PartGui; a session without Part never
+//! matches, so nothing is hidden.
+bool vkIsBrepEdgeCommand(const SoRenderCommand & command)
+{
+  if (command.userData == nullptr) {
+    return false;
+  }
+  static const SoType brepEdgeType = SoType::fromName(SbName("SoBrepEdgeSet"));
+  if (brepEdgeType == SoType::badType()) {
+    return false;
+  }
+  const SoNode * node = static_cast<const SoNode *>(command.userData);
+  return node->isOfType(brepEdgeType);
 }
 
 } // namespace
@@ -881,15 +900,29 @@ SoVulkanRenderBackend::buildWorkItems(const SoDrawList & drawlist,
   out.clear();
 
   // Model feature-edge visibility: when the edge overlay is toggled off, skip
-  // the non-triangle line commands (BRep edge lines, polylines) in the main
-  // pass.  Screen-space SO_RENDERPASS_OVERLAY geometry (nav cube, axes) and
-  // point markers are not edges and still draw.  The explicit debug
+  // the Part feature-edge line commands (SoBrepEdgeSet) in the main pass.
+  // Screen-space SO_RENDERPASS_OVERLAY geometry (nav cube, axes) and point
+  // markers are not edges and still draw.  The explicit debug
   // wireframe/tessellation overlay redraw below is also left alone.
+  //
+  // This must match the *source shape*, not every line primitive: the main
+  // pass also carries the Sketcher's edit curves (the rectangle/circle
+  // preview), sketch axes, datum labels and other polylines, all of which are
+  // legitimate line geometry that the "hide model edges" toggle must not
+  // touch.  Skipping by topology alone made a sketch appear empty whenever
+  // edges were hidden.
+  // The common case (edges visible = the default) returns on the first line,
+  // so vkIsBrepEdgeCommand() is not called at all.  When edges are hidden the
+  // cheap integer topology test rejects triangles/points first and the type
+  // walk runs only for the line primitives that could actually be edges.
   const auto edgeHidden = [this](const SoRenderCommand & c) {
     if (this->edgeOverlayVisible) return false;
     if (c.pass == SO_RENDERPASS_OVERLAY) return false;
-    return c.geometry.topology == SO_TOPOLOGY_LINES ||
-           c.geometry.topology == SO_TOPOLOGY_LINE_STRIP;
+    if (c.geometry.topology != SO_TOPOLOGY_LINES &&
+        c.geometry.topology != SO_TOPOLOGY_LINE_STRIP) {
+      return false;
+    }
+    return vkIsBrepEdgeCommand(c);
   };
 
   // Geometry content identity for batching: reuse the cached content hash the
@@ -1561,11 +1594,13 @@ SoVulkanRenderBackend::recordTracedComposite(const SoDrawList & drawlist,
     const SoPrimitiveTopology topo = command.geometry.topology;
     if (topo == SO_TOPOLOGY_TRIANGLES) continue;
     if (topo == SO_TOPOLOGY_TRIANGLE_STRIP) continue;
-    // Edge-overlay toggle: skip the feature-edge line commands, keep point
-    // markers.  The traced surface itself is unaffected (it is the present
-    // pass's job); only this raster residue is gated.
+    // Edge-overlay toggle: skip the Part feature-edge line commands, keep
+    // point markers and every other line primitive (Sketcher edit curves,
+    // axes, datum labels).  The traced surface itself is unaffected (it is the
+    // present pass's job); only this raster residue is gated.
     if (!this->edgeOverlayVisible &&
-        (topo == SO_TOPOLOGY_LINES || topo == SO_TOPOLOGY_LINE_STRIP)) {
+        (topo == SO_TOPOLOGY_LINES || topo == SO_TOPOLOGY_LINE_STRIP) &&
+        vkIsBrepEdgeCommand(command)) {
       continue;
     }
 
