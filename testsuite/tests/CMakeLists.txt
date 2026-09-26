@@ -158,6 +158,8 @@ if(HAVE_EGL)
 			VulkanBackendRetainedChangeTest vulkan/vulkan-backend-retained-change-test.cpp
 			VulkanBackendMaterialChangeTest vulkan/vulkan-backend-material-change-test.cpp
 			VulkanBackendParallelTest vulkan/vulkan-backend-parallel-test.cpp
+			VulkanBackendParallelUnavailableTest vulkan/vulkan-backend-parallel-unavailable-test.cpp
+			VulkanBackendParallelLifecycleTest vulkan/vulkan-backend-parallel-lifecycle-test.cpp
 			VulkanRenderManagerTest vulkan/vulkan-rendermanager-test.cpp
 			VulkanRenderManagerVisibilityTest vulkan/vulkan-rendermanager-visibility-test.cpp
 			VulkanLightStabilityTest vulkan/vulkan-light-stability-test.cpp

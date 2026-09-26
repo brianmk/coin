@@ -119,8 +119,16 @@ struct Concurrency {
   //! Upper bound on record-pool workers.  FC_VULKAN_RECORD_WORKERS; unset
   //! keeps the hardware-derived default (clamped to 8).
   std::optional<unsigned int> recordWorkerCap;
-  //! Secondary command buffers for the external (caller-owned) pass.
-  //! FC_VULKAN_EXTERNAL_SECONDARY; default off.
+  //! Minimum opaque secondary-batch count for the parallel recorder to engage
+  //! (below it the serial single-secondary path is used).  Tune with
+  //! FC_VULKAN_PARALLEL_MIN_ITEMS for scenes whose batching falls under the
+  //! historical 64-item heuristic.
+  unsigned int parallelMinItems = 64;
+  //! Legacy opt-in for secondary command buffers on the external
+  //! (caller-owned) pass.  FC_VULKAN_EXTERNAL_SECONDARY; default off.  The
+  //! external path is now gated on VK_EXT_nested_command_buffer instead (the
+  //! caller mirrors INLINE_AND_SECONDARY contents), so this is kept only for
+  //! diagnostics and no longer required.
   bool externalSecondary = false;
   //! Overlap the denoiser copy on a second compute queue.
   //! FC_VULKAN_ASYNC_COMPUTE; presence-only, default off.

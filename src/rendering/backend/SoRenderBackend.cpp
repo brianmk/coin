@@ -5,6 +5,23 @@
 #include <Inventor/errors/SoDebugError.h>
 
 #include <cassert>
+#include <mutex>
+
+namespace {
+
+// Serializes log/error dispatch.  The Vulkan renderer's record workers can
+// report failures concurrently with the recording thread, and neither the
+// embedding's callbacks nor SoDebugError's handler list is guaranteed to be
+// thread-safe; without this, a worker error could corrupt a log handler or an
+// in-progress message.  Recursive so a handler that itself emits cannot
+// deadlock.
+std::recursive_mutex & logMutex()
+{
+  static std::recursive_mutex m;
+  return m;
+}
+
+} // namespace
 
 SoRenderBackend::SoRenderBackend()
   : initialized(FALSE), initparams()
@@ -46,6 +63,7 @@ SoRenderBackend::getInitParams() const
 void
 SoRenderBackend::emitLog(const char * message) const
 {
+  std::lock_guard<std::recursive_mutex> lock(logMutex());
   if (this->initparams.logCallback) {
     this->initparams.logCallback(message, this->initparams.userData);
     return;
@@ -56,6 +74,7 @@ SoRenderBackend::emitLog(const char * message) const
 void
 SoRenderBackend::emitError(const char * message) const
 {
+  std::lock_guard<std::recursive_mutex> lock(logMutex());
   if (this->initparams.errorCallback) {
     this->initparams.errorCallback(message, this->initparams.userData);
     return;

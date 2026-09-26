@@ -1219,7 +1219,17 @@ SoVulkanRenderBackend::recordSecondaryChunk(VulkanRecordContext & ctx,
                                             VkCommandBuffer secondary,
                                             VkFramebuffer framebuffer)
 {
-  if (secondary == VK_NULL_HANDLE || items.empty()) return true;
+  if (items.empty()) return true;
+  if (secondary == VK_NULL_HANDLE) {
+    // A non-empty chunk with no target buffer is a lost draw, not a no-op:
+    // returning success here would let the caller skip recording the items
+    // (and, in the parallel replay, hand VK_NULL_HANDLE to
+    // vkCmdExecuteCommands).  Fail loudly so the caller re-records inline.
+    this->emitError(
+      "recordSecondaryChunk: no secondary command buffer available for a "
+      "non-empty chunk");
+    return false;
+  }
   vkBackendTrace(this->uboFrameIndex, "recordSecondaryChunk.enter",
                  "secondary=%p items=%zu",
                  reinterpret_cast<const void *>(secondary), items.size());
@@ -1255,6 +1265,13 @@ SoVulkanRenderBackend::recordSecondaryChunk(VulkanRecordContext & ctx,
   vkBackendTrace(this->uboFrameIndex, "recordSecondaryChunk.beginOk",
                  "secondary=%p", reinterpret_cast<const void *>(secondary));
   ctx.buffer = secondary;
+  // The frame viewport/scissor live in dynamic state, which a secondary does
+  // NOT inherit from the primary that executes it.  Set them now that the
+  // buffer is recording, or every draw in this chunk violates
+  // VUID-vkCmdDraw-None-07831 (and renders with the driver's default
+  // viewport, which only happens to be correct for a full-target viewport).
+  // Per-command viewport/scissor overrides still apply inside the loop.
+  this->applyViewport(params, target, ctx);
   for (const VulkanWorkItem * item : items) {
     this->recordWorkItem(drawlist, params, target, renderPass, *item, ctx);
   }
@@ -1267,6 +1284,14 @@ SoVulkanRenderBackend::recordSecondaryChunk(VulkanRecordContext & ctx,
     this->emitError(
       ("recordSecondaryChunk: vkEndCommandBuffer failed: "
        + SoVulkanShared::vkResultName(endRes)).c_str());
+    // Reset it now: a recording buffer may not be reset by the next frame's
+    // vkResetCommandBuffer, so leaving it here would only move the failure.
+    const VkResult resetRes = vkResetCommandBuffer(secondary, 0);
+    if (resetRes != VK_SUCCESS) {
+      this->emitError(
+        ("recordSecondaryChunk: vkResetCommandBuffer after a failed end "
+         "failed: " + SoVulkanShared::vkResultName(resetRes)).c_str());
+    }
     return false;
   }
   vkBackendTrace(this->uboFrameIndex, "recordSecondaryChunk.endOk",
@@ -1384,24 +1409,34 @@ SoVulkanRenderBackend::recordFrame(const SoDrawList & drawlist,
   this->buildWorkItems(drawlist, params, wireframeOverlay, pointsOverlay,
                        tessellationOverlay, overlayColor, renderPass,
                        workItems);
+  // Drop the previous frame's pointers into workItemsScratch.  They are only
+  // cleared on the parallel branch below, so a serial/inline frame would leave
+  // pointers into a vector buildWorkItems() has since refilled (and possibly
+  // reallocated).
+  for (ParallelRecordJob & job : this->recordJobs) {
+    job.items.clear();
+  }
   vkBackendTrace(this->uboFrameIndex, "recordFrame.workItemsBuilt",
                  "items=%zu", workItems.size());
 
   // Secondaries are recorded with RENDER_PASS_CONTINUE inheritance into the
-  // pass the frame is in.  On the INTERNAL path that pass is backend-owned
-  // (renderPass == this->renderPasses.currentRenderPass()) and the combination
-  // is exercised by the testsuite.  The EXTERNAL path (FreeCAD's QuarterVulkanWidget) hands us a
-  // caller-owned pass/framebuffer/command-buffer triplet (QVulkanWindow's,
-  // possibly MSAA); recording secondaries against it has proven to corrupt
-  // NVIDIA driver state (crash inside the driver at the first render-pass
-  // command after the replay) so it stays OFF unless explicitly opted in
-  // while that interaction is investigated.
-  const bool externalPass = renderPass != this->renderPasses.currentRenderPass();
+  // pass the frame is in and executed with vkCmdExecuteCommands(), which is
+  // only legal inside a subpass begun with
+  // VK_SUBPASS_CONTENTS_INLINE_AND_SECONDARY_COMMAND_BUFFERS_EXT
+  // (VK_EXT_nested_command_buffer).  On the INTERNAL path the backend begins
+  // that subpass itself.  On the EXTERNAL path (FreeCAD's QuarterVulkanWidget)
+  // the caller owns the pass and begins the subpass, so it must mirror the
+  // choice: QuarterVulkanRenderer asks its manager
+  // (nestedCommandBuffersEnabled()) and begins with the same contents whenever
+  // the extension is enabled.  Since the extension can only be enabled when the
+  // embedding requests it, nestedCommandBufferEnabled is itself the guarantee
+  // that the caller cooperates, so the old externalSecondary opt-in (and the
+  // plain-INLINE caller-owned subpass that corrupted NVIDIA driver state) is no
+  // longer needed.
   const bool canUseSecondary =
     this->nestedCommandBufferEnabled &&
     !this->secondaryCommandBuffers.empty() &&
-    inheritFramebuffer != VK_NULL_HANDLE &&
-    (!externalPass || SoVulkanConfig::get().concurrency.externalSecondary);
+    inheritFramebuffer != VK_NULL_HANDLE;
   const bool debugFlags =
     SoVulkanConfig::get().debug.matrixDump ||
     SoVulkanConfig::get().debug.blackDebug;
@@ -1413,7 +1448,21 @@ SoVulkanRenderBackend::recordFrame(const SoDrawList & drawlist,
   }
   const bool wantParallel =
     canUseSecondary && this->parallelRecordEnabled && !debugFlags &&
-    secondaryItemCount >= 64 && this->maxRecordWorkers > 1;
+    secondaryItemCount >= SoVulkanConfig::get().concurrency.parallelMinItems &&
+    this->maxRecordWorkers > 1;
+  if (this->parallelRecordEnabled && canUseSecondary && secondaryItemCount > 0 &&
+      !wantParallel && debugFlags) {
+    // An explicitly requested parallel recorder forced back to serial by a
+    // debug dump must say so once instead of silently changing the record path.
+    static bool reported = false;
+    if (!reported) {
+      reported = true;
+      this->emitError(
+        "FC_VULKAN_PARALLEL_RECORD is set but parallel recording is suppressed "
+        "while FC_VULKAN_MATRIX_DUMP / FC_VULKAN_BLACK_DEBUG is active; "
+        "recording serially");
+    }
+  }
   vkBackendTrace(this->uboFrameIndex, "recordFrame.mode",
                  "secondary=%u canSec=%d parEnabled=%d W=%u wantPar=%d",
                  static_cast<unsigned>(secondaryItemCount),
@@ -1423,7 +1472,13 @@ SoVulkanRenderBackend::recordFrame(const SoDrawList & drawlist,
   if (canUseSecondary && secondaryItemCount > 0 && !wantParallel) {
     // M1c serial: one secondary holds the whole opaque pass, replayed in place.
     VkCommandBuffer secondary = this->currentSecondaryCommandBuffer();
-    VkCommandBuffer primary = this->currentCommandBuffer();
+    // Replay into the frame's command buffer, which is ctx.buffer: the caller's
+    // command buffer on the external path (renderExternal) and the backend's
+    // ring slot on the internal path (where the two are the same).  Using
+    // currentCommandBuffer() here put the external path's
+    // vkCmdExecuteCommands/vkCmdClearAttachments onto the backend's unbegun
+    // ring slot, which faults inside the NVIDIA driver.
+    VkCommandBuffer primary = ctx.buffer;
     std::vector<const VulkanWorkItem *> & opaqueItems = this->opaqueItemsScratch;
     opaqueItems.clear();
     opaqueItems.reserve(static_cast<size_t>(secondaryItemCount));
@@ -1442,6 +1497,8 @@ SoVulkanRenderBackend::recordFrame(const SoDrawList & drawlist,
       }
       return TRUE;
     }
+    // The secondary chunk recorded successfully.
+    ++this->secondaryRecordFrameCount_;
     // The primary's bound state was NOT preserved across the secondary, so
     // reset its dedup cache before continuing inline.
     ctx.buffer = primary;
@@ -1458,6 +1515,7 @@ SoVulkanRenderBackend::recordFrame(const SoDrawList & drawlist,
     // longest-first for load balance), record each into its own worker
     // secondary in parallel, then replay all in order followed by the inline
     // painter-order / overlay / annotation items.
+    ++this->parallelRecordFrameCount_;
     if (SoVulkanConfig::get().debug.backendDebug) {
       static int parLog = 0;
       if (parLog++ < 3) {
@@ -1534,8 +1592,10 @@ SoVulkanRenderBackend::recordFrame(const SoDrawList & drawlist,
                    this->recordDoneCount.load(), this->recordJobs[0].ok ? 1 : 0);
     // Replay the secondaries in order, then inline the non-opaque items.
     // A failed worker's chunk is re-recorded inline (serial fallback) into the
-    // primary instead of executing its possibly-invalid secondary.
-    VkCommandBuffer primary = this->currentCommandBuffer();
+    // primary instead of executing its possibly-invalid secondary.  Primary is
+    // the frame's command buffer (ctx.buffer): the caller-owned buffer on the
+    // external path, the ring slot on the internal path (see the serial path).
+    VkCommandBuffer primary = ctx.buffer;
     ctx.buffer = primary;
     ctx.reset();
     std::vector<VkCommandBuffer> & execute = this->executeScratch;
@@ -1543,10 +1603,14 @@ SoVulkanRenderBackend::recordFrame(const SoDrawList & drawlist,
     execute.reserve(W);
     for (uint32_t w = 0; w < W; ++w) {
       if (this->recordJobs[w].items.empty()) continue;
-      if (this->recordJobs[w].ok) {
+      if (this->recordJobs[w].ok &&
+          this->recordJobs[w].secondary != VK_NULL_HANDLE) {
         execute.push_back(this->recordJobs[w].secondary);
       }
       else {
+        // The worker failed, or reported success without a buffer (which
+        // recordSecondaryChunk now rejects): re-record its items inline rather
+        // than execute an invalid/missing secondary.
         this->emitError("parallel record worker failed; recorded inline");
         for (const VulkanWorkItem * item : this->recordJobs[w].items) {
           this->recordWorkItem(drawlist, params, target, renderPass, *item,

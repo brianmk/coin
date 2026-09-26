@@ -1,16 +1,23 @@
 // testsuite/vulkan-backend-parallel-test.cpp
 //
-// Exercises the M1c/M1d secondary/parallel recording path with a heavy,
-// mixed scene: many render-order-independent opaque depth-tested commands
-// (shared geometry -> instanced batches, plus unique-material singles), a
-// few painter-order transparent quads, and a depth-off on-top annotation.
+// Exercises the M1c/M1d secondary/parallel recording path with a heavy, mixed
+// scene: many render-order-independent opaque depth-tested commands (shared
+// geometry -> instanced batches, plus unique-material singles), a few
+// painter-order transparent quads, and a depth-off on-top annotation.
 //
-// The test renders the scene twice in one process -- once with
-// FC_VULKAN_PARALLEL_RECORD unset and once with it set (the flag is read at
-// backend initialization, so each pass gets a fresh Harness) -- and requires
-// the pixel hashes to match: the parallel path must produce pixel-identical
-// output to the serial secondary path.  It also fails if a render call
-// fails or a frame comes back black (a silent lost-draw signal).
+// The device must be created with VK_EXT_nested_command_buffer, or the backend
+// cannot execute secondaries inside the subpass and silently records fully
+// inline -- which is exactly what this test must not accept.  The harness
+// enables the extension when the device supports it; if it does not, the test
+// skips loudly (77) instead of passing vacuously.
+//
+// It renders the scene twice on one device:
+//   pass 1: parallel recording disabled  -> M1c serial secondary path
+//   pass 2: parallel recording enabled    -> M1d parallel path
+// and requires:
+//   * each pass to have actually used its intended path (frame counters), and
+//   * the pixel hashes to match (the parallel path must be pixel-identical to
+//     the serial secondary path).
 // PAR_HASH=<hex> is printed per pass for manual cross-run comparison.
 
 #include "VulkanTestHarness.h"
@@ -81,7 +88,7 @@ SoDrawList buildScene()
   // 100 unique-material opaque triangles (singles: material participates in
   // the batch key, so each color breaks the batch into its own item -- this
   // pushes the recordToSecondary item count past the 64-item parallel
-  // threshold so FC_VULKAN_PARALLEL_RECORD actually dispatches workers).
+  // threshold so the parallel recorder actually dispatches workers).
   for (int i = 0; i < 100; ++i) {
     SoRenderCommand c = makeTriangle(tri);
     SbMatrix m;
@@ -136,12 +143,12 @@ SoDrawList buildScene()
   return drawlist;
 }
 
-// Renders the scene through \a harness for a few frames, readbacks, and
+// Renders \a drawlist through \a harness for a few frames, readbacks, and
 // returns the pixel hash.  Accumulates failures in \a failures (render
 // failures, black frame).
-uint64_t renderHashed(Harness & harness, int & failures)
+uint64_t renderHashed(Harness & harness, const SoDrawList & drawlist,
+                      int & failures)
 {
-  const SoDrawList drawlist = buildScene();
   const SoRenderParams params = harness.renderParams();
   for (int frame = 0; frame < 4; ++frame) {
     if (!harness.backend.render(drawlist, params)) {
@@ -174,25 +181,49 @@ int
 main()
 {
   int failures = 0;
-  uint64_t serialHash = 0;
-  uint64_t parallelHash = 0;
 
-  unsetenv("FC_VULKAN_PARALLEL_RECORD");
-  {
-    Harness harness;
-    const int initResult = harness.init();
-    if (initResult != 0) return initResult;
-    serialHash = renderHashed(harness, failures);
+  Harness harness;
+  harness.wantNestedCommandBuffer = true;
+  const int initResult = harness.init();
+  if (initResult != 0) return initResult;
+
+  // Without the extension the backend cannot execute secondaries inside the
+  // subpass: both passes would be fully inline and the hash comparison would
+  // prove nothing.  Skip loudly rather than report a vacuous pass.
+  if (!harness.haveNestedCommandBuffer) {
+    return skip("device lacks VK_EXT_nested_command_buffer; the secondary / "
+                "parallel recorder cannot be exercised");
   }
 
-  setenv("FC_VULKAN_PARALLEL_RECORD", "1", 1);
-  {
-    Harness harness;
-    const int initResult = harness.init();
-    if (initResult != 0) return initResult;
-    parallelHash = renderHashed(harness, failures);
+  const SoDrawList drawlist = buildScene();
+
+  // Pass 1: M1c serial secondary.
+  const uint64_t secondaryBefore = harness.backend.secondaryRecordFrameCount();
+  harness.backend.setParallelRecordEnabled(FALSE);
+  const uint64_t serialHash = renderHashed(harness, drawlist, failures);
+  const uint64_t secondaryAfter = harness.backend.secondaryRecordFrameCount();
+  if (secondaryAfter == secondaryBefore) {
+    std::cerr << "FAIL: the serial pass did not use the secondary (M1c) path"
+              << std::endl;
+    ++failures;
   }
-  unsetenv("FC_VULKAN_PARALLEL_RECORD");
+  if (harness.backend.parallelRecordFrameCount() != 0) {
+    std::cerr << "FAIL: the serial pass used the parallel (M1d) path"
+              << std::endl;
+    ++failures;
+  }
+
+  // Pass 2: M1d parallel.
+  const uint64_t parallelBefore = harness.backend.parallelRecordFrameCount();
+  harness.backend.setParallelRecordEnabled(TRUE);
+  const uint64_t parallelHash = renderHashed(harness, drawlist, failures);
+  const uint64_t parallelAfter = harness.backend.parallelRecordFrameCount();
+  if (parallelAfter == parallelBefore) {
+    std::cerr << "FAIL: the parallel pass did not engage the parallel (M1d) "
+                 "recorder; it silently fell back (see errors above)"
+              << std::endl;
+    ++failures;
+  }
 
   if (serialHash != parallelHash) {
     std::cerr << "FAIL: parallel path differs from the serial path "
@@ -201,6 +232,7 @@ main()
     ++failures;
   }
 
+  harness.shutdown();
   SoDB::finish();
   return failures == 0 ? 0 : 1;
 }

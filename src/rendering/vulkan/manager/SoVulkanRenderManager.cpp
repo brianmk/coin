@@ -927,6 +927,12 @@ SoVulkanRenderManager::isHdrRasterActive() const
     : FALSE;
 }
 
+SbBool
+SoVulkanRenderManager::nestedCommandBuffersEnabled() const
+{
+  return this->pimpl->backend.nestedCommandBuffersEnabled() ? TRUE : FALSE;
+}
+
 SoVulkanRenderBackend *
 SoVulkanRenderManager::getBackend(void) const
 {

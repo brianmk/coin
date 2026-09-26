@@ -278,6 +278,14 @@ public:
   //! Whether the raster HDR output path is active (ray tracing off + HDR on).
   SbBool isHdrRasterActive() const;
 
+  //! True when the owned backend's device was created with
+  //! VK_EXT_nested_command_buffer enabled.  A caller that begins its own
+  //! render pass (renderExternal/renderExternalOverlay) must then begin the
+  //! subpass with VK_SUBPASS_CONTENTS_INLINE_AND_SECONDARY_COMMAND_BUFFERS_EXT
+  //! so the backend may execute its secondary command buffers; with plain
+  //! INLINE contents it records inline instead.
+  SbBool nestedCommandBuffersEnabled() const;
+
   /*!
     \brief Select the ray-tracing backend for the next render() calls.
 

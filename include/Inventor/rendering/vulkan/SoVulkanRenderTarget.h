@@ -111,7 +111,13 @@ struct SoVulkanDeviceContext {
   uint32_t apiVersion = VK_API_VERSION_1_0;           //!< Negotiated API version.
   const VkAllocationCallbacks * allocator = nullptr;  //!< Optional host allocator.
   //! Probed capabilities (see SoVulkanDeviceCaps).  When capsValid is false
-  //! (e.g. an offscreen/test context) the renderer probes the device itself.
+  //! (e.g. an offscreen/test context) the renderer probes the features it can
+  //! determine from the physical device (fillModeNonSolid, optional sampled
+  //! formats, descriptor indexing).  Capabilities that instead describe what
+  //! the *logical* device was created with -- notably nestedCommandBuffer and
+  //! pipelineCreationFeedback -- cannot be probed back and default to false;
+  //! an embedding that enables them MUST set capsValid and the matching caps
+  //! flag, or the renderer will (correctly) refuse to use the feature.
   SoVulkanDeviceCaps caps {};
   bool capsValid = false;
 };
