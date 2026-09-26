@@ -20,6 +20,7 @@
 #include <cstring>
 #include <functional>
 #include <iostream>
+#include <mutex>
 #include <sstream>
 #include <string>
 #include <vector>
@@ -31,6 +32,122 @@ namespace vulkan_test {
 constexpr uint32_t kWidth = 32;
 constexpr uint32_t kHeight = 32;
 constexpr uint32_t kPixelBytes = 4;
+
+// ---------------------------------------------------------------------------
+// Shared sinks for the backend error callback and the Vulkan validation
+// messenger.  Collected so a test can assert that a condition was reported
+// loudly (e.g. "parallel recording requested but unavailable") and that a
+// resource lifecycle did not raise a validation error.  Both are mutex-guarded
+// because the record workers report errors from their own threads.
+// ---------------------------------------------------------------------------
+inline std::mutex & sinkMutex()
+{
+  static std::mutex m;
+  return m;
+}
+
+inline std::vector<std::string> & backendErrorSink()
+{
+  static std::vector<std::string> s;
+  return s;
+}
+
+inline std::vector<std::string> & validationSink()
+{
+  static std::vector<std::string> s;
+  return s;
+}
+
+inline void clearBackendErrors()
+{
+  std::lock_guard<std::mutex> lk(sinkMutex());
+  backendErrorSink().clear();
+}
+
+inline void clearValidationMessages()
+{
+  std::lock_guard<std::mutex> lk(sinkMutex());
+  validationSink().clear();
+}
+
+inline bool sinkContains(const std::vector<std::string> & sink,
+                         const std::string & needle)
+{
+  std::lock_guard<std::mutex> lk(sinkMutex());
+  for (const std::string & s : sink) {
+    if (s.find(needle) != std::string::npos) return true;
+  }
+  return false;
+}
+
+inline void captureBackendError(const char * message, void * /*userdata*/)
+{
+  // Keep the error visible on stderr as well as captured, so a failing test
+  // still prints why.
+  std::fprintf(stderr, "Coin error (test capture): %s\n",
+               message ? message : "");
+  std::lock_guard<std::mutex> lk(sinkMutex());
+  backendErrorSink().emplace_back(message ? message : "");
+}
+
+inline VKAPI_ATTR VkBool32 VKAPI_CALL
+captureValidation(VkDebugUtilsMessageSeverityFlagBitsEXT severity,
+                  VkDebugUtilsMessageTypeFlagsEXT /*type*/,
+                  const VkDebugUtilsMessengerCallbackDataEXT * data,
+                  void * /*userdata*/)
+{
+  if (severity >= VK_DEBUG_UTILS_MESSAGE_SEVERITY_WARNING_BIT_EXT) {
+    const char * text = (data && data->pMessage) ? data->pMessage : "";
+    std::fprintf(stderr, "[validation] %s\n", text);
+    std::lock_guard<std::mutex> lk(sinkMutex());
+    validationSink().emplace_back(text);
+  }
+  return VK_FALSE;
+}
+
+inline bool hasInstanceExtension(const char * name)
+{
+  uint32_t count = 0;
+  if (vkEnumerateInstanceExtensionProperties(nullptr, &count, nullptr) !=
+      VK_SUCCESS) {
+    return false;
+  }
+  std::vector<VkExtensionProperties> props(count);
+  vkEnumerateInstanceExtensionProperties(nullptr, &count, props.data());
+  for (const VkExtensionProperties & p : props) {
+    if (std::strcmp(p.extensionName, name) == 0) return true;
+  }
+  return false;
+}
+
+inline bool hasInstanceLayer(const char * name)
+{
+  uint32_t count = 0;
+  if (vkEnumerateInstanceLayerProperties(&count, nullptr) != VK_SUCCESS) {
+    return false;
+  }
+  std::vector<VkLayerProperties> props(count);
+  vkEnumerateInstanceLayerProperties(&count, props.data());
+  for (const VkLayerProperties & p : props) {
+    if (std::strcmp(p.layerName, name) == 0) return true;
+  }
+  return false;
+}
+
+inline bool hasDeviceExtension(VkPhysicalDevice device, const char * name)
+{
+  uint32_t count = 0;
+  if (vkEnumerateDeviceExtensionProperties(device, nullptr, &count, nullptr) !=
+      VK_SUCCESS) {
+    return false;
+  }
+  std::vector<VkExtensionProperties> props(count);
+  vkEnumerateDeviceExtensionProperties(device, nullptr, &count, props.data());
+  for (const VkExtensionProperties & p : props) {
+    if (std::strcmp(p.extensionName, name) == 0) return true;
+  }
+  return false;
+}
 
 inline int skip(const char * reason)
 {
@@ -262,6 +379,20 @@ struct Harness
   // mode -- must skip on devices without it.
   bool haveFillModeNonSolid = false;
 
+  // Request that VK_EXT_nested_command_buffer (both features) be enabled at
+  // device creation.  Must be set before init().  The renderer's secondary /
+  // parallel recorder is only reachable when this is on, so a test of that
+  // path sets it and then checks haveNestedCommandBuffer.
+  bool wantNestedCommandBuffer = false;
+  bool haveNestedCommandBuffer = false;
+
+  // Request the Khronos validation layer (if installed); validation warnings
+  // and errors are collected in validationSink().
+  bool wantValidation = false;
+  bool haveValidation = false;
+
+  VkDebugUtilsMessengerEXT debugMessenger = VK_NULL_HANDLE;
+
   SoVulkanDeviceContext deviceContext;
   SoVulkanRenderTarget target;
   SoVulkanRenderBackend backend;
@@ -272,6 +403,26 @@ struct Harness
   {
     SoDB::init();
 
+    // Optional instance extensions/layers.  VK_KHR_get_physical_device_
+    // properties2 is needed to query the nested-command-buffer features on a
+    // 1.0 instance; the validation layer is opt-in.
+    std::vector<const char *> instanceExtensions;
+    std::vector<const char *> instanceLayers;
+    const bool requestProps2 =
+      this->wantNestedCommandBuffer &&
+      hasInstanceExtension(
+        VK_KHR_GET_PHYSICAL_DEVICE_PROPERTIES_2_EXTENSION_NAME);
+    if (requestProps2) {
+      instanceExtensions.push_back(
+        VK_KHR_GET_PHYSICAL_DEVICE_PROPERTIES_2_EXTENSION_NAME);
+    }
+    if (this->wantValidation &&
+        hasInstanceLayer("VK_LAYER_KHRONOS_validation") &&
+        hasInstanceExtension(VK_EXT_DEBUG_UTILS_EXTENSION_NAME)) {
+      instanceExtensions.push_back(VK_EXT_DEBUG_UTILS_EXTENSION_NAME);
+      instanceLayers.push_back("VK_LAYER_KHRONOS_validation");
+    }
+
     VkApplicationInfo appInfo {};
     appInfo.sType = VK_STRUCTURE_TYPE_APPLICATION_INFO;
     appInfo.pApplicationName = "coin-vulkan-smoke";
@@ -280,9 +431,40 @@ struct Harness
     VkInstanceCreateInfo instanceInfo {};
     instanceInfo.sType = VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO;
     instanceInfo.pApplicationInfo = &appInfo;
+    instanceInfo.enabledExtensionCount =
+      static_cast<uint32_t>(instanceExtensions.size());
+    instanceInfo.ppEnabledExtensionNames =
+      instanceExtensions.empty() ? nullptr : instanceExtensions.data();
+    instanceInfo.enabledLayerCount = static_cast<uint32_t>(instanceLayers.size());
+    instanceInfo.ppEnabledLayerNames =
+      instanceLayers.empty() ? nullptr : instanceLayers.data();
     if (vkCreateInstance(&instanceInfo, nullptr, &this->instance) !=
         VK_SUCCESS) {
       return skip("could not create a Vulkan instance");
+    }
+
+    // Wire up the validation messenger (best effort: a missing entry point
+    // just leaves haveValidation false).
+    if (!instanceLayers.empty()) {
+      auto createMessenger =
+        reinterpret_cast<PFN_vkCreateDebugUtilsMessengerEXT>(
+          vkGetInstanceProcAddr(this->instance,
+                                "vkCreateDebugUtilsMessengerEXT"));
+      if (createMessenger) {
+        VkDebugUtilsMessengerCreateInfoEXT mci {};
+        mci.sType = VK_STRUCTURE_TYPE_DEBUG_UTILS_MESSENGER_CREATE_INFO_EXT;
+        mci.messageSeverity =
+          VK_DEBUG_UTILS_MESSAGE_SEVERITY_WARNING_BIT_EXT |
+          VK_DEBUG_UTILS_MESSAGE_SEVERITY_ERROR_BIT_EXT;
+        mci.messageType = VK_DEBUG_UTILS_MESSAGE_TYPE_GENERAL_BIT_EXT |
+                          VK_DEBUG_UTILS_MESSAGE_TYPE_VALIDATION_BIT_EXT |
+                          VK_DEBUG_UTILS_MESSAGE_TYPE_PERFORMANCE_BIT_EXT;
+        mci.pfnUserCallback = &captureValidation;
+        if (createMessenger(this->instance, &mci, nullptr,
+                            &this->debugMessenger) == VK_SUCCESS) {
+          this->haveValidation = true;
+        }
+      }
     }
 
     uint32_t deviceCount = 0;
@@ -335,16 +517,60 @@ struct Harness
     enabledFeatures.fillModeNonSolid = physicalFeatures.fillModeNonSolid;
     this->haveFillModeNonSolid = enabledFeatures.fillModeNonSolid;
 
+    // Query and (when supported) enable VK_EXT_nested_command_buffer.  The
+    // feature struct can only be queried through the KHR/core features2 entry
+    // point chained on the instance extension requested above.
+    bool enableNested = false;
+    if (this->wantNestedCommandBuffer &&
+        hasDeviceExtension(this->physicalDevice,
+                           VK_EXT_NESTED_COMMAND_BUFFER_EXTENSION_NAME)) {
+      auto getFeatures2 = reinterpret_cast<PFN_vkGetPhysicalDeviceFeatures2KHR>(
+        vkGetInstanceProcAddr(this->instance,
+                              "vkGetPhysicalDeviceFeatures2KHR"));
+      if (getFeatures2) {
+        VkPhysicalDeviceNestedCommandBufferFeaturesEXT nested {};
+        nested.sType =
+          VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_NESTED_COMMAND_BUFFER_FEATURES_EXT;
+        VkPhysicalDeviceFeatures2 features2 {};
+        features2.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2;
+        features2.pNext = &nested;
+        getFeatures2(this->physicalDevice, &features2);
+        enableNested =
+          nested.nestedCommandBuffer && nested.nestedCommandBufferRendering;
+      }
+    }
+
     VkDeviceCreateInfo deviceInfo {};
     deviceInfo.sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO;
     deviceInfo.queueCreateInfoCount = 1;
     deviceInfo.pQueueCreateInfos = &queueInfo;
     deviceInfo.pEnabledFeatures = &enabledFeatures;
+    VkPhysicalDeviceFeatures2 enabledFeatures2 {};
+    VkPhysicalDeviceNestedCommandBufferFeaturesEXT enabledNested {};
+    const char * nestedExtensionName =
+      VK_EXT_NESTED_COMMAND_BUFFER_EXTENSION_NAME;
+    if (enableNested) {
+      // Chaining VkPhysicalDeviceFeatures2 with pEnabledFeatures == nullptr is
+      // the Vulkan 1.1+ / KHR form; the two nested features must both be
+      // enabled for the renderer's INLINE_AND_SECONDARY subpass.
+      enabledFeatures2.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2;
+      enabledFeatures2.features = enabledFeatures;
+      enabledNested.sType =
+        VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_NESTED_COMMAND_BUFFER_FEATURES_EXT;
+      enabledNested.nestedCommandBuffer = VK_TRUE;
+      enabledNested.nestedCommandBufferRendering = VK_TRUE;
+      enabledFeatures2.pNext = &enabledNested;
+      deviceInfo.pNext = &enabledFeatures2;
+      deviceInfo.pEnabledFeatures = nullptr;
+      deviceInfo.enabledExtensionCount = 1;
+      deviceInfo.ppEnabledExtensionNames = &nestedExtensionName;
+    }
     if (vkCreateDevice(this->physicalDevice, &deviceInfo, nullptr,
                        &this->device) != VK_SUCCESS) {
       vkDestroyInstance(this->instance, nullptr);
       return skip("could not create a Vulkan logical device");
     }
+    this->haveNestedCommandBuffer = enableNested;
     vkGetDeviceQueue(this->device, this->queueFamily, 0, &this->queue);
 
     if (!createImage(this->device, this->physicalDevice,
@@ -394,6 +620,13 @@ struct Harness
     this->deviceContext.device = this->device;
     this->deviceContext.graphicsQueue = this->queue;
     this->deviceContext.graphicsQueueFamilyIndex = this->queueFamily;
+    // Tell the backend what the device was created with.  nestedCommandBuffer
+    // cannot be read back from a created device, so it is only usable when the
+    // embedding advertises it here.
+    if (this->haveNestedCommandBuffer) {
+      this->deviceContext.capsValid = true;
+      this->deviceContext.caps.nestedCommandBuffer = true;
+    }
 
     this->target.colorImage = this->colorImage;
     this->target.colorImageView = this->colorView;
@@ -411,6 +644,7 @@ struct Harness
 
     SoRenderBackendInitParams initParams;
     initParams.userData = &this->deviceContext;
+    initParams.errorCallback = &captureBackendError;
     if (!this->backend.initialize(initParams)) {
       this->shutdown();
       return skip("Vulkan backend could not initialize");
@@ -456,6 +690,17 @@ struct Harness
     if (this->device != VK_NULL_HANDLE) {
       vkDestroyDevice(this->device, nullptr);
       this->device = VK_NULL_HANDLE;
+    }
+    if (this->debugMessenger != VK_NULL_HANDLE) {
+      auto destroyMessenger =
+        reinterpret_cast<PFN_vkDestroyDebugUtilsMessengerEXT>(
+          vkGetInstanceProcAddr(this->instance,
+                                "vkDestroyDebugUtilsMessengerEXT"));
+      if (destroyMessenger) {
+        destroyMessenger(this->instance, this->debugMessenger, nullptr);
+      }
+      this->debugMessenger = VK_NULL_HANDLE;
+      this->haveValidation = false;
     }
     if (this->instance != VK_NULL_HANDLE) {
       vkDestroyInstance(this->instance, nullptr);

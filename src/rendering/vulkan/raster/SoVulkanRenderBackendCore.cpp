@@ -220,6 +220,29 @@ SoVulkanRenderBackend::setMaxFramesInFlight(const uint32_t count)
   }
 }
 
+void
+SoVulkanRenderBackend::setParallelRecordEnabled(const SbBool enabled)
+{
+  if (enabled != FALSE && this->maxRecordWorkers <= 1) {
+    // Report rather than accepting a request that can never take effect; the
+    // counter/getter side would otherwise show "parallel requested" while every
+    // frame records serially.
+    this->emitError(
+      "setParallelRecordEnabled: no record worker threads are available; "
+      "parallel recording stays disabled");
+    this->parallelRecordEnabled = false;
+    return;
+  }
+  if (enabled != FALSE && !this->nestedCommandBufferEnabled) {
+    this->emitError(
+      "setParallelRecordEnabled: the device was not created with "
+      "VK_EXT_nested_command_buffer; parallel recording stays disabled");
+    this->parallelRecordEnabled = false;
+    return;
+  }
+  this->parallelRecordEnabled = enabled != FALSE;
+}
+
 const char *
 SoVulkanRenderBackend::getName() const
 {
@@ -368,6 +391,23 @@ SoVulkanRenderBackend::initialize(const SoRenderBackendInitParams & params)
   }
   vkBackendTrace(0, "init.parallelConfig", "parallel=%d W=%u",
                  this->parallelRecordEnabled ? 1 : 0, this->maxRecordWorkers);
+  // An explicitly requested parallel recorder that cannot engage must not
+  // degrade to serial silently: report each unmet precondition once at init.
+  if (SoVulkanConfig::get().concurrency.parallelRecord) {
+    if (this->maxRecordWorkers <= 1) {
+      this->emitError(
+        "FC_VULKAN_PARALLEL_RECORD is set but no record worker threads are "
+        "available (hardware_concurrency <= 1 or FC_VULKAN_RECORD_WORKERS=1); "
+        "recording serially");
+    }
+    if (!this->nestedCommandBufferEnabled) {
+      this->emitError(
+        "FC_VULKAN_PARALLEL_RECORD is set but the device was not created with "
+        "VK_EXT_nested_command_buffer (nestedCommandBuffer + "
+        "nestedCommandBufferRendering); parallel recording is unavailable and "
+        "recording falls back to the inline path");
+    }
+  }
 
   // Cache the device capabilities the backend relies on.  Vulkan has no API
   // to read back which features an already-created device enabled, so query
@@ -598,6 +638,15 @@ SoVulkanRenderBackend::createCommandPool()
   SoVulkanDebugUtils::nameObject(this->device, VK_OBJECT_TYPE_COMMAND_POOL,
                                  reinterpret_cast<uint64_t>(this->commandPool),
                                  "Coin raster primary command pool");
+  // Build the record worker pool BEFORE sizing the per-worker command pools.
+  // A thread-spawn failure shrinks maxRecordWorkers to 1, and the pool array
+  // and the secondary layout below must be sized from the same post-fallback
+  // value; otherwise buffers would be allocated from one set of pools and
+  // freed against another (invalid free + leak).  A spawn failure is a serial
+  // fallback, not a fatal initialization error.
+  if (this->maxRecordWorkers > 1 && !this->buildRecordPool()) {
+    this->emitError("record worker pool unavailable; recording serially");
+  }
   // Secondary pools for the M1c/M1d opaque-pass re-record: same
   // transient/reset flags as the primary pool, secondary-level buffers.  One
   // pool per worker (worker 0 = the recording thread): VkCommandPool host
@@ -624,6 +673,19 @@ SoVulkanRenderBackend::buildRecordPool()
 {
   if (this->maxRecordWorkers <= 1) return true;
   if (this->recordWorkers.size() >= this->maxRecordWorkers - 1) return true;
+  // Test-only fault injection: force the "worker spawn failed" fallback so the
+  // shrink-then-reallocate path stays covered by the suite.  Read on each call
+  // (deliberately not cached) so one test binary can exercise both the normal
+  // and the forced-failure configuration.
+  if (SoVulkanShared::envSet("FC_VULKAN_TEST_FAIL_RECORD_POOL")) {
+    this->emitError(
+      "buildRecordPool: forced worker-spawn failure "
+      "(FC_VULKAN_TEST_FAIL_RECORD_POOL); falling back to serial recording");
+    this->shutdownRecordPool();
+    this->parallelRecordEnabled = false;
+    this->maxRecordWorkers = 1;
+    return false;
+  }
   {
     std::lock_guard<std::mutex> lk(this->recordMutex);
     this->recordPoolStopped = false;
@@ -683,7 +745,23 @@ SoVulkanRenderBackend::recordJobWorker(const size_t workerIndex)
     }
     vkBackendTrace(this->uboFrameIndex, "recordJobWorker.wake",
                    "w=%zu gen=%u", workerIndex, processed);
-    if (workerIndex >= this->recordJobs.size()) continue;
+    if (workerIndex >= this->recordJobs.size()) {
+      // The job list is sized to maxRecordWorkers and worker indices are
+      // bounded by it, so this must not happen.  Report it, but still publish
+      // completion: skipping the publication would hang the recording thread's
+      // recordCvDone join forever.
+      this->emitError(
+        "Vulkan parallel record: worker index out of range; skipping the "
+        "record step");
+      {
+        std::lock_guard<std::mutex> lk(this->recordMutex);
+        if (this->recordJobGeneration == generation) {
+          this->recordDoneCount.fetch_add(1);
+          this->recordCvDone.notify_all();
+        }
+      }
+      continue;
+    }
     ParallelRecordJob & job = this->recordJobs[workerIndex];
     vkBackendTrace(this->uboFrameIndex, "recordJobWorker.record",
                    "w=%zu secondary=%p items=%zu", workerIndex,
@@ -797,14 +875,9 @@ SoVulkanRenderBackend::allocateFrameResources()
   // Per-worker record contexts + job slots, sized by maxRecordWorkers.
   this->workerRecordContexts.assign(this->maxRecordWorkers, VulkanRecordContext{});
   this->recordJobs.assign(this->maxRecordWorkers, ParallelRecordJob{});
-  // The pool serves both parallel recording and the wide-line expansion
-  // pre-pass, so build it whenever there is more than one worker.
-  if (this->maxRecordWorkers > 1) {
-    if (!this->buildRecordPool()) {
-      this->releaseFrameResources();
-      return false;
-    }
-  }
+  // The worker pool itself is built in createCommandPool(), before the pools
+  // and secondaries are sized, so a spawn failure has already reduced
+  // maxRecordWorkers here.  Nothing to do.
   return true;
 }
 
@@ -814,15 +887,23 @@ SoVulkanRenderBackend::releaseFrameResources()
   // The caller must have made the queue idle (shutdown waits) or have waited
   // the pending fences (setMaxFramesInFlight) before this runs.
   this->frameRing.release(this->device, this->commandPool, this->allocator);
+  // The worker stride that indexed the allocation is the number of per-worker
+  // pools, NOT maxRecordWorkers: if maxRecordWorkers is ever reduced after the
+  // secondaries were allocated, using it here would free buffers against the
+  // wrong pool (VUID-vkFreeCommandBuffers-commandBuffer-00060) and leak the
+  // rest.  The pool array is the allocation-time source of truth.
+  const size_t stride = this->secondaryCommandPools.size();
   for (size_t i = 0; i < this->secondaryCommandBuffers.size(); ++i) {
     VkCommandBuffer & buffer = this->secondaryCommandBuffers[i];
     if (buffer == VK_NULL_HANDLE) continue;
-    const uint32_t w =
-      static_cast<uint32_t>(i % this->maxRecordWorkers);
-    if (w < this->secondaryCommandPools.size()) {
-      vkFreeCommandBuffers(this->device, this->secondaryCommandPools[w], 1,
-                           &buffer);
+    if (stride == 0) {
+      this->emitError(
+        "releaseFrameResources: secondary command buffer has no owning pool");
+      continue;
     }
+    const size_t w = i % stride;
+    vkFreeCommandBuffers(this->device, this->secondaryCommandPools[w], 1,
+                         &buffer);
   }
   this->secondaryCommandBuffers.clear();
   this->workerRecordContexts.clear();

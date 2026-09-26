@@ -159,6 +159,50 @@ public:
   void setOverlayCompositeMode(SbBool enabled);
 
   /*!
+    \brief True when the device was created with VK_EXT_nested_command_buffer
+    and nestedCommandBufferRendering enabled.
+
+    When true a subpass may be begun with
+    VK_SUBPASS_CONTENTS_INLINE_AND_SECONDARY_COMMAND_BUFFERS_EXT and the
+    backend records and executes secondary command buffers inside it.  On the
+    caller-owned (external) pass the caller begins the subpass, so it must use
+    that same contents for the backend's secondaries to be legal; an embedding
+    such as QVulkanWindow queries this through its SoVulkanRenderManager before
+    beginning its pass.
+  */
+  bool nestedCommandBuffersEnabled() const
+  {
+    return this->nestedCommandBufferEnabled;
+  }
+
+  /*!
+    \brief Override parallel opaque-pass recording at runtime.
+
+    The initial value comes from FC_VULKAN_PARALLEL_RECORD when initialize()
+    resolves the configuration.  This lets an embedding (or a regression test)
+    switch between the serial-secondary and parallel recorders without
+    recreating the device.  It still requires record worker threads and a
+    device created with VK_EXT_nested_command_buffer; requesting it when
+    either is unavailable is reported through emitError and stays serial.
+  */
+  void setParallelRecordEnabled(SbBool enabled);
+
+  //! Frames recorded through the serial one-secondary path (M1c).  Diagnostics
+  //! and regression tests use it to prove the secondary path actually ran.
+  uint64_t secondaryRecordFrameCount() const
+  {
+    return this->secondaryRecordFrameCount_;
+  }
+
+  //! Frames recorded through the parallel (M1d) path.  A regression test
+  //! asserts this advances when parallel recording is enabled, so a run that
+  //! silently fell back to the inline path cannot pass as a parallel test.
+  uint64_t parallelRecordFrameCount() const
+  {
+    return this->parallelRecordFrameCount_;
+  }
+
+  /*!
     \brief Declare how many recorded frames the caller may keep in flight.
 
     Drives the deferred-destruction batch count and the lighting UBO ring
@@ -773,6 +817,11 @@ private:
   // thread and workers 1..N-1 are spawned threads, all joined in shutdown().
   bool parallelRecordEnabled = false;
   uint32_t maxRecordWorkers = 1;
+  // Frames recorded through each secondary path since initialize().  Separate
+  // counters so a test can prove which path a frame actually took (see the
+  // getters above); a silent fallback then cannot masquerade as coverage.
+  uint64_t secondaryRecordFrameCount_ = 0;
+  uint64_t parallelRecordFrameCount_ = 0;
   // True when the device was created with VK_EXT_nested_command_buffer and
   // nestedCommandBufferRendering, so a subpass may begin with
   // VK_SUBPASS_CONTENTS_INLINE_AND_SECONDARY_COMMAND_BUFFERS_EXT and both

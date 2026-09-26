@@ -152,6 +152,12 @@ Config load()
       c.concurrency.recordWorkerCap = static_cast<unsigned int>(v);
     }
   }
+  if (SoVulkanShared::envSet("FC_VULKAN_PARALLEL_MIN_ITEMS")) {
+    const int v = SoVulkanShared::envInt("FC_VULKAN_PARALLEL_MIN_ITEMS", 0);
+    if (v >= 1) {
+      c.concurrency.parallelMinItems = static_cast<unsigned int>(v);
+    }
+  }
   c.concurrency.externalSecondary =
     SoVulkanShared::envFlagEnabled("FC_VULKAN_EXTERNAL_SECONDARY", false);
   c.concurrency.asyncCompute = SoVulkanShared::envSet("FC_VULKAN_ASYNC_COMPUTE");
@@ -296,10 +302,11 @@ void dump()
     std::snprintf(sWorkerCap, sizeof(sWorkerCap), "-");
   }
   std::fprintf(stderr,
-               "[VKCONFIG] parallel=%d workerCap=%s extSec=%d "
+               "[VKCONFIG] parallel=%d workerCap=%s parMinItems=%u extSec=%d "
                "asyncCompute=%d wlineCpu=%d\n",
                c.concurrency.parallelRecord ? 1 : 0,
                sWorkerCap,
+               c.concurrency.parallelMinItems,
                c.concurrency.externalSecondary ? 1 : 0,
                c.concurrency.asyncCompute ? 1 : 0,
                c.raster.wideLineCpu ? 1 : 0);

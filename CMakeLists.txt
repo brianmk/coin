@@ -191,6 +191,19 @@ else()
   set(COIN_BUILD_VULKAN_RENDERER_VALUE 0)
 endif()
 
+# The fork's Vulkan renderer uses C++17 library facilities (std::optional,
+# std::string_view) and is compiled with C++20 by the FreeCAD superproject,
+# which sets CMAKE_CXX_STANDARD before adding this subdirectory.  A standalone
+# Coin configure (the documented way to build the test suite) has no such
+# setting and would otherwise fall back to the C++11 default above and fail to
+# compile those sources.  Raise the minimum here when the renderer is built.
+if(COIN_BUILD_VULKAN_RENDERER AND CMAKE_CXX_STANDARD LESS 20)
+  set(CMAKE_CXX_STANDARD 20)
+  set(CMAKE_CXX_STANDARD_REQUIRED ON)
+  message(STATUS
+    "Raising C++ standard to '${CMAKE_CXX_STANDARD}' for the Vulkan renderer.")
+endif()
+
 check_include_file_cxx(thread HAVE_STD_THREAD)
 cmake_dependent_option(COIN_DEBUG_CHECK_THREAD "Enable thread check in several central Coin functions." OFF "HAVE_STD_THREAD" OFF)
 
