@@ -45,6 +45,13 @@ struct GeometryLod {
   //! Largest index count that gets a compacted buffer (memory bound).
   //! FC_VULKAN_GEOM_LOD_MAX_INDEX; default 64M, clamped to > 0.
   uint32_t maxIndices = 64000000u;
+  //! Smallest triangle count that is worth compacting.  Below this the fixed
+  //! per-command cost (fill + barrier + dispatch) exceeds the vertex shading the
+  //! compaction saves, so the command is drawn in full.  Scenes made of many
+  //! small parts (a CAD assembly) otherwise pay one dispatch per part for a
+  //! handful of triangles.  FC_VULKAN_GEOM_LOD_MIN_PRIMS; default 256, clamped
+  //! to >= 0 (0 disables the gate, restoring the pre-2026 behaviour).
+  uint32_t minPrims = 256u;
 };
 
 // Ray-tracing / path-tracing diagnostics.  Presence-only (any value, including
