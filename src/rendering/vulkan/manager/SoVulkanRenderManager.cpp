@@ -115,6 +115,15 @@ SoVulkanRenderManager::~SoVulkanRenderManager()
 void
 SoVulkanRenderManager::setSceneGraph(SoNode * root)
 {
+  // Re-setting the SAME root must be a no-op: the base's setSceneGraph() has
+  // no same-root guard and unconditionally calls sceneGraphChanged(), which
+  // re-arms the graph-dirty sensor and drops the scene bbox cache.  FreeCAD's
+  // QuarterVulkanRenderer pushes the (unchanged) scene pointer every frame, so
+  // without this the sensor is re-armed each frame and the O(nodes)
+  // graph-fingerprint walk cannot be skipped.
+  if (this->pimpl->getSceneGraph() == root) {
+    return;
+  }
   // The base owns the root pointer and the reference; the P-impl's
   // sceneGraphChanged() re-arms the graph-dirty sensor and drops the bbox
   // cache (see SoVulkanRenderManagerP.h).
