@@ -30,8 +30,8 @@ SoVulkanRenderManagerP::computeGraphFingerprint() const
               (unsigned long)hScene, (unsigned long)hOverlay,
               (unsigned long)hDecor,
               (unsigned long long)this->externalRevision,
-              (int)this->viewportRegion.getViewportSizePixels()[0],
-              (int)this->viewportRegion.getViewportSizePixels()[1]);
+              (int)this->viewport.getViewportSizePixels()[0],
+              (int)this->viewport.getViewportSizePixels()[1]);
     }
   }
   // The replay gate is keyed on the MAIN scene only (plus the viewport and the
@@ -45,7 +45,7 @@ SoVulkanRenderManagerP::computeGraphFingerprint() const
   // fingerprint is stable; their pointer mixes below stay constant so an
   // overlay-scene swap still invalidates.
   graphFingerprintWalk(this->scene, this->camera, h);
-  const SbVec2s size = this->viewportRegion.getViewportSizePixels();
+  const SbVec2s size = this->viewport.getViewportSizePixels();
   mixHash(h, static_cast<uint32_t>(size[0]));
   mixHash(h, static_cast<uint32_t>(size[1]));
   uint32_t dprBits = 0;
@@ -163,7 +163,7 @@ SoVulkanRenderManagerP::setClippingPlanes(void)
     this->sceneFpValid = TRUE;
   }
   if (!this->sceneBBoxCached) {
-    SoGetBoundingBoxAction bboxaction(this->viewportRegion);
+    SoGetBoundingBoxAction bboxaction(this->viewport);
     bboxaction.apply(this->scene);
     this->sceneWorldBBox = bboxaction.getXfBoundingBox();
     this->sceneBBoxScene = this->scene;
@@ -171,7 +171,7 @@ SoVulkanRenderManagerP::setClippingPlanes(void)
     this->sceneBBoxCached = true;
   } else if (this->sceneBBoxScene != this->scene ||
              this->sceneBBoxFingerprint != sceneFp) {
-    SoGetBoundingBoxAction bboxaction(this->viewportRegion);
+    SoGetBoundingBoxAction bboxaction(this->viewport);
     bboxaction.apply(this->scene);
     this->sceneWorldBBox = bboxaction.getXfBoundingBox();
     this->sceneBBoxScene = this->scene;
@@ -185,7 +185,7 @@ SoVulkanRenderManagerP::setClippingPlanes(void)
   // a thin band.  SoGroundPlane sizes its footprint independently of the far
   // plane, so including it here cannot feed back into the next frame.
   if (this->decorationScene) {
-    SoGetBoundingBoxAction decorationbboxaction(this->viewportRegion);
+    SoGetBoundingBoxAction decorationbboxaction(this->viewport);
     decorationbboxaction.apply(this->decorationScene);
     xbox.extendBy(decorationbboxaction.getXfBoundingBox());
   }
@@ -376,7 +376,7 @@ SoVulkanRenderManagerP::prepareRenderParams(SbBool clearwindow,
 
   const long applyBcStart = vkRenderBreadcrumbEnabled() ? vkRenderBreadcrumbNowUs() : 0;
   SoIRRenderAction & action = this->irAction;
-  action.setViewportRegion(this->viewportRegion);
+  action.setViewportRegion(this->viewport);
   {
     static bool loggedAction = false;
     if (!loggedAction && SoVulkanConfig::get().debug.backendDebug) {
@@ -388,7 +388,7 @@ SoVulkanRenderManagerP::prepareRenderParams(SbBool clearwindow,
     }
   }
 
-  params.viewport = this->viewportRegion;
+  params.viewport = this->viewport;
   // The viewport region is in device pixels, so carry the device-pixel ratio
   // into the render params.  The GL and Vulkan backends scale logical line
   // widths / point sizes by this (SoDrawStyle values are logical points);
@@ -415,13 +415,13 @@ SoVulkanRenderManagerP::prepareRenderParams(SbBool clearwindow,
               cname,
               static_cast<double>(cpos[0]), static_cast<double>(cpos[1]),
               static_cast<double>(cpos[2]), static_cast<double>(cheight),
-              static_cast<double>(this->viewportRegion.getViewportAspectRatio()),
+              static_cast<double>(this->viewport.getViewportAspectRatio()),
               static_cast<int>(this->autoClipping),
               static_cast<double>(this->computedNear),
               static_cast<double>(this->computedFar));
     }
   }
-  params.clearColor = this->backgroundColor;
+  params.clearColor = this->backgroundcolor;
   if (breadcrumbsEnabled()) {
     static bool logged = false;
     if (!logged) {
@@ -479,7 +479,7 @@ SoVulkanRenderManagerP::prepareRenderParams(SbBool clearwindow,
    // churn (identical fingerprint -> replay) from a real content change
    // (different fingerprint -> re-traverse).
    uint64_t graphFp;
-   const SbVec2s fpVpSize = this->viewportRegion.getViewportSizePixels();
+   const SbVec2s fpVpSize = this->viewport.getViewportSizePixels();
     if (this->graphFingerprintValid && this->lastFpValid &&
         !this->sceneGraphDirty && this->scene == this->lastFpScene &&
         fpVpSize == this->lastFpViewport && this->devicePixelRatio == this->lastFpDpr) {
@@ -630,7 +630,7 @@ SoVulkanRenderManagerP::prepareRenderParams(SbBool clearwindow,
       }
       this->overlayRootChildrenValid = TRUE;
     }
-    this->overlayIrAction.setViewportRegion(this->viewportRegion);
+    this->overlayIrAction.setViewportRegion(this->viewport);
     this->overlayIrAction.setModelPointsVisible(this->pointsOverlay
                                                 || SoVulkanConfig::get().raster.points);
     if (oroot->getNumChildren() > 0) {
@@ -719,20 +719,20 @@ SoVulkanRenderManagerP::prepareRenderParams(SbBool clearwindow,
       const auto * pc =
         static_cast<const SoPerspectiveCamera *>(this->camera);
       vv.perspective(pc->heightAngle.getValue(),
-                     this->viewportRegion.getViewportAspectRatio(),
+                     this->viewport.getViewportAspectRatio(),
                      nearplane, farplane);
     }
     else if (this->camera->isOfType(SoOrthographicCamera::getClassTypeId())) {
       const auto * oc = static_cast<const SoOrthographicCamera *>(this->camera);
       const float halfheight = oc->height.getValue() * 0.5f;
       const float halfwidth =
-        halfheight * this->viewportRegion.getViewportAspectRatio();
+        halfheight * this->viewport.getViewportAspectRatio();
       vv.ortho(-halfwidth, halfwidth, -halfheight, halfheight,
                nearplane, farplane);
     }
     else {
       vv = this->camera->getViewVolume(
-        this->viewportRegion.getViewportAspectRatio());
+        this->viewport.getViewportAspectRatio());
     }
 
     if (vv.getDepth() == 0.0f || vv.getWidth() == 0.0f
@@ -1014,14 +1014,14 @@ SoVulkanRenderManagerP::prepareRenderParams(SbBool clearwindow,
       && (params.viewMatrix[3][3] != 1.0f || params.projMatrix[3][3] != 1.0f
           || params.projMatrix[2][3] != 0.0f)) {
     loggedReady = true;
-    SbVec2s vpsize = this->viewportRegion.getViewportSizePixels();
+    SbVec2s vpsize = this->viewport.getViewportSizePixels();
     SoDebugError::postInfo(
       "SoVulkanRenderManager::prepareRenderParams",
       "scene=%p camera=%p viewport=%dx%d commands=%d clearColor=(%.3f,%.3f,%.3f,%.3f) "
       "clearWindow=%d clearDepth=%d",
       this->scene, this->camera, vpsize[0], vpsize[1],
-      list.getNumCommands(), this->backgroundColor[0], this->backgroundColor[1],
-      this->backgroundColor[2], this->backgroundColor[3],
+      list.getNumCommands(), this->backgroundcolor[0], this->backgroundcolor[1],
+      this->backgroundcolor[2], this->backgroundcolor[3],
       this->clearWindow ? 1 : 0, this->clearDepth ? 1 : 0);
     SoDebugError::postInfo(
       "SoVulkanRenderManager::prepareRenderParams",
@@ -1129,7 +1129,7 @@ SoVulkanRenderManagerP::dumpClipDebug(SoDrawList & list,
     // camera NODE's own fields vs the harvested params.viewMatrix.  If they
     // disagree, the matrix the GPU uses is not built from this camera node.
     if (this->camera && this->scene) {
-      SoGetBoundingBoxAction bba(this->viewportRegion);
+      SoGetBoundingBoxAction bba(this->viewport);
       bba.apply(this->scene);
       SbBox3f wbox = bba.getBoundingBox();
       if (!wbox.isEmpty()) {
@@ -1171,7 +1171,7 @@ SoVulkanRenderManagerP::dumpClipDebug(SoDrawList & list,
   // is obvious.  This isolates whether the near plane is cutting geometry
   // because setClippingPlanes computes a wrong camera-space box.
   if (frames % 250 == 0 && this->scene) {
-    SoGetBoundingBoxAction bboxAction(this->viewportRegion);
+    SoGetBoundingBoxAction bboxAction(this->viewport);
     bboxAction.apply(this->scene);
     SbBox3f wbox = bboxAction.getBoundingBox();
     if (!wbox.isEmpty()) {

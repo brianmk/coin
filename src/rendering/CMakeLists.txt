@@ -6,6 +6,7 @@ set(COIN_RENDERING_FILES
 	gl/CoinOffscreenGLCanvas.cpp
 	backend/SoRenderManager.cpp
 	backend/SoRenderManagerP.cpp
+	backend/SoSceneManagerBase.cpp
 	backend/SoRenderIR.cpp
 	backend/SoRenderBackend.cpp
 	# SoGLRenderBackend.cpp is intentionally NOT part of libCoin: it is a
@@ -80,6 +81,8 @@ set(COIN_RENDERING_INTERNAL_FILES
 	gl/SoGLNurbs.cpp
 	backend/SoRenderManagerP.h
 	backend/SoRenderManagerP.cpp
+	backend/SoSceneManagerBase.h
+	backend/SoSceneManagerBase.cpp
 	gl/SoOffscreenCGData.h
 	gl/SoOffscreenCGData.cpp
 	gl/SoOffscreenGLXData.h

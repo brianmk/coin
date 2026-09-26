@@ -51,6 +51,8 @@
 #include <Inventor/sensors/SoNodeSensor.h>
 #include <Inventor/misc/SoNotification.h>
 
+#include "rendering/backend/SoSceneManagerBase.h"
+
 class SbMatrix;
 class SoNodeSensor;
 class SoInfo;
@@ -59,16 +61,21 @@ class SoGetBoundingBoxAction;
 class SoGetMatrixAction;
 class SoSearchAction;
 class SbPList;
-class SoRenderManagerP {
+// The scene graph, camera, viewport region + DPR, background color, active
+// flag and redraw sensor/callback are owned by SoSceneManagerBase, which the
+// Vulkan render manager shares.  Only the legacy-GL-specific state (stereo,
+// superimpositions, GL actions, root sensor) lives here.
+class SoRenderManagerP : public SoSceneManagerBase {
 public:
   SoRenderManagerP(SoRenderManager * publ);
   ~SoRenderManagerP();
+
+  void sceneGraphChanged(SoNode * oldroot, SoNode * newroot) override;
 
   void setClippingPlanes(void);
   static void updateClippingPlanesCB(void * closure, SoSensor * sensor);
   void getCameraCoordinateSystem(SbMatrix & matrix,
                                  SbMatrix & inverse);
-  static void redrawshotTriggeredCB(void * data, SoSensor * sensor);
   static void cleanup(void);
 
   void lock(void) {
@@ -84,22 +91,17 @@ public:
 
   SoRenderManager * publ;
   SoNodeSensor * rootsensor;
-  SoNode * scene;
-  SoCamera * camera;
   float nearplanevalue;
   SbBool doublebuffer;
-  SbBool isactive;
   float stereooffset;
   SoInfo * dummynode;
   uint32_t overlaycolor;
   SoColorPacker colorpacker;
   SbViewportRegion stereostencilmaskvp;
   GLubyte * stereostencilmask;
-  SbColor4f backgroundcolor;
   int backgroundindex;
   SbBool texturesenabled;
   SbBool isrgbmode;
-  uint32_t redrawpri;
   SoNodeSensor * clipsensor;
 
   SoGetBoundingBoxAction * getbboxaction;
@@ -113,17 +115,11 @@ public:
 #if COIN_BUILD_LEGACY_GL_RENDERER
   SbBool deleteglaction;
 #endif
-  SbViewportRegion viewport;
-  float devicePixelRatio;
 
   SoRenderManager::StereoMode stereostenciltype;
   SoRenderManager::RenderMode rendermode;
   SoRenderManager::StereoMode stereomode;
   SoRenderManager::AutoClippingStrategy autoclipping;
-
-  SoRenderManagerRenderCB * rendercb;
-  void * rendercbdata;
-  SoOneShotSensor * redrawshot;
 
   SbPList * superimpositions;
 

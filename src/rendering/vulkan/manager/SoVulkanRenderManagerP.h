@@ -29,6 +29,7 @@
 #include <Inventor/rendering/SoRenderIR.h>
 #include <Inventor/rendering/vulkan/SoVulkanRenderTarget.h>
 
+#include "rendering/backend/SoSceneManagerBase.h"
 #include "rendering/backend/SoRenderBackend.h"
 #include "rendering/backend/SoClippingPlanes.h"
 #include "rendering/backend/SoRenderIRP.h"
@@ -244,13 +245,18 @@ inline void graphFingerprintWalk(SoNode * node, const SoNode * skip, uint64_t & 
 // scene-dirty sensor callback.
 void vulkanSceneGraphChangedCallback(void * data, SoSensor * sensor);
 
-class SoVulkanRenderManagerP {
+// The scene graph, camera, viewport region + device-pixel ratio and
+// background color are owned by the shared backend-agnostic
+// SoSceneManagerBase.  Everything below is Vulkan-specific: the overlay and
+// decoration scenes, the retained-IR replay state, the frame traversal roots
+// and the Vulkan/RTX backends.
+class SoVulkanRenderManagerP : public SoSceneManagerBase {
 public:
   SoVulkanRenderManagerP()
     : irAction(SbViewportRegion()),
       overlayIrAction(SbViewportRegion())
   {
-    this->viewportRegion.setWindowSize(1, 1);
+    this->viewport.setWindowSize(1, 1);
     // Persist one traversal root so prepareRenderParams() does not heap-allocate
     // + ref/unref a new separator on every frame.  Children are cleared and
     // re-added each frame; only the root node itself is retained.
@@ -277,12 +283,6 @@ public:
       delete this->sceneGraphSensor;
       this->sceneGraphSensor = nullptr;
     }
-    if (this->camera) {
-      this->camera->unref();
-    }
-    if (this->scene) {
-      this->scene->unref();
-    }
     if (this->overlayScene) {
       this->overlayScene->unref();
     }
@@ -295,20 +295,23 @@ public:
     if (this->overlayRoot) {
       this->overlayRoot->unref();
     }
+    // camera and main scene are released by ~SoSceneManagerBase.
   }
 
-  SoNode * scene = nullptr;
+  // Re-arm the graph-dirty sensor on a new scene root and drop the world-space
+  // bounding-box cache, which is invalid for a different scene.  Called by the
+  // base with the new root already retained and before the old root is
+  // released.
+  void sceneGraphChanged(SoNode * oldroot, SoNode * newroot) override;
+
   SoNode * overlayScene = nullptr;
   SoNode * decorationScene = nullptr;
-  SoCamera * camera = nullptr;
   // Persistent traversal root (see the constructor comment).
   SoSeparator * frameRoot = nullptr;
   //! Persistent root for the always-re-recorded overlay/decoration scenes.
   SoSeparator * overlayRoot = nullptr;
   SoNode * overlayRootChildren[3] = {nullptr, nullptr, nullptr};
   SbBool overlayRootChildrenValid = FALSE;
-  SbViewportRegion viewportRegion;
-  SbColor4f backgroundColor = SbColor4f(0.0f, 0.0f, 0.0f, 1.0f);
   SbBool backgroundGradient = FALSE;
   SbColor4f backgroundTopColor = SbColor4f(0.0f, 0.0f, 0.0f, 1.0f);
   SbColor4f backgroundBottomColor = SbColor4f(0.0f, 0.0f, 0.0f, 1.0f);
@@ -328,11 +331,6 @@ public:
   SbBool clearWindow = TRUE;
   SbBool clearDepth = TRUE;
   void * renderTarget = nullptr;
-  //! Device-pixel ratio of the Vulkan surface.  The swapchain/viewport region
-  //! is in device pixels, so renderer widths/sizes (logical SoDrawStyle
-  //! points) must be scaled by this; kept in the render params for the
-  //! backends and also exposed to the SoDevicePixelRatio element.
-  float devicePixelRatio = 1.0f;
 
   SoVulkanRenderManager::AutoClippingStrategy autoClipping =
     SoVulkanRenderManager::NO_AUTO_CLIPPING;

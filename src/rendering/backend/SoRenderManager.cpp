@@ -288,8 +288,6 @@ SoRenderManager::SoRenderManager(void)
   PRIVATE(this)->stereomode = SoRenderManager::MONO;
   PRIVATE(this)->autoclipping = SoRenderManager::NO_AUTO_CLIPPING;
   PRIVATE(this)->redrawpri = SoRenderManager::getDefaultRedrawPriority();
-  PRIVATE(this)->redrawshot =
-    new SoOneShotSensor(SoRenderManagerP::redrawshotTriggeredCB, this);
   PRIVATE(this)->redrawshot->setPriority(PRIVATE(this)->redrawpri);
 
 #if COIN_BUILD_LEGACY_GL_RENDERER
@@ -315,7 +313,6 @@ SoRenderManager::~SoRenderManager()
 #endif
   if (PRIVATE(this)->deleteaudiorenderaction) delete PRIVATE(this)->audiorenderaction;
   delete PRIVATE(this)->rootsensor;
-  delete PRIVATE(this)->redrawshot;
 
   if (PRIVATE(this)->superimpositions != NULL) {
     while (PRIVATE(this)->superimpositions->getLength() > 0) {
@@ -326,9 +323,8 @@ SoRenderManager::~SoRenderManager()
 
   //delete PRIVATE(this)->clipsensor;
 
-  if (PRIVATE(this)->scene)
-    PRIVATE(this)->scene->unref();
-  this->setCamera(NULL);
+  // scene graph, camera and the redraw sensor are released by
+  // SoSceneManagerBase's destructor.
 
   delete PRIVATE(this);
 }
@@ -344,21 +340,7 @@ SoRenderManager::~SoRenderManager()
 void
 SoRenderManager::setSceneGraph(SoNode * const sceneroot)
 {
-  //this->detachClipSensor();
-  this->detachRootSensor();
-  // Don't unref() until after we've set up the new root, in case the
-  // old root == the new sceneroot. (Just to be that bit more robust.)
-  SoNode * oldroot = PRIVATE(this)->scene;
-
-  PRIVATE(this)->scene = sceneroot;
-
-  if (PRIVATE(this)->scene) {
-    PRIVATE(this)->scene->ref();
-    this->attachRootSensor(PRIVATE(this)->scene);
-    //this->attachClipSensor(PRIVATE(this)->scene);
-  }
-  
-  if (oldroot) oldroot->unref();
+  PRIVATE(this)->setSceneGraph(sceneroot);
 }
 
 /*!
@@ -376,14 +358,7 @@ SoRenderManager::getSceneGraph(void) const
 void
 SoRenderManager::setCamera(SoCamera * camera)
 {
-  // avoid unref() then ref() on the same node
-  if (camera == PRIVATE(this)->camera) return;
-
-  if (PRIVATE(this)->camera) {
-    PRIVATE(this)->camera->unref();
-  }
-  PRIVATE(this)->camera = camera;
-  if (camera) camera->ref();
+  PRIVATE(this)->setCamera(camera);
 }
 
 /*!
@@ -392,7 +367,7 @@ SoRenderManager::setCamera(SoCamera * camera)
 SoCamera *
 SoRenderManager::getCamera(void) const
 {
-  return PRIVATE(this)->camera;
+  return PRIVATE(this)->getCamera();
 }
 
 /*
@@ -1250,14 +1225,7 @@ void
 SoRenderManager::scheduleRedraw(void)
 {
   PRIVATE(this)->lock();
-  if (this->isActive() && PRIVATE(this)->rendercb) {
-#if COIN_DEBUG && 0 // debug
-    SoDebugError::postInfo("SoRenderManager::scheduleRedraw",
-                           "scheduling redrawshot (oneshotsensor) %p",
-                           PRIVATE(this)->redrawshot);
-#endif // debug
-    PRIVATE(this)->redrawshot->schedule();
-  }
+  PRIVATE(this)->scheduleRedraw();
   PRIVATE(this)->unlock();
 }
 
@@ -1278,11 +1246,9 @@ SoRenderManager::setWindowSize(const SbVec2s & newsize)
                          "(%d, %d)", newsize[0], newsize[1]);
 #endif // debug
 
-  SbViewportRegion region = PRIVATE(this)->viewport;
-  region.setWindowSize(newsize[0], newsize[1]);
-  PRIVATE(this)->viewport = region;
+  PRIVATE(this)->setWindowSize(newsize);
 #if COIN_BUILD_LEGACY_GL_RENDERER
-  PRIVATE(this)->glaction->setViewportRegion(region);
+  PRIVATE(this)->glaction->setViewportRegion(PRIVATE(this)->viewport);
 #endif
 }
 
@@ -1323,12 +1289,9 @@ SoRenderManager::setSize(const SbVec2s & newsize)
                          "(%d, %d)", newsize[0], newsize[1]);
 #endif // debug
 
-  SbViewportRegion region = PRIVATE(this)->viewport;
-  SbVec2s origin = region.getViewportOriginPixels();
-  region.setViewportPixels(origin, newsize);
-  PRIVATE(this)->viewport = region;
+  PRIVATE(this)->setSize(newsize);
 #if COIN_BUILD_LEGACY_GL_RENDERER
-  PRIVATE(this)->glaction->setViewportRegion(region);
+  PRIVATE(this)->glaction->setViewportRegion(PRIVATE(this)->viewport);
 #endif
 }
 
@@ -1355,12 +1318,9 @@ SoRenderManager::setOrigin(const SbVec2s & newOrigin)
                          "(%d, %d)", newOrigin[0], newOrigin[1]);
 #endif // debug
 
-  SbViewportRegion region = PRIVATE(this)->viewport;
-  SbVec2s size = region.getViewportSizePixels();
-  region.setViewportPixels(newOrigin, size);
-  PRIVATE(this)->viewport = region;
+  PRIVATE(this)->setOrigin(newOrigin);
 #if COIN_BUILD_LEGACY_GL_RENDERER
-  PRIVATE(this)->glaction->setViewportRegion(region);
+  PRIVATE(this)->glaction->setViewportRegion(PRIVATE(this)->viewport);
 #endif
 }
 
@@ -1386,7 +1346,7 @@ SoRenderManager::getOrigin(void) const
 void
 SoRenderManager::setViewportRegion(const SbViewportRegion & newregion)
 {
-  PRIVATE(this)->viewport = newregion;
+  PRIVATE(this)->setViewportRegion(newregion);
 #if COIN_BUILD_LEGACY_GL_RENDERER
   PRIVATE(this)->glaction->setViewportRegion(newregion);
 #endif
@@ -1401,7 +1361,7 @@ SoRenderManager::setViewportRegion(const SbViewportRegion & newregion)
 const SbViewportRegion &
 SoRenderManager::getViewportRegion(void) const
 {
-  return PRIVATE(this)->viewport;
+  return PRIVATE(this)->getViewportRegion();
 }
 
 /*!
@@ -1410,7 +1370,7 @@ SoRenderManager::getViewportRegion(void) const
 void
 SoRenderManager::setBackgroundColor(const SbColor4f & color)
 {
-  PRIVATE(this)->backgroundcolor = color;
+  PRIVATE(this)->setBackgroundColor(color);
 }
 
 /*!
@@ -1420,7 +1380,7 @@ SoRenderManager::setBackgroundColor(const SbColor4f & color)
 const SbColor4f &
 SoRenderManager::getBackgroundColor(void) const
 {
-  return PRIVATE(this)->backgroundcolor;
+  return PRIVATE(this)->getBackgroundColor();
 }
 
 /*!
@@ -1512,8 +1472,16 @@ void
 SoRenderManager::setRenderCallback(SoRenderManagerRenderCB * f,
                                   void * const userdata)
 {
-  PRIVATE(this)->rendercb = f;
-  PRIVATE(this)->rendercbdata = userdata;
+  // The base stores the callback type-erased (the manager argument is void*)
+  // so it stays backend-agnostic.  SoRenderManagerRenderCB and
+  // SoSceneManagerBaseRenderCB have the same calling convention; the union
+  // performs the conversion without a -Wcast-function-type warning.
+  union {
+    SoRenderManagerRenderCB * glcb;
+    SoSceneManagerBaseRenderCB * basecb;
+  } conv;
+  conv.glcb = f;
+  PRIVATE(this)->setRenderCallback(conv.basecb, userdata);
 }
 
 /*!
@@ -1522,7 +1490,7 @@ SoRenderManager::setRenderCallback(SoRenderManagerRenderCB * f,
 void
 SoRenderManager::activate(void)
 {
-  PRIVATE(this)->isactive = TRUE;
+  PRIVATE(this)->activate();
 }
 
 /*!
@@ -1531,7 +1499,7 @@ SoRenderManager::activate(void)
 void
 SoRenderManager::deactivate(void)
 {
-  PRIVATE(this)->isactive = FALSE;
+  PRIVATE(this)->deactivate();
 }
 
 /*!
@@ -1540,7 +1508,7 @@ SoRenderManager::deactivate(void)
 int
 SoRenderManager::isActive(void) const
 {
-  return PRIVATE(this)->isactive;
+  return PRIVATE(this)->isActive();
 }
 
 /*!
@@ -1549,9 +1517,7 @@ SoRenderManager::isActive(void) const
 void
 SoRenderManager::redraw(void)
 {
-  if (PRIVATE(this)->rendercb) {
-    PRIVATE(this)->rendercb(PRIVATE(this)->rendercbdata, this);
-  }
+  PRIVATE(this)->redraw();
 }
 
 /*!
@@ -1564,7 +1530,7 @@ SoRenderManager::redraw(void)
 SbBool
 SoRenderManager::isAutoRedraw(void) const
 {
-  return PRIVATE(this)->rendercb != NULL;
+  return PRIVATE(this)->isAutoRedraw();
 }
 
 
@@ -1782,9 +1748,8 @@ SoRenderManager::isTexturesEnabled(void) const
 void
 SoRenderManager::setRedrawPriority(const uint32_t priority)
 {
-  PRIVATE(this)->redrawpri = priority;
+  PRIVATE(this)->setRedrawPriority(priority);
 
-  if (PRIVATE(this)->redrawshot) PRIVATE(this)->redrawshot->setPriority(priority);
   if (PRIVATE(this)->rootsensor) PRIVATE(this)->rootsensor->setPriority(PRIVATE(this)->redrawpri == 0 ? 0 : 1);
 }
 
@@ -1794,7 +1759,7 @@ SoRenderManager::setRedrawPriority(const uint32_t priority)
 uint32_t
 SoRenderManager::getRedrawPriority(void) const
 {
-  return PRIVATE(this)->redrawpri;
+  return PRIVATE(this)->getRedrawPriority();
 }
 
 /*!
