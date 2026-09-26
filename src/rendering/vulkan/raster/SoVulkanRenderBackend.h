@@ -516,10 +516,13 @@ private:
   bool allocateSubPixelDescriptorSet(VkDescriptorSet & set);
   // Record the compaction dispatches for the frame into \a cb.  Must run
   // outside a render pass; a trailing memory barrier orders the writes
-  // against the indirect/index reads of the subsequent draws.
-  void recordGeometryLodPrepass(VkCommandBuffer cb,
-                                const SoDrawList & drawlist,
-                                const SoRenderParams & params);
+  // against the indirect/index reads of the subsequent draws.  Returns the
+  // number of commands compacted; 0 means nothing was recorded (no eligible
+  // command, or all were below GeometryLod.minPrims), so the caller can skip
+  // submitting the buffer.
+  uint32_t recordGeometryLodPrepass(VkCommandBuffer cb,
+                                    const SoDrawList & drawlist,
+                                    const SoRenderParams & params);
   // True when the geometry-LOD pre-pass would record anything this frame:
   // interaction LOD (or the verification override) is engaged, the feature is
   // enabled and the compaction pipeline exists.  Split out so the external
