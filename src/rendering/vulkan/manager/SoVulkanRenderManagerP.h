@@ -38,7 +38,7 @@
 #include "rendering/vulkan/common/core/SoVulkanConfig.h"
 
 class SoVulkanRenderManagerP;
-static void vulkanSceneGraphChangedCallback(void * data, SoSensor * sensor);
+void vulkanSceneGraphChangedCallback(void * data, SoSensor * sensor);
 
 #include <algorithm>
 #include <chrono>
