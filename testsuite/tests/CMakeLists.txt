@@ -85,6 +85,10 @@ coin_add_test(RetainedRasterTextTest retained/retained-raster-text-test.cpp)
 # ---------------------------------------------------------------------------
 # model/ - pure-CPU host contract tests (no GPU or window system)
 # ---------------------------------------------------------------------------
+coin_add_test(PhysicalMaterialElementTest model/physical-material-element-test.cpp)
+coin_add_test(MaterialBlockPackTest model/material-block-pack-test.cpp)
+coin_add_test(TextureCoordinateProjectionTest model/texture-coordinate-projection-test.cpp)
+coin_add_test(NodeSerializationTest model/node-serialization-test.cpp)
 
 # ---------------------------------------------------------------------------
 # gl/ - legacy OpenGL backend, GLSL, EGL and offscreen readback
@@ -152,6 +156,7 @@ if(HAVE_EGL)
 			VulkanBackendMaterialTest vulkan/vulkan-backend-material-test.cpp
 			VulkanBackendHdrTest vulkan/vulkan-backend-hdr-test.cpp
 			VulkanBackendRetainedChangeTest vulkan/vulkan-backend-retained-change-test.cpp
+			VulkanBackendMaterialChangeTest vulkan/vulkan-backend-material-change-test.cpp
 			VulkanBackendParallelTest vulkan/vulkan-backend-parallel-test.cpp
 			VulkanRenderManagerTest vulkan/vulkan-rendermanager-test.cpp
 			VulkanRenderManagerVisibilityTest vulkan/vulkan-rendermanager-visibility-test.cpp
