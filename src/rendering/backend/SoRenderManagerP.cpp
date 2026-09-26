@@ -57,6 +57,7 @@ int SoRenderManagerRootSensor::debugrootnotifications = -1;
 #define INHERIT_TRANSPARENCY_TYPE -1
 
 SoRenderManagerP::SoRenderManagerP(SoRenderManager * publ)
+  : SoSceneManagerBase(SoRenderManager::getDefaultRedrawPriority(), publ)
 {
   this->publ = publ;
   this->getmatrixaction = NULL;
@@ -71,23 +72,17 @@ SoRenderManagerP::~SoRenderManagerP()
   delete this->searchaction;
 }
 
-// Internal callback.
+// The legacy GL manager attaches its root-dirty sensor to the new scene root.
+// Called by the base with the new root already retained and before the old
+// root is released; detaching here (rather than before the assignment) is
+// equivalent, since detach() does not look at the current root.
 void
-SoRenderManagerP::redrawshotTriggeredCB(void * data, SoSensor * /* sensor */)
+SoRenderManagerP::sceneGraphChanged(SoNode * /* oldroot */, SoNode * newroot)
 {
-#if COIN_DEBUG && 0 // debug
-  SoDebugError::postInfo("SoRenderManager::redrawshotTriggeredCB", "start");
-#endif // debug
-
-  SoRenderManager * thisp = (SoRenderManager *) data;
-
-  // Need to recheck the "active" flag, as it could have changed since
-  // it was tested in the SoRenderManager::scheduleRedraw() call.
-  if (PRIVATE(thisp)->isactive) { thisp->redraw(); }
-
-#if COIN_DEBUG && 0 // debug
-  SoDebugError::postInfo("SoRenderManager::redrawshotTriggeredCB", "done\n\n");
-#endif // debug
+  this->publ->detachRootSensor();
+  if (newroot) {
+    this->publ->attachRootSensor(newroot);
+  }
 }
 
 void

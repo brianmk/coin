@@ -56,6 +56,26 @@ vulkanSceneGraphChangedCallback(void * data, SoSensor * /*sensor*/)
   pimpl->sceneGraphDirty = TRUE;
 }
 
+// Called by SoSceneManagerBase::setSceneGraph() with the new root already
+// retained and before the previous root is released.
+void
+SoVulkanRenderManagerP::sceneGraphChanged(SoNode * /*oldroot*/, SoNode * newroot)
+{
+  // The bbox is cached in world space; a different scene graph invalidates it.
+  this->sceneBBoxCached = false;
+  this->sceneBBoxScene = nullptr;
+  // Re-arm the graph-fingerprint dirty sensor on the new scene: detach from the
+  // previous scene and attach to the new one, and mark the fingerprint dirty so
+  // the next frame re-walks rather than trusting a stale cached fingerprint.
+  if (this->sceneGraphSensor) {
+    this->sceneGraphSensor->detach();
+    if (newroot) {
+      this->sceneGraphSensor->attach(newroot);
+    }
+    this->sceneGraphDirty = TRUE;
+  }
+}
+
 
 SoVulkanRenderManager::SoVulkanRenderManager()
   : pimpl(new SoVulkanRenderManagerP)
@@ -77,29 +97,16 @@ SoVulkanRenderManager::~SoVulkanRenderManager()
 void
 SoVulkanRenderManager::setSceneGraph(SoNode * root)
 {
-  if (this->pimpl->scene == root) {
-    return;
-  }
-  setRetainedNode(this->pimpl->scene, root);
-  // The bbox is cached in world space; a different scene graph invalidates it.
-  this->pimpl->sceneBBoxCached = false;
-  this->pimpl->sceneBBoxScene = nullptr;
-  // Re-arm the graph-fingerprint dirty sensor on the new scene: detach from the
-  // previous scene and attach to the new one, and mark the fingerprint dirty so
-  // the next frame re-walks rather than trusting a stale cached fingerprint.
-  if (this->pimpl->sceneGraphSensor) {
-    this->pimpl->sceneGraphSensor->detach();
-    if (root) {
-      this->pimpl->sceneGraphSensor->attach(root);
-    }
-    this->pimpl->sceneGraphDirty = TRUE;
-  }
+  // The base owns the root pointer and the reference; the P-impl's
+  // sceneGraphChanged() re-arms the graph-dirty sensor and drops the bbox
+  // cache (see SoVulkanRenderManagerP.h).
+  this->pimpl->setSceneGraph(root);
 }
 
 SoNode *
 SoVulkanRenderManager::getSceneGraph(void) const
 {
-  return this->pimpl->scene;
+  return this->pimpl->getSceneGraph();
 }
 
 void
@@ -140,14 +147,15 @@ SoVulkanRenderManager::setCamera(SoCamera * camera)
   // perspective and orthographic views.  Without a reference the old node is
   // destroyed and this raw pointer dangles, crashing the next render
   // (segfault in setClippingPlanes / SoBase::isOfType).  Keep the camera
-  // alive for as long as the manager references it.
-  setRetainedNode(this->pimpl->camera, camera);
+  // alive for as long as the manager references it.  The base performs the
+  // identical retain/release.
+  this->pimpl->setCamera(camera);
 }
 
 SoCamera *
 SoVulkanRenderManager::getCamera(void) const
 {
-  return this->pimpl->camera;
+  return this->pimpl->getCamera();
 }
 
 void
@@ -177,37 +185,37 @@ SoVulkanRenderManager::getNearPlaneValue(void) const
 void
 SoVulkanRenderManager::setViewportRegion(const SbViewportRegion & region)
 {
-  this->pimpl->viewportRegion = region;
+  this->pimpl->setViewportRegion(region);
 }
 
 const SbViewportRegion &
 SoVulkanRenderManager::getViewportRegion(void) const
 {
-  return this->pimpl->viewportRegion;
+  return this->pimpl->getViewportRegion();
 }
 
 void
 SoVulkanRenderManager::setBackgroundColor(const SbColor4f & color)
 {
-  this->pimpl->backgroundColor = color;
+  this->pimpl->setBackgroundColor(color);
 }
 
 const SbColor4f &
 SoVulkanRenderManager::getBackgroundColor(void) const
 {
-  return this->pimpl->backgroundColor;
+  return this->pimpl->getBackgroundColor();
 }
 
 void
 SoVulkanRenderManager::setDevicePixelRatio(float ratio)
 {
-  this->pimpl->devicePixelRatio = ratio;
+  this->pimpl->setDevicePixelRatio(ratio);
 }
 
 float
 SoVulkanRenderManager::getDevicePixelRatio(void) const
 {
-  return this->pimpl->devicePixelRatio;
+  return this->pimpl->getDevicePixelRatio();
 }
 
 void

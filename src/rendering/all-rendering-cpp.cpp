@@ -47,6 +47,7 @@
 #endif
 #include "backend/SoRenderManager.cpp"
 #include "backend/SoRenderManagerP.cpp"
+#include "backend/SoSceneManagerBase.cpp"
 #include "gl/SoGLDriverDatabase.cpp"
 #include "backend/SoRenderIR.cpp"
 #include "backend/SoRenderBackend.cpp"

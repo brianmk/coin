@@ -8,6 +8,7 @@ RegularSources = \
         gl/SoGLNurbs.cpp \
         backend/SoRenderManager.cpp \
 	backend/SoRenderManagerP.cpp \
+	backend/SoSceneManagerBase.cpp \
 	gl/SoOffscreenRenderer.cpp \
 	gl/SoOffscreenCGData.cpp \
 	gl/SoOffscreenGLXData.cpp \
@@ -28,7 +29,8 @@ PrivateHeaders = \
 	gl/SoOffscreenCGData.h \
 	gl/SoOffscreenGLXData.h \
 	gl/SoOffscreenWGLData.h \
-        backend/SoRenderManagerP.h
+        backend/SoRenderManagerP.h \
+	backend/SoSceneManagerBase.h
 ObsoleteHeaders =
 
 ##$ BEGIN TEMPLATE Make-Common(rendering, rendering)
