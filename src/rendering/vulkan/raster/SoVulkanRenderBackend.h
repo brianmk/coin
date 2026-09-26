@@ -805,6 +805,14 @@ private:
   // the ring's pending flag stays false for those slots so beginFrame() never
   // waits on them.
   SoVulkanFrameRing frameRing;
+  // Fence for the external pre-pass submit (texture copies + geometry-LOD
+  // compaction).  The pre-pass must complete before the caller's render pass
+  // is submitted, but the caller owns that submit, so a semaphore cannot be
+  // threaded through it and the pre-pass is host-waited.  This dedicated
+  // fence waits for exactly this submit instead of draining the whole queue
+  // with vkQueueWaitIdle(), which also waits on the caller's acquire/present
+  // operations.  Lazily created; destroyed in shutdown().
+  VkFence externalPrepassFence = VK_NULL_HANDLE;
   // Secondary command buffers for M1c/M1d: one per in-flight frame slot per
   // worker, used to record the render-order-independent opaque pass inside an
   // already-begun render pass (RENDER_PASS_CONTINUE), then

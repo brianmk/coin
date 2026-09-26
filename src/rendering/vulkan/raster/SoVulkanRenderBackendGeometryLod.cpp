@@ -583,14 +583,38 @@ SoVulkanRenderBackend::submitExternalPrepass(VkCommandBuffer commandBuffer,
   submit.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
   submit.commandBufferCount = 1;
   submit.pCommandBuffers = &commandBuffer;
-  const bool submitted =
-    vkQueueSubmit(this->queue, 1, &submit, VK_NULL_HANDLE) == VK_SUCCESS;
   // Host wait: the copies and the compacted writes must be complete and
   // visible before the caller submits its pass, and the caller's submission is
-  // out of reach, so no semaphore can be threaded through it.  The queue
-  // drains here; because the frame was already recorded above, only the
-  // pre-pass itself is on the critical path.
-  const bool waited = vkQueueWaitIdle(this->queue) == VK_SUCCESS;
+  // out of reach, so no semaphore can be threaded through it.  Wait on a
+  // dedicated fence so only this pre-pass submission is observed, rather than
+  // draining the whole shared graphics queue with vkQueueWaitIdle() (which
+  // also waits on the caller's swapchain acquire/present).  Fall back to the
+  // queue drain if the fence cannot be created or reset.
+  if (this->externalPrepassFence == VK_NULL_HANDLE) {
+    VkFenceCreateInfo fenceInfo {};
+    fenceInfo.sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO;
+    if (vkCreateFence(this->device, &fenceInfo, this->allocator,
+                      &this->externalPrepassFence) != VK_SUCCESS) {
+      this->externalPrepassFence = VK_NULL_HANDLE;
+    }
+  }
+  bool submitted = false;
+  bool waited = false;
+  if (this->externalPrepassFence != VK_NULL_HANDLE &&
+      vkResetFences(this->device, 1, &this->externalPrepassFence) ==
+        VK_SUCCESS) {
+    submitted = vkQueueSubmit(this->queue, 1, &submit,
+                              this->externalPrepassFence) == VK_SUCCESS;
+    if (submitted) {
+      waited = vkWaitForFences(this->device, 1, &this->externalPrepassFence,
+                               VK_TRUE, UINT64_MAX) == VK_SUCCESS;
+    }
+  }
+  else {
+    submitted =
+      vkQueueSubmit(this->queue, 1, &submit, VK_NULL_HANDLE) == VK_SUCCESS;
+    waited = submitted && vkQueueWaitIdle(this->queue) == VK_SUCCESS;
+  }
   vkFreeCommandBuffers(this->device, this->commandPool, 1, &commandBuffer);
   if (timing) timing->lodMs = SoVulkanShared::steadyNowMs() - submitT0;
   if (!submitted || !waited) {
