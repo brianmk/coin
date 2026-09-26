@@ -69,6 +69,19 @@ SoVulkanGpuTimers::initialize(VkDevice device, VkPhysicalDevice physicalDevice,
 }
 
 void
+SoVulkanGpuTimers::resetSlot(VkCommandBuffer commandBuffer)
+{
+  if (this->queryPool == VK_NULL_HANDLE ||
+      commandBuffer == VK_NULL_HANDLE || this->slotResetForFrame) {
+    return;
+  }
+  const uint32_t base = this->ringIndex * kMaxScopesPerFrame * 2;
+  vkCmdResetQueryPool(commandBuffer, this->queryPool, base,
+                      kMaxScopesPerFrame * 2);
+  this->slotResetForFrame = true;
+}
+
+void
 SoVulkanGpuTimers::beginScope(VkCommandBuffer commandBuffer, const char * name)
 {
   if (this->queryPool == VK_NULL_HANDLE ||
@@ -81,12 +94,14 @@ SoVulkanGpuTimers::beginScope(VkCommandBuffer commandBuffer, const char * name)
   }
   const uint32_t slot = this->ringIndex;
   const uint32_t base = slot * kMaxScopesPerFrame * 2;
-  if (this->scopeCount == 0) {
+  if (!this->slotResetForFrame) {
     // Reset this slot's query range before the first write: vkCmdWriteTimestamp
     // requires the query to be unavailable, and the slot's previous results
-    // were read back kRingFrames ago.  Must run outside a render pass.
+    // were read back kRingFrames ago.  Must run outside a render pass, so the
+    // external path resets via resetSlot() before its pass instead.
     vkCmdResetQueryPool(commandBuffer, this->queryPool, base,
                         kMaxScopesPerFrame * 2);
+    this->slotResetForFrame = true;
   }
   this->scopeNames[slot][this->scopeCount] = name;
   vkCmdWriteTimestamp(commandBuffer, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
@@ -116,8 +131,10 @@ SoVulkanGpuTimers::endFrame()
   if (this->queryPool == VK_NULL_HANDLE) {
     return;
   }
-  // An unmatched begin (no endScope this frame) must not leak into the next.
+  // An unmatched begin (no endScope this frame) must not leak into the next,
+  // and the next frame must reset its slot again before writing.
   this->scopePending = false;
+  this->slotResetForFrame = false;
   const uint32_t slot = this->ringIndex;
   this->slotScopeCount[slot] = this->scopeCount;
   this->scopeCount = 0;

@@ -88,6 +88,18 @@ public:
                         VkFramebuffer framebuffer);
 
   /*!
+    \brief Reset the current frame's GPU-timestamp queries on the caller's
+    command buffer.
+
+    Only meaningful when GPU timing (FC_VULKAN_GPU_TIMING) is active.  An
+    external embedder that begins its own render pass must record this before
+    vkCmdBeginRenderPass, because vkCmdResetQueryPool is illegal inside a pass;
+    renderExternal() then records the timestamp writes inside the pass.  A
+    no-op when timing is disabled, so it is safe to always call.
+  */
+  void resetExternalGpuQueries(VkCommandBuffer commandBuffer);
+
+  /*!
     \brief Record only the overlay pass (e.g. the navigation cube) into a
     caller-owned command buffer/render pass.
 
