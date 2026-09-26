@@ -53,6 +53,10 @@ struct RTMaterial {
     vec4  lightSpot[8];
     vec4  triangleData;    // x = triangle-normal pool offset
     vec4  pbr;             // x = metalness, y = roughness, z = usePbr
+    vec4  textureData;     // x = UV pool offset, y = UV count
+    vec4  textureLayers;   // base/roughness/normal/emissive array layers (-1)
+    vec4  optical;         // x = transmission IOR, y = absorption,
+                           // z = transmission (opacity), w = reserved
 };
 
 layout(set = 0, binding = 3, std430) buffer Materials {

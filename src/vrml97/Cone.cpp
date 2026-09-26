@@ -131,7 +131,7 @@
 #include <Inventor/elements/SoMultiTextureCoordinateElement.h>
 
 #include "nodes/SoSubNodeP.h"
-#include "rendering/SoGL.h"
+#include "rendering/gl/SoGL.h"
 #include "misc/SoGenerate.h"
 #include "misc/SoPick.h"
 

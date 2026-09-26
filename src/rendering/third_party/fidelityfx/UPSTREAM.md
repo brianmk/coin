@@ -12,8 +12,8 @@ License:  MIT (see `LICENSE.txt`)
   - the shadow denoiser (vendored for reference; not yet ported).
 
 These are HLSL shader headers: they are not compiled by Coin.  The Coin port
-lives in `data/shaders/vulkan/rt/FsrPrefilter.glsl` (plus `FsrCommon.glsl`),
+lives in `data/shaders/vulkan/rt/DnsrPrefilter.glsl` (plus `DnsrCommon.glsl`),
 which reimplements the reflection prefilter stage in Vulkan GLSL compute and
-feeds it the path tracer's G-buffers.  `COIN_BUILD_FSR_DENOISER` (default OFF)
-selects whether that backend is built into `SoRTXRenderBackend`'s "fsr"
+feeds it the path tracer's G-buffers.  `COIN_BUILD_DNSR_DENOISER` (default OFF)
+selects whether that backend is built into `SoRTXRenderBackend`'s "dnsr"
 denoiser slot.

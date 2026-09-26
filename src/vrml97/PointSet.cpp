@@ -121,9 +121,9 @@ class SoVBO;
 #endif // COIN_DEBUG
 
 #include "nodes/SoSubNodeP.h"
-#include "rendering/SoGL.h"
+#include "rendering/gl/SoGL.h"
 #if COIN_BUILD_LEGACY_GL_RENDERER
-#include "rendering/SoVBO.h"
+#include "rendering/gl/SoVBO.h"
 #endif
 
 static SbBool

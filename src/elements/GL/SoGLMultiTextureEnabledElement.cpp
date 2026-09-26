@@ -50,7 +50,7 @@
 #include <Inventor/system/gl.h>
 #include <Inventor/C/glue/gl.h>
 #include <cassert>
-#include "rendering/SoGL.h"
+#include "rendering/gl/SoGL.h"
 
 SO_ELEMENT_SOURCE(SoGLMultiTextureEnabledElement);
 

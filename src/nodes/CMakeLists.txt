@@ -48,6 +48,7 @@ set(COIN_NODES_FILES
 	SoPackedColor.cpp
 	SoPathSwitch.cpp
 	SoPendulum.cpp
+	SoPhysicalMaterial.cpp
 	SoPerspectiveCamera.cpp
 	SoPickStyle.cpp
 	SoPointLight.cpp
@@ -85,6 +86,7 @@ set(COIN_NODES_FILES
 	SoTextureCoordinateEnvironment.cpp
 	SoTextureCoordinateFunction.cpp
 	SoTextureCoordinatePlane.cpp
+	SoTextureCoordinateProjection.cpp
 	SoTextureCoordinateNormalMap.cpp
 	SoTextureCoordinateReflectionMap.cpp
 	SoTextureCoordinateObject.cpp

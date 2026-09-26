@@ -161,13 +161,13 @@ class SoVBO;
 
 #include "coindefs.h"
 class SoVertexArrayIndexer;
-#include "rendering/SoGL.h"
+#include "rendering/gl/SoGL.h"
 #include "glue/glp.h"
 #if COIN_BUILD_LEGACY_GL_RENDERER
-#include "rendering/SoVertexArrayIndexer.h"
+#include "rendering/gl/SoVertexArrayIndexer.h"
 #endif
 #if COIN_BUILD_LEGACY_GL_RENDERER
-#include "rendering/SoVBO.h"
+#include "rendering/gl/SoVBO.h"
 #endif
 
 class SoVRMLIndexedLineSetP {

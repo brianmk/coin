@@ -48,7 +48,7 @@
 #include <Inventor/system/gl.h>
 #include <Inventor/errors/SoDebugError.h>
 
-#include "rendering/SoGL.h"
+#include "rendering/gl/SoGL.h"
 
 // *************************************************************************
 

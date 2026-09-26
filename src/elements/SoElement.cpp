@@ -448,6 +448,7 @@ SoElement::initElements(void)
   SoTextureOverrideElement::initClass();
   SoPickRayElement::initClass();
   SoReplacedElement::initClass();
+  SoPhysicalMaterialElement::initClass();
   SoCoordinateElement::initClass();
 #if COIN_BUILD_LEGACY_GL_RENDERER
   SoGLCoordinateElement::initClass();

@@ -141,37 +141,55 @@ vec3 envSpecular(vec3 r, float roughness)
 }
 
 // --- PBR (metallic-roughness) BRDF helpers --------------------------------
+// The primitive terms (alpha, F0, D, G, F) live in common/MaterialCommon.glsl
+// so the raster and path-traced backends share one definition.  These helpers
+// only adapt the RTMaterial record to those shared functions.
 float pbrAlpha(RTMaterial mat)
 {
-    return clamp(mat.pbr.y * mat.pbr.y, 0.001, 1.0);
+    return coin_pbr_alpha(mat.pbr.y);
 }
 
 vec3 pbrF0(RTMaterial mat)
 {
-    return mix(vec3(0.04), mat.diffuse.rgb, clamp(mat.pbr.x, 0.0, 1.0));
+    return coin_pbr_f0(mat.diffuse.rgb, mat.pbr.x);
 }
 
-float pbrD_GGX(float NdotH, float a)
+// Base colour at a hit: the scalar diffuse, modulated by the base-colour
+// texture when the material carries one (layer >= 0) and the command has UVs.
+// u_textureArray is the sampler2DArray declared by the host shader.
+vec3 coin_rt_base_color(RTMaterial mat, vec2 uv)
 {
-    float a2 = a * a;
-    float d = NdotH * NdotH * (a2 - 1.0) + 1.0;
-    return a2 / max(3.14159265 * d * d, 1e-7);
+    if (mat.textureLayers.x >= 0.0 && mat.textureData.y > 0.5) {
+        return mat.diffuse.rgb *
+          texture(u_textureArray, vec3(uv, mat.textureLayers.x)).rgb;
+    }
+    return mat.diffuse.rgb;
 }
 
-float pbrG_SchlickGGX(float NdotX, float a)
+// Roughness map: scale the scalar roughness by the sampled map, blended in by
+// the authored strength (packed in pbr.w).
+float coin_rt_roughness(RTMaterial mat, vec2 uv)
 {
-    float k = a * 0.5;
-    return NdotX / max(NdotX * (1.0 - k) + k, 1e-7);
+    float roughness = mat.pbr.y;
+    if (mat.textureLayers.y >= 0.0 && mat.textureData.y > 0.5) {
+        float sampled =
+          texture(u_textureArray, vec3(uv, mat.textureLayers.y)).r;
+        roughness *= mix(1.0, sampled, clamp(mat.pbr.w, 0.0, 1.0));
+    }
+    return roughness;
 }
 
-float pbrG_Smith(float NdotV, float NdotL, float a)
+// Emissive map: additive emission scaled by the authored intensity
+// (packed in textureData.w).
+vec3 coin_rt_emissive(RTMaterial mat, vec2 uv)
 {
-    return pbrG_SchlickGGX(NdotV, a) * pbrG_SchlickGGX(NdotL, a);
-}
-
-vec3 pbrF_Schlick(float VdotH, vec3 F0)
-{
-    return F0 + (vec3(1.0) - F0) * pow(clamp(1.0 - VdotH, 0.0, 1.0), 5.0);
+    vec3 emissive = mat.emissive.rgb;
+    if (mat.textureLayers.w >= 0.0 && mat.textureData.y > 0.5) {
+        emissive +=
+          texture(u_textureArray, vec3(uv, mat.textureLayers.w)).rgb *
+          max(mat.textureData.w, 0.0);
+    }
+    return emissive;
 }
 
 // Full BRDF evaluation for unit N, V, L (NdotV > 0, NdotL >= 0).  The
@@ -184,10 +202,10 @@ vec3 pbrEval(vec3 N, vec3 V, vec3 L, RTMaterial mat)
     float NdotH = max(dot(N, H), 0.0);
     float VdotH = max(dot(V, H), 0.0);
     float a = pbrAlpha(mat);
-    vec3 F = pbrF_Schlick(VdotH, pbrF0(mat));
+    vec3 F = coin_pbr_f_schlick(VdotH, pbrF0(mat));
     vec3 kd = (vec3(1.0) - F) * (1.0 - clamp(mat.pbr.x, 0.0, 1.0));
     return kd * mat.diffuse.rgb / 3.14159265 +
-           F * pbrD_GGX(NdotH, a) * pbrG_Smith(NdotV, NdotL, a) /
+           F * coin_pbr_d_ggx(NdotH, a) * coin_pbr_g_smith(NdotV, NdotL, a) /
              max(4.0 * NdotV * NdotL, 1e-6);
 }
 

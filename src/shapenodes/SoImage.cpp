@@ -181,7 +181,7 @@
 #include "nodes/SoSubNodeP.h"
 #include "glue/GLUWrapper.h"
 #include "glue/simage_wrapper.h"
-#include "rendering/SoRenderIRP.h"
+#include "rendering/backend/SoRenderIRP.h"
 
 #include <cstring>
 
