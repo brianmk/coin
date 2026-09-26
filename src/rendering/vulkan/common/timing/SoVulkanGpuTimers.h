@@ -44,12 +44,24 @@ public:
   //! Open/close a named scope on \a commandBuffer.  Nesting is not supported:
   //! scopes are recorded as a flat sequence of begin/end pairs.
   //!
-  //! Only valid on the own-queue path, where the slot's queries can be reset
-  //! before vkCmdBeginRenderPass: vkCmdWriteTimestamp requires the query to be
-  //! unavailable, and vkCmdResetQueryPool is illegal inside a render pass, so
-  //! the caller-owned (external) path cannot use this yet.
+  //! vkCmdWriteTimestamp requires the scope's queries to be unavailable, i.e.
+  //! reset for this frame.  On the own-queue (internal) path the first
+  //! beginScope() records that reset itself, before vkCmdBeginRenderPass.  On
+  //! the caller-owned (external) path vkCmdResetQueryPool is illegal inside the
+  //! caller's already-begun render pass, so the caller records resetSlot() on
+  //! its command buffer BEFORE vkCmdBeginRenderPass; the begin/end writes then
+  //! proceed inside the pass.
   void beginScope(VkCommandBuffer commandBuffer, const char * name);
   void endScope(VkCommandBuffer commandBuffer);
+
+  //! Reset the current frame's query range on \a commandBuffer.  Must be
+  //! recorded outside a render pass.  Afterwards slotReset() is true until the
+  //! next endFrame().  A no-op when timing is disabled; safe to call.
+  void resetSlot(VkCommandBuffer commandBuffer);
+  //! True once resetSlot() has run for the current frame and endFrame() has not
+  //! yet advanced the ring.  The external path only records scopes when this is
+  //! true: a beginScope() inside the caller's pass cannot reset the pool.
+  bool slotReset() const { return this->slotResetForFrame; }
 
   //! Advance the ring and read back the oldest completed frame.
   void endFrame();
@@ -70,6 +82,9 @@ private:
   //! dropped begin (max scopes reached) clears it, so the paired endScope() is
   //! a no-op and cannot overwrite the previous scope's end timestamp.
   bool scopePending = false;
+  //! True once this frame's query range has been reset (resetSlot() or the
+  //! first beginScope()), so no later begin() resets it again.
+  bool slotResetForFrame = false;
   uint32_t slotScopeCount[kRingFrames] = {};
   const char * scopeNames[kRingFrames][kMaxScopesPerFrame] = {};
 };

@@ -9,6 +9,7 @@
 
 #include <Inventor/rendering/vulkan/SoVulkanRenderManager.h>
 
+#include <Inventor/SoPath.h>
 #include <Inventor/SbViewportRegion.h>
 #include <Inventor/SbXfBox3f.h>
 #include <Inventor/actions/SoGetBoundingBoxAction.h>
@@ -16,6 +17,7 @@
 #include <Inventor/actions/SoSearchAction.h>
 #include <Inventor/errors/SoDebugError.h>
 #include <Inventor/nodes/SoCamera.h>
+#include <Inventor/nodes/SoGroup.h>
 #include <Inventor/nodes/SoLight.h>
 #include <Inventor/nodes/SoEnvironment.h>
 #include <Inventor/nodes/SoNode.h>
@@ -37,6 +39,8 @@
 #include "rendering/vulkan/raytracing/rtx/SoRTXRenderBackend.h"
 #include "rendering/vulkan/common/core/SoVulkanShared.h"
 #include "rendering/vulkan/common/core/SoVulkanConfig.h"
+
+#include <vector>
 
 class SoVulkanRenderManagerP;
 void vulkanSceneGraphChangedCallback(void * data, SoSensor * sensor);
@@ -213,19 +217,28 @@ inline void mixHash(uint64_t & h, uint64_t v)
 //      /shape/selection nodes, which still fold their ids, so an in-place
 //      edit, a move, an add/remove or a material/texture swap still
 //      invalidates the draw list and forces a re-record.
-inline void graphFingerprintWalk(SoNode * node, const SoNode * skip, uint64_t & h)
+//! True for a node whose id the graph fingerprint deliberately ignores: the
+//! camera-coupled chatter (camera/light/environment/rotation/transform-
+//! separator) and the plain container nodes.  A field write on such a node
+//! cannot change the retained main draw list, so it is also what the
+//! scene-dirty sensor treats as non-invalidating (see the callback in
+//! SoVulkanRenderManager.cpp) -- shared here so the two stay consistent.
+inline bool fingerprintSkipsNodeId(const SoNode * node)
 {
-  if (!node || node == skip) return;
-  mixHash(h, reinterpret_cast<uintptr_t>(node));
-  const bool skipId =
-    node->isOfType(SoCamera::getClassTypeId()) ||
+  return node->isOfType(SoCamera::getClassTypeId()) ||
     node->isOfType(SoLight::getClassTypeId()) ||
     node->isOfType(SoEnvironment::getClassTypeId()) ||
     node->isOfType(SoRotation::getClassTypeId()) ||
     node->isOfType(SoTransformSeparator::getClassTypeId()) ||
     node->getTypeId() == SoGroup::getClassTypeId() ||
     node->getTypeId() == SoSeparator::getClassTypeId();
-  if (!skipId) {
+}
+
+inline void graphFingerprintWalk(SoNode * node, const SoNode * skip, uint64_t & h)
+{
+  if (!node || node == skip) return;
+  mixHash(h, reinterpret_cast<uintptr_t>(node));
+  if (!fingerprintSkipsNodeId(node)) {
     mixHash(h, static_cast<uint64_t>(node->getNodeId()));
   }
   if (node->isOfType(SoGroup::getClassTypeId())) {
@@ -272,6 +285,11 @@ public:
     // where the scene has not changed (static / camera-only frames).
     this->sceneGraphSensor =
       new SoNodeSensor(vulkanSceneGraphChangedCallback, this);
+    // Priority 0 makes this a SoDelayQueueSensor "immediate" sensor AND makes
+    // SoDataSensor populate the trigger node/operation type; at the default
+    // priority the trigger is left null and the callback cannot tell a
+    // camera-coupled field write from a real scene change (see the callback).
+    this->sceneGraphSensor->setPriority(0);
   }
 
   ~SoVulkanRenderManagerP()
@@ -306,6 +324,26 @@ public:
 
   SoNode * overlayScene = nullptr;
   SoNode * decorationScene = nullptr;
+  // `camera` itself is owned by SoSceneManagerBase (it was hoisted there when
+  // the GL and Vulkan managers were unified); only the lookup cache lives here.
+  //! Cached result of resolveActiveCamera(): the first camera node found in the
+  //! scene, plus the child-index path from the scene root down to it.  Reused
+  //! while the path still resolves to the same node, which is checked in O(depth)
+  //! instead of an O(scene) SoSearchAction.  A camera-pose write does not change
+  //! the path (the node identity is unchanged), so the search is skipped on
+  //! navigation frames; a child-list edit that shifts, removes or replaces any
+  //! node on the path fails the check and re-runs the search.  See
+  //! resolveActiveCamera().
+  SoCamera * resolvedCamera = nullptr;
+  SoNode * resolvedCameraScene = nullptr;
+  std::vector<int> resolvedCameraPath;
+  //! The retained camera (this->camera) at the time the search last ran.  Used
+  //! only for the "no camera in the scene" result: it is reused while the scene
+  //! pointer and this pointer are unchanged, so a fruitless search is not
+  //! repeated every frame (it costs ~44 ms on a 1600-shape scene and FreeCAD's
+  //! camera is never inside the traversed scene).
+  SoCamera * resolvedCameraFallback = nullptr;
+  bool resolvedCameraCached = false;
   // Persistent traversal root (see the constructor comment).
   SoSeparator * frameRoot = nullptr;
   //! Persistent root for the always-re-recorded overlay/decoration scenes.
