@@ -262,6 +262,13 @@ SoVulkanRenderBackend::shutdown()
   // (VUID-vkDestroyQueryPool-device-parameter).
   this->gpuTimers.shutdown();
 
+  // The queue is drained above, so the external pre-pass fence is idle; destroy
+  // it while the VkDevice is still alive.
+  if (this->externalPrepassFence != VK_NULL_HANDLE) {
+    vkDestroyFence(this->device, this->externalPrepassFence, this->allocator);
+    this->externalPrepassFence = VK_NULL_HANDLE;
+  }
+
   // The queue is idle, so every deferred resource is safe to release now.
   this->flushAllPendingDestroys();
 
