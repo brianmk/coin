@@ -11,7 +11,9 @@
 #include <Inventor/nodes/SoCamera.h>
 #include <Inventor/nodes/SoLight.h>
 #include <Inventor/nodes/SoEnvironment.h>
+#include <Inventor/misc/SoNotRec.h>
 #include <Inventor/nodes/SoNode.h>
+#include <Inventor/sensors/SoDataSensor.h>
 #include <Inventor/sensors/SoNodeSensor.h>
 #include <Inventor/nodes/SoOrthographicCamera.h>
 #include <Inventor/nodes/SoPerspectiveCamera.h>
@@ -45,14 +47,30 @@ class SoVulkanRenderManagerP;
 
 using namespace SoVulkanManagerDetail;
 
-// Mark the graph fingerprint dirty when any part of the main scene is notified
-// (a field write or child-list edit anywhere in the subtree) -- the exact
-// condition the O(N) fingerprint walk detects, so it can be skipped until the
-// scene actually changes.
+// Mark the graph fingerprint dirty when a render-affecting part of the main
+// scene changes.  The root sensor fires on ANY subtree notification, including
+// the headlight/camera-coupled field writes FreeCAD performs every navigation
+// frame.  Those do not change the retained main draw list -- the fingerprint
+// walk skips their node ids (fingerprintSkipsNodeId) -- so treating them as a
+// graph change forced the O(scene) fingerprint walk (~55 ms on a 1600-shape
+// scene) on every navigation frame, defeating the retained-IR replay.  A
+// structural edit (child-list op) or a field write on any other node still
+// dirties.  The sensor runs at priority 0 (an "immediate" delay sensor) so
+// SoDataSensor populates the trigger node/op; at the default priority the
+// trigger is left null and no distinction is possible.
 void
-vulkanSceneGraphChangedCallback(void * data, SoSensor * /*sensor*/)
+vulkanSceneGraphChangedCallback(void * data, SoSensor * sensor)
 {
   auto * pimpl = static_cast<SoVulkanRenderManagerP *>(data);
+  auto * dataSensor = static_cast<SoDataSensor *>(sensor);
+  const SoNotRec::OperationType op =
+    sensor ? dataSensor->getTriggerOperationType() : SoNotRec::UNSPECIFIED;
+  const bool fieldChange =
+    (op == SoNotRec::FIELD_UPDATE || op == SoNotRec::UNSPECIFIED);
+  SoNode * trigger = sensor ? dataSensor->getTriggerNode() : nullptr;
+  if (fieldChange && trigger && fingerprintSkipsNodeId(trigger)) {
+    return;
+  }
   pimpl->sceneGraphDirty = TRUE;
 }
 

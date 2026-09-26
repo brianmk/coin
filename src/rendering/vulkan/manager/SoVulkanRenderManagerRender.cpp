@@ -63,23 +63,58 @@ SoVulkanRenderManagerP::resolveActiveCamera()
   // (refreshActiveCamera() then setClippingPlanes()), and the fallback
   // SoSearchAction below is an O(scene) full-graph search with per-match path
   // allocation: measured at ~41 ms for a 1600-shape scene, i.e. ~82 ms/frame of
-  // pure camera lookup.  The main-scene root sensor raises sceneGraphDirty on
-  // ANY subtree notify, so a child-list edit that replaces or removes the
-  // camera node marks this cache stale; a pure camera-pose write also raises it
-  // (over-invalidation), which merely re-runs the search on that frame and
-  // never returns a stale camera.
-  if (this->resolvedCameraScene == this->scene && !this->sceneGraphDirty) {
-    return this->resolvedCamera ? this->resolvedCamera : this->camera;
+  // pure camera lookup -- and the scene root sensor fires on the camera-pose
+  // write FreeCAD performs every navigation frame, so gating on that flag alone
+  // left the search running on exactly the moving frames that need it most.
+  //
+  // Instead re-validate the cached node with the stored child-index path from
+  // the scene root: O(depth), no search.  The path is only a way to reach the
+  // same node, so a camera-pose write keeps it valid (the node identity is
+  // unchanged and its pose is read live elsewhere); a child-list edit that
+  // shifts, removes or replaces any node on the path makes the walk land on a
+  // different node (or fail), which re-runs the search.
+  if (this->resolvedCameraCached && this->resolvedCameraScene == this->scene) {
+    if (this->resolvedCamera) {
+      SoNode * node = this->scene;
+      bool valid = node != nullptr;
+      for (int index : this->resolvedCameraPath) {
+        if (!node || !node->isOfType(SoGroup::getClassTypeId())) {
+          valid = false;
+          break;
+        }
+        SoGroup * group = static_cast<SoGroup *>(node);
+        if (index < 0 || index >= group->getNumChildren()) {
+          valid = false;
+          break;
+        }
+        node = group->getChild(index);
+      }
+      if (valid && node == this->resolvedCamera) {
+        return this->resolvedCamera;
+      }
+    }
+    else if (this->resolvedCameraFallback == this->camera) {
+      // Cached "no camera in the scene"; the retained camera is the authority
+      // and nothing that could introduce an in-scene camera (a different scene
+      // or a different retained camera) has happened.
+      return this->camera;
+    }
   }
+  // About to (re)run the search: reset and record the inputs it depends on.
+  this->resolvedCameraCached = true;
   this->resolvedCamera = nullptr;
   this->resolvedCameraScene = this->scene;
+  this->resolvedCameraFallback = this->camera;
+  this->resolvedCameraPath.clear();
 
   // The scene graph passed to setSceneGraph() is the GL viewer's superscene,
-  // which CONTAINS the camera node that navigation actually mutates (FreeCAD
-  // keeps the camera inside the scene root separator).  Prefer that node: it
-  // is the single authority and cannot go stale, whereas the retained pointer
-  // set by setCamera() is a snapshot that diverges as soon as the camera is
-  // rotated/panned without an intervening sync.
+  // which CAN contain the camera node that navigation mutates, so prefer an
+  // in-scene camera when there is one: it is the single authority and cannot go
+  // stale, whereas the retained pointer set by setCamera() could be a snapshot
+  // that diverges once the camera is rotated/panned without a re-sync.  In
+  // practice FreeCAD sets the camera explicitly and the superscene holds only
+  // the geometry (the search finds nothing) -- which is why the empty result is
+  // cached: the search is O(scene) and would otherwise run every frame.
   if (this->scene) {
     if (this->scene->getTypeId().isDerivedFrom(SoSeparator::getClassTypeId())) {
       SoSeparator * sep = static_cast<SoSeparator *>(this->scene);
@@ -87,6 +122,7 @@ SoVulkanRenderManagerP::resolveActiveCamera()
         SoNode * child = sep->getChild(i);
         if (child && child->isOfType(SoCamera::getClassTypeId())) {
           this->resolvedCamera = static_cast<SoCamera *>(child);
+          this->resolvedCameraPath.push_back(i);
           return this->resolvedCamera;
         }
       }
@@ -100,7 +136,13 @@ SoVulkanRenderManagerP::resolveActiveCamera()
     search.apply(this->scene);
     const SoPathList & paths = search.getPaths();
     if (paths.getLength() > 0) {
-      this->resolvedCamera = static_cast<SoCamera *>(paths[0]->getTail());
+      SoPath * path = paths[0];
+      this->resolvedCamera = static_cast<SoCamera *>(path->getTail());
+      // Record the descent from the scene root: getIndex(i) is the index of the
+      // i-th path node within its parent, so start at 1 (0 is the root itself).
+      for (int i = 1; i < path->getLength(); ++i) {
+        this->resolvedCameraPath.push_back(path->getIndex(i));
+      }
       return this->resolvedCamera;
     }
   }
@@ -522,7 +564,9 @@ SoVulkanRenderManagerP::prepareRenderParams(SbBool clearwindow,
       // forever, leaving an object's show/hide state never reflected in the
       // viewport.  The walk is the authoritative signal and is O(nodes) (a few
       // mixHash per node), far cheaper than an actual re-traversal.
+      const long fpBcStart = vkRenderBreadcrumbEnabled() ? vkRenderBreadcrumbNowUs() : 0;
       graphFp = this->computeGraphFingerprint();
+      vkRenderBreadcrumbSince(fpBcStart, 1000, "prepare computeGraphFingerprint end");
       this->sceneGraphDirty = FALSE;
     }
    this->lastFpScene = this->scene;
