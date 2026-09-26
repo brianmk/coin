@@ -257,6 +257,13 @@ public:
                         VkRenderPass renderPass,
                         VkFramebuffer framebuffer);
 
+  //! Record the frame's GPU-timestamp query reset on the caller's command
+  //! buffer, immediately before vkCmdBeginRenderPass.  A caller that begins its
+  //! own pass must call this so renderExternal() can write GPU timestamps inside
+  //! the pass (vkCmdResetQueryPool is illegal inside one).  No-op unless GPU
+  //! timing (FC_VULKAN_GPU_TIMING) is active, so it is safe to always call.
+  void resetExternalGpuQueries(VkCommandBuffer commandBuffer);
+
   /*!
     \brief HDR output variant of renderExternal() for the raster path.
 

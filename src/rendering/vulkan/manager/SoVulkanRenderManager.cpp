@@ -933,6 +933,12 @@ SoVulkanRenderManager::nestedCommandBuffersEnabled() const
   return this->pimpl->backend.nestedCommandBuffersEnabled() ? TRUE : FALSE;
 }
 
+void
+SoVulkanRenderManager::resetExternalGpuQueries(VkCommandBuffer commandBuffer)
+{
+  this->pimpl->backend.resetExternalGpuQueries(commandBuffer);
+}
+
 SoVulkanRenderBackend *
 SoVulkanRenderManager::getBackend(void) const
 {

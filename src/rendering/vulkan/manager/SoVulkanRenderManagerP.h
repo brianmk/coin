@@ -301,6 +301,12 @@ public:
   SoNode * overlayScene = nullptr;
   SoNode * decorationScene = nullptr;
   SoCamera * camera = nullptr;
+  //! Cached result of resolveActiveCamera(): the first camera node found in the
+  //! scene, valid while resolvedCameraScene == scene and the main-scene root
+  //! sensor has not fired (sceneGraphDirty).  Avoids a full-scene
+  //! SoSearchAction on every frame; see resolveActiveCamera().
+  SoCamera * resolvedCamera = nullptr;
+  SoNode * resolvedCameraScene = nullptr;
   // Persistent traversal root (see the constructor comment).
   SoSeparator * frameRoot = nullptr;
   //! Persistent root for the always-re-recorded overlay/decoration scenes.

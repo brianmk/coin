@@ -59,6 +59,21 @@ SoVulkanRenderManagerP::computeGraphFingerprint() const
 SoCamera *
 SoVulkanRenderManagerP::resolveActiveCamera()
 {
+  // Cache the resolved node.  This runs at least twice per frame
+  // (refreshActiveCamera() then setClippingPlanes()), and the fallback
+  // SoSearchAction below is an O(scene) full-graph search with per-match path
+  // allocation: measured at ~41 ms for a 1600-shape scene, i.e. ~82 ms/frame of
+  // pure camera lookup.  The main-scene root sensor raises sceneGraphDirty on
+  // ANY subtree notify, so a child-list edit that replaces or removes the
+  // camera node marks this cache stale; a pure camera-pose write also raises it
+  // (over-invalidation), which merely re-runs the search on that frame and
+  // never returns a stale camera.
+  if (this->resolvedCameraScene == this->scene && !this->sceneGraphDirty) {
+    return this->resolvedCamera ? this->resolvedCamera : this->camera;
+  }
+  this->resolvedCamera = nullptr;
+  this->resolvedCameraScene = this->scene;
+
   // The scene graph passed to setSceneGraph() is the GL viewer's superscene,
   // which CONTAINS the camera node that navigation actually mutates (FreeCAD
   // keeps the camera inside the scene root separator).  Prefer that node: it
@@ -71,7 +86,8 @@ SoVulkanRenderManagerP::resolveActiveCamera()
       for (int i = 0; i < sep->getNumChildren(); ++i) {
         SoNode * child = sep->getChild(i);
         if (child && child->isOfType(SoCamera::getClassTypeId())) {
-          return static_cast<SoCamera *>(child);
+          this->resolvedCamera = static_cast<SoCamera *>(child);
+          return this->resolvedCamera;
         }
       }
     }
@@ -84,7 +100,8 @@ SoVulkanRenderManagerP::resolveActiveCamera()
     search.apply(this->scene);
     const SoPathList & paths = search.getPaths();
     if (paths.getLength() > 0) {
-      return static_cast<SoCamera *>(paths[0]->getTail());
+      this->resolvedCamera = static_cast<SoCamera *>(paths[0]->getTail());
+      return this->resolvedCamera;
     }
   }
   // No camera in the scene graph: fall back to the retained pointer (used by
