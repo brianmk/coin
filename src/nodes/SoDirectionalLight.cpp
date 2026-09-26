@@ -112,7 +112,7 @@
 #include <cstdlib>
 
 #include "nodes/SoSubNodeP.h"
-#include "rendering/SoGL.h"
+#include "rendering/gl/SoGL.h"
 
 // *************************************************************************
 

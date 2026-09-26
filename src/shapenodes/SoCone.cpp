@@ -100,7 +100,7 @@
 #endif // COIN_DEBUG
 
 #include "nodes/SoSubNodeP.h"
-#include "rendering/SoGL.h"
+#include "rendering/gl/SoGL.h"
 #include "misc/SoPick.h"
 #include "misc/SoGenerate.h"
 

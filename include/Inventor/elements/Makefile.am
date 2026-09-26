@@ -86,6 +86,7 @@ PublicHeaders = \
 	SoPickRayElement.h \
 	SoPickStyleElement.h \
 	SoPointSizeElement.h \
+	SoPhysicalMaterialElement.h \
 	SoPolygonOffsetElement.h \
 	SoProfileCoordinateElement.h \
 	SoProfileElement.h \

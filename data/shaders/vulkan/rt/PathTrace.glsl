@@ -68,7 +68,12 @@ struct RTMaterial {
     vec4  triangleData;    // x = triangle-normal pool offset, y = normal count,
                            // z = NEE pool offset, w = NEE entry count
     vec4  pbr;             // x = metalness, y = roughness, z = usePbr,
-                           // w = unused
+                           // w = roughness-map strength
+    vec4  textureData;     // x = UV pool offset, y = UV count,
+                           // z = normal-map strength, w = emissive intensity
+    vec4  textureLayers;   // base/roughness/normal/emissive array layers (-1)
+    vec4  optical;         // x = transmission IOR, y = Beer-Lambert absorption,
+                           // z = transmission (opacity), w = reserved
 };
 
 layout(set = 0, binding = 3, std430) buffer Materials {
@@ -150,11 +155,32 @@ layout(set = 0, binding = 16, std430) buffer StableDepthBuffer {
     vec4 stableDepth[];
 };
 
-const int COIN_MAX_LIGHTS = 8;
+// Material texture array (binding 17): every distinct material texture as a
+// sampler2DArray layer, selected per hit by RTMaterial::textureLayers.
+layout(set = 0, binding = 17) uniform sampler2DArray u_textureArray;
 
+// Per-triangle texture coordinates (binding 18), three vec4 per triangle,
+// indexed via RTMaterial::textureData (x = pool offset, y = triangle count).
+layout(set = 0, binding = 18, std430) readonly buffer UvPool {
+    vec4 triangleUvs[];
+} uvPoolBuffer;
+
+// Per-triangle tangents (binding 19), three vec4 per triangle (xyz = face
+// tangent, w = bitangent sign), appended in lockstep with the UV pool and
+// indexed with the same RTMaterial::textureData.x offset.  Only read for the
+// normal map.
+layout(set = 0, binding = 19, std430) readonly buffer TangentPool {
+    vec4 triangleTangents[];
+} tangentPoolBuffer;
+
+
+const int COIN_MAX_LIGHTS = 8;
 
 // Shading math, environment/IBL, BRDF and ray-query trace helpers are factored
 // into modules so this file keeps only the binding boilerplate + entry point.
+// MaterialCommon.glsl carries the BRDF primitives shared with the raster
+// fragment shader (included once per translation unit).
+#include "../common/MaterialCommon.glsl"
 #include "RTShadingCommon.glsl"
 #include "RTRayTrace.glsl"
 
@@ -255,6 +281,9 @@ void main()
         vec3 rgb = vec3(0.0);
         if (h.hit) {
             RTMaterial mat = matBuffer.materials[h.materialIndex];
+            mat.diffuse.rgb = coin_rt_base_color(mat, h.uv);
+            mat.pbr.y = coin_rt_roughness(mat, h.uv);
+            mat.emissive.rgb = coin_rt_emissive(mat, h.uv);
             if (mat.pbr.z > 0.5) {
                 rgb = coin_rtx_directLighting(h.pos, h.normal, dir, mat) +
                       mat.emissive.rgb;
@@ -291,6 +320,9 @@ void main()
         vec3 rgb;
         if (h.hit) {
             RTMaterial mat = matBuffer.materials[h.materialIndex];
+            mat.diffuse.rgb = coin_rt_base_color(mat, h.uv);
+            mat.pbr.y = coin_rt_roughness(mat, h.uv);
+            mat.emissive.rgb = coin_rt_emissive(mat, h.uv);
             vec3 N = normalize(h.normal);
             vec3 V = -dir;
             vec3 diffuse = mat.diffuse.rgb;
@@ -351,6 +383,9 @@ void main()
         vec3 rgb;
         if (h.hit) {
             RTMaterial mat = matBuffer.materials[h.materialIndex];
+            mat.diffuse.rgb = coin_rt_base_color(mat, h.uv);
+            mat.pbr.y = coin_rt_roughness(mat, h.uv);
+            mat.emissive.rgb = coin_rt_emissive(mat, h.uv);
             float ao = coin_rtx_ao(h.pos, h.normal, hash2(px.x, px.y, frameIndex));
             if (mat.pbr.z > 0.5) {
                 rgb = (mat.diffuse.rgb * ao) +
@@ -397,8 +432,6 @@ void main()
     // coefficient (0 in air).  In every other mode these stay inert so the
     // thin-glass path is unchanged.
     const bool maxMode = frame.u_state.y > 4.5;
-    const float glassIor = max(frame.u_glass.x, 1.0);
-    const float glassAbsorb = max(frame.u_glass.y, 0.0);
     bool insideGlass = false;
     vec3 glassSigma = vec3(0.0);
 
@@ -462,6 +495,9 @@ void main()
         }
 
         RTMaterial mat = matBuffer.materials[h.materialIndex];
+        mat.diffuse.rgb = coin_rt_base_color(mat, h.uv);
+        mat.pbr.y = coin_rt_roughness(mat, h.uv);
+        mat.emissive.rgb = coin_rt_emissive(mat, h.uv);
 
         if (bounce == 0) {
             albedos[index] = vec4(mat.diffuse.rgb, 1.0);
@@ -537,6 +573,10 @@ void main()
         // square.  The specular reflection is unaffected.
         if (dielectric) {
             vec3 I = rayDir;
+            // Per-material optics from the shared material record (see
+            // SoRenderIR::SoMaterialBlock::optical): x = IOR, y = absorption.
+            const float glassIor = max(mat.optical.x, 1.0);
+            const float glassAbsorb = max(mat.optical.y, 0.0);
             // traceClosest() orients the normal toward the ray origin, so the
             // ray always enters the surface: cosI = -dot(I, n) > 0.
             bool entering = !insideGlass;
@@ -596,6 +636,25 @@ void main()
                     glassSigma = vec3(0.0);
                 }
             }
+            // Ambient/environment body term (stylised).  A smooth dielectric
+            // both reflects and transmits only weakly near normal incidence,
+            // and in a dark scene the traced reflection/refraction are
+            // near-black, so the glass would read as a black hole.  Add a
+            // Fresnel-weighted ambient reflection once per body (on entry) so
+            // the glass keeps body and its tint in any environment: the ambient
+            // is the material colour (never darker than the local background
+            // gradient) scaled by a small base reflectivity plus the Schlick
+            // Fresnel term, which brightens the rim at grazing angles.  The
+            // physically-traced reflection/refraction above still carry the
+            // real environment, so a bright scene reflects correctly on top.
+            if (entering) {
+                float viewT = clamp(float(px.y) /
+                                    max(frame.u_viewport.y, 1.0), 0.0, 1.0);
+                vec3 ambientEnv = mix(frame.u_bgTop.rgb,
+                                      frame.u_bgBottom.rgb, viewT);
+                vec3 glassBody = max(mat.diffuse.rgb, ambientEnv);
+                radiance += weight * (0.50 + 0.50 * R) * glassBody;
+            }
             lastPdf = 1.0;  // delta interface
             rayOrigin = h.pos + newDir * 0.001;
             rayDir = normalize(newDir);
@@ -634,7 +693,7 @@ void main()
             float metallic = clamp(mat.pbr.x, 0.0, 1.0);
             float a = pbrAlpha(mat);
             vec3 F0 = pbrF0(mat);
-            vec3 Fv = pbrF_Schlick(NdotV, F0);
+            vec3 Fv = coin_pbr_f_schlick(NdotV, F0);
             vec2 u2 = hash2(px.x, px.y,
                             frameIndex + uint(bounce) * 919u + 1u);
             if (u2.x < 0.5) {
@@ -661,18 +720,21 @@ void main()
                 vec3 H = normalize(tangent * Ht.x + bitangent * Ht.y +
                                    n * Ht.z);
                 vec3 L = normalize(reflect(-V, H));
-                float NdotL = max(dot(n, L), 0.0);
+                float NdotL = dot(n, L);
                 float VdotH = max(dot(V, H), 0.0);
                 float NdotH = max(dot(n, H), 0.0);
                 if (NdotL <= 0.0) {
-                    newDir = normalize(reflect(rayDir, n));
+                    // The sampled half-vector put the reflected direction
+                    // below the horizon.  The Smith shadowing term evaluates to
+                    // zero there, so this sample contributes no energy;
+                    // terminate the path instead of tracing a direction that
+                    // would only be multiplied by a zero weight.
+                    break;
                 }
-                else {
-                    newDir = L;
-                }
-                vec3 F = pbrF_Schlick(VdotH, F0);
-                float G = pbrG_Smith(NdotV, NdotL, a);
-                lastPdf = 0.5 * pbrD_GGX(NdotH, a) * NdotH /
+                newDir = L;
+                vec3 F = coin_pbr_f_schlick(VdotH, F0);
+                float G = coin_pbr_g_smith(NdotV, NdotL, a);
+                lastPdf = 0.5 * coin_pbr_d_ggx(NdotH, a) * NdotH /
                           max(4.0 * VdotH, 1e-8);
                 weight *= (F * G * VdotH) / max(NdotV * NdotH, 1e-6) / 0.5;
             }

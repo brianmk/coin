@@ -48,7 +48,7 @@
 
 #include "glue/glp.h"
 #include "glue/glslp.h"
-#include "rendering/SoGL.h"
+#include "rendering/gl/SoGL.h"
 #include "shaders/SoGLSLShaderDiagnostics.h"
 #include "shaders/SoGLSLShaderParameter.h"
 

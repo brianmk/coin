@@ -78,8 +78,9 @@ coin_embed_gl_shader(gl_point_fragment data/shaders/gl/point/Fragment.glsl)
 coin_embed_gl_shader(gl_pixel_vertex data/shaders/gl/pixel/Vertex.glsl)
 coin_embed_gl_shader(gl_pixel_fragment data/shaders/gl/pixel/Fragment.glsl)
 
-# Vulkan SPIR-V headers are committed to the source tree
-# (src/rendering/vulkan/visual/*.spv.h) so the backend builds without a
+# Vulkan SPIR-V headers are committed to the source tree under
+# (src/rendering/vulkan/generated/shaders/, mirroring data/shaders/vulkan/) so
+# the backend builds without a
 # runtime shader compiler.  Regeneration is an explicit, offline step driven
 # by the `coin_regenerate_vulkan_spirv` target; it is intentionally not part
 # of the default build so glslangValidator is never a build dependency.
@@ -124,6 +125,16 @@ if(COIN_BUILD_VULKAN_RENDERER)
     endif()
   endforeach()
 
+  # Textual GLSL #include modules are expanded by the shader generator and are
+  # deliberately not registered as independent resources, so CMake has no
+  # input dependency on them: editing an include (e.g. rt/RTRayTrace.glsl or
+  # common/MaterialCommon.glsl) would leave the committed .spv.h headers stale.
+  # Depend on every Vulkan GLSL source so an include edit regenerates the
+  # headers that embed the include closure.
+  file(GLOB_RECURSE _coin_vulkan_glsl_sources
+    "${CMAKE_CURRENT_SOURCE_DIR}/shaders/vulkan/*.glsl")
+  list(APPEND _coin_layout_deps ${_coin_vulkan_glsl_sources})
+
   # Shader-side diagnostics (debugPrintfEXT).  Off by default so the committed
   # .spv.h headers stay byte-identical; turning it on recompiles the shaders
   # with COIN_ENABLE_DEBUG_PRINTF and requires FC_VULKAN_DEBUG_PRINTF at run
@@ -157,24 +168,17 @@ if(COIN_BUILD_VULKAN_RENDERER)
     endif()
 
     get_filename_component(_basename "${_input}" NAME_WE)
-    # RT shaders live in src/rendering/vulkan/rt/, the rest in .../visual/.
-    # Derive the output subdirectory from the source path so RT headers are
-    # written where the backend includes them (no post-build copy).  Use
-    # string(FIND) rather than if(... MATCHES): macro arguments are textually
-    # substituted, which makes the if() variable-vs-literal resolution
-    # ambiguous for a path token.
-    set(_spirv_subdir "visual")
-    string(FIND "${_input}" "/rt/" _rt_path_pos)
-    if(NOT _rt_path_pos EQUAL -1)
-      set(_spirv_subdir "rt")
-    endif()
     # Source path relative to data/shaders/vulkan, recorded in the header stamp
-    # so tools/rendering/check_spirv_stamps.py can locate the GLSL.  This is the
-    # real source subdir (wide-line/, geometry-lod/, ...), which differs from
-    # the header output subdir (always visual/ or rt/).
+    # so tools/rendering/check_spirv_stamps.py can locate the GLSL.
     string(REPLACE "data/shaders/vulkan/" "" _source_rel "${_input}")
+    # Mirror the GLSL source subdirectory under generated/shaders/ so each
+    # committed header lands beside the shaders it came from (visual/, output/,
+    # geometry-lod/, wide-line/, rt/, rt/denoise/, ...).  Deriving the output
+    # subdir from the source path keeps the two trees in lockstep with no
+    # post-build copy.
+    get_filename_component(_spirv_subdir "${_source_rel}" DIRECTORY)
     set(_output_file
-      "${PROJECT_SOURCE_DIR}/src/rendering/vulkan/${_spirv_subdir}/${_basename}.spv.h")
+      "${PROJECT_SOURCE_DIR}/src/rendering/vulkan/generated/shaders/${_spirv_subdir}/${_basename}.spv.h")
 
     string(REGEX REPLACE "[^A-Za-z0-9_]" "_" _logical_name "${_name}")
     set(_variable_name "coin_${_logical_name}_spirv")
@@ -286,10 +290,11 @@ if(COIN_BUILD_VULKAN_RENDERER)
     coin_embed_vulkan_spirv(vulkan_output_fragment
       data/shaders/vulkan/output/OutputFragment.glsl frag)
 
-    # Ray-tracing backend shaders.  These pass the "rt" output subdirectory so
-    # the generated headers land in src/rendering/vulkan/rt/ where the backend
-    # includes them.  The .spv.h files are committed like the visual ones; this
-    # is only the offline regeneration path.
+    # Ray-tracing backend shaders.  The macro mirrors the source subdirectory
+    # (rt/, rt/denoise/) so the generated headers land under
+    # src/rendering/vulkan/generated/shaders/rt*/ where the backend includes
+    # them.  The .spv.h files are committed like the rest; this is only the
+    # offline regeneration path.
     coin_embed_vulkan_spirv(vulkan_rt_pathtrace
       data/shaders/vulkan/rt/PathTrace.glsl comp rt)
     coin_embed_vulkan_spirv(vulkan_rt_raygen
@@ -307,12 +312,12 @@ if(COIN_BUILD_VULKAN_RENDERER)
     coin_embed_vulkan_spirv(vulkan_rt_presentfragment
       data/shaders/vulkan/rt/PresentFragment.glsl frag rt)
     coin_embed_vulkan_spirv(vulkan_rt_denoisedownsample
-      data/shaders/vulkan/rt/DenoiseDownsample.glsl comp rt)
-    # AMD FidelityFX DNSR denoiser (the "fsr" path-tracing denoiser slot).
-    coin_embed_vulkan_spirv(vulkan_rt_fsrprefilter
-      data/shaders/vulkan/rt/FsrPrefilter.glsl comp rt)
-    coin_embed_vulkan_spirv(vulkan_rt_fsrresolvetemporal
-      data/shaders/vulkan/rt/FsrResolveTemporal.glsl comp rt)
+      data/shaders/vulkan/rt/denoise/DenoiseDownsample.glsl comp rt)
+    # AMD FidelityFX DNSR denoiser (the "dnsr" path-tracing denoiser slot).
+    coin_embed_vulkan_spirv(vulkan_rt_dnsrprefilter
+      data/shaders/vulkan/rt/denoise/DnsrPrefilter.glsl comp rt)
+    coin_embed_vulkan_spirv(vulkan_rt_dnsrresolvetemporal
+      data/shaders/vulkan/rt/denoise/DnsrResolveTemporal.glsl comp rt)
     # Single-ray GPU pick for the RTX viewport (Vulkan/RTX only).
     coin_embed_vulkan_spirv(vulkan_rt_pick
       data/shaders/vulkan/rt/Pick.glsl comp rt)
@@ -323,8 +328,8 @@ if(COIN_BUILD_VULKAN_RENDERER)
 
     # Verify every committed header matches a fresh regeneration.  Run this
     # before pushing a shader change (or in CI) to catch a stale .spv.h.  The
-    # macro now writes RT headers directly into src/rendering/vulkan/rt/, so
-    # there is no separate copy step to keep in sync.
+    # macro writes each header directly into its mirrored generated/shaders/
+    # subdirectory, so there is no separate copy step to keep in sync.
     add_custom_target(coin_check_vulkan_spirv
       DEPENDS ${COIN_VULKAN_SPIRV_CHECK_TARGETS}
       COMMENT "Checking committed Vulkan SPIR-V headers against a fresh regeneration")

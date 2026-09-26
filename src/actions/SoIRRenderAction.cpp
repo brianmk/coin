@@ -36,6 +36,7 @@
 #include <Inventor/elements/SoComplexityElement.h>
 #include <Inventor/elements/SoComplexityTypeElement.h>
 #include <Inventor/elements/SoMultiTextureCoordinateElement.h>
+#include <Inventor/elements/SoTextureCoordinateBindingElement.h>
 #include <Inventor/elements/SoProfileElement.h>
 #include <Inventor/elements/SoProfileCoordinateElement.h>
 #include <Inventor/elements/SoTextureQualityElement.h>
@@ -51,6 +52,7 @@
 #include <Inventor/elements/SoTextureOverrideElement.h>
 #include <Inventor/elements/SoDevicePixelRatioElement.h>
 #include <Inventor/elements/SoPointSizeElement.h>
+#include <Inventor/elements/SoPhysicalMaterialElement.h>
 #include <Inventor/nodes/SoShaderProgram.h>
 #include <Inventor/nodes/SoCamera.h>
 #include <Inventor/nodes/SoNode.h>
@@ -62,10 +64,11 @@
 #include <Inventor/nodes/SoScale.h>
 #include <Inventor/nodes/SoMatrixTransform.h>
 #include <Inventor/nodes/SoTransformation.h>
+#include <Inventor/nodes/SoPhysicalMaterial.h>
 #include <Inventor/lists/SoPathList.h>
 
 #include "actions/SoSubActionP.h"
-#include "rendering/SoRenderIRP.h"
+#include "rendering/backend/SoRenderIRP.h"
 
 #include <cassert>
 
@@ -103,6 +106,8 @@ SoIRRenderAction::initClass(void)
   SO_ACTION_ADD_METHOD_INTERNAL(SoScale, SoIRRenderAction::callDoAction);
   SO_ACTION_ADD_METHOD_INTERNAL(SoMatrixTransform, SoIRRenderAction::callDoAction);
   SO_ACTION_ADD_METHOD_INTERNAL(SoTransformation, SoIRRenderAction::callDoAction);
+  // Physical-material nodes set SoPhysicalMaterialElement in doAction().
+  SO_ACTION_ADD_METHOD_INTERNAL(SoPhysicalMaterial, SoIRRenderAction::callDoAction);
 
   SO_ENABLE(SoIRRenderAction, SoViewportRegionElement);
   SO_ENABLE(SoIRRenderAction, SoViewVolumeElement);
@@ -123,6 +128,7 @@ SoIRRenderAction::initClass(void)
   SO_ENABLE(SoIRRenderAction, SoLightElement);
   SO_ENABLE(SoIRRenderAction, SoEnvironmentElement);
   SO_ENABLE(SoIRRenderAction, SoLightAttenuationElement);
+  SO_ENABLE(SoIRRenderAction, SoPhysicalMaterialElement);
   SO_ENABLE(SoIRRenderAction, SoMaterialBindingElement);
   SO_ENABLE(SoIRRenderAction, SoNormalBindingElement);
   SO_ENABLE(SoIRRenderAction, SoCacheElement);
@@ -136,6 +142,12 @@ SoIRRenderAction::initClass(void)
   SO_ENABLE(SoIRRenderAction, SoComplexityElement);
   SO_ENABLE(SoIRRenderAction, SoComplexityTypeElement);
   SO_ENABLE(SoIRRenderAction, SoMultiTextureCoordinateElement);
+  // Explicit texture coordinates (SoTextureCoordinate2/3) reach
+  // SoIndexedFaceSet::generatePrimitives() through the binding element; it
+  // must be enabled or the shape asserts reading it.  The projection-function
+  // path (SoTextureCoordinateProjection) short-circuits before the binding
+  // lookup, which is why this went unnoticed until explicit coords were used.
+  SO_ENABLE(SoIRRenderAction, SoTextureCoordinateBindingElement);
   SO_ENABLE(SoIRRenderAction, SoProfileElement);
   SO_ENABLE(SoIRRenderAction, SoProfileCoordinateElement);
   SO_ENABLE(SoIRRenderAction, SoTextureQualityElement);

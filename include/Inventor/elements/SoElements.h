@@ -107,6 +107,7 @@
 #include <Inventor/elements/SoTextureOverrideElement.h>
 #include <Inventor/elements/SoPickRayElement.h>
 #include <Inventor/elements/SoReplacedElement.h>
+#include <Inventor/elements/SoPhysicalMaterialElement.h>
 #include <Inventor/elements/SoCoordinateElement.h>
 #if COIN_HAVE_LEGACY_GL_RENDERER
 #include <Inventor/elements/SoGLCoordinateElement.h>

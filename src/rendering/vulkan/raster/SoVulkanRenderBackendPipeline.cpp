@@ -1,0 +1,668 @@
+// src/rendering/vulkan/raster/SoVulkanRenderBackendPipeline.cpp
+//
+// Graphics pipeline and render-pass management.  Provides:
+//
+//   - getOrCreatePipeline(): build + cache an immutable VkPipeline per unique
+//     retained state (topology, fill/cull, depth, blend, stencil, sample
+//     count, wide-line) and translate it into the Vulkan state structs
+//   - Background-gradient pipeline + recordBackground()
+//
+// The render-pass/framebuffer cache moved to SoVulkanRenderPassCache.
+
+#include "rendering/vulkan/raster/SoVulkanRenderBackend.h"
+#include "rendering/vulkan/raster/SoVulkanRenderBackendP.h"
+#include "rendering/vulkan/common/core/SoVulkanConfig.h"
+
+#include <Inventor/elements/SoDrawStyleElement.h>
+#include <Inventor/errors/SoDebugError.h>
+
+#include <algorithm>
+#include <cstddef>
+#include <cstdint>
+#include <cstdio>
+#include <cstdlib>
+#include <cstring>
+#include <limits>
+#include <mutex>
+#include <vector>
+
+using namespace CoinVulkanDetail;
+
+VkPipeline
+SoVulkanRenderBackend::createGraphicsPipeline(
+  VkPipelineLayout layout, VkRenderPass renderPass,
+  const VkPipelineShaderStageCreateInfo stages[2],
+  const VkPipelineVertexInputStateCreateInfo & vertexInput,
+  const VkPipelineInputAssemblyStateCreateInfo & inputAssembly,
+  const VkPipelineRasterizationStateCreateInfo & rasterization,
+  VkSampleCountFlagBits sampleCount,
+  const VkPipelineDepthStencilStateCreateInfo & depthStencil,
+  const VkPipelineColorBlendAttachmentState & blendAttachment)
+{
+  // Fixed state shared by every graphics pipeline: viewport/scissor are
+  // dynamic, one color attachment, no logic op, one sample count.
+  VkPipelineViewportStateCreateInfo viewportState {};
+  viewportState.sType = VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO;
+  viewportState.viewportCount = 1;
+  viewportState.scissorCount = 1;
+
+  VkPipelineMultisampleStateCreateInfo multisample {};
+  multisample.sType = VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO;
+  multisample.rasterizationSamples = sampleCount;
+
+  VkPipelineColorBlendStateCreateInfo colorBlend {};
+  colorBlend.sType = VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO;
+  colorBlend.logicOpEnable = VK_FALSE;
+  colorBlend.attachmentCount = 1;
+  colorBlend.pAttachments = &blendAttachment;
+
+  const VkDynamicState dynamicStates[] = {
+    VK_DYNAMIC_STATE_VIEWPORT,
+    VK_DYNAMIC_STATE_SCISSOR,
+  };
+  VkPipelineDynamicStateCreateInfo dynamicState {};
+  dynamicState.sType = VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO;
+  dynamicState.dynamicStateCount = 2;
+  dynamicState.pDynamicStates = dynamicStates;
+
+  VkGraphicsPipelineCreateInfo ci {};
+  ci.sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO;
+  ci.stageCount = 2;
+  ci.pStages = stages;
+  ci.pVertexInputState = &vertexInput;
+  ci.pInputAssemblyState = &inputAssembly;
+  ci.pViewportState = &viewportState;
+  ci.pRasterizationState = &rasterization;
+  ci.pMultisampleState = &multisample;
+  ci.pDepthStencilState = &depthStencil;
+  ci.pColorBlendState = &colorBlend;
+  ci.pDynamicState = &dynamicState;
+  ci.layout = layout;
+  ci.renderPass = renderPass;
+  ci.subpass = 0;
+
+  const bool wantFeedback =
+    this->hasPipelineCreationFeedback &&
+    SoVulkanConfig::get().diagnostics.pipelineFeedback;
+  VkPipelineCreationFeedbackEXT feedback {};
+  VkPipelineCreationFeedbackCreateInfoEXT feedbackInfo {};
+  if (wantFeedback) {
+    feedbackInfo.sType =
+      VK_STRUCTURE_TYPE_PIPELINE_CREATION_FEEDBACK_CREATE_INFO_EXT;
+    feedbackInfo.pPipelineCreationFeedback = &feedback;
+    feedbackInfo.pipelineStageCreationFeedbackCount = 0;
+    ci.pNext = &feedbackInfo;
+  }
+
+  VkPipeline created = VK_NULL_HANDLE;
+  const VkResult createRes = vkCreateGraphicsPipelines(
+    this->device, this->pipelines.handle(), 1, &ci, this->allocator, &created);
+  if (createRes != VK_SUCCESS) {
+    // Name the failing VkResult here: the callers only report a generic
+    // "failed to create ... pipeline", which hides OOM vs device-lost vs a
+    // validation failure.
+    this->emitError(("createGraphicsPipeline: vkCreateGraphicsPipelines failed: "
+                     + SoVulkanShared::vkResultName(createRes)).c_str());
+    return VK_NULL_HANDLE;
+  }
+  if (wantFeedback) {
+    const bool cacheHit =
+      (feedback.flags &
+       VK_PIPELINE_CREATION_FEEDBACK_APPLICATION_PIPELINE_CACHE_HIT_BIT_EXT) != 0;
+    std::fprintf(stderr,
+                 "[RTDBG] pipelineFeedback raster cacheHit=%d creation=%.3fus\n",
+                 cacheHit ? 1 : 0,
+                 static_cast<double>(feedback.duration) * 1.0e-3);
+  }
+  return created;
+}
+
+bool
+SoVulkanRenderBackend::createBackgroundPipeline(
+  const SoVulkanRenderTarget & target,
+  VkRenderPass renderPass,
+  VkPipeline & pipeline)
+{
+  BackgroundPipelineKey key;
+  key.renderPass = renderPass;
+  key.sampleCount = target.sampleCount;
+  if (this->pipelines.findBackground(key, pipeline)) {
+    return pipeline != VK_NULL_HANDLE;
+  }
+
+  VkPipelineShaderStageCreateInfo stages[2] {};
+  stages[0].sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+  stages[0].stage = VK_SHADER_STAGE_VERTEX_BIT;
+  stages[0].module = this->backgroundVertexModule;
+  stages[0].pName = "main";
+  stages[1].sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+  stages[1].stage = VK_SHADER_STAGE_FRAGMENT_BIT;
+  stages[1].module = this->backgroundFragmentModule;
+  stages[1].pName = "main";
+
+  // Fullscreen triangle: no vertex inputs.
+  VkPipelineVertexInputStateCreateInfo vertexInput {};
+  vertexInput.sType =
+    VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO;
+  vertexInput.vertexBindingDescriptionCount = 0;
+  vertexInput.vertexAttributeDescriptionCount = 0;
+
+  VkPipelineInputAssemblyStateCreateInfo inputAssembly {};
+  inputAssembly.sType =
+    VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO;
+  inputAssembly.topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
+  inputAssembly.primitiveRestartEnable = VK_FALSE;
+
+  VkPipelineRasterizationStateCreateInfo rasterization {};
+  rasterization.sType =
+    VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO;
+  rasterization.depthClampEnable = VK_FALSE;
+  rasterization.rasterizerDiscardEnable = VK_FALSE;
+  rasterization.polygonMode = VK_POLYGON_MODE_FILL;
+  rasterization.cullMode = VK_CULL_MODE_NONE;
+  rasterization.frontFace = VK_FRONT_FACE_COUNTER_CLOCKWISE;
+  rasterization.lineWidth = 1.0f;
+
+  // The gradient fills the whole viewport and writes no depth so geometry
+  // drawn afterwards is unaffected.
+  VkPipelineDepthStencilStateCreateInfo depthStencil {};
+  depthStencil.sType =
+    VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO;
+  depthStencil.depthTestEnable = VK_FALSE;
+  depthStencil.depthWriteEnable = VK_FALSE;
+  depthStencil.depthCompareOp = VK_COMPARE_OP_ALWAYS;
+  depthStencil.depthBoundsTestEnable = VK_FALSE;
+  depthStencil.stencilTestEnable = VK_FALSE;
+
+  VkPipelineColorBlendAttachmentState blendAttachment {};
+  blendAttachment.colorWriteMask =
+    VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT |
+    VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT;
+  blendAttachment.blendEnable = VK_FALSE;
+
+  const VkPipeline created = this->createGraphicsPipeline(
+    this->backgroundPipelineLayout, renderPass, stages, vertexInput,
+    inputAssembly, rasterization, target.sampleCount, depthStencil,
+    blendAttachment);
+  if (created == VK_NULL_HANDLE) {
+    this->emitError("failed to create Vulkan background pipeline");
+    this->pipelines.storeBackground(key, VK_NULL_HANDLE);
+    pipeline = VK_NULL_HANDLE;
+    return false;
+  }
+  this->pipelines.storeBackground(key, created);
+  pipeline = created;
+  return true;
+}
+
+void
+SoVulkanRenderBackend::recordBackground(const SoRenderParams & params,
+                                        const SoVulkanRenderTarget & target,
+                                        VkRenderPass renderPass,
+                                        VulkanRecordContext & ctx)
+{
+  if (!params.backgroundGradient) {
+    return;
+  }
+
+  VkPipeline pipeline = VK_NULL_HANDLE;
+  if (!this->createBackgroundPipeline(target, renderPass, pipeline) ||
+      pipeline == VK_NULL_HANDLE) {
+    return;
+  }
+
+  // The gradient covers exactly the viewport region (same Y-flip math as
+  // applyViewport()); geometry drawn afterwards restores its own viewport.
+  const SbVec2s & origin = params.viewport.getViewportOriginPixels();
+  const SbVec2s & size = params.viewport.getViewportSizePixels();
+  const VkRect2D rect = toVkRect(clampFlippedRect(
+    origin[0], origin[1], size[0], size[1], target.extent));
+  if (rect.extent.width == 0 || rect.extent.height == 0) return;
+
+  VkViewport viewport {};
+  viewport.x = static_cast<float>(rect.offset.x);
+  viewport.y = static_cast<float>(rect.offset.y);
+  viewport.width = static_cast<float>(rect.extent.width);
+  viewport.height = static_cast<float>(rect.extent.height);
+  viewport.minDepth = 0.0f;
+  viewport.maxDepth = 1.0f;
+  this->applyViewportState(viewport, ctx);
+
+  this->applyScissorState(rect, ctx);
+
+  this->applyPipeline(pipeline, ctx);
+
+  VulkanBackgroundPush push {};
+  push.topColor[0] = params.backgroundTopColor[0];
+  push.topColor[1] = params.backgroundTopColor[1];
+  push.topColor[2] = params.backgroundTopColor[2];
+  push.topColor[3] = params.backgroundTopColor[3];
+  push.bottomColor[0] = params.backgroundBottomColor[0];
+  push.bottomColor[1] = params.backgroundBottomColor[1];
+  push.bottomColor[2] = params.backgroundBottomColor[2];
+  push.bottomColor[3] = params.backgroundBottomColor[3];
+  push.viewport[0] = static_cast<float>(rect.extent.width);
+  push.viewport[1] = static_cast<float>(rect.extent.height);
+  push.viewport[2] = static_cast<float>(rect.offset.x);
+  push.viewport[3] = static_cast<float>(rect.offset.y);
+  vkCmdPushConstants(ctx.buffer, this->backgroundPipelineLayout,
+                      VK_SHADER_STAGE_VERTEX_BIT |
+                        VK_SHADER_STAGE_FRAGMENT_BIT,
+                      0, sizeof(push), &push);
+
+  vkCmdDraw(ctx.buffer, 3, 1, 0, 0);
+}
+
+bool
+SoVulkanRenderBackend::getOrCreatePipeline(const SoRenderCommand & command,
+                                           const SoVulkanRenderTarget & target,
+                                           VkRenderPass pass,
+                                           VkPipeline & pipeline,
+                                           const bool transparent,
+                                           const int fillModeOverride,
+                                           const bool overlayPass,
+                                           VulkanCachedCommand * cacheEntry)
+{
+  if (vkBackendTraceEnabled()) {
+    static std::atomic<int> n(0);
+    if (n.fetch_add(1) < 32) {
+      vkBackendTrace(this->uboFrameIndex, "getOrCreatePipeline.enter",
+                     "call=%d", n.load());
+    }
+  }
+  // Pipelines are immutable in Vulkan.  Key the cache on every retained
+  // state value that changes the created pipeline so commands of different
+  // topology, fill mode, depth/blend state, or sample count never reuse an
+  // incompatible pipeline.  Shading model, vertex-color, texture, and
+  // lighting remain uniform/push-constant concerns in this milestone and do
+  // not need to participate in the key yet.
+  const bool blending = transparent || command.state.blend.enabled ||
+                        command.material.diffuse[3] < 0.999f;
+  const bool overlay = fillModeOverride >= 0;
+  // SoPolygonOffsetElement contributes an explicit depth bias captured into
+  // the raster state.  Selection/overlay faces use it to pull themselves in
+  // front of the coplanar base geometry (GL glPolygonOffset semantics).
+  // Respect it in the key so selection overlays stop z-fighting with the
+  // geometry underneath them.
+  const bool polygonOffset =
+    command.state.raster.polygonOffsetFactor != 0.0f ||
+    command.state.raster.polygonOffsetUnits != 0.0f;
+  const bool depthBias = overlay || polygonOffset;
+  // GL polygon-offset units map ~1:1 onto Vulkan's depthBiasConstantFactor,
+  // but the two differ in how `r` (the minimum resolvable depth step) is
+  // derived: GL uses the (fixed-point, 24-bit) depth range while this backend
+  // commonly owns a float (D32_SFLOAT) depth attachment, whose resolvable
+  // step is far finer.  A GL-sized offset therefore leaves the coplanar
+  // selection/hover overlay Z-fighting with the base (a dark seam along the
+  // face boundary).  Scale the GL decal up so the overlay wins the depth test
+  // decisively; the slope factor keeps it from detaching at grazing,
+  // silhouette edges.
+  constexpr float kDecalScale = 512.0f;
+  const float kUseDecal = SoVulkanConfig::get().raster.rasterDecal
+    ? kDecalScale : 1.0f;
+  const float depthBiasConstant = polygonOffset
+    ? command.state.raster.polygonOffsetUnits * kUseDecal
+    : (overlay ? -0.5f : 0.0f);
+  const float depthBiasSlope = polygonOffset
+    ? command.state.raster.polygonOffsetFactor * kUseDecal
+    : (overlay ? -0.5f : 0.0f);
+  PipelineKey key;
+  // Wide-line rendering (line width > 1 and/or a stipple pattern) draws each
+  // segment as a quad.  Eligible commands expand the quad on the GPU in the
+  // instanced vertex shader (key.wideLineInstanced); the rest expand on the
+  // CPU and are drawn as a triangle list, mirroring the GL wide-line geometry
+  // shader.  The overlay wireframe redraw stays on the plain line path.
+  key.wideLine = isWideLine(command, fillModeOverride, this->interactionLodActive);
+  // GPU-instanced variant when the command is eligible AND its static instance
+  // endpoint buffer exists.  The record path and the wide-line expansion
+  // pre-pass apply the identical per-command test, so the key and the draw
+  // always agree.
+  key.wideLineInstanced = key.wideLine && isInstancedWideLine(command) &&
+    cacheEntry != nullptr &&
+    cacheEntry->instancedLineBuffer != VK_NULL_HANDLE;
+  key.renderPass = pass;
+  key.topology = command.geometry.topology;
+  key.fillMode = overlay ? static_cast<uint8_t>(fillModeOverride)
+                          : command.state.raster.fillMode;
+  key.cullMode = overlay ? 0 : command.state.raster.cullMode;
+  key.ccwFrontFace = command.state.raster.ccwFrontFace;
+  key.depthTestEnable = command.state.depth.enabled || overlay;
+  // Overlay-pass geometry (e.g. the navigation cube) draws last into its own
+  // viewport and keeps depth writes so it can self-occlude correctly; the
+  // wireframe/point redraw overlays deliberately disable depth writes.
+  key.depthWriteEnable = overlayPass
+    ? command.state.depth.writeEnabled
+    : (!transparent && !overlay && command.state.depth.writeEnabled);
+  key.depthFunction = overlayPass ? static_cast<uint8_t>(command.state.depth.func)
+                                  : (overlay ? static_cast<uint8_t>(SO_DEPTH_LEQUAL)
+                                             : command.state.depth.func);
+  key.depthBiasEnable = depthBias;
+  key.depthBiasConstantFactor = depthBiasConstant;
+  key.depthBiasSlopeFactor = depthBiasSlope;
+  key.blendEnable = blending;
+  key.sampleCount = target.sampleCount;
+  if (blending) {
+    key.blendSrcRGB = command.state.blend.srcRGBFactor;
+    key.blendDstRGB = command.state.blend.dstRGBFactor;
+    key.blendSrcAlpha = command.state.blend.srcAlphaFactor;
+    key.blendDstAlpha = command.state.blend.dstAlphaFactor;
+    key.blendEquationRGB = command.state.blend.rgbEquation;
+    key.blendEquationAlpha = command.state.blend.alphaEquation;
+  }
+  const SoStencilState & stencil = command.state.stencil;
+  key.stencilEnable = stencil.enabled;
+  if (stencil.enabled) {
+    key.stencilFunction = stencil.function;
+    key.stencilReference = stencil.reference;
+    key.stencilCompareMask = stencil.compareMask;
+    key.stencilWriteMask = stencil.writeMask;
+    key.stencilFailOp = stencil.failOp;
+    key.stencilZFailOp = stencil.zfailOp;
+    key.stencilZPassOp = stencil.zpassOp;
+  }
+
+  // Per-command fast path: an unchanged command (same retained state -> the
+  // same PipelineKey) re-resolves to the same VkPipeline without paying the
+  // unordered_map lookup (key hash + bucket walk + equality) every frame.
+  // The key that produced the last resolved handle is stored verbatim on the
+  // geometry-cache entry, and the (cheap field-by-field, hash-free) equality
+  // below decides the hit.  The backing entry is destroyed together with the
+  // pipeline cache in invalidateCache(), so the cached handle can never
+  // dangle.  Callers that already resolved the entry (recordDrawCommand /
+  // recordCommandBatch) pass it in to skip the commandToCache lookup here.
+  VulkanCachedCommand * entry = cacheEntry;
+  if (entry == nullptr) {
+    entry = this->geometryCache.find(&command);
+  }
+  if (entry && entry->hasResolvedPipeline && entry->resolvedKey == key) {
+    pipeline = entry->resolvedPipeline;
+    return pipeline != VK_NULL_HANDLE;
+  }
+
+  // Serialize the cold path.  The per-command fast path above touches only the
+  // caller-owned cache entry, but the shared pipeline store's find()/store()
+  // mutate an unordered_map.  The parallel record workers are dispatched only
+  // after buildWorkItems() warms each key on the recording thread, so a miss
+  // here normally means an un-warmed key (the batch fallback); if that happens
+  // concurrently the map access would race.  Guard it rather than depending on
+  // the warm-up being complete.
+  std::lock_guard<std::mutex> pipelineLock(this->pipelinesMutex);
+
+  if (this->pipelines.find(key, pipeline)) {
+    if (entry) {
+      entry->resolvedKey = key;
+      entry->resolvedPipeline = pipeline;
+      entry->hasResolvedPipeline = true;
+    }
+    return pipeline != VK_NULL_HANDLE;
+  }
+
+  // VK_POLYGON_MODE_LINE and VK_POLYGON_MODE_POINT require the
+  // fillModeNonSolid feature to be enabled at device creation.  The
+  // embedding application enables it only when the hardware advertises it,
+  // so creating such a pipeline without the feature is a spec violation
+  // (VUID-VkPipelineRasterizationStateCreateInfo-polygonMode-01507) and can
+  // make vkCreateGraphicsPipelines fail or hang drivers.  Refuse the
+  // pipeline instead; the failure is cached under the key so the warning is
+  // emitted once and every later lookup of the same state cheaply returns
+  // false.
+  if (!this->fillModeNonSolid && !key.wideLine &&
+      (key.fillMode == SoDrawStyleElement::LINES ||
+       key.fillMode == SoDrawStyleElement::POINTS)) {
+    this->emitError(
+      "Vulkan backend: the device does not support the fillModeNonSolid "
+      "feature; wireframe and point fill modes cannot be rendered");
+    this->pipelines.store(key, VK_NULL_HANDLE);
+    if (entry) {
+      entry->resolvedKey = key;
+      entry->resolvedPipeline = VK_NULL_HANDLE;
+      entry->hasResolvedPipeline = true;
+    }
+    pipeline = VK_NULL_HANDLE;
+    return false;
+  }
+
+  VkPipelineShaderStageCreateInfo stages[2] {};
+  stages[0].sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+  stages[0].stage = VK_SHADER_STAGE_VERTEX_BIT;
+  stages[0].module = key.wideLineInstanced ? this->wideLineInstancedVertexModule
+                    : key.wideLine ? this->wideLineVertexModule
+                                   : this->vertexModule;
+  stages[0].pName = "main";
+  stages[1].sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+  stages[1].stage = VK_SHADER_STAGE_FRAGMENT_BIT;
+  stages[1].module = key.wideLine ? this->wideLineFragmentModule
+                                  : this->fragmentModule;
+  stages[1].pName = "main";
+
+  // Binding 0: the interleaved position/normal/color/texcoord stream.  The
+  // wide-line path substitutes its own 36-byte clip-space layout at binding 0.
+  VkVertexInputBindingDescription binding[2] {};
+  binding[0].binding = 0;
+  // GPU-instanced wide lines read one instance per segment from binding 0
+  // (four vec4: p0, p1, c0, c1); the CPU-expanded path reads its 36-byte
+  // clip-space quad stream; the visual path reads the interleaved vertex.
+  binding[0].stride = key.wideLineInstanced ? sizeof(float) * 16
+                     : key.wideLine ? 36u : VULKAN_VERTEX_STRIDE;
+  binding[0].inputRate = key.wideLineInstanced
+    ? VK_VERTEX_INPUT_RATE_INSTANCE : VK_VERTEX_INPUT_RATE_VERTEX;
+  // Binding 1: the per-instance model matrix, four R32G32B32A32 rows advanced
+  // per instance (rate INSTANCE).  Used by the visual pipelines only; the
+  // wide-line pipelines (CPU-expanded and GPU-instanced) read the transform
+  // from the per-draw DrawBlock UBO instead, so neither declares binding 1.
+  if (!key.wideLine) {
+    binding[1].binding = 1;
+    binding[1].stride = sizeof(float) * 16; // mat4, 4 x vec4
+    binding[1].inputRate = VK_VERTEX_INPUT_RATE_INSTANCE;
+  }
+
+  VkVertexInputAttributeDescription attributes[8] {};
+  attributes[0].location = 0;
+  attributes[0].binding = 0;
+  attributes[0].format = VK_FORMAT_R32G32B32_SFLOAT;
+  attributes[0].offset = 0;
+  attributes[1].location = 1;
+  attributes[1].binding = 0;
+  attributes[1].format = VK_FORMAT_R32G32B32_SFLOAT;
+  attributes[1].offset = 12;
+  attributes[2].location = 2;
+  attributes[2].binding = 0;
+  attributes[2].format = VK_FORMAT_R8G8B8A8_UNORM;
+  attributes[2].offset = 24;
+  attributes[3].location = 3;
+  attributes[3].binding = 0;
+  attributes[3].format = VK_FORMAT_R16G16_SFLOAT;
+  attributes[3].offset = 28;
+  // Instance model matrix rows (binding 1, rate INSTANCE).
+  attributes[4].location = 4;
+  attributes[4].binding = 1;
+  attributes[4].format = VK_FORMAT_R32G32B32A32_SFLOAT;
+  attributes[4].offset = 0;
+  attributes[5].location = 5;
+  attributes[5].binding = 1;
+  attributes[5].format = VK_FORMAT_R32G32B32A32_SFLOAT;
+  attributes[5].offset = 16;
+  attributes[6].location = 6;
+  attributes[6].binding = 1;
+  attributes[6].format = VK_FORMAT_R32G32B32A32_SFLOAT;
+  attributes[6].offset = 32;
+  attributes[7].location = 7;
+  attributes[7].binding = 1;
+  attributes[7].format = VK_FORMAT_R32G32B32A32_SFLOAT;
+  attributes[7].offset = 48;
+
+  // Wide-line layout: clip-space position (0), color (16), polyline
+  // distance (32).
+  VkVertexInputAttributeDescription wideLineAttributes[3] {};
+  wideLineAttributes[0].location = 0;
+  wideLineAttributes[0].binding = 0;
+  wideLineAttributes[0].format = VK_FORMAT_R32G32B32A32_SFLOAT;
+  wideLineAttributes[0].offset = 0;
+  wideLineAttributes[1].location = 2;
+  wideLineAttributes[1].binding = 0;
+  wideLineAttributes[1].format = VK_FORMAT_R32G32B32A32_SFLOAT;
+  wideLineAttributes[1].offset = 16;
+  wideLineAttributes[2].location = 4;
+  wideLineAttributes[2].binding = 0;
+  wideLineAttributes[2].format = VK_FORMAT_R32_SFLOAT;
+  wideLineAttributes[2].offset = 32;
+
+  // GPU-instanced wide-line layout: one instance per segment, four vec4
+  // (p0, p1, c0, c1) at binding 0 (locations 0..3).  The model matrix comes
+  // from the per-draw DrawBlock UBO (draw.u_model), so there is no binding-1
+  // attribute.
+  VkVertexInputAttributeDescription instancedLineAttributes[4] {};
+  instancedLineAttributes[0] = { 0, 0, VK_FORMAT_R32G32B32A32_SFLOAT, 0 };
+  instancedLineAttributes[1] = { 1, 0, VK_FORMAT_R32G32B32A32_SFLOAT, 16 };
+  instancedLineAttributes[2] = { 2, 0, VK_FORMAT_R32G32B32A32_SFLOAT, 32 };
+  instancedLineAttributes[3] = { 3, 0, VK_FORMAT_R32G32B32A32_SFLOAT, 48 };
+
+  VkPipelineVertexInputStateCreateInfo vertexInput {};
+  vertexInput.sType =
+    VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO;
+  vertexInput.pVertexBindingDescriptions = binding;
+  if (key.wideLineInstanced) {
+    vertexInput.vertexBindingDescriptionCount = 1u;
+    vertexInput.vertexAttributeDescriptionCount = 4u;
+    vertexInput.pVertexAttributeDescriptions = instancedLineAttributes;
+  }
+  else if (key.wideLine) {
+    vertexInput.vertexBindingDescriptionCount = 1u;
+    vertexInput.vertexAttributeDescriptionCount = 3u;
+    vertexInput.pVertexAttributeDescriptions = wideLineAttributes;
+  }
+  else {
+    vertexInput.vertexBindingDescriptionCount = 2u;
+    vertexInput.vertexAttributeDescriptionCount = 8u;
+    vertexInput.pVertexAttributeDescriptions = attributes;
+  }
+
+  VkPipelineInputAssemblyStateCreateInfo inputAssembly {};
+  inputAssembly.sType =
+    VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO;
+  inputAssembly.topology = key.wideLine
+    ? VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST
+    : topologyToVk(command.geometry.topology);
+  inputAssembly.primitiveRestartEnable = VK_FALSE;
+
+  VkPipelineRasterizationStateCreateInfo rasterization {};
+  rasterization.sType =
+    VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO;
+  rasterization.depthClampEnable = VK_FALSE;
+  rasterization.rasterizerDiscardEnable = VK_FALSE;
+  const uint8_t fillMode = fillModeOverride >= 0
+                             ? static_cast<uint8_t>(fillModeOverride)
+                             : command.state.raster.fillMode;
+  // The overlay fill mode passed in by recordFrame() uses SoDrawStyleElement
+  // style values, and the retained IR stores the same encoding (see
+  // SoRenderIR::fillRenderStateFromState): FILLED=0, LINES=1, POINTS=2.
+  //
+  // Wide lines expand each segment into FILLED quads (drawn as a triangle
+  // list), so the polygon mode must be FILL regardless of the underlying
+  // draw style.  Using the inherited LINES mode here rasterizes the quad's
+  // edges as hairline wireframe instead of the solid line, which makes the
+  // expanded quads (a few pixels wide) effectively invisible -- the
+  // "wide lines don't render" symptom.
+  rasterization.polygonMode =
+    key.wideLine ? VK_POLYGON_MODE_FILL
+    : fillMode == SoDrawStyleElement::LINES ? VK_POLYGON_MODE_LINE
+    : fillMode == SoDrawStyleElement::POINTS ? VK_POLYGON_MODE_POINT
+    : VK_POLYGON_MODE_FILL;
+  // The vertex shader flips Y to match Coin's bottom-left origin; that
+  // reflection reverses screen winding, so the Vulkan front face is the
+  // inverse of the GL vertex ordering captured in the IR.  Back-face
+  // culling matches GL: only shapes declaring an explicit winding plus
+  // SOLID shape type cull (ccwFrontFace/cullMode above).  FreeCAD BRep
+  // tessellations declare COUNTERCLOCKWISE/SOLID, so closed parts cull
+  // back faces here exactly like the GL pipeline does.
+  rasterization.cullMode =
+    key.wideLine || !key.cullMode ? VK_CULL_MODE_NONE
+                                  : VK_CULL_MODE_BACK_BIT;
+  rasterization.frontFace = key.ccwFrontFace
+    ? VK_FRONT_FACE_CLOCKWISE
+    : VK_FRONT_FACE_COUNTER_CLOCKWISE;
+  rasterization.lineWidth = 1.0f;
+  // Depth bias: wireframe/point overlays pull toward the camera so they pass
+  // the depth test against coplanar filled geometry; selection/overlay faces
+  // carry an explicit SoPolygonOffsetElement captured into the raster state.
+  rasterization.depthBiasEnable = depthBias ? VK_TRUE : VK_FALSE;
+  rasterization.depthBiasConstantFactor = depthBiasConstant;
+  rasterization.depthBiasSlopeFactor = depthBiasSlope;
+
+  VkPipelineDepthStencilStateCreateInfo depthStencil {};
+  depthStencil.sType =
+    VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO;
+  depthStencil.depthTestEnable =
+    (command.state.depth.enabled || overlay) ? VK_TRUE : VK_FALSE;
+  depthStencil.depthWriteEnable =
+    (!transparent && !overlay && command.state.depth.writeEnabled)
+      ? VK_TRUE : VK_FALSE;
+  depthStencil.depthCompareOp = overlay
+    ? VK_COMPARE_OP_LESS_OR_EQUAL
+    : depthFunctionToVk(command.state.depth.func);
+  depthStencil.depthBoundsTestEnable = VK_FALSE;
+  depthStencil.stencilTestEnable = stencil.enabled ? VK_TRUE : VK_FALSE;
+  VkStencilOpState stencilState {};
+  if (stencil.enabled) {
+    stencilState.failOp = stencilOpToVk(stencil.failOp);
+    stencilState.passOp = stencilOpToVk(stencil.zpassOp);
+    stencilState.depthFailOp = stencilOpToVk(stencil.zfailOp);
+    stencilState.compareOp = stencilFunctionToVk(stencil.function);
+    stencilState.compareMask = stencil.compareMask;
+    stencilState.writeMask = stencil.writeMask;
+    stencilState.reference = stencil.reference;
+  }
+  depthStencil.front = stencilState;
+  depthStencil.back = stencilState;
+
+  VkPipelineColorBlendAttachmentState blendAttachment {};
+  blendAttachment.colorWriteMask =
+    VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT |
+    VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT;
+  blendAttachment.blendEnable = blending ? VK_TRUE : VK_FALSE;
+  if (command.state.blend.enabled) {
+    blendAttachment.srcColorBlendFactor =
+      blendFactorToVk(command.state.blend.srcRGBFactor);
+    blendAttachment.dstColorBlendFactor =
+      blendFactorToVk(command.state.blend.dstRGBFactor);
+    blendAttachment.colorBlendOp =
+      blendEquationToVk(command.state.blend.rgbEquation);
+    blendAttachment.srcAlphaBlendFactor =
+      blendFactorToVk(command.state.blend.srcAlphaFactor);
+    blendAttachment.dstAlphaBlendFactor =
+      blendFactorToVk(command.state.blend.dstAlphaFactor);
+    blendAttachment.alphaBlendOp =
+      blendEquationToVk(command.state.blend.alphaEquation);
+  }
+  else {
+    blendAttachment.srcColorBlendFactor = VK_BLEND_FACTOR_SRC_ALPHA;
+    blendAttachment.dstColorBlendFactor = VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA;
+    blendAttachment.colorBlendOp = VK_BLEND_OP_ADD;
+    blendAttachment.srcAlphaBlendFactor = VK_BLEND_FACTOR_ONE;
+    blendAttachment.dstAlphaBlendFactor = VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA;
+    blendAttachment.alphaBlendOp = VK_BLEND_OP_ADD;
+  }
+
+  const VkPipeline created = this->createGraphicsPipeline(
+    this->pipelineLayout, pass, stages, vertexInput, inputAssembly,
+    rasterization, target.sampleCount, depthStencil, blendAttachment);
+  if (created == VK_NULL_HANDLE) {
+    this->emitError("failed to create Vulkan graphics pipeline");
+    this->pipelines.store(key, VK_NULL_HANDLE);
+    if (entry) {
+      entry->resolvedKey = key;
+      entry->resolvedPipeline = VK_NULL_HANDLE;
+      entry->hasResolvedPipeline = true;
+    }
+    pipeline = VK_NULL_HANDLE;
+    return false;
+  }
+  this->pipelines.store(key, created);
+  if (entry) {
+    entry->resolvedKey = key;
+    entry->resolvedPipeline = created;
+    entry->hasResolvedPipeline = true;
+  }
+  pipeline = created;
+  return true;
+}

@@ -168,11 +168,11 @@ option(COIN_BUILD_VULKAN_RENDERER
 # AMD FidelityFX DNSR denoiser backend for the Vulkan path tracer.  The MIT
 # shader sources are vendored under src/rendering/third_party/fidelityfx/, so
 # this is a pure build switch (no external SDK): ON compiles the DNSR compute
-# passes and wires them into SoRTXRenderBackend's "fsr" denoiser slot; OFF
+# passes and wires them into SoRTXRenderBackend's "dnsr" denoiser slot; OFF
 # leaves the slot degrading to OIDN exactly as before.  Mirrors the OIDN/RTX
 # denoiser options: the runtime selection, device checks and graceful fallback
 # are unchanged either way.
-option(COIN_BUILD_FSR_DENOISER
+option(COIN_BUILD_DNSR_DENOISER
   "Build the AMD FidelityFX DNSR (ray-regeneration) denoiser backend."
   OFF)
 
@@ -1098,17 +1098,17 @@ else()
 endif()
 # AMD FidelityFX DNSR ray-regeneration denoiser: an on-GPU Vulkan compute
 # denoiser whose MIT shader sources are vendored under
-# src/rendering/third_party/fidelityfx/dnsr/.  Enabled by COIN_BUILD_FSR_DENOISER
-# (default OFF); when OFF SoRTXRenderBackend degrades the "fsr" slot to OIDN.
-if(COIN_BUILD_FSR_DENOISER)
-  set(HAVE_FSR_DENOISER 1)
+# src/rendering/third_party/fidelityfx/dnsr/.  Enabled by COIN_BUILD_DNSR_DENOISER
+# (default OFF); when OFF SoRTXRenderBackend degrades the "dnsr" slot to OIDN.
+if(COIN_BUILD_DNSR_DENOISER)
+  set(HAVE_DNSR_DENOISER 1)
 else()
-  set(HAVE_FSR_DENOISER 0)
+  set(HAVE_DNSR_DENOISER 0)
 endif()
-if(HAVE_FSR_DENOISER)
-  set(FEAT_HAVE_FSR_DENOISER 1)
+if(HAVE_DNSR_DENOISER)
+  set(FEAT_HAVE_DNSR_DENOISER 1)
 else()
-  set(FEAT_HAVE_FSR_DENOISER 0)
+  set(FEAT_HAVE_DNSR_DENOISER 0)
 endif()
 
 if(HAVE_OIDN)
@@ -1121,14 +1121,14 @@ if(HAVE_RTX_DENOISER)
 else()
   set(COIN_BUILD_RTX_DENOISER_VALUE 0)
 endif()
-set(COIN_BUILD_FSR_DENOISER_VALUE ${HAVE_FSR_DENOISER})
+set(COIN_BUILD_DNSR_DENOISER_VALUE ${HAVE_DNSR_DENOISER})
 
 add_compile_definitions(
   COIN_BUILD_LEGACY_GL_RENDERER=${COIN_BUILD_LEGACY_GL_RENDERER_VALUE}
   COIN_BUILD_VULKAN_RENDERER=${COIN_BUILD_VULKAN_RENDERER_VALUE}
   COIN_BUILD_OIDN=${COIN_BUILD_OIDN_VALUE}
   COIN_BUILD_RTX_DENOISER=${COIN_BUILD_RTX_DENOISER_VALUE}
-  COIN_BUILD_FSR_DENOISER=${COIN_BUILD_FSR_DENOISER_VALUE}
+  COIN_BUILD_DNSR_DENOISER=${COIN_BUILD_DNSR_DENOISER_VALUE}
 )
 
 # ############################################################################

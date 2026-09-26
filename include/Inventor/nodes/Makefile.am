@@ -73,6 +73,7 @@ PublicHeaders = \
 	SoPackedColor.h \
 	SoPathSwitch.h \
 	SoPendulum.h \
+	SoPhysicalMaterial.h \
 	SoPerspectiveCamera.h \
 	SoPickStyle.h \
 	SoPointLight.h \
@@ -118,6 +119,7 @@ PublicHeaders = \
 	SoTextureCoordinateEnvironment.h \
 	SoTextureCoordinateFunction.h \
 	SoTextureCoordinatePlane.h \
+	SoTextureCoordinateProjection.h \
 	SoTextureCoordinateNormalMap.h \
 	SoTextureCoordinateReflectionMap.h \
 	SoTextureCoordinateObject.h \

@@ -8,6 +8,9 @@
 // according to the command's SoTextureModel.
 
 #version 450
+#extension GL_GOOGLE_include_directive : require
+
+#include "../common/MaterialCommon.glsl"
 
 layout(push_constant) uniform PushConstants {
     vec4  u_color;        // offset 0, 16 bytes
@@ -41,9 +44,21 @@ layout(set = 1, binding = 0, std140) uniform DrawBlock {
     vec4  u_materialParams;       // offset 176: x=shininess, y=twoSided,
                                   //            z=lightCount, w=shadingModel
     mat4  u_proj;                 // offset 192: projection (view/model above)
+    vec4  u_materialPbr;          // offset 256: x=metalness, y=roughness,
+                                  //            z=physical-material enabled
+    vec4  u_materialMapParams;    // offset 272: x=roughness strength,
+                                  //            y=normal strength,
+                                  //            z=emissive intensity
 } draw;
 
 layout(set = 1, binding = 1) uniform sampler2D u_texture;
+
+// Optional secondary PBR maps (set 2).  When a map is absent the corresponding
+// default texture is bound (white roughness, flat normal, black emissive), so
+// sampling is always safe and the arithmetic is a no-op.
+layout(set = 2, binding = 0) uniform sampler2D u_roughnessMap;
+layout(set = 2, binding = 1) uniform sampler2D u_normalMap;
+layout(set = 2, binding = 2) uniform sampler2D u_emissiveMap;
 
 layout(location = 0) in vec4 v_color;
 layout(location = 1) in vec3 v_eyePos;
@@ -53,6 +68,46 @@ layout(location = 3) in vec2 v_texcoord;
 layout(location = 0) out vec4 fragColor;
 
 const int COIN_MAX_LIGHTS = 8;
+
+// Emissive contribution: the scalar emissive colour plus the optional emissive
+// map (set 2, binding 2) scaled by its authored intensity.  The presence
+// bitmask gates the sample so an absent map costs nothing.
+vec3 coin_vulkan_emissive()
+{
+    vec3 emissive = draw.u_emissiveColor.rgb;
+    if ((int(draw.u_materialMapParams.w) & 4) != 0) {
+        emissive += texture(u_emissiveMap, v_texcoord).rgb
+            * max(draw.u_materialMapParams.z, 0.0);
+    }
+    return emissive;
+}
+
+// Perturb an eye-space normal by the optional tangent-space normal map
+// (set 2, binding 1).  The tangent basis is derived per-fragment from the
+// screen-space derivatives of the eye-space position and the texture
+// coordinate (no per-vertex tangent stream), which is adequate for the CAD
+// preview and needs no geometry changes.  The map is decoded from [0,1] to
+// [-1,1] and its xy scaled by the authored normal strength.
+vec3 coin_vulkan_perturb_normal(vec3 N)
+{
+    if ((int(draw.u_materialMapParams.w) & 2) == 0) {
+        return N;
+    }
+    vec3 sampled = texture(u_normalMap, v_texcoord).xyz * 2.0 - 1.0;
+    sampled.xy *= max(draw.u_materialMapParams.y, 0.0);
+
+    vec3 dp1 = dFdx(v_eyePos);
+    vec3 dp2 = dFdy(v_eyePos);
+    vec2 duv1 = dFdx(v_texcoord);
+    vec2 duv2 = dFdy(v_texcoord);
+    vec3 dp2perp = cross(dp2, N);
+    vec3 dp1perp = cross(N, dp1);
+    vec3 T = dp2perp * duv1.x + dp1perp * duv2.x;
+    vec3 B = dp2perp * duv1.y + dp1perp * duv2.y;
+    float invmax = inversesqrt(max(dot(T, T), dot(B, B)) + 1.0e-8);
+    mat3 tbn = mat3(T * invmax, B * invmax, N);
+    return normalize(tbn * sampled);
+}
 
 // Per-fragment Blinn-Phong (matches the GL model's terms, but evaluated
 // here instead of per vertex): interpolated normals give a smooth diffuse
@@ -73,6 +128,10 @@ vec3 coin_vulkan_lighting(vec3 eyePos, vec3 eyeNormal, vec3 baseColor)
     if (draw.u_materialParams.y > 0.5 && dot(N, V) < 0.0) {
         N = -N;
     }
+    N = coin_vulkan_perturb_normal(N);
+    // sceneAmbient * materialAmbient; keep in sync with
+    // SoRenderIR::effectiveMaterialAmbient (the path tracer's definition, used
+    // for the same term so raster and RT agree).
     vec3 litColor = lighting.u_ambientLight.rgb * draw.u_materialAmbient.rgb;
 
     for (int i = 0; i < COIN_MAX_LIGHTS; ++i) {
@@ -112,7 +171,100 @@ vec3 coin_vulkan_lighting(vec3 eyePos, vec3 eyeNormal, vec3 baseColor)
         litColor += lighting.u_lightColor[i].rgb * attenuation * spotFactor *
                     (diffuse + specular);
     }
-    return clamp(litColor + draw.u_emissiveColor.rgb, 0.0, 1.0);
+    return clamp(litColor + coin_vulkan_emissive(), 0.0, 1.0);
+}
+
+// Metallic-roughness (GGX) direct lighting.  Selected when the command
+// carries an authored physical material (u_materialPbr.z > 0.5); otherwise
+// the legacy Blinn-Phong path above is used, so default materials render
+// exactly as before.
+//
+//   metalness 0 = dielectric (plastic/concrete), 1 = conductor (metal)
+//   roughness 0 = mirror, 1 = fully diffuse
+//
+// Direct lights only.  Environment/IBL is approximated by the ambient term
+// scaled by the diffuse albedo, which keeps the fast viewport cheap.
+vec3 coin_vulkan_pbr_lighting(vec3 eyePos, vec3 eyeNormal, vec3 baseColor)
+{
+    vec3 N = normalize(eyeNormal);
+    vec3 V = (draw.u_proj[2][3] == 0.0) ? vec3(0.0, 0.0, 1.0)
+                                      : normalize(-eyePos);
+    if (draw.u_materialParams.y > 0.5 && dot(N, V) < 0.0) {
+        N = -N;
+    }
+    N = coin_vulkan_perturb_normal(N);
+
+    float metalness = clamp(draw.u_materialPbr.x, 0.0, 1.0);
+    // Optional roughness map: sampled with the base texture coordinates and
+    // blended in by the authored strength (0 ignores the map, 1 multiplies the
+    // scalar roughness by the sampled value).  Gated by the presence bitmask.
+    float roughnessFactor = 1.0;
+    if ((int(draw.u_materialMapParams.w) & 1) != 0) {
+        float sampledRoughness = texture(u_roughnessMap, v_texcoord).r;
+        roughnessFactor =
+            mix(1.0, sampledRoughness, clamp(draw.u_materialMapParams.x, 0.0, 1.0));
+    }
+    float roughness =
+        clamp(draw.u_materialPbr.y * roughnessFactor, 0.045, 1.0);
+    float alpha = coin_pbr_alpha(roughness);
+
+    vec3 F0 = coin_pbr_f0(baseColor, metalness);
+    vec3 diffuseColor = baseColor * (1.0 - metalness);
+    float NdotV = max(dot(N, V), 1.0e-4);
+
+    vec3 litColor = lighting.u_ambientLight.rgb * draw.u_materialAmbient.rgb *
+                    diffuseColor;
+
+    for (int i = 0; i < COIN_MAX_LIGHTS; ++i) {
+        if (i >= int(draw.u_materialParams.z)) break;
+
+        vec3 L = lighting.u_lightDirection[i].xyz;
+        float attenuation = 1.0;
+        float spotFactor = 1.0;
+        if (lighting.u_lightType[i].x > 0.5) {
+            vec3 lightVector = lighting.u_lightPosition[i].xyz - eyePos;
+            float distanceToLight = length(lightVector);
+            if (distanceToLight <= 0.0001) continue;
+            L = lightVector / distanceToLight;
+            vec3 att = lighting.u_lightAttenuation[i].xyz;
+            attenuation = 1.0 / max(att.z + att.y * distanceToLight +
+                                    att.x * distanceToLight * distanceToLight,
+                                    0.0001);
+            if (lighting.u_lightType[i].x > 1.5) {
+                vec3 coneDir = normalize(lighting.u_lightDirection[i].xyz);
+                vec3 fromLight =
+                    normalize(eyePos - lighting.u_lightPosition[i].xyz);
+                float spotCos = dot(coneDir, fromLight);
+                if (spotCos < lighting.u_lightSpotParams[i].x) continue;
+                spotFactor = pow(max(spotCos, 0.0),
+                                 lighting.u_lightSpotParams[i].y);
+            }
+        }
+
+        vec3 Ln = normalize(L);
+        float NdotL = max(dot(N, Ln), 0.0);
+        if (NdotL <= 0.0) continue;
+        vec3 H = normalize(Ln + V);
+        float NdotH = max(dot(N, H), 0.0);
+        float VdotH = max(dot(V, H), 0.0);
+
+        // GGX/Trowbridge-Reitz normal distribution.
+        float D = coin_pbr_d_ggx(NdotH, alpha);
+
+        // Smith height-correlated visibility (Schlick-GGX with k = r^2/2).
+        float G = coin_pbr_g_smith(NdotV, NdotL, alpha);
+
+        // Schlick Fresnel.
+        vec3 F = coin_pbr_f_schlick(VdotH, F0);
+
+        vec3 specular = (D * G) * F / max(4.0 * NdotV * NdotL, 1.0e-4);
+        vec3 kd = (vec3(1.0) - F) * (1.0 - metalness);
+        vec3 diffuse = kd * diffuseColor / COIN_PI;
+
+        litColor += lighting.u_lightColor[i].rgb * attenuation * spotFactor *
+                    (diffuse + specular) * NdotL;
+    }
+    return clamp(litColor + coin_vulkan_emissive(), 0.0, 1.0);
 }
 
 bool coin_vulkan_alpha_test_pass(float alpha, int function, float reference)
@@ -150,7 +302,9 @@ void main()
 
     vec3 rgb = draw.u_materialParams.w < 0.5
         ? v_color.rgb
-        : coin_vulkan_lighting(v_eyePos, v_eyeNormal, v_color.rgb);
+        : (draw.u_materialPbr.z > 0.5
+            ? coin_vulkan_pbr_lighting(v_eyePos, v_eyeNormal, v_color.rgb)
+            : coin_vulkan_lighting(v_eyePos, v_eyeNormal, v_color.rgb));
     float primaryAlpha = v_color.a;
     float alpha = primaryAlpha * materialAlpha;
 

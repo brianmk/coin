@@ -340,7 +340,7 @@
 #include "glue/glp.h"
 #include "misc/SoShaderGenerator.h"
 #include "caches/SoShaderProgramCache.h"
-#include "rendering/SoGL.h"
+#include "rendering/gl/SoGL.h"
 
 // *************************************************************************
 

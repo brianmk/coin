@@ -56,6 +56,7 @@ RegularSources = \
 	SoPickRayElement.cpp \
 	SoPickStyleElement.cpp \
 	SoPointSizeElement.cpp \
+	SoPhysicalMaterialElement.cpp \
 	SoPolygonOffsetElement.cpp \
 	SoProfileCoordinateElement.cpp \
 	SoProfileElement.cpp \
