@@ -8,6 +8,7 @@ struct HitInfo {
     float t;
     vec3 pos;
     vec3 normal;
+    vec2 uv;
     int materialIndex;
     int primitiveId;
 };
@@ -29,6 +30,7 @@ HitInfo traceClosest(vec3 origin, vec3 dir, float tMax)
     h.t = -1.0;
     h.pos = vec3(0.0);
     h.normal = vec3(0.0);
+    h.uv = vec2(0.0);
     h.materialIndex = 0;
     if (!h.hit) return h;
 
@@ -62,6 +64,34 @@ HitInfo traceClosest(vec3 origin, vec3 dir, float tMax)
     vec3 toRay = normalize(origin - h.pos);
     if (dot(h.normal, toRay) < 0.0) {
         h.normal = -h.normal;
+    }
+    // Texture coordinates: barycentric-interpolate the triangle's three UVs
+    // from the UV pool (populated by appendTriangleUvs).  Gated on the pool
+    // being present so an untextured command skips the load.
+    if (mat.textureData.y > 0.5) {
+        uint ubase = uint(mat.textureData.x) + prim * 3u;
+        vec4 u0 = uvPoolBuffer.triangleUvs[ubase + 0u];
+        vec4 u1 = uvPoolBuffer.triangleUvs[ubase + 1u];
+        vec4 u2 = uvPoolBuffer.triangleUvs[ubase + 2u];
+        h.uv = u0.xy * (1.0 - bc.x - bc.y) + u1.xy * bc.x + u2.xy * bc.y;
+    }
+    // Normal map: perturb the shading normal with the tangent-space sample.
+    // The tangent pool shares the UV pool offset; its w carries the bitangent
+    // sign.  The TBN is built in object space (objN is still object space
+    // here) and the perturbed normal is transformed to world like objN.
+    if (mat.textureLayers.z >= 0.0 && mat.textureData.y > 0.5) {
+        uint tbase = uint(mat.textureData.x) + prim * 3u;
+        vec4 t0 = tangentPoolBuffer.triangleTangents[tbase + 0u];
+        vec4 t1 = tangentPoolBuffer.triangleTangents[tbase + 1u];
+        vec4 t2 = tangentPoolBuffer.triangleTangents[tbase + 2u];
+        vec3 objT = t0.xyz * (1.0 - bc.x - bc.y) + t1.xyz * bc.x +
+                    t2.xyz * bc.y;
+        vec3 t = normalize(objT - objN * dot(objN, objT));
+        vec3 b = cross(objN, t) * t0.w;
+        vec3 n = texture(u_textureArray, vec3(h.uv, mat.textureLayers.z)).xyz * 2.0 - 1.0;
+        n.xy *= clamp(mat.textureData.z, 0.0, 1.0);
+        vec3 p = normalize(t * n.x + b * n.y + objN * n.z);
+        h.normal = normalize(mat3(transpose(inverse(mat3(objToWorld)))) * p);
     }
     return h;
 }

@@ -78,9 +78,9 @@
 
 #include "tidbitsp.h"
 #include "misc/SbHash.h"
-#include "rendering/SoGL.h"
-#include "rendering/SoVBO.h"
-#include "rendering/SoVertexArrayIndexer.h"
+#include "rendering/gl/SoGL.h"
+#include "rendering/gl/SoVBO.h"
+#include "rendering/gl/SoVertexArrayIndexer.h"
 #include "SbBasicP.h"
 
 // *************************************************************************

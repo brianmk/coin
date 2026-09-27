@@ -253,13 +253,13 @@ class SoVBO;
 #endif // HAVE_THREADS
 
 #if COIN_BUILD_LEGACY_GL_RENDERER
-#include "rendering/SoVBO.h"
+#include "rendering/gl/SoVBO.h"
 #endif
 #if COIN_BUILD_LEGACY_GL_RENDERER
-#include "rendering/SoVertexArrayIndexer.h"
+#include "rendering/gl/SoVertexArrayIndexer.h"
 #endif
 #include "glue/glp.h"
-#include "rendering/SoGL.h"
+#include "rendering/gl/SoGL.h"
 #include "nodes/SoSubNodeP.h"
 
 #include "coindefs.h"

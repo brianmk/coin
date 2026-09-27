@@ -1,0 +1,1322 @@
+// src/rendering/vulkan/raytracing/rtx/SoRTXRenderBackendPipeline.cpp
+
+// Split from the original monolithic SoRTXRenderBackend.cpp.  Contains the
+// member functions for the "Pipeline" concern of the Vulkan RTX backend.
+
+#include "rendering/vulkan/raytracing/rtx/SoRTXRenderBackend.h"
+#include "rendering/vulkan/common/core/SoVulkanConfig.h"
+#include <Inventor/errors/SoDebugError.h>
+#include <algorithm>
+#include <array>
+#include <chrono>
+#include <cmath>
+#include <cstdio>
+#include <cstring>
+#include <string>
+#include "rendering/vulkan/generated/shaders/rt/PathTrace.spv.h"
+#include "rendering/vulkan/generated/shaders/rt/Raygen.spv.h"
+#include "rendering/vulkan/generated/shaders/rt/Miss.spv.h"
+#include "rendering/vulkan/generated/shaders/rt/ShadowMiss.spv.h"
+#include "rendering/vulkan/generated/shaders/rt/ClosestHit.spv.h"
+#include "rendering/vulkan/generated/shaders/rt/ShadowClosestHit.spv.h"
+#include "rendering/vulkan/generated/shaders/rt/PresentVertex.spv.h"
+#include "rendering/vulkan/generated/shaders/rt/PresentFragment.spv.h"
+#include "rendering/vulkan/generated/shaders/rt/denoise/DenoiseDownsample.spv.h"
+#include <rendering/vulkan/raytracing/rtx/SoRTXRenderBackendP.h>
+
+#include "vk_mem_alloc.h"
+
+using namespace SoRTXBackend;
+
+namespace {
+
+// Optional VK_EXT_pipeline_creation_feedback chaining (FC_VULKAN_PIPELINE_FEEDBACK).
+// Only used when the app enabled the extension + feature (hasPipelineCreationFeedback)
+// and the config flag is on; otherwise the create-info pNext is left untouched.
+bool pipelineFeedbackWanted(bool supported)
+{
+  return supported && SoVulkanConfig::get().diagnostics.pipelineFeedback;
+}
+
+void chainPipelineFeedback(VkPipelineCreationFeedbackCreateInfoEXT & info,
+                           VkPipelineCreationFeedbackEXT & feedback,
+                           void * createInfo)
+{
+  info.sType = VK_STRUCTURE_TYPE_PIPELINE_CREATION_FEEDBACK_CREATE_INFO_EXT;
+  info.pPipelineCreationFeedback = &feedback;
+  info.pipelineStageCreationFeedbackCount = 0;
+  reinterpret_cast<VkBaseOutStructure *>(createInfo)->pNext =
+    reinterpret_cast<VkBaseOutStructure *>(&info);
+}
+
+void logPipelineFeedback(const char * label,
+                         const VkPipelineCreationFeedbackEXT & feedback)
+{
+  const bool cacheHit =
+    (feedback.flags &
+     VK_PIPELINE_CREATION_FEEDBACK_APPLICATION_PIPELINE_CACHE_HIT_BIT_EXT) != 0;
+  std::fprintf(stderr,
+               "[RTDBG] pipelineFeedback %s cacheHit=%d creation=%.3fus\n",
+               label, cacheHit ? 1 : 0,
+               static_cast<double>(feedback.duration) * 1.0e-3);
+}
+
+} // namespace
+
+bool
+SoRTXRenderBackend::createDescriptorSetLayout()
+{
+  // Ray tracing descriptor set: bindings 0-7 (see Raygen.glsl and
+  // ClosestHit.glsl).  Stage flags mirror the consumers: the raygen traces
+  // rays and writes the image/accum/G-buffers, the miss shader samples the
+  // frame UBO, and the closest-hit shader reads materials, the frame UBO
+  // and the triangle-normal pool.
+  VkDescriptorSetLayoutBinding bindings[20] {};
+  bindings[0].binding = 0;
+  bindings[0].descriptorType = VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR;
+  bindings[0].descriptorCount = 1;
+  bindings[0].stageFlags = VK_SHADER_STAGE_RAYGEN_BIT_KHR | VK_SHADER_STAGE_COMPUTE_BIT;
+
+  bindings[1].binding = 1;
+  bindings[1].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
+  bindings[1].descriptorCount = 1;
+  bindings[1].stageFlags = VK_SHADER_STAGE_RAYGEN_BIT_KHR |
+    VK_SHADER_STAGE_COMPUTE_BIT;
+
+  bindings[2].binding = 2;
+  bindings[2].descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
+  bindings[2].descriptorCount = 1;
+  bindings[2].stageFlags = VK_SHADER_STAGE_RAYGEN_BIT_KHR |
+    VK_SHADER_STAGE_MISS_BIT_KHR | VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR |
+    VK_SHADER_STAGE_COMPUTE_BIT;
+
+  bindings[3].binding = 3;
+  bindings[3].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+  bindings[3].descriptorCount = 1;
+  bindings[3].stageFlags = VK_SHADER_STAGE_RAYGEN_BIT_KHR |
+    VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR | VK_SHADER_STAGE_COMPUTE_BIT;
+
+  // Path tracing: accumulation buffer, first-bounce G-buffers (written by
+  // the raygen) and the triangle-normal pool (read by the closest hit).
+  for (uint32_t b = 4; b <= 6; ++b) {
+    bindings[b].binding = b;
+    bindings[b].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+    bindings[b].descriptorCount = 1;
+    bindings[b].stageFlags = VK_SHADER_STAGE_RAYGEN_BIT_KHR |
+      VK_SHADER_STAGE_COMPUTE_BIT;
+  }
+  bindings[7].binding = 7;
+  bindings[7].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+  bindings[7].descriptorCount = 1;
+  bindings[7].stageFlags = VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR |
+    VK_SHADER_STAGE_COMPUTE_BIT;
+
+  // Adaptive sampling: per-pixel sums-of-squares and the active-pixel
+  // counter (compute-tracer only).
+  bindings[8].binding = 8;
+  bindings[8].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+  bindings[8].descriptorCount = 1;
+  bindings[8].stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+  bindings[9].binding = 9;
+  bindings[9].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+  bindings[9].descriptorCount = 1;
+  bindings[9].stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+
+  // Temporal reprojection history: accumulation, sums-of-squares and world
+  // positions of the previous traced frame (compute-tracer only).
+  for (uint32_t b = 10; b <= 12; ++b) {
+    bindings[b].binding = b;
+    bindings[b].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+    bindings[b].descriptorCount = 1;
+    bindings[b].stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+  }
+
+  // Emissive-triangle pool for NEE (compute-tracer only).
+  bindings[13].binding = 13;
+  bindings[13].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+  bindings[13].descriptorCount = 1;
+  bindings[13].stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+
+  // Albedo G-buffer (binding 14): written by the raygen and fed to the
+  // denoiser as a guide.  Only bound while a denoiser backend is active.
+  bindings[14].binding = 14;
+  bindings[14].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+  bindings[14].descriptorCount = 1;
+  bindings[14].stageFlags = VK_SHADER_STAGE_RAYGEN_BIT_KHR |
+    VK_SHADER_STAGE_COMPUTE_BIT;
+
+  // Screen-space motion-vector G-buffer (binding 15): written by the
+  // compute tracer and fed to the temporal denoiser (OIDN 'motion' input /
+  // OptiX motion guide).  Raygen+compute write it; the host readback reads
+  // it back for the denoiser.
+  bindings[15].binding = 15;
+  bindings[15].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+  bindings[15].descriptorCount = 1;
+  bindings[15].stageFlags = VK_SHADER_STAGE_RAYGEN_BIT_KHR |
+    VK_SHADER_STAGE_COMPUTE_BIT;
+
+  // Stable edge-overlay occlusion depth (binding 16): first-bounce hit of the
+  // un-jittered centre sample, written by the raygen/compute tracer and read
+  // by the present pass to derive the raster edge overlay's depth.  Kept out
+  // of the ping-ponged position history so it stays constant across a run.
+  bindings[16].binding = 16;
+  bindings[16].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+  bindings[16].descriptorCount = 1;
+  bindings[16].stageFlags = VK_SHADER_STAGE_RAYGEN_BIT_KHR |
+    VK_SHADER_STAGE_COMPUTE_BIT;
+
+  // Material texture array (binding 17): one sampler2DArray holding every
+  // distinct material texture as a layer, indexed per hit by
+  // RTMaterial::textureLayers.  A single descriptor, so no descriptor-indexing
+  // feature is required.
+  bindings[17].binding = 17;
+  bindings[17].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+  bindings[17].descriptorCount = 1;
+  bindings[17].stageFlags = VK_SHADER_STAGE_RAYGEN_BIT_KHR |
+    VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR | VK_SHADER_STAGE_COMPUTE_BIT;
+
+  // Per-triangle texture coordinates (binding 18), indexed via
+  // RTMaterial::textureData (x/y).  The closest hit and the compute tracer read
+  // it to barycentric-interpolate a hit's UV.
+  bindings[18].binding = 18;
+  bindings[18].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+  bindings[18].descriptorCount = 1;
+  bindings[18].stageFlags = VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR |
+    VK_SHADER_STAGE_COMPUTE_BIT;
+
+  // Per-triangle tangents (binding 19), three vec4 per triangle (xyz = face
+  // tangent, w = bitangent sign).  Appended in lockstep with the UV pool and
+  // indexed with the same RTMaterial::textureData.x offset; only read for the
+  // normal map.
+  bindings[19].binding = 19;
+  bindings[19].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+  bindings[19].descriptorCount = 1;
+  bindings[19].stageFlags = VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR |
+    VK_SHADER_STAGE_COMPUTE_BIT;
+
+  // UPDATE_AFTER_BIND binding flags when the device supports (and the
+  // embedding enabled) descriptor indexing: every binding here is rewritten
+  // while a caller-owned frame may still reference the set, which is otherwise
+  // illegal (VUID-vkUpdateDescriptorSets-None-03047).  The backing storage is
+  // reused across the three layout creations below; vkCreateDescriptorSetLayout
+  // consumes it synchronously.
+  std::vector<VkDescriptorBindingFlags> bindingFlags;
+  VkDescriptorSetLayoutBindingFlagsCreateInfo flagsCI {};
+  const auto attachBindingFlags =
+    [this, &bindingFlags, &flagsCI](VkDescriptorSetLayoutCreateInfo & layoutCI,
+                                    uint32_t count) {
+      if (!this->hasUpdateAfterBind) {
+        return;
+      }
+      bindingFlags.assign(count, VK_DESCRIPTOR_BINDING_UPDATE_AFTER_BIND_BIT);
+      flagsCI.sType =
+        VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_BINDING_FLAGS_CREATE_INFO;
+      flagsCI.bindingCount = count;
+      flagsCI.pBindingFlags = bindingFlags.data();
+      layoutCI.pNext = &flagsCI;
+      // Required whenever any binding carries UPDATE_AFTER_BIND
+      // (VUID-VkDescriptorSetLayoutCreateInfo-flags-03000).
+      layoutCI.flags |=
+        VK_DESCRIPTOR_SET_LAYOUT_CREATE_UPDATE_AFTER_BIND_POOL_BIT;
+    };
+
+  VkDescriptorSetLayoutCreateInfo ci {};
+  ci.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
+  ci.bindingCount = 20;
+  ci.pBindings = bindings;
+  attachBindingFlags(ci, 20);
+  if (this->hasUpdateAfterBind) {
+    // Binding 0 is the TLAS: acceleration-structure update-after-bind is a
+    // separate feature (VkPhysicalDeviceAccelerationStructureFeaturesKHR) that
+    // is not requested, so it must not carry the flag
+    // (VUID-VkDescriptorSetLayoutBindingFlagsCreateInfo-descriptorBindingAccelerationStructureUpdateAfterBind-03570).
+    bindingFlags[0] = 0;
+  }
+  if (vkCreateDescriptorSetLayout(this->device, &ci, this->allocator,
+                                  &this->rtSetLayout) != VK_SUCCESS) {
+    return false;
+  }
+
+  // Present descriptor set: combined image sampler at binding 1 (the raw
+  // traced image for the preview mode) plus the accumulation and G-buffer
+  // storage buffers at bindings 2-4 (the denoising path tracing path) and
+  // the denoiser output at binding 5 (sampled when a denoiser backend has
+  // produced a result for the current frame).  Binding 6 is the traced
+  // camera's view/projection (world->view->clip) so the present pass can
+  // write scene depth for the raster composite overlay's edge occlusion.
+  // Binding 7 is the stable edge-overlay occlusion depth (see the RT set
+  // layout above), read by sceneDepth() in PresentFragment.glsl.
+  VkDescriptorSetLayoutBinding presentBindings[7] {};
+  presentBindings[0].binding = 1;
+  presentBindings[0].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+  presentBindings[0].descriptorCount = 1;
+  presentBindings[0].stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
+  for (uint32_t b = 2; b <= 5; ++b) {
+    presentBindings[b - 1].binding = b;
+    presentBindings[b - 1].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+    presentBindings[b - 1].descriptorCount = 1;
+    presentBindings[b - 1].stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
+  }
+  presentBindings[5].binding = 6;
+  presentBindings[5].descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
+  presentBindings[5].descriptorCount = 1;
+  presentBindings[5].stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
+  presentBindings[6].binding = 7;
+  presentBindings[6].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+  presentBindings[6].descriptorCount = 1;
+  presentBindings[6].stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
+
+  VkDescriptorSetLayoutCreateInfo pci {};
+  pci.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
+  pci.bindingCount = 7;
+  pci.pBindings = presentBindings;
+  attachBindingFlags(pci, 7);
+  if (vkCreateDescriptorSetLayout(this->device, &pci, this->allocator,
+                                  &this->presentSetLayout) != VK_SUCCESS) {
+    return false;
+  }
+  return this->createDenoiseDownsampleSetLayout();
+}
+
+bool
+SoRTXRenderBackend::createDenoiseDownsampleSetLayout()
+{
+  // Four full-res G-buffer inputs (binding 0-3) plus the single host staging
+  // allocation the shader writes the normalized working set into (binding 4).
+  // All are storage buffers at this set's index 0; the shader addresses the
+  // output regions via push-constant vec4 element offsets.
+  VkDescriptorSetLayoutBinding bindings[5] {};
+  for (uint32_t b = 0; b < 5; ++b) {
+    bindings[b].binding = b;
+    bindings[b].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+    bindings[b].descriptorCount = 1;
+    bindings[b].stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+  }
+  VkDescriptorSetLayoutCreateInfo ci {};
+  ci.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
+  ci.bindingCount = 5;
+  ci.pBindings = bindings;
+  std::vector<VkDescriptorBindingFlags> bindingFlags;
+  VkDescriptorSetLayoutBindingFlagsCreateInfo flagsCI {};
+  if (this->hasUpdateAfterBind) {
+    bindingFlags.assign(5, VK_DESCRIPTOR_BINDING_UPDATE_AFTER_BIND_BIT);
+    flagsCI.sType =
+      VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_BINDING_FLAGS_CREATE_INFO;
+    flagsCI.bindingCount = 5;
+    flagsCI.pBindingFlags = bindingFlags.data();
+    ci.pNext = &flagsCI;
+    ci.flags |= VK_DESCRIPTOR_SET_LAYOUT_CREATE_UPDATE_AFTER_BIND_POOL_BIT;
+  }
+  return vkCreateDescriptorSetLayout(this->device, &ci, this->allocator,
+                                     &this->denoiseDownsampleSetLayout) ==
+    VK_SUCCESS;
+}
+
+bool
+SoRTXRenderBackend::createDescriptorPool()
+{
+  // Sized for a full RTX_MAX_FRAMES_IN_FLIGHT ring (one RT + one present set
+  // per slot) plus the denoise-downsample and GPU-pick sets.  The ring is
+  // normally only a few slots (swapchain image count + 1); the pool is
+  // over-provisioned so setMaxFramesInFlight() never has to recreate it.
+  const uint32_t ring = RTX_MAX_FRAMES_IN_FLIGHT;
+  VkDescriptorPoolSize sizes[5] {};
+  sizes[0].type = VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR;
+  // One per RT set plus the single GPU-pick set.
+  sizes[0].descriptorCount = ring + 1;
+  sizes[1].type = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
+  // One per RT set (storage image) and one per present set (sampled image).
+  sizes[1].descriptorCount = ring * 2;
+  sizes[2].type = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+  // One per present set (the traced image) plus one per RT set (the material
+  // texture array, binding 17).
+  sizes[2].descriptorCount = ring * 2;
+  sizes[3].type = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
+  sizes[3].descriptorCount = ring * 2;
+  sizes[4].type = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+  // 15 storage buffers per RT set (incl. the UV pool and the tangent pool,
+  // bindings 18/19), 4 per present set; +one stable-depth slot in each
+  // (bindings 16 and 7).
+  sizes[4].descriptorCount = ring * 28 + 41;
+
+  VkDescriptorPoolCreateInfo ci {};
+  ci.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
+  // Required when any set allocated from this pool carries the
+  // UPDATE_AFTER_BIND binding flag (see createDescriptorSetLayout).
+  ci.flags = this->hasUpdateAfterBind
+    ? VK_DESCRIPTOR_POOL_CREATE_UPDATE_AFTER_BIND_BIT
+    : 0;
+  // ring RT sets + ring present sets + 1 denoise set + 1 GPU-pick set + 2 DNSR
+  // denoise sets (prefilter + temporal).
+  ci.maxSets = ring * 2 + 4;
+  ci.poolSizeCount = 5;
+  ci.pPoolSizes = sizes;
+  return vkCreateDescriptorPool(this->device, &ci, this->allocator,
+                                &this->descriptorPool) == VK_SUCCESS;
+}
+
+bool
+SoRTXRenderBackend::createShaderModules()
+{
+  auto load = [this](const uint32_t * code, size_t count,
+                     VkShaderModule & module) {
+    VkShaderModuleCreateInfo ci {};
+    ci.sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO;
+    ci.codeSize = count * sizeof(uint32_t);
+    ci.pCode = code;
+    const VkResult res =
+      vkCreateShaderModule(this->device, &ci, this->allocator, &module);
+    if (res != VK_SUCCESS) {
+      this->emitError(("createShaderModules: vkCreateShaderModule failed: "
+                       + SoVulkanShared::vkResultName(res)).c_str());
+      return false;
+    }
+    return true;
+  };
+  if (!load(coin_vulkan_rt_pathtrace_spirv,
+            coin_vulkan_rt_pathtrace_spirv_count, this->pathTraceModule)) {
+    return false;
+  }
+  if (!load(coin_vulkan_rt_raygen_spirv,
+            coin_vulkan_rt_raygen_spirv_count, this->raygenModule)) {
+    return false;
+  }
+  if (!load(coin_vulkan_rt_miss_spirv,
+            coin_vulkan_rt_miss_spirv_count, this->missModule)) {
+    return false;
+  }
+  if (!load(coin_vulkan_rt_shadowmiss_spirv,
+            coin_vulkan_rt_shadowmiss_spirv_count, this->shadowMissModule)) {
+    return false;
+  }
+  if (!load(coin_vulkan_rt_closesthit_spirv,
+            coin_vulkan_rt_closesthit_spirv_count, this->closestHitModule)) {
+    return false;
+  }
+  if (!load(coin_vulkan_rt_shadowclosesthit_spirv,
+            coin_vulkan_rt_shadowclosesthit_spirv_count,
+            this->shadowClosestHitModule)) {
+    return false;
+  }
+  if (!load(coin_vulkan_rt_presentvertex_spirv,
+            coin_vulkan_rt_presentvertex_spirv_count,
+            this->presentVertexModule)) {
+    return false;
+  }
+  if (!load(coin_vulkan_rt_presentfragment_spirv,
+            coin_vulkan_rt_presentfragment_spirv_count,
+            this->presentFragmentModule)) {
+    return false;
+  }
+  if (!load(coin_vulkan_rt_denoisedownsample_spirv,
+            coin_vulkan_rt_denoisedownsample_spirv_count,
+            this->denoiseDownsampleModule)) {
+    return false;
+  }
+  return true;
+}
+
+bool
+SoRTXRenderBackend::createFrameBuffer()
+{
+  if (this->presentFrameBuffer != VK_NULL_HANDLE) {
+    return this->frameBuffer != VK_NULL_HANDLE;
+  }
+  if (this->frameBuffer == VK_NULL_HANDLE) {
+    if (!this->createHostVisibleBuffer(
+          sizeof(RTXFrameBlock), VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT,
+          this->frameBuffer, this->frameMemory, &this->frameMapped)) {
+      return false;
+    }
+  }
+  // Compact present frame block: world->view (mat4) followed by view->clip
+  // (mat4), exactly matching the PresentFrame std140 block in
+  // PresentFragment.glsl (two mat4, offsets 0 and 64).
+  return this->createHostVisibleBuffer(
+    2 * sizeof(float) * 16, VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT,
+    this->presentFrameBuffer, this->presentFrameMemory,
+    &this->presentFrameMapped);
+}
+
+bool
+SoRTXRenderBackend::updateDescriptors()
+{
+  // Allocate the ring slots once (the layouts differ, so one allocation per
+  // slot per layout).
+  for (uint32_t pair = 0; pair < this->descriptorRingSize; ++pair) {
+    if (this->rtDescriptorSets[pair] != VK_NULL_HANDLE) continue;
+    VkDescriptorSetLayout layout = this->rtSetLayout;
+    VkDescriptorSetAllocateInfo ai {};
+    ai.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
+    ai.descriptorPool = this->descriptorPool;
+    ai.descriptorSetCount = 1;
+    ai.pSetLayouts = &layout;
+    if (vkAllocateDescriptorSets(this->device, &ai,
+                                 &this->rtDescriptorSets[pair]) !=
+        VK_SUCCESS) {
+      return false;
+    }
+  }
+  for (uint32_t pair = 0; pair < this->descriptorRingSize; ++pair) {
+    if (this->presentDescriptorSets[pair] != VK_NULL_HANDLE) continue;
+    VkDescriptorSetLayout layout = this->presentSetLayout;
+    VkDescriptorSetAllocateInfo ai {};
+    ai.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
+    ai.descriptorPool = this->descriptorPool;
+    ai.descriptorSetCount = 1;
+    ai.pSetLayouts = &layout;
+    if (vkAllocateDescriptorSets(this->device, &ai,
+                                 &this->presentDescriptorSets[pair]) !=
+        VK_SUCCESS) {
+      return false;
+    }
+  }
+  if (this->denoiseDownsampleDescriptorSet == VK_NULL_HANDLE) {
+    VkDescriptorSetAllocateInfo ai {};
+    ai.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
+    ai.descriptorPool = this->descriptorPool;
+    ai.descriptorSetCount = 1;
+    ai.pSetLayouts = &this->denoiseDownsampleSetLayout;
+    if (vkAllocateDescriptorSets(this->device, &ai,
+                                 &this->denoiseDownsampleDescriptorSet) !=
+        VK_SUCCESS) {
+      this->denoiseDownsampleDescriptorSet = VK_NULL_HANDLE;
+      return false;
+    }
+  }
+  const VkDescriptorSet rtSet = this->rtDescriptorSets[this->descriptorSetIndex];
+  const VkDescriptorSet presentSet =
+    this->presentDescriptorSets[this->descriptorSetIndex];
+
+  VkDescriptorBufferInfo frameInfo {};
+  frameInfo.buffer = this->frameBuffer;
+  frameInfo.offset = 0;
+  frameInfo.range = sizeof(RTXFrameBlock);
+
+  VkDescriptorImageInfo storageInfo {};
+  storageInfo.imageView = this->storageImageView;
+  storageInfo.imageLayout = VK_IMAGE_LAYOUT_GENERAL;
+
+  VkDescriptorImageInfo presentInfo {};
+  presentInfo.sampler = this->presentSampler;
+  presentInfo.imageView = this->storageImageView;
+  // The image stays in GENERAL layout for both the trace (storage) and
+  // present (sampled) accesses; no in-render-pass transitions needed.
+  presentInfo.imageLayout = VK_IMAGE_LAYOUT_GENERAL;
+
+  VkDescriptorBufferInfo materialInfo {};
+  materialInfo.buffer = this->materialBuffer;
+  materialInfo.offset = 0;
+  materialInfo.range = VK_WHOLE_SIZE;
+
+  // Path tracing buffers: accumulation (set 0, binding 4), world normal
+  // G-buffer (binding 5) and world position/hit-distance G-buffer
+  // (binding 6).  Written by the raygen shader.
+  VkDescriptorBufferInfo accumInfo {};
+  accumInfo.buffer = this->accumBuffer;
+  accumInfo.offset = 0;
+  accumInfo.range = VK_WHOLE_SIZE;
+  VkDescriptorBufferInfo normalInfo {};
+  normalInfo.buffer = this->normalBuffer;
+  normalInfo.offset = 0;
+  normalInfo.range = VK_WHOLE_SIZE;
+  VkDescriptorBufferInfo positionInfo {};
+  positionInfo.buffer = this->positionBuffer;
+  positionInfo.offset = 0;
+  positionInfo.range = VK_WHOLE_SIZE;
+  VkDescriptorBufferInfo normalPoolInfo {};
+  normalPoolInfo.buffer = this->normalPoolBuffer;
+  normalPoolInfo.offset = 0;
+  normalPoolInfo.range = VK_WHOLE_SIZE;
+  VkDescriptorBufferInfo sumSqInfo {};
+  sumSqInfo.buffer = this->sumSqBuffer;
+  sumSqInfo.offset = 0;
+  sumSqInfo.range = VK_WHOLE_SIZE;
+  VkDescriptorBufferInfo counterInfo {};
+  counterInfo.buffer = this->activeCounterBuffer;
+  counterInfo.offset = 0;
+  counterInfo.range = VK_WHOLE_SIZE;
+  VkDescriptorBufferInfo accumHistInfo {};
+  accumHistInfo.buffer = this->accumHistoryBuffer;
+  accumHistInfo.offset = 0;
+  accumHistInfo.range = VK_WHOLE_SIZE;
+  VkDescriptorBufferInfo sumSqHistInfo {};
+  sumSqHistInfo.buffer = this->sumSqHistoryBuffer;
+  sumSqHistInfo.offset = 0;
+  sumSqHistInfo.range = VK_WHOLE_SIZE;
+  VkDescriptorBufferInfo posHistInfo {};
+  posHistInfo.buffer = this->positionHistoryBuffer;
+  posHistInfo.offset = 0;
+  posHistInfo.range = VK_WHOLE_SIZE;
+  VkDescriptorBufferInfo neePoolInfo {};
+  // The RT set layout always declares binding 13, but scenes without
+  // emissive geometry never allocate the NEE pool.  Bind a valid zero-count
+  // placeholder instead of leaving the set entry uninitialized; the NEE
+  // shaders only read this buffer when the uniform block reports a non-zero
+  // triangle count.
+  neePoolInfo.buffer = this->neePoolBuffer != VK_NULL_HANDLE
+                         ? this->neePoolBuffer
+                         : this->activeCounterBuffer;
+  neePoolInfo.offset = 0;
+  neePoolInfo.range = VK_WHOLE_SIZE;
+  VkDescriptorBufferInfo albedoInfo {};
+  albedoInfo.buffer = this->albedoBuffer;
+  albedoInfo.offset = 0;
+  albedoInfo.range = VK_WHOLE_SIZE;
+  VkDescriptorBufferInfo motionInfo {};
+  motionInfo.buffer = this->motionBuffer;
+  motionInfo.offset = 0;
+  motionInfo.range = VK_WHOLE_SIZE;
+  VkDescriptorBufferInfo stableDepthInfo {};
+  stableDepthInfo.buffer = this->stableDepthBuffer;
+  stableDepthInfo.offset = 0;
+  stableDepthInfo.range = VK_WHOLE_SIZE;
+  VkDescriptorBufferInfo denoisedInfo {};
+  denoisedInfo.buffer = this->denoisedBuffer;
+  denoisedInfo.offset = 0;
+  denoisedInfo.range = VK_WHOLE_SIZE;
+
+  // Binding 0: the acceleration structure (TLAS) read by the raygen shader.
+  // Only written once the TLAS exists; updateDescriptors() is re-invoked by
+  // buildTlas() right after (re)creation so a null handle is never written
+  // and the trace phase always observes a valid descriptor.
+  VkWriteDescriptorSetAccelerationStructureKHR asWrite {};
+  asWrite.sType =
+    VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET_ACCELERATION_STRUCTURE_KHR;
+  asWrite.accelerationStructureCount = 1;
+  VkAccelerationStructureKHR asHandle = this->tlas;
+  asWrite.pAccelerationStructures = &asHandle;
+
+  std::vector<VkWriteDescriptorSet> writes;
+  writes.reserve(5);
+
+  if (this->tlas != VK_NULL_HANDLE) {
+    VkWriteDescriptorSet asBinding {};
+    asBinding.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+    asBinding.dstSet = rtSet;
+    asBinding.dstBinding = 0;
+    asBinding.descriptorCount = 1;
+    asBinding.descriptorType =
+      VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR;
+    asBinding.pNext = &asWrite;
+    writes.push_back(asBinding);
+  }
+
+  VkWriteDescriptorSet storageWrite {};
+  storageWrite.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+  storageWrite.dstSet = rtSet;
+  storageWrite.dstBinding = 1;
+  storageWrite.descriptorCount = 1;
+  storageWrite.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
+  storageWrite.pImageInfo = &storageInfo;
+  if (this->storageImageView != VK_NULL_HANDLE) {
+    writes.push_back(storageWrite);
+  }
+
+  VkWriteDescriptorSet frameWrite {};
+  frameWrite.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+  frameWrite.dstSet = rtSet;
+  frameWrite.dstBinding = 2;
+  frameWrite.descriptorCount = 1;
+  frameWrite.descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
+  frameWrite.pBufferInfo = &frameInfo;
+  writes.push_back(frameWrite);
+
+  if (this->materialBuffer != VK_NULL_HANDLE) {
+    VkWriteDescriptorSet materialWrite {};
+    materialWrite.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+    materialWrite.dstSet = rtSet;
+    materialWrite.dstBinding = 3;
+    materialWrite.descriptorCount = 1;
+    materialWrite.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+    materialWrite.pBufferInfo = &materialInfo;
+    writes.push_back(materialWrite);
+  }
+
+  if (this->accumBuffer != VK_NULL_HANDLE) {
+    VkWriteDescriptorSet accumWrite {};
+    accumWrite.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+    accumWrite.dstSet = rtSet;
+    accumWrite.dstBinding = 4;
+    accumWrite.descriptorCount = 1;
+    accumWrite.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+    accumWrite.pBufferInfo = &accumInfo;
+    writes.push_back(accumWrite);
+  }
+  if (this->normalBuffer != VK_NULL_HANDLE) {
+    VkWriteDescriptorSet normalWrite {};
+    normalWrite.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+    normalWrite.dstSet = rtSet;
+    normalWrite.dstBinding = 5;
+    normalWrite.descriptorCount = 1;
+    normalWrite.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+    normalWrite.pBufferInfo = &normalInfo;
+    writes.push_back(normalWrite);
+  }
+  if (this->positionBuffer != VK_NULL_HANDLE) {
+    VkWriteDescriptorSet positionWrite {};
+    positionWrite.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+    positionWrite.dstSet = rtSet;
+    positionWrite.dstBinding = 6;
+    positionWrite.descriptorCount = 1;
+    positionWrite.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+    positionWrite.pBufferInfo = &positionInfo;
+    writes.push_back(positionWrite);
+  }
+  if (this->normalPoolBuffer != VK_NULL_HANDLE) {
+    VkWriteDescriptorSet poolWrite {};
+    poolWrite.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+    poolWrite.dstSet = rtSet;
+    poolWrite.dstBinding = 7;
+    poolWrite.descriptorCount = 1;
+    poolWrite.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+    poolWrite.pBufferInfo = &normalPoolInfo;
+    writes.push_back(poolWrite);
+  }
+  if (this->sumSqBuffer != VK_NULL_HANDLE) {
+    VkWriteDescriptorSet sumSqWrite {};
+    sumSqWrite.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+    sumSqWrite.dstSet = rtSet;
+    sumSqWrite.dstBinding = 8;
+    sumSqWrite.descriptorCount = 1;
+    sumSqWrite.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+    sumSqWrite.pBufferInfo = &sumSqInfo;
+    writes.push_back(sumSqWrite);
+  }
+  if (this->activeCounterBuffer != VK_NULL_HANDLE) {
+    VkWriteDescriptorSet counterWrite {};
+    counterWrite.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+    counterWrite.dstSet = rtSet;
+    counterWrite.dstBinding = 9;
+    counterWrite.descriptorCount = 1;
+    counterWrite.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+    counterWrite.pBufferInfo = &counterInfo;
+    writes.push_back(counterWrite);
+  }
+  if (this->accumHistoryBuffer != VK_NULL_HANDLE) {
+    VkWriteDescriptorSet accumHistWrite {};
+    accumHistWrite.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+    accumHistWrite.dstSet = rtSet;
+    accumHistWrite.dstBinding = 10;
+    accumHistWrite.descriptorCount = 1;
+    accumHistWrite.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+    accumHistWrite.pBufferInfo = &accumHistInfo;
+    writes.push_back(accumHistWrite);
+  }
+  if (this->sumSqHistoryBuffer != VK_NULL_HANDLE) {
+    VkWriteDescriptorSet sumSqHistWrite {};
+    sumSqHistWrite.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+    sumSqHistWrite.dstSet = rtSet;
+    sumSqHistWrite.dstBinding = 11;
+    sumSqHistWrite.descriptorCount = 1;
+    sumSqHistWrite.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+    sumSqHistWrite.pBufferInfo = &sumSqHistInfo;
+    writes.push_back(sumSqHistWrite);
+  }
+  if (this->positionHistoryBuffer != VK_NULL_HANDLE) {
+    VkWriteDescriptorSet posHistWrite {};
+    posHistWrite.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+    posHistWrite.dstSet = rtSet;
+    posHistWrite.dstBinding = 12;
+    posHistWrite.descriptorCount = 1;
+    posHistWrite.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+    posHistWrite.pBufferInfo = &posHistInfo;
+    writes.push_back(posHistWrite);
+  }
+  if (neePoolInfo.buffer != VK_NULL_HANDLE) {
+    VkWriteDescriptorSet neePoolWrite {};
+    neePoolWrite.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+    neePoolWrite.dstSet = rtSet;
+    neePoolWrite.dstBinding = 13;
+    neePoolWrite.descriptorCount = 1;
+    neePoolWrite.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+    neePoolWrite.pBufferInfo = &neePoolInfo;
+    writes.push_back(neePoolWrite);
+  }
+  if (this->albedoBuffer != VK_NULL_HANDLE) {
+    VkWriteDescriptorSet albedoWrite {};
+    albedoWrite.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+    albedoWrite.dstSet = rtSet;
+    albedoWrite.dstBinding = 14;
+    albedoWrite.descriptorCount = 1;
+    albedoWrite.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+    albedoWrite.pBufferInfo = &albedoInfo;
+    writes.push_back(albedoWrite);
+  }
+  if (this->motionBuffer != VK_NULL_HANDLE) {
+    VkWriteDescriptorSet motionWrite {};
+    motionWrite.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+    motionWrite.dstSet = rtSet;
+    motionWrite.dstBinding = 15;
+    motionWrite.descriptorCount = 1;
+    motionWrite.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+    motionWrite.pBufferInfo = &motionInfo;
+    writes.push_back(motionWrite);
+  }
+  if (this->stableDepthBuffer != VK_NULL_HANDLE) {
+    VkWriteDescriptorSet stableDepthWrite {};
+    stableDepthWrite.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+    stableDepthWrite.dstSet = rtSet;
+    stableDepthWrite.dstBinding = 16;
+    stableDepthWrite.descriptorCount = 1;
+    stableDepthWrite.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+    stableDepthWrite.pBufferInfo = &stableDepthInfo;
+    writes.push_back(stableDepthWrite);
+  }
+
+  // Material texture array (binding 17): the sampler2DArray of every distinct
+  // material texture.  Always populated (at minimum a 1x1 white layer) so the
+  // sampled binding is valid even for an untextured scene.  textureInfo must
+  // outlive the vkUpdateDescriptorSets call below (the write stores a pointer
+  // to it), so it is declared at function scope.
+  VkDescriptorImageInfo textureInfo {};
+  textureInfo.imageView = this->textureArrayView;
+  textureInfo.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+  textureInfo.sampler = this->textureArraySampler;
+  if (this->textureArrayView != VK_NULL_HANDLE &&
+      this->textureArraySampler != VK_NULL_HANDLE) {
+    VkWriteDescriptorSet textureWrite {};
+    textureWrite.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+    textureWrite.dstSet = rtSet;
+    textureWrite.dstBinding = 17;
+    textureWrite.descriptorCount = 1;
+    textureWrite.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+    textureWrite.pImageInfo = &textureInfo;
+    writes.push_back(textureWrite);
+  }
+
+  // Per-triangle UV pool (binding 18).  Bind a placeholder when the scene has
+  // no texture coordinates, mirroring the NEE-pool fallback above.
+  VkDescriptorBufferInfo uvPoolInfo {};
+  uvPoolInfo.buffer = this->uvPoolBuffer != VK_NULL_HANDLE
+                        ? this->uvPoolBuffer
+                        : this->activeCounterBuffer;
+  uvPoolInfo.offset = 0;
+  uvPoolInfo.range = VK_WHOLE_SIZE;
+  if (uvPoolInfo.buffer != VK_NULL_HANDLE) {
+    VkWriteDescriptorSet uvWrite {};
+    uvWrite.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+    uvWrite.dstSet = rtSet;
+    uvWrite.dstBinding = 18;
+    uvWrite.descriptorCount = 1;
+    uvWrite.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+    uvWrite.pBufferInfo = &uvPoolInfo;
+    writes.push_back(uvWrite);
+  }
+
+  // Per-triangle tangent pool (binding 19).  Placeholder fallback, like the UV
+  // pool; only read for the normal map.
+  VkDescriptorBufferInfo tangentPoolInfo {};
+  tangentPoolInfo.buffer = this->tangentPoolBuffer != VK_NULL_HANDLE
+                             ? this->tangentPoolBuffer
+                             : this->activeCounterBuffer;
+  tangentPoolInfo.offset = 0;
+  tangentPoolInfo.range = VK_WHOLE_SIZE;
+  if (tangentPoolInfo.buffer != VK_NULL_HANDLE) {
+    VkWriteDescriptorSet tangentWrite {};
+    tangentWrite.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+    tangentWrite.dstSet = rtSet;
+    tangentWrite.dstBinding = 19;
+    tangentWrite.descriptorCount = 1;
+    tangentWrite.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+    tangentWrite.pBufferInfo = &tangentPoolInfo;
+    writes.push_back(tangentWrite);
+  }
+
+  VkWriteDescriptorSet presentWrite {};
+  presentWrite.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+  presentWrite.dstSet = presentSet;
+  presentWrite.dstBinding = 1;
+  presentWrite.descriptorCount = 1;
+  presentWrite.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+  presentWrite.pImageInfo = &presentInfo;
+  if (this->storageImageView != VK_NULL_HANDLE &&
+      this->presentSampler != VK_NULL_HANDLE) {
+    writes.push_back(presentWrite);
+  }
+
+  if (this->accumBuffer != VK_NULL_HANDLE) {
+    VkWriteDescriptorSet presentAccumWrite {};
+    presentAccumWrite.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+    presentAccumWrite.dstSet = presentSet;
+    presentAccumWrite.dstBinding = 2;
+    presentAccumWrite.descriptorCount = 1;
+    presentAccumWrite.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+    presentAccumWrite.pBufferInfo = &accumInfo;
+    writes.push_back(presentAccumWrite);
+  }
+  if (this->normalBuffer != VK_NULL_HANDLE) {
+    VkWriteDescriptorSet presentNormalWrite {};
+    presentNormalWrite.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+    presentNormalWrite.dstSet = presentSet;
+    presentNormalWrite.dstBinding = 3;
+    presentNormalWrite.descriptorCount = 1;
+    presentNormalWrite.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+    presentNormalWrite.pBufferInfo = &normalInfo;
+    writes.push_back(presentNormalWrite);
+  }
+  if (this->positionBuffer != VK_NULL_HANDLE) {
+    VkWriteDescriptorSet presentPositionWrite {};
+    presentPositionWrite.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+    presentPositionWrite.dstSet = presentSet;
+    presentPositionWrite.dstBinding = 4;
+    presentPositionWrite.descriptorCount = 1;
+    presentPositionWrite.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+    presentPositionWrite.pBufferInfo = &positionInfo;
+    writes.push_back(presentPositionWrite);
+  }
+  // Binding 7 must ALWAYS carry a valid buffer: the present shader declares
+  // StableDepthBuffer as a statically-used storage buffer.  Fall back to the
+  // position G-buffer if the stable buffer does not exist yet.
+  if (this->stableDepthBuffer == VK_NULL_HANDLE) {
+    stableDepthInfo.buffer = this->positionBuffer;
+  }
+  if (stableDepthInfo.buffer != VK_NULL_HANDLE) {
+    VkWriteDescriptorSet presentStableWrite {};
+    presentStableWrite.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+    presentStableWrite.dstSet = presentSet;
+    presentStableWrite.dstBinding = 7;
+    presentStableWrite.descriptorCount = 1;
+    presentStableWrite.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+    presentStableWrite.pBufferInfo = &stableDepthInfo;
+    writes.push_back(presentStableWrite);
+  }
+  // Binding 5 must ALWAYS carry a valid buffer: the present shader declares
+  // DenoisedBuffer as a statically-used storage buffer, and a slot left
+  // unwritten keeps a stale handle from a previously freed denoised buffer
+  // (the descriptor ring is reused).  When no denoiser is active fall back to
+  // the accumulation buffer; the shader only reads binding 5 when the denoise
+  // flag (u_denoise.x) is set, which cannot happen with a null denoisedBuffer.
+  if (this->denoisedBuffer == VK_NULL_HANDLE &&
+      this->accumBuffer != VK_NULL_HANDLE) {
+    denoisedInfo.buffer = this->accumBuffer;
+  }
+  if (denoisedInfo.buffer != VK_NULL_HANDLE) {
+    VkWriteDescriptorSet presentDenoisedWrite {};
+    presentDenoisedWrite.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+    presentDenoisedWrite.dstSet = presentSet;
+    presentDenoisedWrite.dstBinding = 5;
+    presentDenoisedWrite.descriptorCount = 1;
+    presentDenoisedWrite.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+    presentDenoisedWrite.pBufferInfo = &denoisedInfo;
+    writes.push_back(presentDenoisedWrite);
+  }
+  if (this->presentFrameBuffer != VK_NULL_HANDLE) {
+    VkDescriptorBufferInfo presentFrameInfo {};
+    presentFrameInfo.buffer = this->presentFrameBuffer;
+    presentFrameInfo.offset = 0;
+    presentFrameInfo.range = 2 * sizeof(float) * 16;
+    VkWriteDescriptorSet presentFrameWrite {};
+    presentFrameWrite.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+    presentFrameWrite.dstSet = presentSet;
+    presentFrameWrite.dstBinding = 6;
+    presentFrameWrite.descriptorCount = 1;
+    presentFrameWrite.descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
+    presentFrameWrite.pBufferInfo = &presentFrameInfo;
+    writes.push_back(presentFrameWrite);
+  }
+
+  vkUpdateDescriptorSets(this->device,
+                         static_cast<uint32_t>(writes.size()), writes.data(),
+                         0, nullptr);
+  // The bindings for the current index are now written; the trace/present
+  // phases that bind this index may rely on it.  A freshly (re)allocated set
+  // that a subsequent non-dirty frame binds is only safe to dispatch against
+  // once this flag is set.
+  this->rtSetValid[this->descriptorSetIndex] = true;
+  this->presentSetValid[this->descriptorSetIndex] = true;
+
+  // Denoiser G-buffer normalize/downsample binding: the four full-res G-buffers
+  // (binding 0-3) and the host staging allocation the shader writes the
+  // normalized working set into (binding 4).  Rewritten on every descriptor
+  // refresh after a buffer (re)creation so handles stay valid across resizes.
+  if (this->denoiseDownsampleDescriptorSet != VK_NULL_HANDLE &&
+      this->accumBuffer != VK_NULL_HANDLE &&
+      this->albedoBuffer != VK_NULL_HANDLE &&
+      this->normalBuffer != VK_NULL_HANDLE &&
+      this->motionBuffer != VK_NULL_HANDLE &&
+      this->denoiseColorBuf != VK_NULL_HANDLE) {
+    VkDescriptorBufferInfo dsAccum {};
+    dsAccum.buffer = this->accumBuffer;
+    dsAccum.range = VK_WHOLE_SIZE;
+    VkDescriptorBufferInfo dsAlbedo {};
+    dsAlbedo.buffer = this->albedoBuffer;
+    dsAlbedo.range = VK_WHOLE_SIZE;
+    VkDescriptorBufferInfo dsNormal {};
+    dsNormal.buffer = this->normalBuffer;
+    dsNormal.range = VK_WHOLE_SIZE;
+    VkDescriptorBufferInfo dsMotion {};
+    dsMotion.buffer = this->motionBuffer;
+    dsMotion.range = VK_WHOLE_SIZE;
+    VkDescriptorBufferInfo dsStaging {};
+    dsStaging.buffer = this->denoiseColorBuf;
+    dsStaging.range = VK_WHOLE_SIZE;
+    VkWriteDescriptorSet dwrites[5] {};
+    const VkDescriptorBufferInfo * dinfos[5] = {
+      &dsAccum, &dsAlbedo, &dsNormal, &dsMotion, &dsStaging};
+    for (uint32_t b = 0; b < 5; ++b) {
+      dwrites[b].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+      dwrites[b].dstSet = this->denoiseDownsampleDescriptorSet;
+      dwrites[b].dstBinding = b;
+      dwrites[b].descriptorCount = 1;
+      dwrites[b].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+      dwrites[b].pBufferInfo = dinfos[b];
+    }
+    vkUpdateDescriptorSets(this->device, 5, dwrites, 0, nullptr);
+    this->denoiseDownsampleValid = true;
+  }
+  else {
+    this->denoiseDownsampleValid = false;
+  }
+  // The DNSR/DNSR descriptor sets are bound once in createDnsrPipeline() (their
+  // buffers are stable for the life of the denoiser and re-created together on
+  // a resize), so there is nothing to refresh here.
+  return true;
+}
+
+bool
+SoRTXRenderBackend::createPipelines()
+{
+  VkPipelineLayoutCreateInfo layoutCI {};
+  layoutCI.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
+  layoutCI.setLayoutCount = 1;
+  layoutCI.pSetLayouts = &this->rtSetLayout;
+  // The raygen receives its per-frame state (frame index, PT flags, bounce
+  // budget) through a 16-byte push constant block.
+  VkPushConstantRange raygenPush {};
+  raygenPush.stageFlags = VK_SHADER_STAGE_RAYGEN_BIT_KHR;
+  raygenPush.offset = 0;
+  raygenPush.size = sizeof(RTXRaygenPush);
+  layoutCI.pPushConstantRanges = &raygenPush;
+  layoutCI.pushConstantRangeCount = 1;
+  if (vkCreatePipelineLayout(this->device, &layoutCI, this->allocator,
+                             &this->rtPipelineLayout) != VK_SUCCESS) {
+    return false;
+  }
+
+  layoutCI.pSetLayouts = &this->presentSetLayout;
+  // The present shader receives width/height/denoiseOn/frameIndex via
+  // u_present, the viewport origin via u_origin, the denoiser flag/scale and
+  // the HDR output/exposure via u_denoise and the tone-mapping operator via
+  // u_tone (the present pass must run inside the caller's render pass, so a
+  // compute denoise pass cannot be dispatched there; the edge-stopping filter
+  // lives in PresentFragment.glsl instead).
+  VkPushConstantRange presentPush {};
+  presentPush.stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
+  presentPush.offset = 0;
+  presentPush.size = 16 * sizeof(float);
+  layoutCI.pPushConstantRanges = &presentPush;
+  layoutCI.pushConstantRangeCount = 1;
+  if (vkCreatePipelineLayout(this->device, &layoutCI, this->allocator,
+                             &this->presentPipelineLayout) != VK_SUCCESS) {
+    return false;
+  }
+
+  // --- Ray tracing pipeline (five SBT groups) ----------------------------
+  // Group layout: 0 = raygen, 1 = miss, 2 = shadow miss, 3 = closest hit,
+  // 4 = shadow closest hit.  Primary rays use missIndex 0 and hit-group
+  // record 0; shadow rays use missIndex 1 and hit-group record 1.
+  VkPipelineShaderStageCreateInfo stages[SBT_GROUP_COUNT] {};
+  const auto stage = [](VkShaderStageFlagBits flag, VkShaderModule module,
+                        VkPipelineShaderStageCreateInfo & out) {
+    out.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+    out.stage = flag;
+    out.module = module;
+    out.pName = "main";
+  };
+  stage(VK_SHADER_STAGE_RAYGEN_BIT_KHR, this->raygenModule, stages[0]);
+  stage(VK_SHADER_STAGE_MISS_BIT_KHR, this->missModule, stages[1]);
+  stage(VK_SHADER_STAGE_MISS_BIT_KHR, this->shadowMissModule, stages[2]);
+  stage(VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR, this->closestHitModule,
+        stages[3]);
+  stage(VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR, this->shadowClosestHitModule,
+        stages[4]);
+
+  VkRayTracingShaderGroupCreateInfoKHR groups[SBT_GROUP_COUNT] {};
+  for (int i = 0; i < SBT_GROUP_COUNT; ++i) {
+    groups[i].sType =
+      VK_STRUCTURE_TYPE_RAY_TRACING_SHADER_GROUP_CREATE_INFO_KHR;
+    groups[i].anyHitShader = VK_SHADER_UNUSED_KHR;
+    groups[i].closestHitShader = VK_SHADER_UNUSED_KHR;
+    groups[i].intersectionShader = VK_SHADER_UNUSED_KHR;
+    if (i <= 2) {
+      groups[i].type = VK_RAY_TRACING_SHADER_GROUP_TYPE_GENERAL_KHR;
+      groups[i].generalShader = static_cast<uint32_t>(i);
+    }
+    else {
+      groups[i].type = VK_RAY_TRACING_SHADER_GROUP_TYPE_TRIANGLES_HIT_GROUP_KHR;
+      groups[i].closestHitShader = static_cast<uint32_t>(i);
+    }
+  }
+
+  VkRayTracingPipelineCreateInfoKHR ci {};
+  ci.sType = VK_STRUCTURE_TYPE_RAY_TRACING_PIPELINE_CREATE_INFO_KHR;
+  ci.stageCount = SBT_GROUP_COUNT;
+  ci.pStages = stages;
+  ci.groupCount = SBT_GROUP_COUNT;
+  ci.pGroups = groups;
+  ci.maxPipelineRayRecursionDepth = 2; // primary + one shadow level
+  ci.layout = this->rtPipelineLayout;
+  const bool wantFeedback = pipelineFeedbackWanted(this->hasPipelineCreationFeedback);
+  VkPipelineCreationFeedbackEXT feedback {};
+  VkPipelineCreationFeedbackCreateInfoEXT feedbackInfo {};
+  if (wantFeedback) {
+    chainPipelineFeedback(feedbackInfo, feedback, &ci);
+  }
+  const VkResult rtRes = this->vkCreateRayTracingPipelinesKHR(
+    this->device, VK_NULL_HANDLE, VK_NULL_HANDLE, 1, &ci, this->allocator,
+    &this->rtPipeline);
+  if (rtRes != VK_SUCCESS) {
+    this->emitError(("createRayTracingPipeline: "
+                     "vkCreateRayTracingPipelinesKHR failed: "
+                     + SoVulkanShared::vkResultName(rtRes)).c_str());
+    return false;
+  }
+  if (wantFeedback) {
+    logPipelineFeedback("rt-pipeline", feedback);
+  }
+  if (!this->createShaderBindingTable()) {
+    return false;
+  }
+
+  // Ray-query compute pipeline (default dispatch mode): the same path
+  // tracer compiled as a compute shader, driven by vkCmdDispatch.
+  VkComputePipelineCreateInfo computeCI {};
+  computeCI.sType = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO;
+  computeCI.stage.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+  computeCI.stage.stage = VK_SHADER_STAGE_COMPUTE_BIT;
+  computeCI.stage.module = this->pathTraceModule;
+  computeCI.stage.pName = "main";
+  computeCI.layout = this->rtPipelineLayout;
+  if (wantFeedback) {
+    chainPipelineFeedback(feedbackInfo, feedback, &computeCI);
+  }
+  const VkResult createRes = vkCreateComputePipelines(
+    this->device, VK_NULL_HANDLE, 1, &computeCI, this->allocator,
+    &this->computePipeline);
+  if (createRes != VK_SUCCESS) {
+    this->emitError(("createPipelines: vkCreateComputePipelines (rt trace) "
+                     "failed: "
+                     + SoVulkanShared::vkResultName(createRes)).c_str());
+    return false;
+  }
+  if (wantFeedback) {
+    logPipelineFeedback("rt-compute", feedback);
+  }
+  return this->createDenoiseDownsamplePipeline();
+}
+
+bool
+SoRTXRenderBackend::createDenoiseDownsamplePipeline()
+{
+  VkPipelineLayoutCreateInfo layoutCI {};
+  layoutCI.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
+  layoutCI.setLayoutCount = 1;
+  layoutCI.pSetLayouts = &this->denoiseDownsampleSetLayout;
+  VkPushConstantRange push {};
+  push.stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+  push.offset = 0;
+  push.size = sizeof(DenoiseDownsamplePush);
+  layoutCI.pPushConstantRanges = &push;
+  layoutCI.pushConstantRangeCount = 1;
+  if (vkCreatePipelineLayout(this->device, &layoutCI, this->allocator,
+                             &this->denoiseDownsamplePipelineLayout) !=
+      VK_SUCCESS) {
+    return false;
+  }
+  VkComputePipelineCreateInfo computeCI {};
+  computeCI.sType = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO;
+  computeCI.stage.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+  computeCI.stage.stage = VK_SHADER_STAGE_COMPUTE_BIT;
+  computeCI.stage.module = this->denoiseDownsampleModule;
+  computeCI.stage.pName = "main";
+  computeCI.layout = this->denoiseDownsamplePipelineLayout;
+  const bool wantFeedback = pipelineFeedbackWanted(this->hasPipelineCreationFeedback);
+  VkPipelineCreationFeedbackEXT feedback {};
+  VkPipelineCreationFeedbackCreateInfoEXT feedbackInfo {};
+  if (wantFeedback) {
+    chainPipelineFeedback(feedbackInfo, feedback, &computeCI);
+  }
+  const VkResult createRes = vkCreateComputePipelines(
+    this->device, VK_NULL_HANDLE, 1, &computeCI, this->allocator,
+    &this->denoiseDownsamplePipeline);
+  if (createRes != VK_SUCCESS) {
+    this->emitError(
+      ("createDenoiseDownsamplePipeline: vkCreateComputePipelines failed: "
+       + SoVulkanShared::vkResultName(createRes)).c_str());
+    return false;
+  }
+  if (wantFeedback) {
+    logPipelineFeedback("denoise-downsample", feedback);
+  }
+  checkDenoiseDownsampleLayout();
+  return true;
+}
+
+bool
+SoRTXRenderBackend::createShaderBindingTable()
+{
+  // Five records: raygen, miss, shadow miss, closest hit, shadow closest
+  // hit, each aligned to the driver's shader-group-handle alignment.  The
+  // table is host-visible so the group handles can be copied in directly.
+  // Extra base-alignment slack keeps the strided region device addresses
+  // aligned to shaderGroupBaseAlignment (VUID-vkCmdTraceRaysKHR-03675).
+  const VkDeviceSize baseAlignment = this->sbtGroupBaseAlignment;
+  const VkDeviceSize tableSize =
+    static_cast<VkDeviceSize>(this->sbtRecordSize) * SBT_GROUP_COUNT +
+    baseAlignment;
+  if (!this->createHostVisibleBuffer(
+        tableSize,
+        VK_BUFFER_USAGE_SHADER_BINDING_TABLE_BIT_KHR |
+          VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT,
+        this->sbtBuffer, this->sbtMemory)) {
+    return false;
+  }
+
+  // Fetch the group handles (one per pipeline group) and copy each into
+  // its aligned record slot.
+  const uint32_t handleSize = this->sbtGroupHandleSize;
+  std::vector<uint8_t> handles(static_cast<size_t>(handleSize) *
+                               SBT_GROUP_COUNT);
+  if (this->vkGetRayTracingShaderGroupHandlesKHR(
+        this->device, this->rtPipeline, 0, SBT_GROUP_COUNT,
+        handles.size(), handles.data()) != VK_SUCCESS) {
+    return false;
+  }
+  void * mapped = nullptr;
+  if (vmaMapMemory(this->vmaAllocator, this->sbtMemory, &mapped) != VK_SUCCESS) {
+    return false;
+  }
+  const VkDeviceAddress rawBase = this->getDeviceAddress(this->sbtBuffer);
+  const VkDeviceAddress alignedBase =
+    (rawBase + baseAlignment - 1) / baseAlignment * baseAlignment;
+  this->sbtBaseOffset = alignedBase - rawBase;
+  for (int i = 0; i < SBT_GROUP_COUNT; ++i) {
+    std::memcpy(static_cast<uint8_t *>(mapped) + this->sbtBaseOffset +
+                  static_cast<size_t>(i) * this->sbtRecordSize,
+                handles.data() + static_cast<size_t>(i) * handleSize,
+                handleSize);
+  }
+  vmaUnmapMemory(this->vmaAllocator, this->sbtMemory);
+
+  // Strided device-address regions handed to vkCmdTraceRaysKHR.
+  const VkDeviceSize stride = this->sbtRecordSize;
+  this->raygenSbtRegion = {alignedBase + 0 * stride, stride, stride};
+  this->missSbtRegion = {alignedBase + 1 * stride, stride, 2 * stride};
+  this->hitSbtRegion = {alignedBase + 3 * stride, stride, 2 * stride};
+  this->callableSbtRegion = {0, 0, 0};
+  return true;
+}
+
+bool
+SoRTXRenderBackend::createPresentPipeline(VkRenderPass renderPass,
+                                           VkSampleCountFlagBits sampleCount)
+{
+  // The present pass renders into the swapchain/MSAA color attachment, so
+  // the pipeline's rasterization sample count must match the render pass
+  // (VUID-VkGraphicsPipelineCreateInfo-renderPass-06082).  Key the cache on
+  // both the render pass and the sample count.
+  if (this->presentPipeline != VK_NULL_HANDLE &&
+      this->presentRenderPass == renderPass &&
+      this->presentSampleCount == sampleCount) {
+    return true;
+  }
+  if (this->presentPipeline != VK_NULL_HANDLE) {
+    // Defer: a pending frame may still bind this pipeline.
+    VkDevice device = this->device;
+    const VkAllocationCallbacks * allocator = this->allocator;
+    const VkPipeline pipeline = this->presentPipeline;
+    this->deferDestroy([device, allocator, pipeline]() {
+      vkDestroyPipeline(device, pipeline, allocator);
+    });
+    this->presentPipeline = VK_NULL_HANDLE;
+  }
+
+  VkPipelineShaderStageCreateInfo stages[2] {};
+  stages[0].sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+  stages[0].stage = VK_SHADER_STAGE_VERTEX_BIT;
+  stages[0].module = this->presentVertexModule;
+  stages[0].pName = "main";
+  stages[1].sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+  stages[1].stage = VK_SHADER_STAGE_FRAGMENT_BIT;
+  stages[1].module = this->presentFragmentModule;
+  stages[1].pName = "main";
+
+  VkPipelineVertexInputStateCreateInfo vertexInput {};
+  vertexInput.sType =
+    VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO;
+  VkPipelineInputAssemblyStateCreateInfo inputAssembly {};
+  inputAssembly.sType =
+    VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO;
+  inputAssembly.topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
+  VkPipelineViewportStateCreateInfo viewportState {};
+  viewportState.sType = VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO;
+  viewportState.viewportCount = 1;
+  viewportState.scissorCount = 1;
+  VkPipelineRasterizationStateCreateInfo rasterization {};
+  rasterization.sType =
+    VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO;
+  rasterization.polygonMode = VK_POLYGON_MODE_FILL;
+  rasterization.cullMode = VK_CULL_MODE_NONE;
+  rasterization.lineWidth = 1.0f;
+  VkPipelineMultisampleStateCreateInfo multisample {};
+  multisample.sType = VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO;
+  multisample.rasterizationSamples = sampleCount;
+  VkPipelineDepthStencilStateCreateInfo depthStencil {};
+  depthStencil.sType =
+    VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO;
+  // The present pass writes the scene depth from the first-bounce hit
+  // position (PresentFragment.glsl sets gl_FragDepth) so the raster
+  // composite overlay that runs afterwards can depth-test BRep edge lines
+  // and the navigation cube against the traced surface, occluding hidden
+  // edges.  The render pass carries a depth attachment (when the target has
+  // one); the fullscreen triangle writes every fragment exactly once, so a
+  // compare of ALWAYS is safe and the depth values land in the buffer the
+  // overlay reads.
+  depthStencil.depthTestEnable = VK_TRUE;
+  depthStencil.depthWriteEnable = VK_TRUE;
+  depthStencil.depthCompareOp = VK_COMPARE_OP_ALWAYS;
+  depthStencil.stencilTestEnable = VK_FALSE;
+  VkPipelineColorBlendAttachmentState blendAttachment {};
+  blendAttachment.colorWriteMask = VK_COLOR_COMPONENT_R_BIT |
+    VK_COLOR_COMPONENT_G_BIT | VK_COLOR_COMPONENT_B_BIT |
+    VK_COLOR_COMPONENT_A_BIT;
+  VkPipelineColorBlendStateCreateInfo colorBlend {};
+  colorBlend.sType = VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO;
+  colorBlend.attachmentCount = 1;
+  colorBlend.pAttachments = &blendAttachment;
+
+  const VkDynamicState dynamicStates[] = {VK_DYNAMIC_STATE_VIEWPORT,
+                                          VK_DYNAMIC_STATE_SCISSOR};
+  VkPipelineDynamicStateCreateInfo dynamicState {};
+  dynamicState.sType = VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO;
+  dynamicState.dynamicStateCount = 2;
+  dynamicState.pDynamicStates = dynamicStates;
+
+  VkGraphicsPipelineCreateInfo ci {};
+  ci.sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO;
+  ci.stageCount = 2;
+  ci.pStages = stages;
+  ci.pVertexInputState = &vertexInput;
+  ci.pInputAssemblyState = &inputAssembly;
+  ci.pViewportState = &viewportState;
+  ci.pRasterizationState = &rasterization;
+  ci.pMultisampleState = &multisample;
+  ci.pDepthStencilState = &depthStencil;
+  ci.pColorBlendState = &colorBlend;
+  ci.pDynamicState = &dynamicState;
+  ci.layout = this->presentPipelineLayout;
+  ci.renderPass = renderPass;
+  ci.subpass = 0;
+  const VkResult createRes = vkCreateGraphicsPipelines(
+    this->device, VK_NULL_HANDLE, 1, &ci, this->allocator,
+    &this->presentPipeline);
+  if (createRes != VK_SUCCESS) {
+    this->emitError(("createPresentPipeline: vkCreateGraphicsPipelines failed: "
+                     + SoVulkanShared::vkResultName(createRes)).c_str());
+    return false;
+  }
+  this->presentRenderPass = renderPass;
+  this->presentSampleCount = sampleCount;
+  return true;
+}

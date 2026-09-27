@@ -72,7 +72,7 @@
 #endif // COIN_THREADSAFE
 
 #if COIN_BUILD_LEGACY_GL_RENDERER
-#include "rendering/SoVBO.h"
+#include "rendering/gl/SoVBO.h"
 #endif
 #include "nodes/SoSubNodeP.h"
 

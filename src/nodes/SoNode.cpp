@@ -217,7 +217,7 @@ SbUniqueId is not really a class, just a \c typedef.
 
 #include "tidbitsp.h"
 #include "misc/SbHash.h"
-#include "rendering/SoGL.h"
+#include "rendering/gl/SoGL.h"
 #include "nodes/SoSubNodeP.h"
 #include "nodes/SoUnknownNode.h"
 #include "threads/threadsutilp.h"
@@ -685,6 +685,7 @@ SoNode::initClasses(void)
   SoLinearProfile::initClass();
   SoNurbsProfile::initClass();
   SoMaterial::initClass();
+  SoPhysicalMaterial::initClass();
   SoMaterialBinding::initClass();
   SoVertexAttributeBinding::initClass();
   SoNormal::initClass();
@@ -708,6 +709,7 @@ SoNode::initClasses(void)
   SoTextureCoordinateDefault::initClass();
   SoTextureCoordinateEnvironment::initClass();
   SoTextureCoordinatePlane::initClass();
+  SoTextureCoordinateProjection::initClass();
   SoUnknownNode::initClass();
   SoVertexProperty::initClass();
   SoWWWInline::initClass();

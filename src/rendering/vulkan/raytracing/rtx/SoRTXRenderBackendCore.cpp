@@ -1,0 +1,1887 @@
+// src/rendering/vulkan/raytracing/rtx/SoRTXRenderBackendCore.cpp
+
+// Split from the original monolithic SoRTXRenderBackend.cpp.  Contains the
+// member functions for the "Core" concern of the Vulkan RTX backend.
+
+#include "rendering/vulkan/raytracing/rtx/SoRTXRenderBackend.h"
+#include "rendering/vulkan/common/core/SoVulkanConfig.h"
+#include "rendering/vulkan/common/core/SoVulkanDebugUtils.h"
+#include <Inventor/errors/SoDebugError.h>
+#include <algorithm>
+#include <array>
+#include <chrono>
+#include <cmath>
+#include <cstdlib>
+#include <cstring>
+#include <string>
+#include <rendering/vulkan/raytracing/rtx/SoRTXRenderBackendP.h>
+
+#include "vk_mem_alloc.h"
+
+using namespace SoRTXBackend;
+
+bool
+SoRTXRenderBackend::drainQueue(const char * context, VkQueue queue)
+{
+  if (queue == VK_NULL_HANDLE) return true;
+  const VkResult result = vkQueueWaitIdle(queue);
+  if (result != VK_SUCCESS) {
+    this->emitError((std::string(context) + ": vkQueueWaitIdle failed: "
+                     + SoVulkanShared::vkResultName(result)).c_str());
+    return false;
+  }
+  return true;
+}
+
+bool
+SoRTXRenderBackend::freeDescriptorSets(VkDescriptorPool pool, uint32_t count,
+                                       const VkDescriptorSet * sets,
+                                       const char * context)
+{
+  if (pool == VK_NULL_HANDLE || count == 0 || sets == nullptr) return true;
+  const VkResult result =
+    vkFreeDescriptorSets(this->device, pool, count, sets);
+  if (result != VK_SUCCESS) {
+    this->emitError((std::string(context) + ": vkFreeDescriptorSets failed: "
+                     + SoVulkanShared::vkResultName(result)).c_str());
+    return false;
+  }
+  return true;
+}
+
+bool
+SoRTXRenderBackend::freeDescriptorSet(VkDescriptorPool pool,
+                                      VkDescriptorSet set,
+                                      const char * context)
+{
+  if (set == VK_NULL_HANDLE) return true;
+  return this->freeDescriptorSets(pool, 1, &set, context);
+}
+
+// Wall-clock milliseconds for the FC_VULKAN_FRAME_TIMING breakdown.
+static double vkNowMs()
+{
+  return std::chrono::duration<double, std::milli>(
+    std::chrono::steady_clock::now().time_since_epoch()).count();
+}
+
+SoRTXRenderBackend::SoRTXRenderBackend()
+{
+}
+
+SoRTXRenderBackend::~SoRTXRenderBackend()
+{
+  if (this->isInitialized()) this->shutdown();
+}
+
+const char *
+SoRTXRenderBackend::getName() const
+{
+  return "RTXRenderBackend";
+}
+
+void
+SoRTXRenderBackend::setPathTracingEnabled(SbBool enabled)
+{
+  if (this->ptEnabled == enabled) return;
+  this->ptEnabled = enabled;
+  // Switching modes invalidates the accumulated image and any in-flight
+  // progressive run.
+  this->ptAccumulating = FALSE;
+  this->ptStartLatch = FALSE;
+  this->ptFrameIndex = 0;
+  this->ptIdleFrames = 0;
+  this->ptWasMoving = FALSE;
+  this->ptDenoisePending = FALSE;
+  this->ptConverged = FALSE;
+  this->denoiseResultReady = FALSE;
+  this->haveLastView = FALSE;
+  this->haveLastCameraVersion = FALSE;
+  this->lastCameraVersion = 0;
+  // Invalidate any in-flight async denoise result for the disabled run.
+  ++this->ptRunGeneration;
+}
+
+SbBool
+SoRTXRenderBackend::getPathTracingEnabled(void) const
+{
+  return this->ptEnabled;
+}
+
+void
+SoRTXRenderBackend::setViewMode(RtxViewMode mode)
+{
+  if (this->rtxViewMode == mode) return;
+  this->rtxViewMode = mode;
+  // A view-mode change invalidates any in-flight progressive run.
+  this->ptAccumulating = FALSE;
+  this->ptStartLatch = FALSE;
+  this->ptFrameIndex = 0;
+  this->ptIdleFrames = 0;
+  this->ptWasMoving = FALSE;
+  this->ptDenoisePending = FALSE;
+  this->ptConverged = FALSE;
+  this->denoiseResultReady = FALSE;
+  this->haveLastView = FALSE;
+  this->haveLastCameraVersion = FALSE;
+  this->lastCameraVersion = 0;
+  // Invalidate any in-flight async denoise result for the previous view mode.
+  ++this->ptRunGeneration;
+}
+
+SoRTXRenderBackend::RtxViewMode
+SoRTXRenderBackend::getViewMode(void) const
+{
+  return this->rtxViewMode;
+}
+
+void
+SoRTXRenderBackend::setPathTracingGlass(const float ior, const float absorption)
+{
+  // This is a public backend entry point, so validate here as well as in the
+  // GUI settings reader (which clamps the same ranges).  A non-finite or
+  // out-of-range value would otherwise reach the shader, where the optical
+  // clamp max(optical.x, 1.0) turns ior < 1 into a silently no-refraction
+  // "dielectric" and NaN is implementation-defined.
+  float safeIor = std::isfinite(ior) ? ior : 1.5f;
+  float safeAbsorption = std::isfinite(absorption) ? absorption : 0.1f;
+  safeIor = std::clamp(safeIor, 1.0f, 3.0f);
+  safeAbsorption = std::clamp(safeAbsorption, 0.0f, 10.0f);
+  if (this->ptGlassIor == safeIor &&
+      this->ptGlassAbsorption == safeAbsorption) {
+    return;
+  }
+  this->ptGlassIor = safeIor;
+  this->ptGlassAbsorption = safeAbsorption;
+  // A changed IOR/absorption changes the traced image (glass bends and tints
+  // differently), so restart the accumulation from a clean slate.  The
+  // geometry and acceleration structures are unaffected, so no AS rebuild is
+  // requested here -- the next path-tracing state update sees the new frame
+  // constants and re-starts the run.
+  this->ptAccumulating = FALSE;
+  this->ptStartLatch = FALSE;
+  this->ptFrameIndex = 0;
+  this->ptIdleFrames = 0;
+  this->ptConverged = FALSE;
+  this->ptDenoisePending = FALSE;
+  this->denoiseResultReady = FALSE;
+  ++this->ptRunGeneration;
+}
+
+void
+SoRTXRenderBackend::setEnvIntensity(const float intensity)
+{
+  this->envIntensity = intensity;
+}
+
+void
+SoRTXRenderBackend::setEnvSunDir(const float x, const float y, const float z)
+{
+  this->envSunDir[0] = x;
+  this->envSunDir[1] = y;
+  this->envSunDir[2] = z;
+}
+
+void
+SoRTXRenderBackend::setEnvSunColor(const float r, const float g, const float b)
+{
+  this->envSunColor[0] = r;
+  this->envSunColor[1] = g;
+  this->envSunColor[2] = b;
+}
+
+void
+SoRTXRenderBackend::setEnvSunPower(const float power)
+{
+  this->envSunPower = power;
+}
+
+void
+SoRTXRenderBackend::setEnvSkyBrightness(const float brightness)
+{
+  this->envSkyBrightness = brightness;
+}
+
+// Procedural environment/cubemap presets.  Each is a skin for the analytic
+// sky (mode 0: an explicit top/bottom gradient overriding the viewport's
+// background colors plus a sun) or a camera-centered room cove (mode 1: a
+// colored floor, four walls and ceiling traced in the shader so the cubemap
+// reads as a real scene like a desk / table / white lab).  They are defined
+// here so the backend owns the palette and the GUI lists them by name without
+// carrying data.  Keep in sync with the RTXFrameBlock envRoom members.
+struct RtxEnvPreset {
+  const char * name;
+  int mode;              // 0 = sky gradient, 1 = room cove
+  float skyTop[3];       // sky mode: zenith gradient color
+  float skyBottom[3];    // sky mode: horizon gradient color
+  float sunDir[3];
+  float sunColor[3];
+  float sunPower;
+  float intensity;
+  float skyBrightness;
+  // Room cove (mode 1): colors + geometry (heights are camera-relative).
+  float wallColor[3];
+  float floorColor[3];
+  float ceilColor[3];
+  float roomHalfExtent;
+  float roomFloorY;
+  float roomCeilY;
+};
+
+namespace {
+const RtxEnvPreset kRtxEnvPresets[] = {
+  // -- Sky-gradient presets ----------------------------------------------
+  { "Daylight", 0,
+    {0.30f, 0.50f, 0.80f}, {0.85f, 0.88f, 0.90f},
+    {0.35f, 0.80f, 0.25f}, {1.00f, 0.95f, 0.85f}, 20.0f, 0.45f, 1.0f,
+    {0.75f, 0.76f, 0.78f}, {0.45f, 0.30f, 0.18f}, {0.90f, 0.90f, 0.90f},
+    3.0f, -1.2f, 2.5f },
+  { "Sunset", 0,
+    {0.25f, 0.18f, 0.35f}, {0.95f, 0.55f, 0.30f},
+    {0.55f, 0.25f, 0.45f}, {1.00f, 0.55f, 0.25f}, 12.0f, 0.40f, 1.0f,
+    {0.75f, 0.76f, 0.78f}, {0.45f, 0.30f, 0.18f}, {0.90f, 0.90f, 0.90f},
+    3.0f, -1.2f, 2.5f },
+  { "Overcast", 0,
+    {0.60f, 0.62f, 0.66f}, {0.82f, 0.83f, 0.85f},
+    {0.20f, 0.90f, 0.15f}, {0.90f, 0.90f, 0.90f}, 6.0f, 0.32f, 1.0f,
+    {0.75f, 0.76f, 0.78f}, {0.45f, 0.30f, 0.18f}, {0.90f, 0.90f, 0.90f},
+    3.0f, -1.2f, 2.5f },
+  { "Neutral Studio", 0,
+    {0.55f, 0.58f, 0.62f}, {0.80f, 0.81f, 0.83f},
+    {0.30f, 0.85f, 0.40f}, {1.00f, 1.00f, 1.00f}, 30.0f, 0.40f, 1.0f,
+    {0.75f, 0.76f, 0.78f}, {0.45f, 0.30f, 0.18f}, {0.90f, 0.90f, 0.90f},
+    3.0f, -1.2f, 2.5f },
+  { "Night", 0,
+    {0.02f, 0.03f, 0.06f}, {0.05f, 0.08f, 0.15f},
+    {0.40f, 0.85f, 0.60f}, {0.55f, 0.65f, 0.95f}, 100.0f, 0.12f, 1.0f,
+    {0.75f, 0.76f, 0.78f}, {0.45f, 0.30f, 0.18f}, {0.90f, 0.90f, 0.90f},
+    3.0f, -1.2f, 2.5f },
+  // -- Room-cove presets -------------------------------------------------
+  // A wooden desk surface under a soft white room; the low floor plane reads
+  // as the desk/table top.
+  { "Desk", 1,
+    {0.30f, 0.50f, 0.80f}, {0.85f, 0.88f, 0.90f},
+    {0.30f, 0.45f, 0.30f}, {1.00f, 0.90f, 0.75f}, 20.0f, 0.55f, 1.0f,
+    {0.78f, 0.80f, 0.82f}, {0.42f, 0.26f, 0.15f}, {0.93f, 0.93f, 0.94f},
+    2.8f, -0.55f, 2.6f },
+  { "Table", 1,
+    {0.30f, 0.50f, 0.80f}, {0.85f, 0.88f, 0.90f},
+    {0.32f, 0.48f, 0.28f}, {1.00f, 0.85f, 0.65f}, 18.0f, 0.50f, 1.0f,
+    {0.80f, 0.82f, 0.84f}, {0.48f, 0.30f, 0.17f}, {0.94f, 0.94f, 0.95f},
+    3.0f, -0.80f, 2.6f },
+  // A bright, clean white lab/shop: all-white walls and ceiling with a pale
+  // floor and a soft cool fill.
+  { "White Lab", 1,
+    {0.30f, 0.50f, 0.80f}, {0.85f, 0.88f, 0.90f},
+    {0.20f, 0.50f, 0.35f}, {1.00f, 1.00f, 1.00f}, 10.0f, 0.55f, 1.0f,
+    {0.88f, 0.90f, 0.92f}, {0.68f, 0.70f, 0.72f}, {0.94f, 0.95f, 0.96f},
+    3.4f, -1.4f, 3.0f },
+  // A pure white seamless background: every surface is near-white so objects
+  // sit in a neutral studio with even ambient light.
+  { "White Background", 1,
+    {0.30f, 0.50f, 0.80f}, {0.85f, 0.88f, 0.90f},
+    {0.20f, 0.40f, 0.40f}, {1.00f, 1.00f, 1.00f}, 8.0f, 0.45f, 1.0f,
+    {0.92f, 0.92f, 0.92f}, {0.90f, 0.90f, 0.90f}, {0.93f, 0.93f, 0.93f},
+    4.0f, -2.0f, 3.5f },
+};
+} // anonymous namespace
+
+const char *
+SoRTXRenderBackend::getEnvMapName(const int index)
+{
+  if (index < 0 || index >= getEnvMapCount()) return nullptr;
+  return kRtxEnvPresets[index].name;
+}
+
+int
+SoRTXRenderBackend::getEnvMapCount(void)
+{
+  return static_cast<int>(sizeof(kRtxEnvPresets) / sizeof(kRtxEnvPresets[0]));
+}
+
+void
+SoRTXRenderBackend::setEnvMap(const int index)
+{
+  if (index == this->envMapId) return;
+  // Any environment override invalidates the accumulated image (the sky and
+  // its contribution change), so drop back to a fresh run like a view-mode
+  // change does.
+  this->ptAccumulating = FALSE;
+  this->ptStartLatch = FALSE;
+  this->ptFrameIndex = 0;
+  this->ptIdleFrames = 0;
+  this->ptWasMoving = FALSE;
+  this->ptDenoisePending = FALSE;
+  this->ptConverged = FALSE;
+  this->denoiseResultReady = FALSE;
+  this->envMapId = index;
+  if (index < 0 || index >= getEnvMapCount()) {
+    // No (or an invalid) environment preset: the environment is disabled and
+    // the viewport gradient is used.  The env member fields must be cleared
+    // here -- they are read in updatePathTracingState()'s background-change
+    // test alongside the viewport gradient, so a stale intensity/sun/sky from
+    // a previously selected preset would keep comparing non-equal to the
+    // cleared values and fire backgroundChanged on every frame, resetting a
+    // converged progressive run back to the raw preview after every denoise.
+    this->envIntensity = 0.0f;
+    this->envSunPower = 1.0f;
+    this->envSkyBrightness = 1.0f;
+    for (int i = 0; i < 3; ++i) {
+      this->envSunDir[i] = 0.0f;
+      this->envSunColor[i] = 0.0f;
+      this->envSkyTop[i] = 0.0f;
+      this->envSkyBottom[i] = 0.0f;
+      this->envWallColor[i] = 0.0f;
+      this->envFloorColor[i] = 0.0f;
+      this->envCeilColor[i] = 0.0f;
+    }
+    this->envMapMode = 0;
+    this->envRoomHalfExtent = 0.0f;
+    this->envRoomFloorY = 0.0f;
+    this->envRoomCeilY = 0.0f;
+    return;
+  }
+  const RtxEnvPreset & p = kRtxEnvPresets[index];
+  this->envIntensity = p.intensity;
+  this->envSunPower = p.sunPower;
+  this->envSkyBrightness = p.skyBrightness;
+  for (int i = 0; i < 3; ++i) {
+    this->envSunDir[i] = p.sunDir[i];
+    this->envSunColor[i] = p.sunColor[i];
+    this->envSkyTop[i] = p.skyTop[i];
+    this->envSkyBottom[i] = p.skyBottom[i];
+    this->envWallColor[i] = p.wallColor[i];
+    this->envFloorColor[i] = p.floorColor[i];
+    this->envCeilColor[i] = p.ceilColor[i];
+  }
+  this->envMapMode = p.mode == 1 ? 1 : 0;
+  this->envRoomHalfExtent = p.roomHalfExtent;
+  this->envRoomFloorY = p.roomFloorY;
+  this->envRoomCeilY = p.roomCeilY;
+}
+
+int
+SoRTXRenderBackend::getEnvMap(void) const
+{
+  return this->envMapId;
+}
+
+void
+SoRTXRenderBackend::setPathTracingStart(SbBool start)
+{
+  if (!this->ptEnabled) {
+    this->emitLog("setPathTracingStart ignored: path tracing is disabled");
+    return;
+  }
+  if (start) {
+    // Latch: the next frame resets the accumulation and starts a fresh
+    // progressive run (even if the camera changed since the last frame).
+    this->ptStartLatch = TRUE;
+  }
+  else {
+    this->ptStartLatch = FALSE;
+    this->ptAccumulating = FALSE;
+    this->ptIdleFrames = 0;
+    // Stop request: an in-flight async denoise result is now stale.
+    ++this->ptRunGeneration;
+  }
+}
+
+SbBool
+SoRTXRenderBackend::getPathTracingActive(void) const
+{
+  return this->ptEnabled && this->ptAccumulating;
+}
+
+SbBool
+SoRTXRenderBackend::getPathTracingRefining(void) const
+{
+  // Request continuous frames while working toward a converged image: while
+  // accumulating, and during the short post-move settle window (ptIdleFrames
+  // below the settle threshold) so the auto-restart has frames to count.
+  // After convergence ptIdleFrames is saturated at ptSettleFrames, so this
+  // reads FALSE and the viewport can go idle.
+  // The single-sample AO and Environment previews never accumulate: they
+  // update on demand (camera/scene sensors) like the raster viewport, so
+  // they must NOT keep the surface busy-looping.
+  if (this->rtxViewMode == RtxViewMode::RtxModeAmbientOcclusion ||
+      this->rtxViewMode == RtxViewMode::RtxModeEnvironment) return FALSE;
+  // A pending denoise (including a denoiser switch re-armed on an already
+  // converged accumulation) and an in-flight async OIDN worker must also keep
+  // frames coming: the device-local filters run in updateDenoise() after the
+  // frame submit, and the async OIDN result is only copied back and published
+  // on a LATER frame.  Without this the loop idles the moment the run converges,
+  // so the switched filter launches (or the worker finishes) but its result is
+  // never published and the viewport stays on the raw accumulation.
+  return this->ptEnabled &&
+    (this->ptAccumulating || this->ptIdleFrames < this->ptSettleFrames ||
+     this->ptDenoisePending || this->oidnWorkerRunning);
+}
+
+uint32_t
+SoRTXRenderBackend::getPathTracingSampleCount(void) const
+{
+  return this->ptAccumulating ? this->ptFrameIndex + 1 : 0;
+}
+
+void
+SoRTXRenderBackend::setPathTracingBounces(const uint32_t bounces)
+{
+  this->ptMaxBouncesBase = std::max(1u, std::min(16u, bounces));
+  // The effective count follows the interaction-LOD state so a settings push
+  // during navigation does not undo the reduced preview.
+  this->ptMaxBounces =
+    this->ptInteractionLod ? this->ptInteractionBounces : this->ptMaxBouncesBase;
+}
+
+void
+SoRTXRenderBackend::setInteractionLod(SbBool active)
+{
+  if (this->ptInteractionLod == active) return;
+  this->ptInteractionLod = active;
+  this->ptMaxBounces =
+    active ? this->ptInteractionBounces : this->ptMaxBouncesBase;
+  if (SoVulkanConfig::get().rtxDebug.rtDebug) {
+    fprintf(stderr, "[RTDBG] interactionLod active=%d bounces=%u\n",
+            active ? 1 : 0, this->ptMaxBounces);
+  }
+  // Leaving the reduced preview must restart a clean full-quality accumulation
+  // against the now-static camera: the reduced-bounce history must not be
+  // carried forward, and the adaptive sampler must not freeze against it.
+  // Mirrors the reset in setViewMode()/setPathTracingEnabled().  Engaging
+  // needs no reset here: the camera move that engaged it already invalidated
+  // the run, so resetting on entry would only thrash the run on a slow drag.
+  if (!active) {
+    this->ptAccumulating = FALSE;
+    this->ptStartLatch = FALSE;
+    this->ptFrameIndex = 0;
+    this->ptIdleFrames = 0;
+    this->ptWasMoving = FALSE;
+    this->ptDenoisePending = FALSE;
+    this->ptConverged = FALSE;
+    this->denoiseResultReady = FALSE;
+    this->ptForceFullResolve = TRUE;
+    // Culling is camera-dependent, so rebuild the TLAS once against the final
+    // static pose; otherwise an instance culled mid-drag would stay missing
+    // (or an off-screen instance stay present) at rest.
+    this->tlasCullRebuildPending = true;
+  }
+}
+
+SbBool
+SoRTXRenderBackend::getInteractionLod(void) const
+{
+  return this->ptInteractionLod;
+}
+
+void
+SoRTXRenderBackend::setPathTracingSettleFrames(const uint32_t frames)
+{
+  this->ptSettleFrames = std::max(1u, std::min(120u, frames));
+}
+
+void
+SoRTXRenderBackend::setPathTracingMaxSamples(const uint32_t samples)
+{
+  this->ptMaxSamples = std::max(1u, std::min(4096u, samples));
+}
+
+void
+SoRTXRenderBackend::setPathTracingDenoiseEnabled(SbBool enabled)
+{
+  this->ptDenoise = enabled;
+}
+
+void
+SoRTXRenderBackend::setHdrOutput(SbBool enabled, float exposure, int toneMap)
+{
+  // Presentation-only state: no buffer/pipeline rebuild needed, the next
+  // present pass picks it up from the push constants.  Guard the exposure
+  // against zero/negative values, which would black out the image.
+  this->hdrOutput = enabled;
+  if (exposure > 0.0f) {
+    this->hdrExposure = exposure;
+  }
+  this->hdrToneMap = toneMap;
+}
+
+void
+SoRTXRenderBackend::setDenoiserFilter(const char * denoiser)
+{
+  if (!denoiser || denoiser[0] == '\0') return;
+  // Map the user-facing name onto the private enum; an unknown name leaves
+  // the current choice alone so a stale pref value never silently disables
+  // the denoiser.  createDenoiseBackend() resolves the kind from this store
+  // on the next buffer (re)creation.
+  DenoiseKind pref;
+  if (std::strcmp(denoiser, "rtx") == 0) pref = DenoiseRtx;
+  else if (std::strcmp(denoiser, "oidn") == 0) pref = DenoiseOidn;
+  // "fsr" is the historical name for this AMD FidelityFX DNSR slot; accept it
+  // as an alias so saved preferences and older env overrides keep working.
+  else if (std::strcmp(denoiser, "dnsr") == 0 ||
+           std::strcmp(denoiser, "fsr") == 0) pref = DenoiseDnsr;
+  else if (std::strcmp(denoiser, "none") == 0) pref = DenoiseNone;
+  else return;
+  // Idempotent: the display-settings blob is re-pushed wholesale on any
+  // Vulkan pref change, so re-applying the SAME denoiser must not force a
+  // backend teardown or invalidate a valid result.
+  if (this->denoiseKindExplicit && pref == this->denoiseKindPref) return;
+  this->denoiseKindPref = pref;
+  this->denoiseKind = pref;
+  this->denoiseKindDirty = true;
+  this->denoiseKindExplicit = true;
+  // A denoiser SWITCH invalidates any published or in-flight result: the
+  // denoisedBuffer (present binding 5) holds the PREVIOUS filter's output, so
+  // presenting it after the switch would freeze the view on that stale image
+  // until the new filter republishes (and, if the new filter never runs -- e.g.
+  // RTX selected on a build without a ready OptiX interop -- indefinitely).
+  // Also supersede an in-flight async OIDN worker so it cannot copy the old
+  // filter's result into the new denoiser's buffer.
+  this->denoiseResultReady = FALSE;
+  this->ptDenoisePending = FALSE;
+  ++this->ptRunGeneration;
+  // Switching the filter must not lose the accumulated image.  If the run has
+  // already converged, the accumulation is a valid denoiser input, so label the
+  // denoise cache stale and re-run the NEW filter against it.  Without this the
+  // converged-idle state machine never re-triggers a denoise, so after a switch
+  // the viewport keeps presenting the raw (undenoised) accumulation -- e.g.
+  // selecting RTX on a converged view ran no denoiser at all.  A mid-run switch
+  // (still accumulating) needs no re-arm: the run reaches its target and denoises
+  // with the new filter on its own.
+  if (pref != DenoiseNone && this->ptConverged) {
+    this->ptDenoisePending = TRUE;
+  }
+}
+
+void
+SoRTXRenderBackend::setDenoiserScale(const float scale)
+{
+  // Clamp to a sane range.  1.0 == native resolution (no upscale).  A factor
+  // > 1 runs the denoiser at a reduced internal resolution and the present
+  // pass bilinearly upscales it (the shader branch is only taken for scale
+  // >= 1.5, so values in (1, 1.5) degrade to native).
+  const float s = std::max(1.0f, std::min(8.0f, scale));
+  if (s == this->denoiseScale) return;
+  this->denoiseScale = s;
+  // The denoiser buffers (host staging + device output) are sized from
+  // denoiseWidth/Height which createPathTracingBuffers computes from this
+  // scale on the next (re)create; force a backend recreate so it picks the
+  // new resolution up.
+  this->denoiseKindDirty = true;
+}
+
+bool
+SoRTXRenderBackend::probeComputeQueue(void)
+{
+  this->computeQueue = VK_NULL_HANDLE;
+  this->computeQueueCount = 0;
+  this->hasComputeQueue = false;
+  if (this->device == VK_NULL_HANDLE || this->physicalDevice == VK_NULL_HANDLE) {
+    return false;
+  }
+  uint32_t familyCount = 0;
+  vkGetPhysicalDeviceQueueFamilyProperties(this->physicalDevice, &familyCount,
+                                            nullptr);
+  if (familyCount == 0) return false;
+  std::vector<VkQueueFamilyProperties> fams(familyCount);
+  vkGetPhysicalDeviceQueueFamilyProperties(this->physicalDevice, &familyCount,
+                                            fams.data());
+  // A dedicated compute family (or an extended graphics-family entry) was
+  // requested at device creation via setQueueCreateInfoModifier; the family +
+  // queue index selected there come through the device context.  UINT32_MAX
+  // means none was requested: report unavailable.
+  if (this->computeQueueFamilyIndex < static_cast<uint32_t>(fams.size())) {
+    const VkQueueFamilyProperties & fp = fams[this->computeQueueFamilyIndex];
+    this->computeQueueCount = fp.queueCount;
+    if (fp.queueFlags & VK_QUEUE_COMPUTE_BIT) {
+      this->computeQueue = VK_NULL_HANDLE;
+      vkGetDeviceQueue(this->device, this->computeQueueFamilyIndex,
+                       this->computeQueueIndex, &this->computeQueue);
+      this->hasComputeQueue = (this->computeQueue != VK_NULL_HANDLE);
+    }
+  }
+  if (SoVulkanConfig::get().rtxDebug.rtDebug) {
+    fprintf(stderr,
+            "[RTDBG] computeCaps family=%u idx=%u req=%d computeQueue=%d "
+            "computeCount=%u flags=0x%x\n",
+            this->computeQueueFamilyIndex, this->computeQueueIndex,
+            this->computeQueueFamilyIndex != ~0u ? 1 : 0,
+            this->hasComputeQueue ? 1 : 0, this->computeQueueCount,
+            this->computeQueueFamilyIndex < static_cast<uint32_t>(fams.size())
+              ? fams[this->computeQueueFamilyIndex].queueFlags : 0u);
+  }
+  return this->hasComputeQueue;
+}
+
+SbBool
+SoRTXRenderBackend::initialize(const SoRenderBackendInitParams & params)
+{
+  if (this->isInitialized()) return TRUE;
+
+  this->setInitParams(params);
+  const auto * deviceContext =
+    static_cast<const SoVulkanDeviceContext *>(params.userData);
+  if (!deviceContext || deviceContext->instance == VK_NULL_HANDLE ||
+      deviceContext->physicalDevice == VK_NULL_HANDLE ||
+      deviceContext->device == VK_NULL_HANDLE ||
+      deviceContext->graphicsQueue == VK_NULL_HANDLE) {
+    this->emitError(
+      "SoRTXRenderBackend requires a SoVulkanDeviceContext in "
+      "SoRenderBackendInitParams::userData");
+    return FALSE;
+  }
+  if (deviceContext->apiVersion < VK_API_VERSION_1_2) {
+    char buf[192];
+    std::snprintf(buf, sizeof(buf),
+                  "SoRTXRenderBackend requires a Vulkan 1.2+ device (device "
+                  "context reports API %u.%u.%u)",
+                  VK_API_VERSION_MAJOR(deviceContext->apiVersion),
+                  VK_API_VERSION_MINOR(deviceContext->apiVersion),
+                  VK_API_VERSION_PATCH(deviceContext->apiVersion));
+    this->emitError(buf);
+    return FALSE;
+  }
+
+  this->instance = deviceContext->instance;
+  this->physicalDevice = deviceContext->physicalDevice;
+  this->device = deviceContext->device;
+  this->queue = deviceContext->graphicsQueue;
+  this->queueFamilyIndex = deviceContext->graphicsQueueFamilyIndex;
+  this->allocator = deviceContext->allocator;
+  this->memProps.setDevice(this->physicalDevice);
+
+  // Resolve the synchronization2 entry points once for this device.  A null
+  // pointer means the extension was not enabled; the shared barrier/submit
+  // helpers then fall back to the legacy entry points.
+  {
+    SoVulkanShared::Sync2Dispatch & sync2 = SoVulkanShared::sync2Dispatch();
+    sync2.cmdPipelineBarrier2 =
+      SoVulkanShared::loadDispatch<PFN_vkCmdPipelineBarrier2KHR>(
+        vkGetDeviceProcAddr(this->device, "vkCmdPipelineBarrier2KHR"));
+    sync2.queueSubmit2 = SoVulkanShared::loadDispatch<PFN_vkQueueSubmit2KHR>(
+      vkGetDeviceProcAddr(this->device, "vkQueueSubmit2KHR"));
+    this->emitLog(sync2.cmdPipelineBarrier2 != nullptr
+                    ? "synchronization2: enabled"
+                    : "synchronization2: unavailable (legacy barriers)");
+  }
+
+  // Create the VMA allocator before any buffer/image allocation.  The
+  // buffer-device-address flag is required because the BLAS/TLAS and SBT
+  // buffers expose VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT; VMA then adds
+  // VK_MEMORY_ALLOCATE_DEVICE_ADDRESS_BIT to the backing allocation.
+  VmaAllocatorCreateInfo allocatorInfo {};
+  allocatorInfo.physicalDevice = this->physicalDevice;
+  allocatorInfo.device = this->device;
+  allocatorInfo.instance = this->instance;
+  allocatorInfo.vulkanApiVersion = deviceContext->apiVersion;
+  allocatorInfo.pAllocationCallbacks = this->allocator;
+  allocatorInfo.flags = VMA_ALLOCATOR_CREATE_BUFFER_DEVICE_ADDRESS_BIT;
+  if (vmaCreateAllocator(&allocatorInfo, &this->vmaAllocator) != VK_SUCCESS) {
+    this->emitError("SoRTXRenderBackend: vmaCreateAllocator failed");
+    return FALSE;
+  }
+
+  // Mark the backend initialized as soon as the VMA allocator exists so that
+  // any early failure below (the ray tracing KHR entry-point resolution, the
+  // create*() calls) runs the full null-tolerant shutdown() cleanup instead of
+  // leaking the allocator and every handle created so far.
+  this->setInitialized(TRUE);
+
+  // The async-compute queue requested at device creation (see the widget's
+  // setQueueCreateInfoModifier).  probeComputeQueue() retrieves the handle
+  // from this family + queue index.  UINT32_MAX family = none requested.
+  this->computeQueueFamilyIndex = deviceContext->computeQueueFamilyIndex;
+  this->computeQueueIndex = deviceContext->computeQueueIndex;
+
+  // Acquire a compute queue for the optional async-compute path, and report
+  // the capability so a probe/check can verify.
+  this->probeComputeQueue();
+
+  // Cache the physical-device identity so the denoiser selection can gate the
+  // CUDA/OptiX path on NVIDIA hardware (see SoRTXRenderBackend.h).
+  VkPhysicalDeviceProperties devProps {};
+  vkGetPhysicalDeviceProperties(this->physicalDevice, &devProps);
+  this->deviceVendorID = devProps.vendorID;
+  this->deviceIsNvidia = (devProps.vendorID == 0x10DE /* NVIDIA */);
+
+  // Query the device UUID (Vulkan 1.1 VkPhysicalDeviceIDProperties) so the
+  // CUDA context can be bound to the same GPU on multi-GPU machines.
+  this->haveDeviceUUID = false;
+  VkPhysicalDeviceIDProperties idProps {};
+  idProps.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ID_PROPERTIES;
+  VkPhysicalDeviceProperties2 idProps2 {};
+  idProps2.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2;
+  idProps2.pNext = &idProps;
+  vkGetPhysicalDeviceProperties2(this->physicalDevice, &idProps2);
+  // VkPhysicalDeviceIDProperties always carries the deviceUUID array (filled
+  // by the driver once the struct is chained); retain it for CUDA matching.
+  // Some drivers expose the array but leave it zero-filled, so only trust it
+  // when it actually contains a non-zero identifier.
+  std::memcpy(this->deviceUUID, idProps.deviceUUID, sizeof(this->deviceUUID));
+  bool deviceUUIDNonZero = false;
+  for (const uint8_t byte : this->deviceUUID) {
+    if (byte != 0) {
+      deviceUUIDNonZero = true;
+      break;
+    }
+  }
+  this->haveDeviceUUID = deviceUUIDNonZero;
+
+  // Capability flags: prefer the embedding application's probe (passed via
+  // SoVulkanDeviceContext::caps) so the extension-name list lives in exactly
+  // one place; only query the device when the application supplied no caps
+  // (offscreen/test contexts).  The features themselves must have been
+  // requested by the embedding app when the device was created.
+  if (deviceContext->capsValid) {
+    this->hasUpdateAfterBind =
+      deviceContext->caps.descriptorIndexingUpdateAfterBind;
+    this->hasPipelineCreationFeedback =
+      deviceContext->caps.pipelineCreationFeedback;
+  }
+  else {
+    VkPhysicalDeviceDescriptorIndexingFeatures di {};
+    di.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DESCRIPTOR_INDEXING_FEATURES;
+    VkPhysicalDeviceFeatures2 f2 {};
+    f2.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2;
+    f2.pNext = &di;
+    vkGetPhysicalDeviceFeatures2(this->physicalDevice, &f2);
+    this->hasUpdateAfterBind =
+      di.descriptorBindingSampledImageUpdateAfterBind &&
+      di.descriptorBindingStorageImageUpdateAfterBind &&
+      di.descriptorBindingUniformBufferUpdateAfterBind &&
+      di.descriptorBindingStorageBufferUpdateAfterBind;
+  }
+
+  // The system loader only exports core entry points; resolve the ray
+  // tracing KHR functions per-device.  Failing here means the device is
+  // missing the acceleration-structure/ray-query extensions (or the loader
+  // version cannot reach them), and the RT backend cannot function.
+  this->vkDestroyAccelerationStructureKHR =
+    loadDispatch<PFN_vkDestroyAccelerationStructureKHR>(
+      vkGetDeviceProcAddr(this->device, "vkDestroyAccelerationStructureKHR"));
+  this->vkGetAccelerationStructureBuildSizesKHR =
+    loadDispatch<PFN_vkGetAccelerationStructureBuildSizesKHR>(
+      vkGetDeviceProcAddr(this->device, "vkGetAccelerationStructureBuildSizesKHR"));
+  this->vkCreateAccelerationStructureKHR =
+    loadDispatch<PFN_vkCreateAccelerationStructureKHR>(
+      vkGetDeviceProcAddr(this->device, "vkCreateAccelerationStructureKHR"));
+  this->vkCmdBuildAccelerationStructuresKHR =
+    loadDispatch<PFN_vkCmdBuildAccelerationStructuresKHR>(
+      vkGetDeviceProcAddr(this->device, "vkCmdBuildAccelerationStructuresKHR"));
+  this->vkGetAccelerationStructureDeviceAddressKHR =
+    loadDispatch<PFN_vkGetAccelerationStructureDeviceAddressKHR>(
+      vkGetDeviceProcAddr(this->device, "vkGetAccelerationStructureDeviceAddressKHR"));
+  this->vkCmdWriteAccelerationStructuresPropertiesKHR =
+    loadDispatch<PFN_vkCmdWriteAccelerationStructuresPropertiesKHR>(
+      vkGetDeviceProcAddr(this->device, "vkCmdWriteAccelerationStructuresPropertiesKHR"));
+  this->vkCmdCopyAccelerationStructureKHR =
+    loadDispatch<PFN_vkCmdCopyAccelerationStructureKHR>(
+      vkGetDeviceProcAddr(this->device, "vkCmdCopyAccelerationStructureKHR"));
+  if (!this->vkDestroyAccelerationStructureKHR ||
+      !this->vkGetAccelerationStructureBuildSizesKHR ||
+      !this->vkCreateAccelerationStructureKHR ||
+      !this->vkCmdBuildAccelerationStructuresKHR ||
+      !this->vkGetAccelerationStructureDeviceAddressKHR ||
+      !this->vkCmdWriteAccelerationStructuresPropertiesKHR ||
+      !this->vkCmdCopyAccelerationStructureKHR) {
+    this->emitError(
+      "failed to resolve ray tracing KHR entry points; the device or "
+      "loader does not provide VK_KHR_acceleration_structure");
+    this->shutdown();
+    return FALSE;
+  }
+
+  // The ray tracing pipeline (VK_KHR_ray_tracing_pipeline) entry points
+  // power the shader binding table dispatch.
+  this->vkCreateRayTracingPipelinesKHR =
+    loadDispatch<PFN_vkCreateRayTracingPipelinesKHR>(
+      vkGetDeviceProcAddr(this->device, "vkCreateRayTracingPipelinesKHR"));
+  this->vkGetRayTracingShaderGroupHandlesKHR =
+    loadDispatch<PFN_vkGetRayTracingShaderGroupHandlesKHR>(
+      vkGetDeviceProcAddr(this->device, "vkGetRayTracingShaderGroupHandlesKHR"));
+  this->vkCmdTraceRaysKHR =
+    loadDispatch<PFN_vkCmdTraceRaysKHR>(
+      vkGetDeviceProcAddr(this->device, "vkCmdTraceRaysKHR"));
+  if (!this->vkCreateRayTracingPipelinesKHR ||
+      !this->vkGetRayTracingShaderGroupHandlesKHR ||
+      !this->vkCmdTraceRaysKHR) {
+    this->emitError(
+      "failed to resolve VK_KHR_ray_tracing_pipeline entry points; the "
+      "device or loader does not provide the ray tracing pipeline");
+    this->shutdown();
+    return FALSE;
+  }
+
+  // Dispatch mode: the SBT pipeline is opt-in (FC_VULKAN_RT_SBT=1); the
+  // default ray-query compute path avoids a hang in NVIDIA driver 610.x
+  // where triangle hit-group execution stalls the GPU.
+  this->useSbtPipeline =
+    SoVulkanConfig::get().rayTracing.sbtPipeline ? TRUE : FALSE;
+
+  // All entry points are resolved from here on.  The backend was already
+  // marked initialized right after the VMA allocator was created, so a
+  // failure in any create*() below runs the full (null-tolerant) shutdown()
+  // cleanup instead of leaking every handle created so far.
+
+  // Query the pipeline properties needed for the SBT record layout, plus the
+  // acceleration-structure properties for the scratch buffer alignment
+  // (VUID-vkCmdBuildAccelerationStructuresKHR-scratchData-*): the scratch
+  // device address must be aligned to
+  // minAccelerationStructureScratchOffsetAlignment, which the buffer's own
+  // memory requirements do not guarantee.
+  VkPhysicalDeviceRayTracingPipelinePropertiesKHR rtProps {};
+  rtProps.sType =
+    VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_RAY_TRACING_PIPELINE_PROPERTIES_KHR;
+  VkPhysicalDeviceAccelerationStructurePropertiesKHR asProps {};
+  asProps.sType =
+    VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ACCELERATION_STRUCTURE_PROPERTIES_KHR;
+  rtProps.pNext = &asProps;
+  VkPhysicalDeviceProperties2 rtProps2 {};
+  rtProps2.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2;
+  rtProps2.pNext = &rtProps;
+  vkGetPhysicalDeviceProperties2(this->physicalDevice, &rtProps2);
+  this->asScratchAlignment =
+    std::max<VkDeviceSize>(asProps.minAccelerationStructureScratchOffsetAlignment, 1u);
+  this->sbtGroupHandleSize = rtProps.shaderGroupHandleSize;
+  this->sbtGroupBaseAlignment = std::max(rtProps.shaderGroupBaseAlignment, 1u);
+  // The record stride must satisfy both the handle alignment and the
+  // base alignment, because every strided region address has to be a
+  // multiple of shaderGroupBaseAlignment (VUID-vkCmdTraceRaysKHR-*).
+  const uint32_t alignment = std::max({
+    rtProps.shaderGroupHandleAlignment,
+    rtProps.shaderGroupBaseAlignment,
+    1u});
+  this->sbtRecordSize = this->sbtGroupHandleSize;
+  this->sbtRecordSize += alignment - 1;
+  this->sbtRecordSize -= this->sbtRecordSize % alignment;
+
+  if (!this->createDescriptorSetLayout()) {
+    this->emitError("failed to create RT descriptor set layout");
+    this->shutdown();
+    return FALSE;
+  }
+  if (!this->createDescriptorPool()) {
+    this->emitError("failed to create RT descriptor pool");
+    this->shutdown();
+    return FALSE;
+  }
+  if (!this->createShaderModules()) {
+    this->emitError("failed to create RT shader modules");
+    this->shutdown();
+    return FALSE;
+  }
+  if (!this->createPipelines()) {
+    this->emitError("failed to create ray tracing pipeline");
+    this->shutdown();
+    return FALSE;
+  }
+  if (!this->createFrameBuffer()) {
+    this->emitError("failed to create RT frame uniform buffer");
+    this->shutdown();
+    return FALSE;
+  }
+
+  // Optional path tracing tuning (SoVulkanConfig resolves the environment
+  // once; an unset variable leaves the backend's member default in place).
+  const SoVulkanConfig::PathTracing & pt = SoVulkanConfig::get().pathTracing;
+  if (pt.bounces) {
+    this->ptMaxBouncesBase = *pt.bounces;
+    this->ptMaxBounces = this->ptInteractionLod
+      ? this->ptInteractionBounces : this->ptMaxBouncesBase;
+  }
+  if (pt.settleFrames) {
+    this->ptSettleFrames = *pt.settleFrames;
+  }
+  if (pt.maxSamples) {
+    this->ptMaxSamples = *pt.maxSamples;
+  }
+  // TLAS instance culling (frustum + sub-pixel).  Opt-in: it changes the
+  // default trace path (small/far instances can pop in), so it stays off
+  // until validated across a wider range of scenes.  Resolved once in
+  // SoVulkanConfig (FC_VULKAN_TLAS_CULL; default off, "0"/"false"/"off" off).
+  this->tlasCullEnabled = SoVulkanConfig::get().rtxCull.enabled;
+  this->tlasCullPixels = SoVulkanConfig::get().rtxCull.pixels;
+  // Adaptive sampling tuning (see PathTrace.glsl u_adaptive).
+  if (pt.adaptive) {
+    this->ptAdaptiveEnabled = *pt.adaptive ? TRUE : FALSE;
+  }
+  if (pt.adaptiveMinSamples) {
+    this->ptAdaptiveMinSamples = *pt.adaptiveMinSamples;
+  }
+  if (pt.adaptiveThreshold) {
+    this->ptAdaptiveThreshold = *pt.adaptiveThreshold;
+  }
+  if (pt.adaptiveStopFraction) {
+    // 0 disables the fraction-based auto-stop (run to the sample cap only).
+    this->ptAdaptiveStopFraction = *pt.adaptiveStopFraction;
+  }
+  // Firefly rejection: replace samples far brighter than the pixel's running
+  // mean (outlier spikes) with that mean.  FC_VULKAN_PT_FIREFLY is the
+  // standard-deviation multiplier; 0 disables it (on by default at 5.0, the
+  // member default) so the override only needs to set 0 to turn it off.
+  if (pt.fireflySigma) {
+    this->ptFireflySigma = *pt.fireflySigma;
+  }
+  // Temporal reprojection: carry converged samples across camera moves.
+  if (pt.temporal) {
+    this->ptTemporalEnabled = *pt.temporal ? TRUE : FALSE;
+  }
+
+  this->emitLog("initialized (Vulkan ray tracing)");
+  return TRUE;
+}
+
+// --- Frame recording ------------------------------------------------------
+
+VkCommandBuffer
+SoRTXRenderBackend::beginTransientCommandBuffer()
+{
+  // Persistent transient pool + one-shot command buffer for the AS phase,
+  // allocated once instead of per frame.  The caller submits and waits the
+  // buffer every frame; resetting it here is safe because the submission is
+  // provably complete (vkQueueWaitIdle) by the time the next frame begins.
+  if (this->transientPool == VK_NULL_HANDLE) {
+    SoVulkanDebugUtils::setDevice(this->device);
+    VkCommandPoolCreateInfo pci {};
+    pci.sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO;
+    pci.flags = VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT |
+                VK_COMMAND_POOL_CREATE_TRANSIENT_BIT;
+    pci.queueFamilyIndex = this->queueFamilyIndex;
+    if (vkCreateCommandPool(this->device, &pci, this->allocator,
+                            &this->transientPool) != VK_SUCCESS) {
+      return VK_NULL_HANDLE;
+    }
+    SoVulkanDebugUtils::nameObject(this->device, VK_OBJECT_TYPE_COMMAND_POOL,
+                                   reinterpret_cast<uint64_t>(this->transientPool),
+                                   "Coin RT transient command pool");
+    VkCommandBufferAllocateInfo ai {};
+    ai.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
+    ai.commandPool = this->transientPool;
+    ai.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+    ai.commandBufferCount = 1;
+    if (vkAllocateCommandBuffers(this->device, &ai,
+                                 &this->transientCommandBuffer) !=
+        VK_SUCCESS) {
+      vkDestroyCommandPool(this->device, this->transientPool, this->allocator);
+      this->transientPool = VK_NULL_HANDLE;
+      return VK_NULL_HANDLE;
+    }
+  }
+  const VkResult resetRes = vkResetCommandBuffer(this->transientCommandBuffer, 0);
+  if (resetRes != VK_SUCCESS) {
+    this->emitError(("beginTransientCommandBuffer: vkResetCommandBuffer failed: "
+                     + SoVulkanShared::vkResultName(resetRes)).c_str());
+    return VK_NULL_HANDLE;
+  }
+  VkCommandBufferBeginInfo bi {};
+  bi.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
+  bi.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+  const VkResult beginRes =
+    vkBeginCommandBuffer(this->transientCommandBuffer, &bi);
+  if (beginRes != VK_SUCCESS) {
+    this->emitError(("beginTransientCommandBuffer: vkBeginCommandBuffer failed: "
+                     + SoVulkanShared::vkResultName(beginRes)).c_str());
+    return VK_NULL_HANDLE;
+  }
+  return this->transientCommandBuffer;
+}
+
+void
+SoRTXRenderBackend::releaseTransientCommandBuffer()
+{
+  if (this->transientCommandBuffer != VK_NULL_HANDLE) {
+    vkFreeCommandBuffers(this->device, this->transientPool, 1,
+                         &this->transientCommandBuffer);
+    this->transientCommandBuffer = VK_NULL_HANDLE;
+  }
+  if (this->transientPool != VK_NULL_HANDLE) {
+    vkDestroyCommandPool(this->device, this->transientPool, this->allocator);
+    this->transientPool = VK_NULL_HANDLE;
+  }
+}
+
+void
+SoRTXRenderBackend::setMaxFramesInFlight(uint32_t count)
+{
+  uint32_t size = count < 2u ? 2u : count;
+  if (size > RTX_MAX_FRAMES_IN_FLIGHT) {
+    size = RTX_MAX_FRAMES_IN_FLIGHT;
+  }
+  if (size == this->descriptorRingSize) {
+    return;
+  }
+  this->descriptorRingSize = size;
+  if (this->descriptorSetIndex >= size) {
+    this->descriptorSetIndex = 0;
+  }
+  // Extra ring slots are allocated lazily by updateDescriptors(); slots beyond
+  // the new size stay allocated but are simply never bound again.
+}
+
+// --- Lifecycle ------------------------------------------------------------
+
+void
+SoRTXRenderBackend::shutdown()
+{
+  if (!this->isInitialized()) return;
+
+  // Drain before destroying anything: a failed wait (e.g. device lost) means
+  // resources may still be in flight, so report it rather than free silently.
+  this->drainQueue("shutdown");
+
+  // The queue is idle: drain both deferred-destruction batches.
+  this->flushPendingDestroys();
+  this->flushPendingDestroys();
+
+  this->invalidateCache();
+  this->freePendingStagingDestroys();
+
+  // GPU-pick resources (Vulkan/RTX only): no-op unless a pick ever ran.
+  this->destroyPickResources();
+
+  if (this->tlas != VK_NULL_HANDLE) {
+    vkDestroyAccelerationStructureKHR(this->device, this->tlas,
+                                      this->allocator);
+    this->tlas = VK_NULL_HANDLE;
+  }
+  if (this->tlasBuffer != VK_NULL_HANDLE) {
+    vmaDestroyBuffer(this->vmaAllocator, this->tlasBuffer, this->tlasMemory);
+    this->tlasBuffer = VK_NULL_HANDLE;
+  }
+  if (this->tlasMemory != VK_NULL_HANDLE) {
+    this->tlasMemory = VK_NULL_HANDLE;
+  }
+  if (this->instanceBuffer != VK_NULL_HANDLE) {
+    vmaDestroyBuffer(this->vmaAllocator, this->instanceBuffer, this->instanceMemory);
+    this->instanceBuffer = VK_NULL_HANDLE;
+  }
+  if (this->instanceMemory != VK_NULL_HANDLE) {
+    this->instanceMemory = VK_NULL_HANDLE;
+  }
+  this->instanceBufferCapacity = 0;
+  this->tlasSize = 0;
+  if (this->scratchBuffer != VK_NULL_HANDLE) {
+    vmaDestroyBuffer(this->vmaAllocator, this->scratchBuffer, this->scratchMemory);
+    this->scratchBuffer = VK_NULL_HANDLE;
+  }
+  if (this->scratchMemory != VK_NULL_HANDLE) {
+    this->scratchMemory = VK_NULL_HANDLE;
+  }
+  this->scratchSize = 0;
+  this->scratchAddress = 0;
+  if (this->storageImage != VK_NULL_HANDLE) {
+    vkDestroyImageView(this->device, this->storageImageView, this->allocator);
+    vmaDestroyImage(this->vmaAllocator, this->storageImage,
+                    this->storageImageMemory);
+    this->storageImage = VK_NULL_HANDLE;
+    this->storageImageView = VK_NULL_HANDLE;
+    this->storageImageMemory = nullptr;
+  }
+  if (this->presentSampler != VK_NULL_HANDLE) {
+    vkDestroySampler(this->device, this->presentSampler, this->allocator);
+    this->presentSampler = VK_NULL_HANDLE;
+  }
+  this->destroyTextureArray();
+  if (this->accumBuffer != VK_NULL_HANDLE) {
+    vmaDestroyBuffer(this->vmaAllocator, this->accumBuffer, this->accumMemory);
+    this->accumBuffer = VK_NULL_HANDLE;
+  }
+  if (this->accumMemory != VK_NULL_HANDLE) {
+    this->accumMemory = VK_NULL_HANDLE;
+  }
+  if (this->normalBuffer != VK_NULL_HANDLE) {
+    vmaDestroyBuffer(this->vmaAllocator, this->normalBuffer, this->normalMemory);
+    this->normalBuffer = VK_NULL_HANDLE;
+  }
+  if (this->normalMemory != VK_NULL_HANDLE) {
+    this->normalMemory = VK_NULL_HANDLE;
+  }
+  if (this->positionBuffer != VK_NULL_HANDLE) {
+    vmaDestroyBuffer(this->vmaAllocator, this->positionBuffer, this->positionMemory);
+    this->positionBuffer = VK_NULL_HANDLE;
+  }
+  if (this->positionMemory != VK_NULL_HANDLE) {
+    this->positionMemory = VK_NULL_HANDLE;
+  }
+  if (this->stableDepthBuffer != VK_NULL_HANDLE) {
+    vmaDestroyBuffer(this->vmaAllocator, this->stableDepthBuffer,
+                     this->stableDepthMemory);
+    this->stableDepthBuffer = VK_NULL_HANDLE;
+  }
+  if (this->stableDepthMemory != VK_NULL_HANDLE) {
+    this->stableDepthMemory = VK_NULL_HANDLE;
+  }
+  if (this->sumSqBuffer != VK_NULL_HANDLE) {
+    vmaDestroyBuffer(this->vmaAllocator, this->sumSqBuffer, this->sumSqMemory);
+    this->sumSqBuffer = VK_NULL_HANDLE;
+  }
+  if (this->sumSqMemory != VK_NULL_HANDLE) {
+    this->sumSqMemory = VK_NULL_HANDLE;
+  }
+  if (this->activeCounterBuffer != VK_NULL_HANDLE) {
+    // The persistent mapping comes from VMA_ALLOCATION_CREATE_MAPPED_BIT, so
+    // there is no vmaMapMemory to balance before vmaDestroyBuffer.
+    this->activeCounterMapped = nullptr;
+    vmaDestroyBuffer(this->vmaAllocator, this->activeCounterBuffer, this->activeCounterMemory);
+    this->activeCounterBuffer = VK_NULL_HANDLE;
+  }
+  if (this->activeCounterMemory != VK_NULL_HANDLE) {
+    this->activeCounterMemory = VK_NULL_HANDLE;
+  }
+  if (this->accumHistoryBuffer != VK_NULL_HANDLE) {
+    vmaDestroyBuffer(this->vmaAllocator, this->accumHistoryBuffer, this->accumHistoryMemory);
+    this->accumHistoryBuffer = VK_NULL_HANDLE;
+  }
+  if (this->accumHistoryMemory != VK_NULL_HANDLE) {
+    this->accumHistoryMemory = VK_NULL_HANDLE;
+  }
+  if (this->sumSqHistoryBuffer != VK_NULL_HANDLE) {
+    vmaDestroyBuffer(this->vmaAllocator, this->sumSqHistoryBuffer, this->sumSqHistoryMemory);
+    this->sumSqHistoryBuffer = VK_NULL_HANDLE;
+  }
+  if (this->sumSqHistoryMemory != VK_NULL_HANDLE) {
+    this->sumSqHistoryMemory = VK_NULL_HANDLE;
+  }
+  if (this->positionHistoryBuffer != VK_NULL_HANDLE) {
+    vmaDestroyBuffer(this->vmaAllocator, this->positionHistoryBuffer, this->positionHistoryMemory);
+    this->positionHistoryBuffer = VK_NULL_HANDLE;
+  }
+  if (this->positionHistoryMemory != VK_NULL_HANDLE) {
+    this->positionHistoryMemory = VK_NULL_HANDLE;
+  }
+  // The screen-space motion-vector G-buffer (read by the denoiser readback)
+  // is part of the same PT buffer pool, so it must be destroyed here too.
+  if (this->motionBuffer != VK_NULL_HANDLE) {
+    vmaDestroyBuffer(this->vmaAllocator, this->motionBuffer, this->motionMemory);
+    this->motionBuffer = VK_NULL_HANDLE;
+  }
+  if (this->motionMemory != VK_NULL_HANDLE) {
+    this->motionMemory = VK_NULL_HANDLE;
+  }
+  this->ptHistoryValid = FALSE;
+  this->ptReprojectFrame = FALSE;
+  this->ptBufferWidth = 0;
+  this->ptBufferHeight = 0;
+  this->ptAccumulating = FALSE;
+  this->ptFrameIndex = 0;
+  this->destroyDenoiser();
+  this->flushPendingDestroys();
+  this->flushPendingDestroys();
+  if (this->materialBuffer != VK_NULL_HANDLE) {
+    vmaDestroyBuffer(this->vmaAllocator, this->materialBuffer, this->materialMemory);
+    this->materialBuffer = VK_NULL_HANDLE;
+    this->materialMemory = VK_NULL_HANDLE;
+    this->materialMapped = nullptr;
+  }
+  this->materialCount = 0;
+  this->materialBufferBytes = 0;
+  if (this->frameBuffer != VK_NULL_HANDLE) {
+    vmaDestroyBuffer(this->vmaAllocator, this->frameBuffer, this->frameMemory);
+    this->frameBuffer = VK_NULL_HANDLE;
+    this->frameMemory = VK_NULL_HANDLE;
+    this->frameMapped = nullptr;
+  }
+  if (this->presentFrameBuffer != VK_NULL_HANDLE) {
+    vmaDestroyBuffer(this->vmaAllocator, this->presentFrameBuffer, this->presentFrameMemory);
+    this->presentFrameBuffer = VK_NULL_HANDLE;
+    this->presentFrameMemory = VK_NULL_HANDLE;
+    this->presentFrameMapped = nullptr;
+  }
+  if (this->presentPipeline != VK_NULL_HANDLE) {
+    vkDestroyPipeline(this->device, this->presentPipeline, this->allocator);
+    this->presentPipeline = VK_NULL_HANDLE;
+  }
+  if (this->rtPipeline != VK_NULL_HANDLE) {
+    vkDestroyPipeline(this->device, this->rtPipeline, this->allocator);
+    this->rtPipeline = VK_NULL_HANDLE;
+  }
+  if (this->computePipeline != VK_NULL_HANDLE) {
+    vkDestroyPipeline(this->device, this->computePipeline, this->allocator);
+    this->computePipeline = VK_NULL_HANDLE;
+  }
+  if (this->denoiseDownsamplePipeline != VK_NULL_HANDLE) {
+    vkDestroyPipeline(this->device, this->denoiseDownsamplePipeline,
+                      this->allocator);
+    this->denoiseDownsamplePipeline = VK_NULL_HANDLE;
+  }
+  this->denoiseDownsampleDescriptorSet = VK_NULL_HANDLE;
+  this->denoiseDownsampleValid = false;
+  if (this->presentPipelineLayout != VK_NULL_HANDLE) {
+    vkDestroyPipelineLayout(this->device, this->presentPipelineLayout,
+                            this->allocator);
+    this->presentPipelineLayout = VK_NULL_HANDLE;
+  }
+  if (this->rtPipelineLayout != VK_NULL_HANDLE) {
+    vkDestroyPipelineLayout(this->device, this->rtPipelineLayout,
+                            this->allocator);
+    this->rtPipelineLayout = VK_NULL_HANDLE;
+  }
+  if (this->denoiseDownsamplePipelineLayout != VK_NULL_HANDLE) {
+    vkDestroyPipelineLayout(this->device, this->denoiseDownsamplePipelineLayout,
+                            this->allocator);
+    this->denoiseDownsamplePipelineLayout = VK_NULL_HANDLE;
+  }
+  if (this->presentVertexModule != VK_NULL_HANDLE) {
+    vkDestroyShaderModule(this->device, this->presentVertexModule,
+                          this->allocator);
+    this->presentVertexModule = VK_NULL_HANDLE;
+  }
+  if (this->presentFragmentModule != VK_NULL_HANDLE) {
+    vkDestroyShaderModule(this->device, this->presentFragmentModule,
+                          this->allocator);
+    this->presentFragmentModule = VK_NULL_HANDLE;
+  }
+  if (this->pathTraceModule != VK_NULL_HANDLE) {
+    vkDestroyShaderModule(this->device, this->pathTraceModule,
+                          this->allocator);
+    this->pathTraceModule = VK_NULL_HANDLE;
+  }
+  if (this->denoiseDownsampleModule != VK_NULL_HANDLE) {
+    vkDestroyShaderModule(this->device, this->denoiseDownsampleModule,
+                          this->allocator);
+    this->denoiseDownsampleModule = VK_NULL_HANDLE;
+  }
+  if (this->raygenModule != VK_NULL_HANDLE) {
+    vkDestroyShaderModule(this->device, this->raygenModule, this->allocator);
+    this->raygenModule = VK_NULL_HANDLE;
+  }
+  if (this->missModule != VK_NULL_HANDLE) {
+    vkDestroyShaderModule(this->device, this->missModule, this->allocator);
+    this->missModule = VK_NULL_HANDLE;
+  }
+  if (this->shadowMissModule != VK_NULL_HANDLE) {
+    vkDestroyShaderModule(this->device, this->shadowMissModule,
+                          this->allocator);
+    this->shadowMissModule = VK_NULL_HANDLE;
+  }
+  if (this->closestHitModule != VK_NULL_HANDLE) {
+    vkDestroyShaderModule(this->device, this->closestHitModule,
+                          this->allocator);
+    this->closestHitModule = VK_NULL_HANDLE;
+  }
+  if (this->shadowClosestHitModule != VK_NULL_HANDLE) {
+    vkDestroyShaderModule(this->device, this->shadowClosestHitModule,
+                          this->allocator);
+    this->shadowClosestHitModule = VK_NULL_HANDLE;
+  }
+  if (this->sbtBuffer != VK_NULL_HANDLE) {
+    vmaDestroyBuffer(this->vmaAllocator, this->sbtBuffer, this->sbtMemory);
+    this->sbtBuffer = VK_NULL_HANDLE;
+  }
+  if (this->sbtMemory != VK_NULL_HANDLE) {
+    this->sbtMemory = VK_NULL_HANDLE;
+  }
+  this->sbtRecordSize = 32;
+  this->sbtBaseOffset = 0;
+  if (this->normalPoolBuffer != VK_NULL_HANDLE) {
+    this->normalPoolMapped = nullptr;
+    vmaDestroyBuffer(this->vmaAllocator, this->normalPoolBuffer, this->normalPoolMemory);
+    this->normalPoolBuffer = VK_NULL_HANDLE;
+    this->normalPoolMemory = VK_NULL_HANDLE;
+  }
+  this->normalPoolCapacity = 0;
+  this->normalPoolUsed = 0;
+  if (this->neePoolBuffer != VK_NULL_HANDLE) {
+    this->neePoolMapped = nullptr;
+    vmaDestroyBuffer(this->vmaAllocator, this->neePoolBuffer, this->neePoolMemory);
+    this->neePoolBuffer = VK_NULL_HANDLE;
+    this->neePoolMemory = VK_NULL_HANDLE;
+  }
+  this->neePoolCapacity = 0;
+  this->neePoolUsed = 0;
+  this->neePoolCount = 0;
+  if (this->uvPoolBuffer != VK_NULL_HANDLE) {
+    this->uvPoolMapped = nullptr;
+    vmaDestroyBuffer(this->vmaAllocator, this->uvPoolBuffer,
+                     this->uvPoolMemory);
+    this->uvPoolBuffer = VK_NULL_HANDLE;
+    this->uvPoolMemory = VK_NULL_HANDLE;
+  }
+  this->uvPoolCapacity = 0;
+  this->uvPoolUsed = 0;
+  if (this->tangentPoolBuffer != VK_NULL_HANDLE) {
+    this->tangentPoolMapped = nullptr;
+    vmaDestroyBuffer(this->vmaAllocator, this->tangentPoolBuffer,
+                     this->tangentPoolMemory);
+    this->tangentPoolBuffer = VK_NULL_HANDLE;
+    this->tangentPoolMemory = VK_NULL_HANDLE;
+  }
+  this->tangentPoolCapacity = 0;
+  this->tangentPoolUsed = 0;
+  if (this->descriptorPool != VK_NULL_HANDLE) {
+    vkDestroyDescriptorPool(this->device, this->descriptorPool,
+                            this->allocator);
+    this->descriptorPool = VK_NULL_HANDLE;
+  }
+  if (this->rtSetLayout != VK_NULL_HANDLE) {
+    vkDestroyDescriptorSetLayout(this->device, this->rtSetLayout,
+                                 this->allocator);
+    this->rtSetLayout = VK_NULL_HANDLE;
+  }
+  if (this->presentSetLayout != VK_NULL_HANDLE) {
+    vkDestroyDescriptorSetLayout(this->device, this->presentSetLayout,
+                                 this->allocator);
+    this->presentSetLayout = VK_NULL_HANDLE;
+  }
+  if (this->denoiseDownsampleSetLayout != VK_NULL_HANDLE) {
+    vkDestroyDescriptorSetLayout(this->device, this->denoiseDownsampleSetLayout,
+                                 this->allocator);
+    this->denoiseDownsampleSetLayout = VK_NULL_HANDLE;
+  }
+  if (this->offscreenFramebuffer != VK_NULL_HANDLE) {
+    vkDestroyFramebuffer(this->device, this->offscreenFramebuffer,
+                         this->allocator);
+    this->offscreenFramebuffer = VK_NULL_HANDLE;
+  }
+  if (this->offscreenRenderPass != VK_NULL_HANDLE) {
+    vkDestroyRenderPass(this->device, this->offscreenRenderPass,
+                        this->allocator);
+    this->offscreenRenderPass = VK_NULL_HANDLE;
+  }
+  this->releaseTransientCommandBuffer();
+  this->offscreenColorImage = VK_NULL_HANDLE;
+  this->offscreenColorView = VK_NULL_HANDLE;
+  for (uint32_t i = 0; i < RTX_MAX_FRAMES_IN_FLIGHT; ++i) {
+    this->rtDescriptorSets[i] = VK_NULL_HANDLE;
+    this->presentDescriptorSets[i] = VK_NULL_HANDLE;
+    // The sets are invalid until updateDescriptors() rewrites them in the next
+    // engine generation; descriptorSetIndex is intentionally NOT reset here, so
+    // the first (possibly non-dirty) frame must repopulate its torn set.
+    this->rtSetValid[i] = false;
+    this->presentSetValid[i] = false;
+  }
+
+#if COIN_BUILD_RTX_DENOISER
+  // Every VMA-backed buffer/image has been released above (including the
+  // deferred CUDA-interop destroys flushed by destroyDenoiser()); drop the
+  // custom export pool before the allocator so VMA sees it empty.  The pool
+  // and rtxInteropPool member exist only when the OptiX denoiser is compiled
+  // in, so the destroy must be guarded to match the declaration.
+  if (this->rtxInteropPool != VK_NULL_HANDLE) {
+    vmaDestroyPool(this->vmaAllocator, this->rtxInteropPool);
+    this->rtxInteropPool = VK_NULL_HANDLE;
+  }
+#endif
+  if (this->vmaAllocator != nullptr) {
+    vmaDestroyAllocator(this->vmaAllocator);
+    this->vmaAllocator = nullptr;
+  }
+
+  this->instance = VK_NULL_HANDLE;
+  this->physicalDevice = VK_NULL_HANDLE;
+  this->device = VK_NULL_HANDLE;
+  this->queue = VK_NULL_HANDLE;
+  this->allocator = nullptr;
+
+  this->setInitialized(FALSE);
+  this->emitLog("shutdown");
+}
+
+SbBool
+SoRTXRenderBackend::render(const SoDrawList & drawlist,
+                           const SoRenderParams & params)
+{
+  if (!this->isInitialized()) {
+    this->emitError("render called before backend initialization");
+    return FALSE;
+  }
+  this->ptLastFrame = params.frame;
+  if (!params.renderTarget) {
+    this->emitError(
+      "render called without a SoVulkanRenderTarget in "
+      "SoRenderParams::renderTarget");
+    return FALSE;
+  }
+  this->debugValidateDrawList(drawlist);
+  this->flushPendingDestroys();
+
+  const auto * target =
+    static_cast<const SoVulkanRenderTarget *>(params.renderTarget);
+  if (target->colorImageView == VK_NULL_HANDLE ||
+      target->colorImage == VK_NULL_HANDLE || target->extent.width == 0 ||
+      target->extent.height == 0) {
+    this->emitError("invalid Vulkan render target");
+    return FALSE;
+  }
+
+  // Offscreen path: single color attachment render pass + framebuffer.
+  // The attachment is the swapchain/MSAA color image, so the render pass
+  // and the present pipeline must both use the target's sample count
+  // (VUID-VkFramebufferCreateInfo-renderPass-04553 and
+  // VUID-VkGraphicsPipelineCreateInfo-renderPass-06082).  Both are cached
+  // per target identity so this path does not recreate them every frame.
+  const bool targetChanged =
+    this->offscreenRenderPass == VK_NULL_HANDLE ||
+    this->offscreenColorImage != target->colorImage ||
+    this->offscreenColorView != target->colorImageView ||
+    this->offscreenColorFormat != target->colorFormat ||
+    this->offscreenSampleCount != target->sampleCount ||
+    this->offscreenDepthImage != target->depthImage ||
+    this->offscreenDepthView != target->depthImageView ||
+    this->offscreenExtent.width != target->extent.width ||
+    this->offscreenExtent.height != target->extent.height;
+  if (targetChanged) {
+    if (this->offscreenFramebuffer != VK_NULL_HANDLE) {
+      vkDestroyFramebuffer(this->device, this->offscreenFramebuffer,
+                           this->allocator);
+      this->offscreenFramebuffer = VK_NULL_HANDLE;
+    }
+    if (this->offscreenRenderPass != VK_NULL_HANDLE) {
+      // The previous render() completed (it waits idle before returning),
+      // so the old pass cannot be referenced by anything still pending.
+      vkDestroyRenderPass(this->device, this->offscreenRenderPass,
+                          this->allocator);
+      this->offscreenRenderPass = VK_NULL_HANDLE;
+    }
+
+    VkAttachmentDescription attachment {};
+    attachment.format = target->colorFormat;
+    attachment.samples = target->sampleCount;
+    attachment.loadOp = VK_ATTACHMENT_LOAD_OP_LOAD;
+    attachment.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
+    attachment.stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
+    attachment.stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
+    attachment.initialLayout = target->colorLayout;
+    attachment.finalLayout = target->colorLayout;
+
+    VkAttachmentReference colorRef {};
+    colorRef.attachment = 0;
+    colorRef.layout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+
+    // The traced scene depth is written here (PresentFragment.glsl sets
+    // gl_FragDepth from the first-bounce hit position) so the raster
+    // composite overlay that runs afterwards (BRep edge lines, navigation
+    // cube) can depth-test against it and cull hidden edges.  Without a depth
+    // attachment the write is discarded and overlay edges show through faces.
+    const bool hasDepth = target->depthImageView != VK_NULL_HANDLE &&
+                          target->depthFormat != VK_FORMAT_UNDEFINED;
+    VkAttachmentDescription depthAttachment {};
+    VkAttachmentReference depthRef {};
+    uint32_t attachmentCount = 1;
+    if (hasDepth) {
+      depthAttachment.format = target->depthFormat;
+      depthAttachment.samples = target->sampleCount;
+      depthAttachment.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
+      depthAttachment.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
+      depthAttachment.stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
+      depthAttachment.stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
+      depthAttachment.initialLayout = target->depthLayout;
+      depthAttachment.finalLayout = target->depthLayout;
+      depthRef.attachment = 1;
+      depthRef.layout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
+      attachmentCount = 2;
+    }
+
+    VkSubpassDescription subpass {};
+    subpass.pipelineBindPoint = VK_PIPELINE_BIND_POINT_GRAPHICS;
+    subpass.colorAttachmentCount = 1;
+    subpass.pColorAttachments = &colorRef;
+    subpass.pDepthStencilAttachment = hasDepth ? &depthRef : nullptr;
+    VkRenderPassCreateInfo rpCI {};
+    // C99 compound literals ((Type[]){...}) are invalid in C++, so build the
+    // render-pass attachment array on the stack instead of using one on the
+    // branch (the framebuffer code below reuses the name 'attachments').
+    VkAttachmentDescription renderPassAttachments[2] = {
+      attachment,
+      depthAttachment
+    };
+    rpCI.sType = VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO;
+    rpCI.attachmentCount = attachmentCount;
+    rpCI.pAttachments = hasDepth ? renderPassAttachments : &attachment;
+    rpCI.subpassCount = 1;
+    rpCI.pSubpasses = &subpass;
+    if (vkCreateRenderPass(this->device, &rpCI, this->allocator,
+                           &this->offscreenRenderPass) != VK_SUCCESS) {
+      this->emitError("failed to create RT render pass");
+      return FALSE;
+    }
+
+    VkFramebufferCreateInfo fci {};
+    fci.sType = VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO;
+    fci.renderPass = this->offscreenRenderPass;
+    fci.attachmentCount = attachmentCount;
+    const VkImageView attachments[] = {target->colorImageView,
+                                       target->depthImageView};
+    fci.pAttachments = attachments;
+    fci.width = target->extent.width;
+    fci.height = target->extent.height;
+    fci.layers = 1;
+    if (vkCreateFramebuffer(this->device, &fci, this->allocator,
+                            &this->offscreenFramebuffer) != VK_SUCCESS) {
+      vkDestroyRenderPass(this->device, this->offscreenRenderPass,
+                          this->allocator);
+      this->offscreenRenderPass = VK_NULL_HANDLE;
+      this->emitError("failed to create RT framebuffer");
+      return FALSE;
+    }
+
+    this->offscreenColorImage = target->colorImage;
+    this->offscreenColorView = target->colorImageView;
+    this->offscreenColorFormat = target->colorFormat;
+    this->offscreenSampleCount = target->sampleCount;
+    this->offscreenDepthImage = target->depthImage;
+    this->offscreenDepthView = target->depthImageView;
+    this->offscreenExtent = target->extent;
+  }
+  const VkRenderPass renderPass = this->offscreenRenderPass;
+  const VkFramebuffer framebuffer = this->offscreenFramebuffer;
+
+  // Persistent transient command buffer for the AS phase (BLAS/TLAS builds
+  // and buffer copies), which is not allowed inside a render pass.  It is
+  // recorded first, then the render pass begins and only the trace/present
+  // work is recorded inside it.
+  VkCommandBuffer cmd = this->beginTransientCommandBuffer();
+  if (cmd == VK_NULL_HANDLE) {
+    this->emitError("failed to allocate RT command buffer");
+    return FALSE;
+  }
+
+  // Phase 1: acceleration structures (outside the render pass).
+  const bool asOk =
+    this->recordAccelerationStructures(drawlist, params, *target, cmd);
+  bool traceOk = false;
+
+  if (asOk) {
+    VkRenderPassBeginInfo rpbi {};
+    rpbi.sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO;
+    rpbi.renderPass = renderPass;
+    rpbi.framebuffer = framebuffer;
+    rpbi.renderArea.offset = {0, 0};
+    rpbi.renderArea.extent = target->extent;
+    // Depth attachment (when present) is LOAD_OP_CLEAR so the composite
+    // overlay's LESS_OR_EQUAL depth test starts from a clean far plane
+    // (background = 1.0); the present pass then writes the real scene depth
+    // for traced pixels so hidden edges/navcube are culled.
+    const bool hasDepthClear =
+      target->depthImageView != VK_NULL_HANDLE &&
+      target->depthFormat != VK_FORMAT_UNDEFINED;
+    VkClearValue clearValues[2] {};
+    clearValues[0].color = {{0.0f, 0.0f, 0.0f, 0.0f}};
+    clearValues[1].depthStencil = {1.0f, 0};
+    rpbi.clearValueCount = hasDepthClear ? 2u : 1u;
+    rpbi.pClearValues = clearValues;
+    vkCmdBeginRenderPass(cmd, &rpbi, VK_SUBPASS_CONTENTS_INLINE);
+
+    // The attachment is loaded, not cleared at pass begin: the clear is
+    // issued below scoped to the requested viewport region (matching the
+    // raster backend's recordClear()).  Clearing the whole attachment here
+    // would overwrite content outside a sub-region viewport.
+    if (params.flags & SO_PARAM_CLEAR_WINDOW) {
+      VkClearAttachment clear {};
+      clear.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+      clear.colorAttachment = 0;
+      clear.clearValue.color.float32[0] = params.clearColor[0];
+      clear.clearValue.color.float32[1] = params.clearColor[1];
+      clear.clearValue.color.float32[2] = params.clearColor[2];
+      clear.clearValue.color.float32[3] = params.clearColor[3];
+
+      const SbVec2s & origin = params.viewport.getViewportOriginPixels();
+      const SbVec2s & size = params.viewport.getViewportSizePixels();
+      const int32_t x0 = std::max(0, static_cast<int32_t>(origin[0]));
+      const int32_t y0 = std::max(
+        0, static_cast<int32_t>(target->extent.height) -
+             static_cast<int32_t>(origin[1]) -
+             static_cast<int32_t>(size[1]));
+      const int32_t x1 = std::min(static_cast<int32_t>(target->extent.width),
+                                  static_cast<int32_t>(origin[0]) +
+                                    static_cast<int32_t>(size[0]));
+      const int32_t y1 = std::min(
+        static_cast<int32_t>(target->extent.height),
+        static_cast<int32_t>(target->extent.height) -
+          static_cast<int32_t>(origin[1]));
+      if (x1 > x0 && y1 > y0) {
+        VkClearRect rect {};
+        rect.rect.offset = {x0, y0};
+        rect.rect.extent = {static_cast<uint32_t>(x1 - x0),
+                            static_cast<uint32_t>(y1 - y0)};
+        rect.baseArrayLayer = 0;
+        rect.layerCount = 1;
+        vkCmdClearAttachments(cmd, 1, &clear, 1, &rect);
+      }
+    }
+
+    // Phase 2: trace + present (inside the render pass).
+    traceOk =
+      this->recordTraceAndPresent(params, *target, cmd, renderPass);
+
+    vkCmdEndRenderPass(cmd);
+  }
+  const VkResult endResult = vkEndCommandBuffer(cmd);
+  if (endResult != VK_SUCCESS) {
+    this->emitError(("render: vkEndCommandBuffer failed: "
+                     + SoVulkanShared::vkResultName(endResult)).c_str());
+  }
+
+  VkSubmitInfo si {};
+  si.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
+  si.commandBufferCount = 1;
+  si.pCommandBuffers = &cmd;
+  // A command buffer that failed to end must not be submitted; propagate the
+  // end result so the failure is reported once, with its reason.
+  const VkResult submitResult =
+    endResult == VK_SUCCESS
+      ? vkQueueSubmit(this->queue, 1, &si, VK_NULL_HANDLE)
+      : endResult;
+  const VkResult waitResult = submitResult == VK_SUCCESS
+    ? vkQueueWaitIdle(this->queue) : submitResult;
+  if (submitResult == VK_SUCCESS && waitResult == VK_SUCCESS) {
+    this->updateAdaptiveStats();
+    // Denoise must read the just-written accumBuffer before the ping-pong
+    // swap for the next frame's reprojection (see renderExternal).
+    this->updateDenoise();
+    this->swapPathTracingHistory();
+  }
+  if (SoVulkanConfig::get().rtxDebug.rtDebug) {
+    fprintf(stderr, "[RTDBG] submit=%d wait=%d asOk=%d traceOk=%d\n",
+            static_cast<int>(submitResult), static_cast<int>(waitResult),
+            asOk ? 1 : 0, traceOk ? 1 : 0);
+  }
+  const bool submitted = submitResult == VK_SUCCESS && waitResult == VK_SUCCESS;
+
+  // Staging buffers are only referenced by the private submission; release
+  // them after it provably completed (or never ran).  The transient command
+  // buffer stays pooled for the next frame.
+  if (submitted) {
+    this->freePendingStagingDestroys();
+    // The frame is fully complete here: shrink any BLAS that was built with
+    // ALLOW_COMPACTION and has not yet been compacted (FC_VULKAN_AS_COMPACT).
+    this->compactPendingBlases();
+  }
+
+  if (!asOk || !traceOk || !submitted) {
+    this->emitError("render: RT frame failed");
+    return FALSE;
+  }
+  return TRUE;
+}
+
+void
+SoRTXRenderBackend::dumpStorageImageIfRequested()
+{
+  const char * path = SoVulkanShared::envString("FC_VULKAN_PT_DUMP");
+  if (!path) return;
+  if (this->storageImage == VK_NULL_HANDLE ||
+      this->storageWidth == 0 || this->storageHeight == 0) return;
+
+  // FC_VULKAN_PT_DUMP_EVERY=N: dump every N frames (frame-index-suffixed),
+  // letting one run capture the whole progressive sequence.  Otherwise dump
+  // one frame at FC_VULKAN_PT_DUMP_FRAME (default = the sample cap).
+  const char * everystr = SoVulkanShared::envString("FC_VULKAN_PT_DUMP_EVERY");
+  const char * atstr = SoVulkanShared::envString("FC_VULKAN_PT_DUMP_FRAME");
+  uint32_t dumpAt = this->ptMaxSamples;
+  if (atstr) {
+    bool atOk = false;
+    const int atVal = SoVulkanShared::parseNonNegativeInt(
+      atstr, static_cast<int>(this->ptMaxSamples), &atOk);
+    if (!atOk) {
+      this->emitError(
+        "FC_VULKAN_PT_DUMP_FRAME is not a valid non-negative integer; using "
+        "the sample cap");
+    }
+    dumpAt = static_cast<uint32_t>(atVal);
+  }
+  bool ok = false;
+  if (everystr) {
+    bool everyOk = false;
+    const int everyVal =
+      SoVulkanShared::parseNonNegativeInt(everystr, 0, &everyOk);
+    if (!everyOk) {
+      this->emitError(
+        "FC_VULKAN_PT_DUMP_EVERY is not a valid non-negative integer; "
+        "disabling the periodic dump");
+      return;
+    }
+    const uint32_t every = static_cast<uint32_t>(everyVal);
+    if (every == 0 || this->ptFrameIndex % every != 0) return;
+    ok = true;
+  } else if (this->ptFrameIndex != dumpAt || this->ptDumpDone) {
+    return;
+  }
+  if (ok) this->ptDumpDone = TRUE;
+
+  char fullpath[4096];
+  if (everystr) {
+    std::snprintf(fullpath, sizeof(fullpath), "%s.%03u.ppm", path,
+                  this->ptFrameIndex);
+  } else {
+    std::snprintf(fullpath, sizeof(fullpath), "%s", path);
+  }
+
+  const uint32_t w = this->storageWidth;
+  const uint32_t h = this->storageHeight;
+
+  // Shared image-to-host dump primitive (staging alloc + one-shot submit +
+  // map), so this no longer hand-rolls its own command buffer/submit/wait.
+  const SoVulkanShared::MemoryTypePicker pick =
+    [this](const VkMemoryRequirements & req, VkMemoryPropertyFlags desired,
+           uint32_t & index) {
+      return this->memProps.pick(req, desired, index);
+    };
+  const SoVulkan::Result dumpResult = SoVulkanShared::dumpImageToHost(
+    this->device, this->queue, this->transientPool, this->allocator,
+    this->storageImage, VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_LAYOUT_GENERAL, w, h,
+    pick, [&](const void * mapped) {
+      const unsigned char * src = static_cast<const unsigned char *>(mapped);
+      FILE * f = fopen(fullpath, "wb");
+      if (f) {
+        fprintf(f, "P6\n%u %u\n255\n", w, h);
+        const size_t rowbytes = static_cast<size_t>(w) * 4;
+        // Source rows are packed RGBA (4 bytes/px); the PPM is RGB, so copy
+        // 3 bytes per pixel (drop the alpha) instead of writing the raw row,
+        // which would interleave alpha into the color channels.
+        std::vector<unsigned char> row(static_cast<size_t>(w) * 3);
+        for (uint32_t y = 0; y < h; ++y) {
+          const unsigned char * r =
+            src + (static_cast<size_t>(y) * rowbytes);
+          for (uint32_t x = 0; x < w; ++x) {
+            row[3u * x + 0u] = r[4u * x + 0u];
+            row[3u * x + 1u] = r[4u * x + 1u];
+            row[3u * x + 2u] = r[4u * x + 2u];
+          }
+          fwrite(row.data(), 1, row.size(), f);
+        }
+        fclose(f);
+        fprintf(stderr, "[RTDBG] dumpStorageImage: wrote %s %ux%u\n", fullpath,
+                w, h);
+      } else {
+        fprintf(stderr, "[RTDBG] dumpStorageImage: fopen %s failed\n", fullpath);
+      }
+    });
+  if (!dumpResult.isOk()) {
+    char msg[256];
+    std::snprintf(msg, sizeof(msg), "dumpStorageImage failed: %s",
+                  dumpResult.message().c_str());
+    this->emitError(msg);
+  }
+}
+
+SbBool
+  SoRTXRenderBackend::renderExternal(const SoDrawList & drawlist,
+                                     const SoRenderParams & params,
+                                     VkCommandBuffer commandBuffer,
+                                     VkRenderPass renderPass)
+{
+  if (!this->isInitialized()) {
+    this->emitError("renderExternal called before backend initialization");
+    return FALSE;
+  }
+  this->ptLastFrame = params.frame;
+  if (SoVulkanConfig::get().debug.blackDebug) {
+    fprintf(stderr,
+            "[BLACKRT] rtx renderExternal frame=%d acc=%d frameIndex=%u "
+            "idleFrames=%u settle=%u enabled=%d samples=%u\n",
+            params.frame, static_cast<int>(this->ptAccumulating),
+            this->ptFrameIndex, this->ptIdleFrames, this->ptSettleFrames,
+            static_cast<int>(this->ptEnabled),
+            this->getPathTracingSampleCount());
+  }
+  if (!params.renderTarget) {
+    this->emitError(
+      "renderExternal called without a SoVulkanRenderTarget in "
+      "SoRenderParams::renderTarget");
+    return FALSE;
+  }
+  if (commandBuffer == VK_NULL_HANDLE || renderPass == VK_NULL_HANDLE) {
+    this->emitError("renderExternal called without command buffer/render pass");
+    return FALSE;
+  }
+  this->debugValidateDrawList(drawlist);
+  this->flushPendingDestroys(true);
+
+  const auto * target =
+    static_cast<const SoVulkanRenderTarget *>(params.renderTarget);
+  if (target->colorImageView == VK_NULL_HANDLE ||
+      target->colorImage == VK_NULL_HANDLE || target->extent.width == 0 ||
+      target->extent.height == 0) {
+    this->emitError("invalid Vulkan render target");
+    return FALSE;
+  }
+
+  // The caller's command buffer is already inside an active render pass, so
+  // the acceleration-structure phase (BLAS/TLAS builds and buffer copies) is
+  // recorded on the persistent transient command buffer which is submitted
+  // and waited on here.  Queue submission is strictly ordered and the wait
+  // makes the AS writes visible to the trace recorded below, so no explicit
+  // synchronization with the caller's buffer is required.
+  const bool wantTiming = [] {
+    static const bool enabled = SoVulkanConfig::get().debug.frameTiming;
+    return enabled;
+  }();
+  const double t0 = wantTiming ? vkNowMs() : 0.0;
+  VkCommandBuffer cmd = this->beginTransientCommandBuffer();
+  if (cmd == VK_NULL_HANDLE) {
+    this->emitError("renderExternal: failed to allocate AS command buffer");
+    return FALSE;
+  }
+  const bool asOk =
+    this->recordAccelerationStructures(drawlist, params, *target, cmd);
+  const VkResult endResult = vkEndCommandBuffer(cmd);
+  if (endResult != VK_SUCCESS) {
+    this->emitError(("renderExternal: vkEndCommandBuffer failed: "
+                     + SoVulkanShared::vkResultName(endResult)).c_str());
+  }
+  const double t1 = wantTiming ? vkNowMs() : 0.0;
+  bool submitted = FALSE;
+  // Never submit a command buffer that failed to end.
+  if (asOk && endResult == VK_SUCCESS) {
+    VkSubmitInfo si {};
+    si.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
+    si.commandBufferCount = 1;
+    si.pCommandBuffers = &cmd;
+    submitted = vkQueueSubmit(this->queue, 1, &si, VK_NULL_HANDLE) ==
+      VK_SUCCESS && vkQueueWaitIdle(this->queue) == VK_SUCCESS;
+  }
+  const double t2 = wantTiming ? vkNowMs() : 0.0;
+  if (submitted) {
+    this->updateAdaptiveStats();
+    // The denoiser readback (recordDenoiseReadback) reads this->accumBuffer,
+    // which the raygen wrote this frame.  swapPathTracingHistory() below
+    // swaps accumBuffer<->accumHistoryBuffer for the next frame's
+    // reprojection, so the denoise must read the just-written data BEFORE the
+    // swap; otherwise it denoises the stale/empty history buffer.
+    this->updateDenoise();
+    this->swapPathTracingHistory();
+  }
+  const double t3 = wantTiming ? vkNowMs() : 0.0;
+  // Staging buffers are only referenced by the private submission; release
+  // them after it provably completed (or never ran).  The command buffer
+  // and pool are released in either case.
+  if (submitted) {
+    this->freePendingStagingDestroys();
+    // The AS phase submission is complete here: shrink any BLAS built with
+    // ALLOW_COMPACTION that has not yet been compacted (FC_VULKAN_AS_COMPACT).
+    this->compactPendingBlases();
+  }
+
+  if (!asOk || !submitted) {
+    this->emitError("renderExternal: AS phase failed");
+    return FALSE;
+  }
+
+  // The trace ran in the AS phase above and the queue is idle, so storageImage
+  // holds the current ray-traced result (if the tracer is accumulating).
+  this->dumpStorageImageIfRequested();
+
+  // The present pass is recorded into the caller's buffer (inside its
+  // render pass); the trace ran in the AS phase above.  The descriptor set
+  // was refreshed by recordAccelerationStructures() after the TLAS
+  // (re)build, so binding 0 references the current TLAS.
+  const bool presentOk =
+    this->recordTraceAndPresent(params, *target, commandBuffer, renderPass);
+  if (wantTiming) {
+    // interval = host frame pacing (1/FPS, includes the Qt-submitted trace +
+    // present + vsync).  asRecord = CPU time to record the AS builds;
+    // asGpu = AS-phase GPU time (the submit+waitIdle blocks until it is done);
+    // denoise = updateDenoise; traceRecord = present-pass record (CPU).
+    const double t4 = vkNowMs();
+    const double interval = this->lastFrameStartMs > 0.0
+      ? t0 - this->lastFrameStartMs : 0.0;
+    this->lastFrameStartMs = t4;
+    fprintf(stderr,
+            "[RTDBG] frameTiming interval=%.2f asRecord=%.2f asGpu=%.2f "
+            "denoise=%.2f traceRecord=%.2f geomScan=%.2f\n",
+            interval, t1 - t0, t2 - t1, t3 - t2, t4 - t3,
+            this->lastGeomScanMs);
+  }
+  return presentOk ? TRUE : FALSE;
+}

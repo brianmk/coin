@@ -1,34 +1,36 @@
 RegularSources = \
-	SoGLContext.cpp \
-	SoGL.cpp \
-	SoGLBigImage.cpp \
-	SoGLDriverDatabase.cpp \
-	SoGLImage.cpp \
-	SoGLCubeMapImage.cpp \
-        SoGLNurbs.cpp \
-        SoRenderManager.cpp \
-	SoRenderManagerP.cpp \
-	SoOffscreenRenderer.cpp \
-	SoOffscreenCGData.cpp \
-	SoOffscreenGLXData.cpp \
-	SoOffscreenWGLData.cpp \
-	SoVBO.cpp \
-	SoVertexArrayIndexer.cpp \
-	CoinOffscreenGLCanvas.cpp
+	gl/SoGLContext.cpp \
+	gl/SoGL.cpp \
+	gl/SoGLBigImage.cpp \
+	gl/SoGLDriverDatabase.cpp \
+	gl/SoGLImage.cpp \
+	gl/SoGLCubeMapImage.cpp \
+        gl/SoGLNurbs.cpp \
+        backend/SoRenderManager.cpp \
+	backend/SoRenderManagerP.cpp \
+	backend/SoSceneManagerBase.cpp \
+	gl/SoOffscreenRenderer.cpp \
+	gl/SoOffscreenCGData.cpp \
+	gl/SoOffscreenGLXData.cpp \
+	gl/SoOffscreenWGLData.cpp \
+	gl/SoVBO.cpp \
+	gl/SoVertexArrayIndexer.cpp \
+	gl/CoinOffscreenGLCanvas.cpp
 
 LinkHackSources = \
 	all-rendering-cpp.cpp
 PublicHeaders =
 PrivateHeaders = \
-	SoGL.h \
-        SoGLNurbs.h \
-	CoinOffscreenGLCanvas.h \
-	SoVBO.h \
-	SoVertexArrayIndexer.h \
-	SoOffscreenCGData.h \
-	SoOffscreenGLXData.h \
-	SoOffscreenWGLData.h \
-        SoRenderManagerP.h
+	gl/SoGL.h \
+        gl/SoGLNurbs.h \
+	gl/CoinOffscreenGLCanvas.h \
+	gl/SoVBO.h \
+	gl/SoVertexArrayIndexer.h \
+	gl/SoOffscreenCGData.h \
+	gl/SoOffscreenGLXData.h \
+	gl/SoOffscreenWGLData.h \
+        backend/SoRenderManagerP.h \
+	backend/SoSceneManagerBase.h
 ObsoleteHeaders =
 
 ##$ BEGIN TEMPLATE Make-Common(rendering, rendering)

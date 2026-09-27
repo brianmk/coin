@@ -125,7 +125,7 @@ class SoVBO;
 #include "misc/SbHash.h"
 #include "misc/SoConfigSettings.h"
 #if COIN_BUILD_LEGACY_GL_RENDERER
-#include "rendering/SoVBO.h"
+#include "rendering/gl/SoVBO.h"
 #endif
 
 #ifdef HAVE_VRML97

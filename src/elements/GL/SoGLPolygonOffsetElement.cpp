@@ -49,7 +49,7 @@
 #include <Inventor/errors/SoDebugError.h>
 #include <Inventor/misc/SoGLDriverDatabase.h>
 
-#include "rendering/SoGL.h"
+#include "rendering/gl/SoGL.h"
 
 SO_ELEMENT_SOURCE(SoGLPolygonOffsetElement);
 

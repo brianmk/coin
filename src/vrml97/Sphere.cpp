@@ -101,7 +101,7 @@
 #include "nodes/SoSubNodeP.h"
 #include "misc/SoGenerate.h"
 #include "misc/SoPick.h"
-#include "rendering/SoGL.h"
+#include "rendering/gl/SoGL.h"
 
 #define SPHERE_NUM_SLICES 30.0f
 #define SPHERE_NUM_STACKS 30.0f

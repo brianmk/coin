@@ -23,6 +23,12 @@ layout(set = 0, binding = 3, std430) readonly buffer NormalBuffer { vec4 normals
 layout(set = 0, binding = 4, std430) readonly buffer PositionBuffer { vec4 positions[]; };
 layout(set = 0, binding = 5, std430) readonly buffer DenoisedBuffer { vec4 denoised[]; };
 
+// Stable occlusion depth for the raster edge-overlay composite: the first-
+// bounce hit of the path tracer's un-jittered centre sample (world position in
+// xyz, ray distance in w; w > 1.0e6 marks a miss).  Separate from the ping-ponged
+// position G-buffer (binding 4) so it is constant across the accumulation run.
+layout(set = 0, binding = 7, std430) readonly buffer StableDepthBuffer { vec4 stableDepth[]; };
+
 // View -> clip projection (forward) of the traced camera.  The present
 // pass writes the scene depth from the first-bounce hit position so the
 // raster composite overlay (BRep edge lines / point markers) can be depth
@@ -37,13 +43,115 @@ layout(push_constant) uniform PresentPush {
     vec4 u_present;  // x = width, y = height, z = denoiseOn, w = frameIndex
     vec4 u_origin;   // x = viewport origin x, y = viewport origin y (pixels)
     vec4 u_denoise;  // x = OIDN result available (sample denoised buffer)
+                     // y = denoise upscale factor, z = HDR output,
+                     // w = diffuse-white gain (1.0 = reference white)
+    vec4 u_tone;     // x = highlight rolloff (0 = clip, 1..3 = filmic), yzw reserved
 } pc;
 
 layout(location = 0) out vec4 fragColor;
 
+// Optional highlight-rolloff operators for the HDR path.  Input and output are
+// scene-linear radiance (1.0 = the compositor's reference white) and the
+// published matrix-free forms are used (0 = clip/passthrough, 1 = Reinhard,
+// 2 = ACES, 3 = Hable).  Mode 0 leaves values above 1.0 as HDR highlights; the
+// filmic curves compress the result into [0,1].  This is the scRGB pipeline,
+// matching data/shaders/vulkan/output/OutputFragment.glsl (kept in sync by hand:
+// the two backends own separate shaders and glslangValidator does not resolve
+// shared includes here).
+vec3 tonemap_clip(vec3 L)
+{
+    return clamp(L, 0.0, 1.0);
+}
+
+// https://www.cs.utah.edu/docs/techreports/2002/pdf/UUCS-02-001.pdf
+vec3 tonemap_reinhard(vec3 L)
+{
+    return L / (1.0 + L);
+}
+
+// https://knarkowicz.wordpress.com/2016/01/06/aces-filmic-tone-mapping-curve/
+vec3 tonemap_aces(vec3 x)
+{
+    const float a = 2.51;
+    const float b = 0.03;
+    const float c = 2.43;
+    const float d = 0.59;
+    const float e = 0.14;
+    return clamp((x * (a * x + b)) / (x * (c * x + d) + e), 0.0, 1.0);
+}
+
+// Uncharted 2 (Hable), http://filmicworlds.com/blog/filmic-tonemapping-operators/.
+vec3 tonemap_hable(vec3 x)
+{
+    const float A = 0.15;
+    const float B = 0.50;
+    const float C = 0.10;
+    const float D = 0.20;
+    const float E = 0.02;
+    const float F = 0.30;
+    const float W = 11.2;
+    vec3 v = x * 2.0;
+    vec3 num = v * (A * v + C * B) + D * E;
+    vec3 den = v * (A * v + B) + D * F;
+    float wnum = W * (A * W + C * B) + D * E;
+    float wden = W * (A * W + B) + D * F;
+    return clamp((num / den - E / F) / (wnum / wden - E / F), 0.0, 1.0);
+}
+
+vec3 tonemap(vec3 L, int mode)
+{
+    if (mode == 1) return tonemap_reinhard(L);
+    if (mode == 2) return tonemap_aces(L);
+    if (mode == 3) return tonemap_hable(L);
+    return tonemap_clip(L);
+}
+
+// sRGB inverse EOTF (IEC 61966-2-1): display-referred sRGB code value ->
+// linear light.  The ray-traced pipeline - like the raster scene shaders -
+// works in Coin/FreeCAD's display-referred sRGB space: the path tracer copies
+// the raster lighting model and uploads the material/light/background colours
+// verbatim, and the accumulation is a display-referred sum.  The HDR branch
+// below must therefore linearise before writing the *linear* scRGB surface,
+// exactly as data/shaders/vulkan/output/OutputFragment.glsl does.  Treating
+// those display-referred values as scene-linear is what washed the
+// path-traced image out (a 0.5 mid-grey stayed 0.5 linear instead of 0.21).
+vec3 srgb_to_linear(vec3 c)
+{
+    bvec3 low = lessThanEqual(c, vec3(0.04045));
+    vec3 lo = c / 12.92;
+    vec3 hi = pow((max(c, vec3(0.0)) + 0.055) / 1.055, vec3(2.4));
+    return mix(hi, lo, low);
+}
+
+// Final output transform.  With HDR off (pc.u_denoise.z < 0.5) the color is
+// clamped to [0,1] exactly as before, so SDR output is unchanged (the surface
+// is an sRGB UNORM format, so the display-referred value is written as-is).
+// With HDR on the display-referred color is decoded to linear light, optionally
+// shaped by the filmic rolloff pc.u_tone.x (0 = clip/passthrough), scaled by the
+// diffuse-white gain pc.u_denoise.w (1.0 lands diffuse white at the
+// compositor's reference white) and written to the FP16 scRGB surface, whose
+// extended range carries any >1.0 highlights; the compositor anchors the
+// reference white and maps the extended range onto the output.  The swapchain
+// is VK_FORMAT_R16G16B16A16_SFLOAT with the surface tagged extended-linear sRGB.
+vec4 presentColor(vec3 linearColor)
+{
+    if (pc.u_denoise.z < 0.5) {
+        return vec4(clamp(linearColor, 0.0, 1.0), 1.0);
+    }
+    vec3 lin = srgb_to_linear(clamp(linearColor, 0.0, 1.0));
+    const int mode = int(pc.u_tone.x + 0.5);
+    if (mode != 0) {
+        lin = tonemap(lin, mode);
+    }
+    return vec4(max(lin * pc.u_denoise.w, vec3(0.0)), 1.0);
+}
+
 // Scene depth (Vulkan [0,1]) of the first-bounce hit at the current pixel.
-// The raygen stores the hit world position in positions[].xyz with the ray
-// distance in .w (a 1e7 sentinel means "miss", i.e. background).  Project it
+// The raygen stores the stable (un-jittered centre-sample) hit world position
+// in stableDepth[].xyz with the ray distance in .w (a 1e7 sentinel means
+// "miss", i.e. background).  Using the stable buffer instead of the jittered
+// positions[] G-buffer keeps the edge-overlay depth test from flickering along
+// silhouettes.  Project it
 // through the traced camera exactly like the visual vertex shader
 // (clip.y is flipped but that does not affect Z), then apply the same
 // OpenGL->Vulkan depth remap: z_ndc = 0.5*(z_clip/w + 1).  The raster
@@ -53,7 +161,7 @@ layout(location = 0) out vec4 fragColor;
 // edge look the raster pipeline produces.
 float sceneDepth(ivec2 px, int idx)
 {
-    vec4 wpos = positions[idx];
+    vec4 wpos = stableDepth[idx];
     if (wpos.w > 1.0e6) {
         return 1.0; // no hit: background, edge geometry is unoccluded
     }
@@ -72,8 +180,8 @@ void main()
     gl_FragDepth = sceneDepth(px, idx);
 
     if (pc.u_present.z < 0.5) {
-        fragColor =
-          texture(u_rtImage, viewportCoord / textureSize(u_rtImage, 0));
+        fragColor = presentColor(
+          texture(u_rtImage, viewportCoord / textureSize(u_rtImage, 0)).rgb);
         return;
     }
 
@@ -86,7 +194,7 @@ void main()
         if (scale < 1.5) {
             vec4 d = denoised[idx];
             if (d.a > 0.5) {
-                fragColor = vec4(clamp(d.rgb, 0.0, 1.0), 1.0);
+                fragColor = presentColor(d.rgb);
                 return;
             }
         }
@@ -104,7 +212,7 @@ void main()
             vec4 d11 = denoised[q1.y * lw + q1.x];
             vec4 d = mix(mix(d00, d10, f.x), mix(d01, d11, f.x), f.y);
             if (d.a > 0.5) {
-                fragColor = vec4(clamp(d.rgb, 0.0, 1.0), 1.0);
+                fragColor = presentColor(d.rgb);
                 return;
             }
         }
@@ -112,7 +220,7 @@ void main()
 
     vec4 c0 = accum[idx];
     if (c0.a <= 0.0) {
-        fragColor = vec4(0.0);
+        fragColor = presentColor(vec3(0.0));
         return;
     }
     vec3 col0 = c0.rgb / c0.a;
@@ -139,5 +247,5 @@ void main()
             wsum += w;
         }
     }
-    fragColor = vec4(clamp(sum / max(wsum, 1.0e-6), 0.0, 1.0), 1.0);
+    fragColor = presentColor(sum / max(wsum, 1.0e-6));
 }

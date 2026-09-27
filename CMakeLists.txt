@@ -165,6 +165,17 @@ option(COIN_BUILD_VULKAN_RENDERER
   "Build Coin's experimental Vulkan retained-renderer backend."
   OFF)
 
+# AMD FidelityFX DNSR denoiser backend for the Vulkan path tracer.  The MIT
+# shader sources are vendored under src/rendering/third_party/fidelityfx/, so
+# this is a pure build switch (no external SDK): ON compiles the DNSR compute
+# passes and wires them into SoRTXRenderBackend's "dnsr" denoiser slot; OFF
+# leaves the slot degrading to OIDN exactly as before.  Mirrors the OIDN/RTX
+# denoiser options: the runtime selection, device checks and graceful fallback
+# are unchanged either way.
+option(COIN_BUILD_DNSR_DENOISER
+  "Build the AMD FidelityFX DNSR (ray-regeneration) denoiser backend."
+  OFF)
+
 # Make the renderer selection explicit for every Coin translation unit and
 # generated public header.  This keeps core-only declarations and definitions
 # in sync even when the build uses separate object-library targets.
@@ -178,6 +189,19 @@ if(COIN_BUILD_VULKAN_RENDERER)
   set(COIN_BUILD_VULKAN_RENDERER_VALUE 1)
 else()
   set(COIN_BUILD_VULKAN_RENDERER_VALUE 0)
+endif()
+
+# The fork's Vulkan renderer uses C++17 library facilities (std::optional,
+# std::string_view) and is compiled with C++20 by the FreeCAD superproject,
+# which sets CMAKE_CXX_STANDARD before adding this subdirectory.  A standalone
+# Coin configure (the documented way to build the test suite) has no such
+# setting and would otherwise fall back to the C++11 default above and fail to
+# compile those sources.  Raise the minimum here when the renderer is built.
+if(COIN_BUILD_VULKAN_RENDERER AND CMAKE_CXX_STANDARD LESS 20)
+  set(CMAKE_CXX_STANDARD 20)
+  set(CMAKE_CXX_STANDARD_REQUIRED ON)
+  message(STATUS
+    "Raising C++ standard to '${CMAKE_CXX_STANDARD}' for the Vulkan renderer.")
 endif()
 
 check_include_file_cxx(thread HAVE_STD_THREAD)
@@ -1086,12 +1110,20 @@ if(HAVE_RTX_DENOISER)
 else()
   set(FEAT_HAVE_RTX_DENOISER 0)
 endif()
-# AMD FidelityFX (FSR) ray-regeneration denoiser is an on-GPU Vulkan compute
-# denoiser that needs the AMD FFX SDK.  It is not currently wired up for a
-# build (the SDK is an optional drop-in); COIN_BUILD_FSR_DENOISER stays 0 so
-# SoRTXRenderBackend degrades to the OIDN path.
-set(HAVE_FSR_DENOISER 0)
-set(FEAT_HAVE_FSR_DENOISER 0)
+# AMD FidelityFX DNSR ray-regeneration denoiser: an on-GPU Vulkan compute
+# denoiser whose MIT shader sources are vendored under
+# src/rendering/third_party/fidelityfx/dnsr/.  Enabled by COIN_BUILD_DNSR_DENOISER
+# (default OFF); when OFF SoRTXRenderBackend degrades the "dnsr" slot to OIDN.
+if(COIN_BUILD_DNSR_DENOISER)
+  set(HAVE_DNSR_DENOISER 1)
+else()
+  set(HAVE_DNSR_DENOISER 0)
+endif()
+if(HAVE_DNSR_DENOISER)
+  set(FEAT_HAVE_DNSR_DENOISER 1)
+else()
+  set(FEAT_HAVE_DNSR_DENOISER 0)
+endif()
 
 if(HAVE_OIDN)
   set(COIN_BUILD_OIDN_VALUE 1)
@@ -1103,14 +1135,14 @@ if(HAVE_RTX_DENOISER)
 else()
   set(COIN_BUILD_RTX_DENOISER_VALUE 0)
 endif()
-set(COIN_BUILD_FSR_DENOISER_VALUE 0)
+set(COIN_BUILD_DNSR_DENOISER_VALUE ${HAVE_DNSR_DENOISER})
 
 add_compile_definitions(
   COIN_BUILD_LEGACY_GL_RENDERER=${COIN_BUILD_LEGACY_GL_RENDERER_VALUE}
   COIN_BUILD_VULKAN_RENDERER=${COIN_BUILD_VULKAN_RENDERER_VALUE}
   COIN_BUILD_OIDN=${COIN_BUILD_OIDN_VALUE}
   COIN_BUILD_RTX_DENOISER=${COIN_BUILD_RTX_DENOISER_VALUE}
-  COIN_BUILD_FSR_DENOISER=${COIN_BUILD_FSR_DENOISER_VALUE}
+  COIN_BUILD_DNSR_DENOISER=${COIN_BUILD_DNSR_DENOISER_VALUE}
 )
 
 # ############################################################################

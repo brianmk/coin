@@ -76,7 +76,7 @@ class SoVBO;
 
 #include "nodes/SoSubNodeP.h"
 #if COIN_BUILD_LEGACY_GL_RENDERER
-#include "rendering/SoVBO.h"
+#include "rendering/gl/SoVBO.h"
 #endif
 
 

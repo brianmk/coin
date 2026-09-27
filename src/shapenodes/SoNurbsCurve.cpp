@@ -127,8 +127,8 @@
 
 #include "glue/GLUWrapper.h"
 #include "nodes/SoSubNodeP.h"
-#include "rendering/SoGL.h"
-#include "rendering/SoGLNurbs.h"
+#include "rendering/gl/SoGL.h"
+#include "rendering/gl/SoGLNurbs.h"
 #include "coindefs.h" // COIN_OBSOLETED()
 #include "SoNurbsP.h"
 

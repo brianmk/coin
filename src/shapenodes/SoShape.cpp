@@ -144,13 +144,13 @@ class SoVBO;
 #endif // HAVE_VRML97
 
 #include "nodes/SoSubNodeP.h"
-#include "rendering/SoGL.h"
-#include "rendering/SoRenderIRP.h"
+#include "rendering/gl/SoGL.h"
+#include "rendering/backend/SoRenderIRP.h"
 #include "glue/glp.h"
 #include "threads/threadsutilp.h"
 #include "tidbitsp.h"
 #if COIN_BUILD_LEGACY_GL_RENDERER
-#include "rendering/SoVBO.h"
+#include "rendering/gl/SoVBO.h"
 #endif
 #include "coindefs.h" // COIN_OBSOLETED()
 
@@ -360,6 +360,21 @@ private:
   int bboxCount = 0;
 };
 
+static bool
+soshape_texture_equal(const SoTextureData & ta, const SoTextureData & tb)
+{
+  return ta.pixels == tb.pixels &&
+    ta.width == tb.width &&
+    ta.height == tb.height &&
+    ta.numComponents == tb.numComponents &&
+    ta.minFilter == tb.minFilter &&
+    ta.magFilter == tb.magFilter &&
+    ta.wrapS == tb.wrapS &&
+    ta.wrapT == tb.wrapT &&
+    ta.model == tb.model &&
+    ta.blendColor == tb.blendColor;
+}
+
 // True when two resolved material snapshots produce an identical draw.
 //
 // Used to coalesce adjacent IR batches whose producer assigned distinct
@@ -378,7 +393,13 @@ soshape_material_equal(const SoMaterialData & a, const SoMaterialData & b)
   }
   if (a.shadingModel != b.shadingModel || a.shininess != b.shininess ||
       a.opacity != b.opacity || a.metalness != b.metalness ||
-      a.roughness != b.roughness) {
+      a.roughness != b.roughness ||
+      a.physicalMaterial != b.physicalMaterial) {
+    return false;
+  }
+  if (a.transmissionIor != b.transmissionIor ||
+      a.transmissionAbsorption != b.transmissionAbsorption ||
+      a.transmissionAuthored != b.transmissionAuthored) {
     return false;
   }
   if (a.textureAlphaIncludesOpacity != b.textureAlphaIncludesOpacity ||
@@ -387,18 +408,15 @@ soshape_material_equal(const SoMaterialData & a, const SoMaterialData & b)
       a.flags != b.flags || a.featureFlags != b.featureFlags) {
     return false;
   }
-  if (a.diffuseTexture != b.diffuseTexture ||
-      a.normalTexture != b.normalTexture ||
-      a.emissiveTexture != b.emissiveTexture) {
+  if (a.roughnessStrength != b.roughnessStrength ||
+      a.normalStrength != b.normalStrength ||
+      a.emissiveIntensity != b.emissiveIntensity) {
     return false;
   }
-  const SoTextureData & ta = a.texture;
-  const SoTextureData & tb = b.texture;
-  if (ta.pixels != tb.pixels || ta.width != tb.width ||
-      ta.height != tb.height || ta.numComponents != tb.numComponents ||
-      ta.minFilter != tb.minFilter || ta.magFilter != tb.magFilter ||
-      ta.wrapS != tb.wrapS || ta.wrapT != tb.wrapT ||
-      ta.model != tb.model || ta.blendColor != tb.blendColor) {
+  if (!soshape_texture_equal(a.texture, b.texture) ||
+      !soshape_texture_equal(a.roughnessTexture, b.roughnessTexture) ||
+      !soshape_texture_equal(a.normalTexture, b.normalTexture) ||
+      !soshape_texture_equal(a.emissiveTexture, b.emissiveTexture)) {
     return false;
   }
   return true;

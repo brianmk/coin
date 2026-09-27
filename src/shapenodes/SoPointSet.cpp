@@ -119,9 +119,9 @@ class SoVBO;
 
 #include "nodes/SoSubNodeP.h"
 #include "coindefs.h"
-#include "rendering/SoGL.h"
+#include "rendering/gl/SoGL.h"
 #if COIN_BUILD_LEGACY_GL_RENDERER
-#include "rendering/SoVBO.h"
+#include "rendering/gl/SoVBO.h"
 #endif
 
 /*!
