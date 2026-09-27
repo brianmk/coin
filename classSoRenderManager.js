@@ -83,5 +83,6 @@ var classSoRenderManager =
     [ "setStereoOffset", "classSoRenderManager.html#af6bf09e76a510918e6d18b9a63c96a41", null ],
     [ "setTexturesEnabled", "classSoRenderManager.html#a30e8314c16428850d7ebe2d55613e40c", null ],
     [ "setViewportRegion", "classSoRenderManager.html#aefae350517dde035dbad1409a0d75dcc", null ],
-    [ "setWindowSize", "classSoRenderManager.html#a2bfcd506a76be364a7826f4dd78a83f9", null ]
+    [ "setWindowSize", "classSoRenderManager.html#a2bfcd506a76be364a7826f4dd78a83f9", null ],
+    [ "updateClippingPlanes", "classSoRenderManager.html#abc7e32e729bbb0f90b38344a6674784f", null ]
 ];

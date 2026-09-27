@@ -140,25 +140,29 @@ $(function(){initNavTree('SoVulkanViewMode_8h.html',''); initResizable(); });
 <table class="memberdecls">
 <tr class="heading"><td colspan="2"><h2 class="groupheader"><a id="enum-members" name="enum-members"></a>
 Enumerations</h2></td></tr>
-<tr class="memitem:a14726fdee3342fe62298d83e61f51236" id="r_a14726fdee3342fe62298d83e61f51236"><td class="memItemLeft" align="right" valign="top"><a id="a14726fdee3342fe62298d83e61f51236" name="a14726fdee3342fe62298d83e61f51236"></a>enum class &#160;</td><td class="memItemRight" valign="bottom"><b>SoVulkanViewMode</b> : int { <b>RtxModeOff</b> = 0
+<tr class="memitem:a14726fdee3342fe62298d83e61f51236" id="r_a14726fdee3342fe62298d83e61f51236"><td class="memItemLeft" align="right" valign="top"><a id="a14726fdee3342fe62298d83e61f51236" name="a14726fdee3342fe62298d83e61f51236"></a>enum class &#160;</td><td class="memItemRight" valign="bottom"><b>SoVulkanViewMode</b> : int { <br />
+&#160;&#160;<b>RtxModeOff</b> = 0
 , <b>RtxModeAmbientOcclusion</b> = 1
 , <b>RtxModePathTrace</b> = 2
 , <b>RtxModeEnvironment</b> = 3
+, <br />
+&#160;&#160;<b>RtxModePathTraceMax</b> = 4
+<br />
  }</td></tr>
 <tr class="separator:a14726fdee3342fe62298d83e61f51236"><td class="memSeparator" colspan="2">&#160;</td></tr>
 </table>
 <a name="details" id="details"></a><h2 class="groupheader">Detailed Description</h2>
 <div class="textblock"><p>Public ray-traced view-mode selector shared by the renderer and its embedding application. </p>
 <p>The ray-traced view mode used to exist as three different encodings: an application-side enum, a raw int passed down the widget stack, and this renderer-side enum. They are now one type, so the mode crosses the application/renderer boundary with the compiler checking it instead of relying on matching magic ints.</p>
-<p>The values are stable and match the historical int encoding: 0 = RtxModeOff raster (no ray tracing) 1 = RtxModeAmbientOcclusion single-sample AO preview, no accumulation 2 = RtxModePathTrace accumulating multi-bounce path tracer 3 = RtxModeEnvironment single-sample procedural IBL preview</p>
+<p>The values are stable and match the historical int encoding: 0 = RtxModeOff raster (no ray tracing) 1 = RtxModeAmbientOcclusion single-sample AO preview, no accumulation 2 = RtxModePathTrace accumulating multi-bounce path tracer 3 = RtxModeEnvironment single-sample procedural IBL preview 4 = RtxModePathTraceMax accumulating path tracer with physically-based dielectric glass (Fresnel + Snell refraction + total internal reflection + Beer-Lambert absorption)</p>
 <p>This header is always available (it has no Vulkan dependency) so an application can name the type even in a build without the Vulkan renderer. </p>
 </div></div><!-- contents -->
 </div><!-- doc-content -->
 <!-- start footer part -->
 <div id="nav-path" class="navpath"><!-- id is needed for treeview function! -->
   <ul>
-    <li class="navelem"><a class="el" href="dir_d44c64559bbebec7f509842c48db8b23.html">include</a></li><li class="navelem"><a class="el" href="dir_469ed70aca823fd8322768ad54869f94.html">Inventor</a></li><li class="navelem"><a class="el" href="dir_5d343cc747bd41482eefe196ea3ce274.html">rendering</a></li><li class="navelem"><a class="el" href="SoVulkanViewMode_8h.html">SoVulkanViewMode.h</a></li>
-    <li class="footer">Generated on Sun Sep 27 2026 18:04:05 for Coin by <a href="https://www.doxygen.org/index.html"><img class="footer" src="doxygen.svg" width="104" height="31" alt="doxygen"/></a> 1.10.0 </li>
+    <li class="navelem"><a class="el" href="dir_d44c64559bbebec7f509842c48db8b23.html">include</a></li><li class="navelem"><a class="el" href="dir_469ed70aca823fd8322768ad54869f94.html">Inventor</a></li><li class="navelem"><a class="el" href="dir_5d343cc747bd41482eefe196ea3ce274.html">rendering</a></li><li class="navelem"><a class="el" href="dir_6697c846499f56b2783d823bb5d9b05f.html">vulkan</a></li><li class="navelem"><a class="el" href="SoVulkanViewMode_8h.html">SoVulkanViewMode.h</a></li>
+    <li class="footer">Generated on Sun Sep 27 2026 22:47:42 for Coin by <a href="https://www.doxygen.org/index.html"><img class="footer" src="doxygen.svg" width="104" height="31" alt="doxygen"/></a> 1.10.0 </li>
   </ul>
 </div>
 </body>

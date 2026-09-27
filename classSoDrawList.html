@@ -179,9 +179,8 @@ Public Member Functions</h2></td></tr>
 <tr class="memitem:a56d25a1e54fbc554de21cddf42292a3e" id="r_a56d25a1e54fbc554de21cddf42292a3e"><td class="memItemLeft" align="right" valign="top"><a id="a56d25a1e54fbc554de21cddf42292a3e" name="a56d25a1e54fbc554de21cddf42292a3e"></a>
 <a class="el" href="classSbList.html">const</a> <a class="el" href="structSoRenderCommand.html">SoRenderCommand</a> &amp;&#160;</td><td class="memItemRight" valign="bottom"><b>getCommand</b> (int <a class="el" href="classSbList.html">i</a>) <a class="el" href="classSbList.html">const</a></td></tr>
 <tr class="separator:a56d25a1e54fbc554de21cddf42292a3e"><td class="memSeparator" colspan="2">&#160;</td></tr>
-<tr class="memitem:aa910390b906268f87d2b7e4fd5dcf05a" id="r_aa910390b906268f87d2b7e4fd5dcf05a"><td class="memItemLeft" align="right" valign="top"><a id="aa910390b906268f87d2b7e4fd5dcf05a" name="aa910390b906268f87d2b7e4fd5dcf05a"></a>
-uint32_t&#160;</td><td class="memItemRight" valign="bottom"><b>getGeneration</b> () <a class="el" href="classSbList.html">const</a></td></tr>
-<tr class="memdesc:aa910390b906268f87d2b7e4fd5dcf05a"><td class="mdescLeft">&#160;</td><td class="mdescRight">Return the generation number incremented when <a class="el" href="#a4d70024e8f92811512f033e01858f7a5" title="Clear commands and per-frame tables, beginning a new frame generation.">clear()</a> starts a new frame. <br /></td></tr>
+<tr class="memitem:aa910390b906268f87d2b7e4fd5dcf05a" id="r_aa910390b906268f87d2b7e4fd5dcf05a"><td class="memItemLeft" align="right" valign="top">uint32_t&#160;</td><td class="memItemRight" valign="bottom"><a class="el" href="#aa910390b906268f87d2b7e4fd5dcf05a">getGeneration</a> () <a class="el" href="classSbList.html">const</a></td></tr>
+<tr class="memdesc:aa910390b906268f87d2b7e4fd5dcf05a"><td class="mdescLeft">&#160;</td><td class="mdescRight">Return a process-unique generation, changed on construction and by <a class="el" href="#a4d70024e8f92811512f033e01858f7a5" title="Clear commands and per-frame tables, beginning a new frame generation.">clear()</a>.  <br /></td></tr>
 <tr class="separator:aa910390b906268f87d2b7e4fd5dcf05a"><td class="memSeparator" colspan="2">&#160;</td></tr>
 <tr class="memitem:a91eea990c185321d19d21502d7969706" id="r_a91eea990c185321d19d21502d7969706"><td class="memItemLeft" align="right" valign="top"><a class="el" href="classSbList.html">const</a> <a class="el" href="structSoLightingData.html">SoLightingData</a> *&#160;</td><td class="memItemRight" valign="bottom"><a class="el" href="#a91eea990c185321d19d21502d7969706">getLighting</a> (<a class="el" href="SoRenderIR_8h.html#a012c25d9ac404cd878fd6e59c84e3877">SoLightingHandle</a> handle) <a class="el" href="classSbList.html">const</a></td></tr>
 <tr class="memdesc:a91eea990c185321d19d21502d7969706"><td class="mdescLeft">&#160;</td><td class="mdescRight">Resolve a lighting handle previously returned by <a class="el" href="#aefbbe7f8429200e2b8486d23c7328a84" title="Add or reuse a lighting setup and return its stable 1-based handle.">addLightingSetup()</a>.  <br /></td></tr>
@@ -252,6 +251,34 @@ int&#160;</td><td class="memItemRight" valign="bottom"><b>getNumCommands</b> () 
 
 </div>
 </div>
+<a id="aa910390b906268f87d2b7e4fd5dcf05a" name="aa910390b906268f87d2b7e4fd5dcf05a"></a>
+<h2 class="memtitle"><span class="permalink"><a href="#aa910390b906268f87d2b7e4fd5dcf05a">&#9670;&#160;</a></span>getGeneration()</h2>
+
+<div class="memitem">
+<div class="memproto">
+<table class="mlabels">
+  <tr>
+  <td class="mlabels-left">
+      <table class="memname">
+        <tr>
+          <td class="memname">uint32_t SoDrawList::getGeneration </td>
+          <td>(</td>
+          <td class="paramname"><span class="paramname"></span></td><td>)</td>
+          <td> const</td>
+        </tr>
+      </table>
+  </td>
+  <td class="mlabels-right">
+<span class="mlabels"><span class="mlabel">inline</span></span>  </td>
+  </tr>
+</table>
+</div><div class="memdoc">
+
+<p>Return a process-unique generation, changed on construction and by <a class="el" href="#a4d70024e8f92811512f033e01858f7a5" title="Clear commands and per-frame tables, beginning a new frame generation.">clear()</a>. </p>
+<p>Backends key GPU resource caches on it, so distinct draw lists (even at the same address) can never alias each other's cache entries. </p>
+
+</div>
+</div>
 <a id="a91eea990c185321d19d21502d7969706" name="a91eea990c185321d19d21502d7969706"></a>
 <h2 class="memtitle"><span class="permalink"><a href="#a91eea990c185321d19d21502d7969706">&#9670;&#160;</a></span>getLighting()</h2>
 
@@ -306,7 +333,7 @@ int&#160;</td><td class="memItemRight" valign="bottom"><b>getNumCommands</b> () 
 <div id="nav-path" class="navpath"><!-- id is needed for treeview function! -->
   <ul>
     <li class="navelem"><a class="el" href="classSoDrawList.html">SoDrawList</a></li>
-    <li class="footer">Generated on Sun Sep 27 2026 18:04:07 for Coin by <a href="https://www.doxygen.org/index.html"><img class="footer" src="doxygen.svg" width="104" height="31" alt="doxygen"/></a> 1.10.0 </li>
+    <li class="footer">Generated on Sun Sep 27 2026 22:47:43 for Coin by <a href="https://www.doxygen.org/index.html"><img class="footer" src="doxygen.svg" width="104" height="31" alt="doxygen"/></a> 1.10.0 </li>
   </ul>
 </div>
 </body>

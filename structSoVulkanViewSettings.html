@@ -162,10 +162,22 @@ bool&#160;</td><td class="memItemRight" valign="bottom"><b>backgroundGradient</b
 <tr class="memitem:afe8b33054c944017999e16f4432dba0a" id="r_afe8b33054c944017999e16f4432dba0a"><td class="memItemLeft" align="right" valign="top"><a id="afe8b33054c944017999e16f4432dba0a" name="afe8b33054c944017999e16f4432dba0a"></a>
 <a class="el" href="classSbColor4f.html">SbColor4f</a>&#160;</td><td class="memItemRight" valign="bottom"><b>edgeColor</b> {0.05f, 0.05f, 0.05f, 1.0f}</td></tr>
 <tr class="separator:afe8b33054c944017999e16f4432dba0a"><td class="memSeparator" colspan="2">&#160;</td></tr>
+<tr class="memitem:aed043b615d731f7d3bd13a89918937f7" id="r_aed043b615d731f7d3bd13a89918937f7"><td class="memItemLeft" align="right" valign="top">bool&#160;</td><td class="memItemRight" valign="bottom"><a class="el" href="#aed043b615d731f7d3bd13a89918937f7">edgeOverlay</a> = <a class="el" href="classSbList.html">true</a></td></tr>
+<tr class="memdesc:aed043b615d731f7d3bd13a89918937f7"><td class="mdescLeft">&#160;</td><td class="mdescRight">Show the model's feature-edge lines (BRep edges / polylines).  <br /></td></tr>
+<tr class="separator:aed043b615d731f7d3bd13a89918937f7"><td class="memSeparator" colspan="2">&#160;</td></tr>
 <tr class="memitem:a804b9fbf7e93cd1c2c00baaf5ee5861f" id="r_a804b9fbf7e93cd1c2c00baaf5ee5861f"><td class="memItemLeft" align="right" valign="top"><a id="a804b9fbf7e93cd1c2c00baaf5ee5861f" name="a804b9fbf7e93cd1c2c00baaf5ee5861f"></a>
 int&#160;</td><td class="memItemRight" valign="bottom"><b>envMap</b> = -1</td></tr>
 <tr class="memdesc:a804b9fbf7e93cd1c2c00baaf5ee5861f"><td class="mdescLeft">&#160;</td><td class="mdescRight">Cubemap environment preset (-1 = viewport background gradient). <br /></td></tr>
 <tr class="separator:a804b9fbf7e93cd1c2c00baaf5ee5861f"><td class="memSeparator" colspan="2">&#160;</td></tr>
+<tr class="memitem:a9a02aceda04fe5b79c23dc1b3b94223f" id="r_a9a02aceda04fe5b79c23dc1b3b94223f"><td class="memItemLeft" align="right" valign="top">float&#160;</td><td class="memItemRight" valign="bottom"><a class="el" href="#a9a02aceda04fe5b79c23dc1b3b94223f">hdrExposure</a> = 1.0f</td></tr>
+<tr class="memdesc:a9a02aceda04fe5b79c23dc1b3b94223f"><td class="mdescLeft">&#160;</td><td class="mdescRight">Diffuse-white gain applied to the linear scene radiance before the scRGB write.  <br /></td></tr>
+<tr class="separator:a9a02aceda04fe5b79c23dc1b3b94223f"><td class="memSeparator" colspan="2">&#160;</td></tr>
+<tr class="memitem:afd5f77d0db662357f76ccc9df31586f9" id="r_afd5f77d0db662357f76ccc9df31586f9"><td class="memItemLeft" align="right" valign="top">bool&#160;</td><td class="memItemRight" valign="bottom"><a class="el" href="#afd5f77d0db662357f76ccc9df31586f9">hdrOutput</a> = <a class="el" href="classSbList.html">false</a></td></tr>
+<tr class="memdesc:afd5f77d0db662357f76ccc9df31586f9"><td class="mdescLeft">&#160;</td><td class="mdescRight">HDR output for the Vulkan viewport, presented as scRGB: an FP16 extended-linear sRGB swapchain (VK_FORMAT_R16G16B16A16_SFLOAT) that the compositor color-manages through the wp_color_manager_v1 protocol.  <br /></td></tr>
+<tr class="separator:afd5f77d0db662357f76ccc9df31586f9"><td class="memSeparator" colspan="2">&#160;</td></tr>
+<tr class="memitem:a83318f79a39faa9192e339c8bd67cc9e" id="r_a83318f79a39faa9192e339c8bd67cc9e"><td class="memItemLeft" align="right" valign="top">int&#160;</td><td class="memItemRight" valign="bottom"><a class="el" href="#a83318f79a39faa9192e339c8bd67cc9e">hdrToneMap</a> = 0</td></tr>
+<tr class="memdesc:a83318f79a39faa9192e339c8bd67cc9e"><td class="mdescLeft">&#160;</td><td class="mdescRight">Highlight compression for the ray-traced path, applied between the exposure and the scRGB write (ignored when hdrOutput is false): 0 = clip (no tone map, highlights pass through above <a class="el" href="classSbList.html#ab18cad4eb2d06030cd564917a8c331f4">1.0</a>; the default), 1 = Reinhard, 2 = ACES, 3 = Hable.  <br /></td></tr>
+<tr class="separator:a83318f79a39faa9192e339c8bd67cc9e"><td class="memSeparator" colspan="2">&#160;</td></tr>
 <tr class="memitem:a78ed57a5728a2db469fe0dfe7d8878e7" id="r_a78ed57a5728a2db469fe0dfe7d8878e7"><td class="memItemLeft" align="right" valign="top"><a id="a78ed57a5728a2db469fe0dfe7d8878e7" name="a78ed57a5728a2db469fe0dfe7d8878e7"></a>
 int&#160;</td><td class="memItemRight" valign="bottom"><b>pathTracingBounces</b> = 4</td></tr>
 <tr class="separator:a78ed57a5728a2db469fe0dfe7d8878e7"><td class="memSeparator" colspan="2">&#160;</td></tr>
@@ -178,6 +190,13 @@ std::string&#160;</td><td class="memItemRight" valign="bottom"><b>pathTracingDen
 <tr class="memitem:a7f8d71b616997a8724c0600836eeaae6" id="r_a7f8d71b616997a8724c0600836eeaae6"><td class="memItemLeft" align="right" valign="top"><a id="a7f8d71b616997a8724c0600836eeaae6" name="a7f8d71b616997a8724c0600836eeaae6"></a>
 float&#160;</td><td class="memItemRight" valign="bottom"><b>pathTracingDenoiserScale</b> = 1.0f</td></tr>
 <tr class="separator:a7f8d71b616997a8724c0600836eeaae6"><td class="memSeparator" colspan="2">&#160;</td></tr>
+<tr class="memitem:a6864bbcf2ccfda43bf6ff5b129031bb8" id="r_a6864bbcf2ccfda43bf6ff5b129031bb8"><td class="memItemLeft" align="right" valign="top"><a id="a6864bbcf2ccfda43bf6ff5b129031bb8" name="a6864bbcf2ccfda43bf6ff5b129031bb8"></a>
+float&#160;</td><td class="memItemRight" valign="bottom"><b>pathTracingGlassAbsorption</b> = 0.1f</td></tr>
+<tr class="separator:a6864bbcf2ccfda43bf6ff5b129031bb8"><td class="memSeparator" colspan="2">&#160;</td></tr>
+<tr class="memitem:a129ba729ac4b824afb0896ea0e2251cf" id="r_a129ba729ac4b824afb0896ea0e2251cf"><td class="memItemLeft" align="right" valign="top"><a id="a129ba729ac4b824afb0896ea0e2251cf" name="a129ba729ac4b824afb0896ea0e2251cf"></a>
+float&#160;</td><td class="memItemRight" valign="bottom"><b>pathTracingGlassIor</b> = 1.5f</td></tr>
+<tr class="memdesc:a129ba729ac4b824afb0896ea0e2251cf"><td class="mdescLeft">&#160;</td><td class="mdescRight">Physically-based glass (RtxModePathTraceMax only): index of refraction for dielectric surfaces (transparency &gt; 0) and the Beer-Lambert absorption strength derived from the material colour. <br /></td></tr>
+<tr class="separator:a129ba729ac4b824afb0896ea0e2251cf"><td class="memSeparator" colspan="2">&#160;</td></tr>
 <tr class="memitem:a1710733d111160cbc446c0565278492d" id="r_a1710733d111160cbc446c0565278492d"><td class="memItemLeft" align="right" valign="top"><a id="a1710733d111160cbc446c0565278492d" name="a1710733d111160cbc446c0565278492d"></a>
 int&#160;</td><td class="memItemRight" valign="bottom"><b>pathTracingMaxSamples</b> = 256</td></tr>
 <tr class="separator:a1710733d111160cbc446c0565278492d"><td class="memSeparator" colspan="2">&#160;</td></tr>
@@ -195,12 +214,79 @@ bool&#160;</td><td class="memItemRight" valign="bottom"><b>tessellationOverlay</
 SoVulkanViewMode&#160;</td><td class="memItemRight" valign="bottom"><b>viewMode</b> = SoVulkanViewMode::RtxModeOff</td></tr>
 <tr class="memdesc:ab5e68fecfbe881839270f574ecd2ea67"><td class="mdescLeft">&#160;</td><td class="mdescRight">Ray-traced view mode (see SoVulkanViewMode). <br /></td></tr>
 <tr class="separator:ab5e68fecfbe881839270f574ecd2ea67"><td class="memSeparator" colspan="2">&#160;</td></tr>
-<tr class="memitem:a0b1112d3b0d6485ac491f4a7413db4da" id="r_a0b1112d3b0d6485ac491f4a7413db4da"><td class="memItemLeft" align="right" valign="top"><a id="a0b1112d3b0d6485ac491f4a7413db4da" name="a0b1112d3b0d6485ac491f4a7413db4da"></a>
-bool&#160;</td><td class="memItemRight" valign="bottom"><b>wireframeOverlay</b> = <a class="el" href="classSbList.html">false</a></td></tr>
-<tr class="memdesc:a0b1112d3b0d6485ac491f4a7413db4da"><td class="mdescLeft">&#160;</td><td class="mdescRight">Raster overlays. <br /></td></tr>
+<tr class="memitem:a0b1112d3b0d6485ac491f4a7413db4da" id="r_a0b1112d3b0d6485ac491f4a7413db4da"><td class="memItemLeft" align="right" valign="top">bool&#160;</td><td class="memItemRight" valign="bottom"><a class="el" href="#a0b1112d3b0d6485ac491f4a7413db4da">wireframeOverlay</a> = <a class="el" href="classSbList.html">false</a></td></tr>
+<tr class="memdesc:a0b1112d3b0d6485ac491f4a7413db4da"><td class="mdescLeft">&#160;</td><td class="mdescRight">Raster overlays.  <br /></td></tr>
 <tr class="separator:a0b1112d3b0d6485ac491f4a7413db4da"><td class="memSeparator" colspan="2">&#160;</td></tr>
 </table>
 <h2 class="groupheader">Member Data Documentation</h2>
+<a id="aed043b615d731f7d3bd13a89918937f7" name="aed043b615d731f7d3bd13a89918937f7"></a>
+<h2 class="memtitle"><span class="permalink"><a href="#aed043b615d731f7d3bd13a89918937f7">&#9670;&#160;</a></span>edgeOverlay</h2>
+
+<div class="memitem">
+<div class="memproto">
+      <table class="memname">
+        <tr>
+          <td class="memname">bool SoVulkanViewSettings::edgeOverlay = <a class="el" href="classSbList.html">true</a></td>
+        </tr>
+      </table>
+</div><div class="memdoc">
+
+<p>Show the model's feature-edge lines (BRep edges / polylines). </p>
+<p>When false the non-triangle line residue is skipped in the raster main pass and in the ray-tracing composite, leaving only the shaded faces. The navigation cube and other SO_RENDERPASS_OVERLAY geometry are unaffected. </p>
+
+</div>
+</div>
+<a id="a9a02aceda04fe5b79c23dc1b3b94223f" name="a9a02aceda04fe5b79c23dc1b3b94223f"></a>
+<h2 class="memtitle"><span class="permalink"><a href="#a9a02aceda04fe5b79c23dc1b3b94223f">&#9670;&#160;</a></span>hdrExposure</h2>
+
+<div class="memitem">
+<div class="memproto">
+      <table class="memname">
+        <tr>
+          <td class="memname">float SoVulkanViewSettings::hdrExposure = 1.0f</td>
+        </tr>
+      </table>
+</div><div class="memdoc">
+
+<p>Diffuse-white gain applied to the linear scene radiance before the scRGB write. </p>
+<p><a class="el" href="classSbList.html#ab18cad4eb2d06030cd564917a8c331f4">1.0</a> presents linear white <a class="el" href="classSbList.html#ab18cad4eb2d06030cd564917a8c331f4">1.0</a> at the compositor's reference white (the default); &gt; 1 brightens the whole viewport, &lt; 1 darkens it. The default matches the raster/RTX backends and the FreeCAD preference default so a default-constructed settings blob renders at the reference white instead of the retired HDR10/PQ white-gain convention (<a class="el" href="classSbList.html#ab18cad4eb2d06030cd564917a8c331f4">0.02</a>). Ignored when hdrOutput is false. </p>
+
+</div>
+</div>
+<a id="afd5f77d0db662357f76ccc9df31586f9" name="afd5f77d0db662357f76ccc9df31586f9"></a>
+<h2 class="memtitle"><span class="permalink"><a href="#afd5f77d0db662357f76ccc9df31586f9">&#9670;&#160;</a></span>hdrOutput</h2>
+
+<div class="memitem">
+<div class="memproto">
+      <table class="memname">
+        <tr>
+          <td class="memname">bool SoVulkanViewSettings::hdrOutput = <a class="el" href="classSbList.html">false</a></td>
+        </tr>
+      </table>
+</div><div class="memdoc">
+
+<p>HDR output for the Vulkan viewport, presented as scRGB: an FP16 extended-linear sRGB swapchain (VK_FORMAT_R16G16B16A16_SFLOAT) that the compositor color-manages through the wp_color_manager_v1 protocol. </p>
+<p>This is the representation Blender and gamescope use for Wayland HDR. Diffuse white is linear <a class="el" href="classSbList.html#ab18cad4eb2d06030cd564917a8c331f4">1.0</a> (the compositor's reference white) and values above <a class="el" href="classSbList.html#ab18cad4eb2d06030cd564917a8c331f4">1.0</a> carry HDR highlights. Set only when the application both requested HDR and the swapchain actually came up with the FP16 extended-linear format (the application owns that decision; the backend just encodes). scRGB is deliberately NOT PQ: the surface is tagged extended-linear sRGB, so no <a class="el" href="classSbList.html#ab18cad4eb2d06030cd564917a8c331f4">BT.2020</a>/PQ encode is ever applied here. </p>
+
+</div>
+</div>
+<a id="a83318f79a39faa9192e339c8bd67cc9e" name="a83318f79a39faa9192e339c8bd67cc9e"></a>
+<h2 class="memtitle"><span class="permalink"><a href="#a83318f79a39faa9192e339c8bd67cc9e">&#9670;&#160;</a></span>hdrToneMap</h2>
+
+<div class="memitem">
+<div class="memproto">
+      <table class="memname">
+        <tr>
+          <td class="memname">int SoVulkanViewSettings::hdrToneMap = 0</td>
+        </tr>
+      </table>
+</div><div class="memdoc">
+
+<p>Highlight compression for the ray-traced path, applied between the exposure and the scRGB write (ignored when hdrOutput is false): 0 = clip (no tone map, highlights pass through above <a class="el" href="classSbList.html#ab18cad4eb2d06030cd564917a8c331f4">1.0</a>; the default), 1 = Reinhard, 2 = ACES, 3 = Hable. </p>
+<p>The filmic operators compress the result into [0,1]. The raster path is display-referred and never tone-maps. See tonemap() in <a class="el" href="classSbList.html#ab18cad4eb2d06030cd564917a8c331f4">data/shaders/vulkan/rt/PresentFragment.glsl</a>. </p>
+
+</div>
+</div>
 <a id="a539f657200fe2b05677fd404ea913076" name="a539f657200fe2b05677fd404ea913076"></a>
 <h2 class="memtitle"><span class="permalink"><a href="#a539f657200fe2b05677fd404ea913076">&#9670;&#160;</a></span>pathTracingDenoise</h2>
 
@@ -218,6 +304,23 @@ bool&#160;</td><td class="memItemRight" valign="bottom"><b>wireframeOverlay</b> 
 
 </div>
 </div>
+<a id="a0b1112d3b0d6485ac491f4a7413db4da" name="a0b1112d3b0d6485ac491f4a7413db4da"></a>
+<h2 class="memtitle"><span class="permalink"><a href="#a0b1112d3b0d6485ac491f4a7413db4da">&#9670;&#160;</a></span>wireframeOverlay</h2>
+
+<div class="memitem">
+<div class="memproto">
+      <table class="memname">
+        <tr>
+          <td class="memname">bool SoVulkanViewSettings::wireframeOverlay = <a class="el" href="classSbList.html">false</a></td>
+        </tr>
+      </table>
+</div><div class="memdoc">
+
+<p>Raster overlays. </p>
+<p>wireframeOverlay and tessellationOverlay are debug views (the tessellation drawn in polygon-LINES) that FreeCAD does not expose as preferences: they are set programmatically or through the renderer's FC_VULKAN_WIREFRAME / FC_VULKAN_TESSELLATION environment hooks (SoVulkanConfig), which the backend ORs with these flags. Only pointsOverlay and edgeOverlay are driven by the FreeCAD view preferences. </p>
+
+</div>
+</div>
 <hr/>The documentation for this struct was generated from the following file:<ul>
 <li><a class="el" href="SoVulkanViewSettings_8h_source.html">SoVulkanViewSettings.h</a></li>
 </ul>
@@ -227,7 +330,7 @@ bool&#160;</td><td class="memItemRight" valign="bottom"><b>wireframeOverlay</b> 
 <div id="nav-path" class="navpath"><!-- id is needed for treeview function! -->
   <ul>
     <li class="navelem"><a class="el" href="structSoVulkanViewSettings.html">SoVulkanViewSettings</a></li>
-    <li class="footer">Generated on Sun Sep 27 2026 18:04:10 for Coin by <a href="https://www.doxygen.org/index.html"><img class="footer" src="doxygen.svg" width="104" height="31" alt="doxygen"/></a> 1.10.0 </li>
+    <li class="footer">Generated on Sun Sep 27 2026 22:47:47 for Coin by <a href="https://www.doxygen.org/index.html"><img class="footer" src="doxygen.svg" width="104" height="31" alt="doxygen"/></a> 1.10.0 </li>
   </ul>
 </div>
 </body>

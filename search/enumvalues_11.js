@@ -25,10 +25,11 @@ var searchData=
   ['sorted_5fobject_5fblend_22',['SORTED_OBJECT_BLEND',['../classSoGLRenderAction.html#ab318debd5fb749f9fcc16487522b860ca46d3d452475893e784b18b21a2f587f2',1,'SoGLRenderAction']]],
   ['sorted_5fobject_5fsorted_5ftriangle_5fadd_23',['SORTED_OBJECT_SORTED_TRIANGLE_ADD',['../classSoGLRenderAction.html#ab318debd5fb749f9fcc16487522b860cac636aa256a6893c78796376f482210a4',1,'SoGLRenderAction']]],
   ['sorted_5fobject_5fsorted_5ftriangle_5fblend_24',['SORTED_OBJECT_SORTED_TRIANGLE_BLEND',['../classSoGLRenderAction.html#ab318debd5fb749f9fcc16487522b860ca85eeb15a9ae8ff2e08e19004f54103db',1,'SoGLRenderAction']]],
-  ['square_25',['SQUARE',['../classSoVectorizeAction.html#a1945e3dc46d9004454f6be5e90947f8fa5fad4d4fe72d7cb27bcc861f697b1b53',1,'SoVectorizeAction']]],
-  ['src_5falpha_26',['SRC_ALPHA',['../classSoTextureCombine.html#a1c478a93f2d16aa0bd36904113cacb0bab56e4e55a20e3d682a81c37d77706b99',1,'SoTextureCombine']]],
-  ['src_5fcolor_27',['SRC_COLOR',['../classSoTextureCombine.html#a1c478a93f2d16aa0bd36904113cacb0ba4644d9bcfd9bbfb18b68052598d8ab11',1,'SoTextureCombine']]],
-  ['start_5ffirst_28',['START_FIRST',['../classSoProfile.html#a48f2107358bb102cdd0edf427ee018f4a46989b1a0f33f9d35a3543099f60b682',1,'SoProfile']]],
-  ['start_5fnew_29',['START_NEW',['../classSoProfile.html#a48f2107358bb102cdd0edf427ee018f4ac6e79bd9830a454055585968b2a412e0',1,'SoProfile']]],
-  ['subtract_30',['SUBTRACT',['../classSoTextureCombine.html#a3794b6806a5a1a8f9aff631bafa19823a8935c3cf32010f27fbede59ae6ffebf7',1,'SoTextureCombine']]]
+  ['spherical_25',['SPHERICAL',['../classSoTextureCoordinateProjection.html#ab672da4c650d42d8f3a1ad09793409b5a87b54389a4a35c226a426228c0f889b1',1,'SoTextureCoordinateProjection']]],
+  ['square_26',['SQUARE',['../classSoVectorizeAction.html#a1945e3dc46d9004454f6be5e90947f8fa5fad4d4fe72d7cb27bcc861f697b1b53',1,'SoVectorizeAction']]],
+  ['src_5falpha_27',['SRC_ALPHA',['../classSoTextureCombine.html#a1c478a93f2d16aa0bd36904113cacb0bab56e4e55a20e3d682a81c37d77706b99',1,'SoTextureCombine']]],
+  ['src_5fcolor_28',['SRC_COLOR',['../classSoTextureCombine.html#a1c478a93f2d16aa0bd36904113cacb0ba4644d9bcfd9bbfb18b68052598d8ab11',1,'SoTextureCombine']]],
+  ['start_5ffirst_29',['START_FIRST',['../classSoProfile.html#a48f2107358bb102cdd0edf427ee018f4a46989b1a0f33f9d35a3543099f60b682',1,'SoProfile']]],
+  ['start_5fnew_30',['START_NEW',['../classSoProfile.html#a48f2107358bb102cdd0edf427ee018f4ac6e79bd9830a454055585968b2a412e0',1,'SoProfile']]],
+  ['subtract_31',['SUBTRACT',['../classSoTextureCombine.html#a3794b6806a5a1a8f9aff631bafa19823a8935c3cf32010f27fbede59ae6ffebf7',1,'SoTextureCombine']]]
 ];

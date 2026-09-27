@@ -10,6 +10,7 @@ var SoRenderIR_8h =
     [ "SoLightingBlock", "structSoLightingBlock.html", null ],
     [ "SoLightingData", "structSoLightingData.html", "structSoLightingData" ],
     [ "SoLightingRaw", "structSoLightingRaw.html", "structSoLightingRaw" ],
+    [ "SoRenderIR::SoMaterialBlock", "structSoRenderIR_1_1SoMaterialBlock.html", null ],
     [ "SoMaterialData", "structSoMaterialData.html", "structSoMaterialData" ],
     [ "SoPixelTextData", "structSoPixelTextData.html", null ],
     [ "SoRasterState", "structSoRasterState.html", null ],
@@ -41,8 +42,11 @@ var SoRenderIR_8h =
       [ "SO_SHADING_UNLIT", "SoRenderIR_8h.html#a6e09cbae86369db3c3962898de02ea3fa7cf2a7487e74b48467174fc82ca36f42", null ],
       [ "SO_SHADING_LEGACY_GOURAUD", "SoRenderIR_8h.html#a6e09cbae86369db3c3962898de02ea3faa1506bf7938cbb7d828ee14db3243943", null ]
     ] ],
+    [ "effectiveMaterialAmbient", "SoRenderIR_8h.html#a0a1fc465ccf8ee4911837b3e9683c595", null ],
     [ "fillLightingBlock", "SoRenderIR_8h.html#ab9df0806d810c7e7bc63b8558c181b51", null ],
     [ "lightToEye", "SoRenderIR_8h.html#a6227991ec2ae3968f1716cd40cc822a8", null ],
     [ "lightToWorld", "SoRenderIR_8h.html#a3a83e7afc69a0f41b21aea9cf77fc5bb", null ],
+    [ "packMaterialBlock", "SoRenderIR_8h.html#a2fe64f019379aebc303b79157046e9c3", null ],
+    [ "resolveOptical", "SoRenderIR_8h.html#a7a5987872f168561ad992a66407e7819", null ],
     [ "SO_MAX_SHADER_LIGHTS", "SoRenderIR_8h.html#ab95fd8abdf7585db4c36f7d5429e0d64", null ]
 ];

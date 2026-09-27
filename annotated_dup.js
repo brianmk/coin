@@ -1,5 +1,8 @@
 var annotated_dup =
 [
+    [ "SoRenderIR", null, [
+      [ "SoMaterialBlock", "structSoRenderIR_1_1SoMaterialBlock.html", null ]
+    ] ],
     [ "cc_debugerror", "structcc__debugerror.html", null ],
     [ "cc_error", "structcc__error.html", null ],
     [ "cc_rbptree", "structcc__rbptree.html", null ],
@@ -513,6 +516,8 @@ var annotated_dup =
     [ "SoPathSwitch", "classSoPathSwitch.html", "classSoPathSwitch" ],
     [ "SoPendulum", "classSoPendulum.html", "classSoPendulum" ],
     [ "SoPerspectiveCamera", "classSoPerspectiveCamera.html", "classSoPerspectiveCamera" ],
+    [ "SoPhysicalMaterial", "classSoPhysicalMaterial.html", "classSoPhysicalMaterial" ],
+    [ "SoPhysicalMaterialElement", "classSoPhysicalMaterialElement.html", "classSoPhysicalMaterialElement" ],
     [ "SoPickAction", "classSoPickAction.html", "classSoPickAction" ],
     [ "SoPickedPoint", "classSoPickedPoint.html", "classSoPickedPoint" ],
     [ "SoPickedPointList", "classSoPickedPointList.html", "classSoPickedPointList" ],
@@ -727,6 +732,7 @@ var annotated_dup =
     [ "SoTextureCoordinateNormalMap", "classSoTextureCoordinateNormalMap.html", "classSoTextureCoordinateNormalMap" ],
     [ "SoTextureCoordinateObject", "classSoTextureCoordinateObject.html", "classSoTextureCoordinateObject" ],
     [ "SoTextureCoordinatePlane", "classSoTextureCoordinatePlane.html", "classSoTextureCoordinatePlane" ],
+    [ "SoTextureCoordinateProjection", "classSoTextureCoordinateProjection.html", "classSoTextureCoordinateProjection" ],
     [ "SoTextureCoordinateReflectionMap", "classSoTextureCoordinateReflectionMap.html", "classSoTextureCoordinateReflectionMap" ],
     [ "SoTextureCoordinateSphere", "classSoTextureCoordinateSphere.html", "classSoTextureCoordinateSphere" ],
     [ "SoTextureCubeMap", "classSoTextureCubeMap.html", "classSoTextureCubeMap" ],

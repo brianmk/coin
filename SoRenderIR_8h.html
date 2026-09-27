@@ -182,6 +182,9 @@ Classes</h2></td></tr>
 <tr class="memitem:"><td class="memItemLeft" align="right" valign="top">struct &#160;</td><td class="memItemRight" valign="bottom"><a class="el" href="structSoLightingRaw.html">SoLightingRaw</a></td></tr>
 <tr class="memdesc:"><td class="mdescLeft">&#160;</td><td class="mdescRight">Scene-space inputs behind one <a class="el" href="structSoLightingData.html" title="Shared (world-space) lighting setup referenced by render commands.">SoLightingData</a> entry (provenance).  <a href="structSoLightingRaw.html#details">More...</a><br /></td></tr>
 <tr class="separator:"><td class="memSeparator" colspan="2">&#160;</td></tr>
+<tr class="memitem:"><td class="memItemLeft" align="right" valign="top">struct &#160;</td><td class="memItemRight" valign="bottom"><a class="el" href="structSoRenderIR_1_1SoMaterialBlock.html">SoRenderIR::SoMaterialBlock</a></td></tr>
+<tr class="memdesc:"><td class="mdescLeft">&#160;</td><td class="mdescRight">Canonical mirror of a command's material parameters, shared by every retained backend's material staging.  <a href="structSoRenderIR_1_1SoMaterialBlock.html#details">More...</a><br /></td></tr>
+<tr class="separator:"><td class="memSeparator" colspan="2">&#160;</td></tr>
 <tr class="memitem:"><td class="memItemLeft" align="right" valign="top">struct &#160;</td><td class="memItemRight" valign="bottom"><a class="el" href="structSoMaterialData.html">SoMaterialData</a></td></tr>
 <tr class="memdesc:"><td class="mdescLeft">&#160;</td><td class="mdescRight">Snapshot of the logical Inventor material state for one draw call.  <a href="structSoMaterialData.html#details">More...</a><br /></td></tr>
 <tr class="separator:"><td class="memSeparator" colspan="2">&#160;</td></tr>
@@ -368,6 +371,9 @@ Enumerations</h2></td></tr>
 </table><table class="memberdecls">
 <tr class="heading"><td colspan="2"><h2 class="groupheader"><a id="func-members" name="func-members"></a>
 Functions</h2></td></tr>
+<tr class="memitem:a0a1fc465ccf8ee4911837b3e9683c595" id="r_a0a1fc465ccf8ee4911837b3e9683c595"><td class="memItemLeft" align="right" valign="top"><a class="el" href="classSbVec3f.html">SbVec3f</a>&#160;</td><td class="memItemRight" valign="bottom"><a class="el" href="#a0a1fc465ccf8ee4911837b3e9683c595">SoRenderIR::effectiveMaterialAmbient</a> (<a class="el" href="classSbList.html">const</a> <a class="el" href="classSbVec3f.html">SbVec3f</a> &amp;<a class="el" href="classSbList.html">sceneAmbient</a>, <a class="el" href="classSbList.html">const</a> <a class="el" href="classSbVec4f.html">SbVec4f</a> &amp;<a class="el" href="classSbList.html">materialAmbient</a>)</td></tr>
+<tr class="memdesc:a0a1fc465ccf8ee4911837b3e9683c595"><td class="mdescLeft">&#160;</td><td class="mdescRight">Effective ambient term for one material under a scene ambient.  <br /></td></tr>
+<tr class="separator:a0a1fc465ccf8ee4911837b3e9683c595"><td class="memSeparator" colspan="2">&#160;</td></tr>
 <tr class="memitem:ab9df0806d810c7e7bc63b8558c181b51" id="r_ab9df0806d810c7e7bc63b8558c181b51"><td class="memItemLeft" align="right" valign="top">int&#160;</td><td class="memItemRight" valign="bottom"><a class="el" href="#ab9df0806d810c7e7bc63b8558c181b51">SoRenderIR::fillLightingBlock</a> (<a class="el" href="structSoLightingBlock.html">SoLightingBlock</a> &amp;block, <a class="el" href="classSbList.html">const</a> <a class="el" href="structSoLightingData.html">SoLightingData</a> &amp;<a class="el" href="classSbList.html">world</a>, <a class="el" href="classSbList.html">const</a> <a class="el" href="classSbMatrix.html">SbMatrix</a> *<a class="el" href="classSbList.html">toEye</a>)</td></tr>
 <tr class="memdesc:ab9df0806d810c7e7bc63b8558c181b51"><td class="mdescLeft">&#160;</td><td class="mdescRight">Fill a <a class="el" href="structSoLightingBlock.html" title="Standardized fixed-capacity GPU mirror of one world-space lighting setup, shared by every retained ba...">SoLightingBlock</a> from a world-space <a class="el" href="structSoLightingData.html" title="Shared (world-space) lighting setup referenced by render commands.">SoLightingData</a>.  <br /></td></tr>
 <tr class="separator:ab9df0806d810c7e7bc63b8558c181b51"><td class="memSeparator" colspan="2">&#160;</td></tr>
@@ -377,6 +383,12 @@ Functions</h2></td></tr>
 <tr class="memitem:a3a83e7afc69a0f41b21aea9cf77fc5bb" id="r_a3a83e7afc69a0f41b21aea9cf77fc5bb"><td class="memItemLeft" align="right" valign="top"><a class="el" href="structSoLightData.html">SoLightData</a>&#160;</td><td class="memItemRight" valign="bottom"><a class="el" href="#a3a83e7afc69a0f41b21aea9cf77fc5bb">SoRenderIR::lightToWorld</a> (<a class="el" href="classSbList.html">const</a> <a class="el" href="structSoLightData.html">SoLightData</a> &amp;<a class="el" href="classSbList.html">eye</a>, <a class="el" href="classSbList.html">const</a> <a class="el" href="classSbMatrix.html">SbMatrix</a> &amp;<a class="el" href="classSbList.html">inverseView</a>)</td></tr>
 <tr class="memdesc:a3a83e7afc69a0f41b21aea9cf77fc5bb"><td class="mdescLeft">&#160;</td><td class="mdescRight">Transform one eye-space light into world space for <em>inverseView</em>.  <br /></td></tr>
 <tr class="separator:a3a83e7afc69a0f41b21aea9cf77fc5bb"><td class="memSeparator" colspan="2">&#160;</td></tr>
+<tr class="memitem:a2fe64f019379aebc303b79157046e9c3" id="r_a2fe64f019379aebc303b79157046e9c3"><td class="memItemLeft" align="right" valign="top"><a class="el" href="classSbList.html">void</a>&#160;</td><td class="memItemRight" valign="bottom"><a class="el" href="#a2fe64f019379aebc303b79157046e9c3">SoRenderIR::packMaterialBlock</a> (<a class="el" href="structSoRenderIR_1_1SoMaterialBlock.html">SoMaterialBlock</a> &amp;block, <a class="el" href="classSbList.html">const</a> <a class="el" href="structSoMaterialData.html">SoMaterialData</a> &amp;material)</td></tr>
+<tr class="memdesc:a2fe64f019379aebc303b79157046e9c3"><td class="mdescLeft">&#160;</td><td class="mdescRight">Fill a <a class="el" href="structSoRenderIR_1_1SoMaterialBlock.html" title="Canonical mirror of a command&#39;s material parameters, shared by every retained backend&#39;s material stag...">SoMaterialBlock</a> from a command's <a class="el" href="structSoMaterialData.html" title="Snapshot of the logical Inventor material state for one draw call.">SoMaterialData</a>.  <br /></td></tr>
+<tr class="separator:a2fe64f019379aebc303b79157046e9c3"><td class="memSeparator" colspan="2">&#160;</td></tr>
+<tr class="memitem:a7a5987872f168561ad992a66407e7819" id="r_a7a5987872f168561ad992a66407e7819"><td class="memItemLeft" align="right" valign="top"><a class="el" href="classSbList.html">void</a>&#160;</td><td class="memItemRight" valign="bottom"><a class="el" href="#a7a5987872f168561ad992a66407e7819">SoRenderIR::resolveOptical</a> (<a class="el" href="structSoRenderIR_1_1SoMaterialBlock.html">SoMaterialBlock</a> &amp;block, float <a class="el" href="classSbList.html">globalIor</a>, float <a class="el" href="classSbList.html">globalAbsorption</a>)</td></tr>
+<tr class="memdesc:a7a5987872f168561ad992a66407e7819"><td class="mdescLeft">&#160;</td><td class="mdescRight">Apply the scene's global glass optics to a packed material.  <br /></td></tr>
+<tr class="separator:a7a5987872f168561ad992a66407e7819"><td class="memSeparator" colspan="2">&#160;</td></tr>
 </table><table class="memberdecls">
 <tr class="heading"><td colspan="2"><h2 class="groupheader"><a id="var-members" name="var-members"></a>
 Variables</h2></td></tr>
@@ -429,6 +441,30 @@ Variables</h2></td></tr>
 </div>
 </div>
 <h2 class="groupheader">Function Documentation</h2>
+<a id="a0a1fc465ccf8ee4911837b3e9683c595" name="a0a1fc465ccf8ee4911837b3e9683c595"></a>
+<h2 class="memtitle"><span class="permalink"><a href="#a0a1fc465ccf8ee4911837b3e9683c595">&#9670;&#160;</a></span>effectiveMaterialAmbient()</h2>
+
+<div class="memitem">
+<div class="memproto">
+      <table class="memname">
+        <tr>
+          <td class="memname"><a class="el" href="classSbVec3f.html">SbVec3f</a> SoRenderIR::effectiveMaterialAmbient </td>
+          <td>(</td>
+          <td class="paramtype"><a class="el" href="classSbList.html">const</a> <a class="el" href="classSbVec3f.html">SbVec3f</a> &amp;</td>          <td class="paramname"><span class="paramname"><em>sceneAmbient</em>, </span></td>
+        </tr>
+        <tr>
+          <td class="paramkey"></td>
+          <td></td>
+          <td class="paramtype"><a class="el" href="classSbList.html">const</a> <a class="el" href="classSbVec4f.html">SbVec4f</a> &amp;</td>          <td class="paramname"><span class="paramname"><em>materialAmbient</em></span>&#160;)</td>
+        </tr>
+      </table>
+</div><div class="memdoc">
+
+<p>Effective ambient term for one material under a scene ambient. </p>
+<p>The raster and ray-traced backends must agree on how a per-material ambient colour combines with the scene ambient. The raster fragment shader applies this in-shader (<code>ambientLight * materialAmbient</code>); the path tracer pre- multiplies it into the material record. Both funnel through this single definition so the convention cannot drift between the two backends. </p>
+
+</div>
+</div>
 <a id="ab9df0806d810c7e7bc63b8558c181b51" name="ab9df0806d810c7e7bc63b8558c181b51"></a>
 <h2 class="memtitle"><span class="permalink"><a href="#ab9df0806d810c7e7bc63b8558c181b51">&#9670;&#160;</a></span>fillLightingBlock()</h2>
 
@@ -506,6 +542,59 @@ Variables</h2></td></tr>
 
 </div>
 </div>
+<a id="a2fe64f019379aebc303b79157046e9c3" name="a2fe64f019379aebc303b79157046e9c3"></a>
+<h2 class="memtitle"><span class="permalink"><a href="#a2fe64f019379aebc303b79157046e9c3">&#9670;&#160;</a></span>packMaterialBlock()</h2>
+
+<div class="memitem">
+<div class="memproto">
+      <table class="memname">
+        <tr>
+          <td class="memname"><a class="el" href="classSbList.html">void</a> SoRenderIR::packMaterialBlock </td>
+          <td>(</td>
+          <td class="paramtype"><a class="el" href="structSoRenderIR_1_1SoMaterialBlock.html">SoMaterialBlock</a> &amp;</td>          <td class="paramname"><span class="paramname"><em>block</em>, </span></td>
+        </tr>
+        <tr>
+          <td class="paramkey"></td>
+          <td></td>
+          <td class="paramtype"><a class="el" href="classSbList.html">const</a> <a class="el" href="structSoMaterialData.html">SoMaterialData</a> &amp;</td>          <td class="paramname"><span class="paramname"><em>material</em></span>&#160;)</td>
+        </tr>
+      </table>
+</div><div class="memdoc">
+
+<p>Fill a SoMaterialBlock from a command's <a class="el" href="structSoMaterialData.html" title="Snapshot of the logical Inventor material state for one draw call.">SoMaterialData</a>. </p>
+<p>One definition of the material mapping for every retained backend. The light count (params[2]) and the path tracer's PBR gate override (pbr[2]) are left to the caller, which alone knows the effective lighting and the backend's gate policy. </p>
+
+</div>
+</div>
+<a id="a7a5987872f168561ad992a66407e7819" name="a7a5987872f168561ad992a66407e7819"></a>
+<h2 class="memtitle"><span class="permalink"><a href="#a7a5987872f168561ad992a66407e7819">&#9670;&#160;</a></span>resolveOptical()</h2>
+
+<div class="memitem">
+<div class="memproto">
+      <table class="memname">
+        <tr>
+          <td class="memname"><a class="el" href="classSbList.html">void</a> SoRenderIR::resolveOptical </td>
+          <td>(</td>
+          <td class="paramtype"><a class="el" href="structSoRenderIR_1_1SoMaterialBlock.html">SoMaterialBlock</a> &amp;</td>          <td class="paramname"><span class="paramname"><em>block</em>, </span></td>
+        </tr>
+        <tr>
+          <td class="paramkey"></td>
+          <td></td>
+          <td class="paramtype">float</td>          <td class="paramname"><span class="paramname"><em>globalIor</em>, </span></td>
+        </tr>
+        <tr>
+          <td class="paramkey"></td>
+          <td></td>
+          <td class="paramtype">float</td>          <td class="paramname"><span class="paramname"><em>globalAbsorption</em></span>&#160;)</td>
+        </tr>
+      </table>
+</div><div class="memdoc">
+
+<p>Apply the scene's global glass optics to a packed material. </p>
+<p><code>optical</code>[3] (the transmissionAuthored flag) decides precedence: when the material did not author its own optics, the viewer's global IOR/absorption are the effective defaults; when it did, the authored <code>optical</code>[0..1] survive untouched. Shared by every backend that has a viewer-level glass setting, so a per-material dielectric is never silently replaced. </p>
+
+</div>
+</div>
 <h2 class="groupheader">Variable Documentation</h2>
 <a id="ab95fd8abdf7585db4c36f7d5429e0d64" name="ab95fd8abdf7585db4c36f7d5429e0d64"></a>
 <h2 class="memtitle"><span class="permalink"><a href="#ab95fd8abdf7585db4c36f7d5429e0d64">&#9670;&#160;</a></span>SO_MAX_SHADER_LIGHTS</h2>
@@ -538,7 +627,7 @@ Variables</h2></td></tr>
 <div id="nav-path" class="navpath"><!-- id is needed for treeview function! -->
   <ul>
     <li class="navelem"><a class="el" href="dir_d44c64559bbebec7f509842c48db8b23.html">include</a></li><li class="navelem"><a class="el" href="dir_469ed70aca823fd8322768ad54869f94.html">Inventor</a></li><li class="navelem"><a class="el" href="dir_5d343cc747bd41482eefe196ea3ce274.html">rendering</a></li><li class="navelem"><a class="el" href="SoRenderIR_8h.html">SoRenderIR.h</a></li>
-    <li class="footer">Generated on Sun Sep 27 2026 18:04:05 for Coin by <a href="https://www.doxygen.org/index.html"><img class="footer" src="doxygen.svg" width="104" height="31" alt="doxygen"/></a> 1.10.0 </li>
+    <li class="footer">Generated on Sun Sep 27 2026 22:47:42 for Coin by <a href="https://www.doxygen.org/index.html"><img class="footer" src="doxygen.svg" width="104" height="31" alt="doxygen"/></a> 1.10.0 </li>
   </ul>
 </div>
 </body>

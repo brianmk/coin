@@ -248,6 +248,6 @@ var NAVTREEINDEX1 =
 "SoPath_8h_source.html":[6,0,1,0,109],
 "SoPendulum_8h_source.html":[6,0,1,0,19,75],
 "SoPerspectiveCamera_8h_source.html":[6,0,1,0,19,76],
-"SoPickAction_8h_source.html":[6,0,1,0,0,13],
-"SoPickRayElement_8h_source.html":[6,0,1,0,8,91]
+"SoPhysicalMaterialElement_8h_source.html":[6,0,1,0,8,91],
+"SoPhysicalMaterial_8h_source.html":[6,0,1,0,19,77]
 };

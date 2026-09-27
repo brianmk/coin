@@ -197,6 +197,9 @@ Public Member Functions</h2></td></tr>
 <tr class="memitem:aa32481a47bc44835be67c40866a7970d" id="r_aa32481a47bc44835be67c40866a7970d"><td class="memItemLeft" align="right" valign="top"><a id="aa32481a47bc44835be67c40866a7970d" name="aa32481a47bc44835be67c40866a7970d"></a>
 <a class="el" href="classSbList.html">const</a> <a class="el" href="classSbViewportRegion.html">SbViewportRegion</a> &amp;&#160;</td><td class="memItemRight" valign="bottom"><b>getViewportRegion</b> (<a class="el" href="classSbList.html">void</a>) <a class="el" href="classSbList.html">const</a></td></tr>
 <tr class="separator:aa32481a47bc44835be67c40866a7970d"><td class="memSeparator" colspan="2">&#160;</td></tr>
+<tr class="memitem:aefa2a3500ef940aeb5d8b3bad34512c6" id="r_aefa2a3500ef940aeb5d8b3bad34512c6"><td class="memItemLeft" align="right" valign="top"><a id="aefa2a3500ef940aeb5d8b3bad34512c6" name="aefa2a3500ef940aeb5d8b3bad34512c6"></a>
+bool&#160;</td><td class="memItemRight" valign="bottom"><b>modelPointsVisible</b> () <a class="el" href="classSbList.html">const</a></td></tr>
+<tr class="separator:aefa2a3500ef940aeb5d8b3bad34512c6"><td class="memSeparator" colspan="2">&#160;</td></tr>
 <tr class="memitem:aaac014d2ed5d16b1daa2a5d22e74ba89" id="r_aaac014d2ed5d16b1daa2a5d22e74ba89"><td class="memItemLeft" align="right" valign="top"><a id="aaac014d2ed5d16b1daa2a5d22e74ba89" name="aaac014d2ed5d16b1daa2a5d22e74ba89"></a>
 <a class="el" href="classSbList.html">void</a>&#160;</td><td class="memItemRight" valign="bottom"><b>popPrimitiveCollector</b> (<a class="el" href="classSoIRRenderAction_1_1PrimitiveCollector.html">PrimitiveCollector</a> *<a class="el" href="classSbList.html">collector</a>)</td></tr>
 <tr class="memdesc:aaac014d2ed5d16b1daa2a5d22e74ba89"><td class="mdescLeft">&#160;</td><td class="mdescRight">Pop the current primitive collector. The caller must pop in stack order. <br /></td></tr>
@@ -205,6 +208,9 @@ Public Member Functions</h2></td></tr>
 <a class="el" href="classSbList.html">void</a>&#160;</td><td class="memItemRight" valign="bottom"><b>pushPrimitiveCollector</b> (<a class="el" href="classSoIRRenderAction_1_1PrimitiveCollector.html">PrimitiveCollector</a> *<a class="el" href="classSbList.html">collector</a>)</td></tr>
 <tr class="memdesc:a0c5b2d6a9b08921fda3bc07d859d135d"><td class="mdescLeft">&#160;</td><td class="mdescRight">Push a primitive collector for subsequent fallback primitive generation. <br /></td></tr>
 <tr class="separator:a0c5b2d6a9b08921fda3bc07d859d135d"><td class="memSeparator" colspan="2">&#160;</td></tr>
+<tr class="memitem:a3d5ea4f50537cc626ebfe6ec15ca69a3" id="r_a3d5ea4f50537cc626ebfe6ec15ca69a3"><td class="memItemLeft" align="right" valign="top"><a class="el" href="classSbList.html">void</a>&#160;</td><td class="memItemRight" valign="bottom"><a class="el" href="#a3d5ea4f50537cc626ebfe6ec15ca69a3">setModelPointsVisible</a> (bool on)</td></tr>
+<tr class="memdesc:a3d5ea4f50537cc626ebfe6ec15ca69a3"><td class="mdescLeft">&#160;</td><td class="mdescRight">Whether base point sets record their geometry during traversal.  <br /></td></tr>
+<tr class="separator:a3d5ea4f50537cc626ebfe6ec15ca69a3"><td class="memSeparator" colspan="2">&#160;</td></tr>
 <tr class="memitem:a7a21a7fc085b065916c0ad00fd34ae52" id="r_a7a21a7fc085b065916c0ad00fd34ae52"><td class="memItemLeft" align="right" valign="top"><a id="a7a21a7fc085b065916c0ad00fd34ae52" name="a7a21a7fc085b065916c0ad00fd34ae52"></a>
 <a class="el" href="classSbList.html">void</a>&#160;</td><td class="memItemRight" valign="bottom"><b>setViewportRegion</b> (<a class="el" href="classSbList.html">const</a> <a class="el" href="classSbViewportRegion.html">SbViewportRegion</a> &amp;<a class="el" href="classSbList.html">vp</a>)</td></tr>
 <tr class="separator:a7a21a7fc085b065916c0ad00fd34ae52"><td class="memSeparator" colspan="2">&#160;</td></tr>
@@ -718,6 +724,26 @@ Additional Inherited Members</h2></td></tr>
 
 </div>
 </div>
+<a id="a3d5ea4f50537cc626ebfe6ec15ca69a3" name="a3d5ea4f50537cc626ebfe6ec15ca69a3"></a>
+<h2 class="memtitle"><span class="permalink"><a href="#a3d5ea4f50537cc626ebfe6ec15ca69a3">&#9670;&#160;</a></span>setModelPointsVisible()</h2>
+
+<div class="memitem">
+<div class="memproto">
+      <table class="memname">
+        <tr>
+          <td class="memname"><a class="el" href="classSbList.html">void</a> SoIRRenderAction::setModelPointsVisible </td>
+          <td>(</td>
+          <td class="paramtype">bool</td>          <td class="paramname"><span class="paramname"><em>on</em></span></td><td>)</td>
+          <td></td>
+        </tr>
+      </table>
+</div><div class="memdoc">
+
+<p>Whether base point sets record their geometry during traversal. </p>
+<p>FreeCAD's BRep vertex markers (Part's SoBrepPointSet) emit their base points unconditionally, which shows the shape vertices as dots even when the viewer's "show vertices" preference is off. A shape node can consult this flag to skip its base geometry; highlight/selection overlays are emitted by a different node and are unaffected. Defaults to true so a caller that does not set it keeps the historical behaviour. </p>
+
+</div>
+</div>
 <hr/>The documentation for this class was generated from the following files:<ul>
 <li><a class="el" href="SoIRRenderAction_8h_source.html">SoIRRenderAction.h</a></li>
 <li><b>SoIRRenderAction.cpp</b></li>
@@ -728,7 +754,7 @@ Additional Inherited Members</h2></td></tr>
 <div id="nav-path" class="navpath"><!-- id is needed for treeview function! -->
   <ul>
     <li class="navelem"><a class="el" href="classSoIRRenderAction.html">SoIRRenderAction</a></li>
-    <li class="footer">Generated on Sun Sep 27 2026 18:04:07 for Coin by <a href="https://www.doxygen.org/index.html"><img class="footer" src="doxygen.svg" width="104" height="31" alt="doxygen"/></a> 1.10.0 </li>
+    <li class="footer">Generated on Sun Sep 27 2026 22:47:44 for Coin by <a href="https://www.doxygen.org/index.html"><img class="footer" src="doxygen.svg" width="104" height="31" alt="doxygen"/></a> 1.10.0 </li>
   </ul>
 </div>
 </body>

@@ -120,13 +120,14 @@ var searchData=
   ['resetcenter_117',['resetCenter',['../classSoGetBoundingBoxAction.html#ad132b7df48f254c4500fd8b2de4ac3cb',1,'SoGetBoundingBoxAction']]],
   ['resetfilepointer_118',['resetFilePointer',['../classSoInput.html#a587ea9cc13a516915fa0bb88cca2c61c',1,'SoInput']]],
   ['resetheaderstring_119',['resetHeaderString',['../classSoOutput.html#a6a029142b4b708bb2f4ca4662a21fa2a',1,'SoOutput']]],
-  ['resolveroutes_120',['resolveRoutes',['../classSoOutput.html#a8a4d22c3ae245f50060e2e6ab5272012',1,'SoOutput']]],
-  ['restrikelighting_121',['restrikeLighting',['../classSoDrawList.html#a6b511c6d9cc12affa7367f07e47aed65',1,'SoDrawList']]],
-  ['reuseappearancenodes_122',['reuseAppearanceNodes',['../classSoToVRML2Action.html#ab575be05157126fe8c66b443bc9d0d89',1,'SoToVRML2Action']]],
-  ['reusegeometrynodes_123',['reuseGeometryNodes',['../classSoToVRML2Action.html#ae6adaa8a8190c272b5c46ce29efed2fa',1,'SoToVRML2Action']]],
-  ['reusepropertynodes_124',['reusePropertyNodes',['../classSoToVRML2Action.html#a0e6471e6a88fd8720e67fd34c89d7963',1,'SoToVRML2Action']]],
-  ['rotateby_125',['rotateBy',['../classSoBumpMapMatrixElement.html#a930a3d97def85ff42bbeb90e0f70b7f3',1,'SoBumpMapMatrixElement::rotateBy()'],['../classSoLocalBBoxMatrixElement.html#a21ed13c5ee9e113d60d83832ee38a72c',1,'SoLocalBBoxMatrixElement::rotateBy()'],['../classSoModelMatrixElement.html#a73b442f437c7fcc3ed70380216bc0f9d',1,'SoModelMatrixElement::rotateBy()']]],
-  ['rotatecamera_126',['rotateCamera',['../classSbDPViewVolume.html#a67b021bbbc5a24853825d464444a8377',1,'SbDPViewVolume::rotateCamera()'],['../classSbViewVolume.html#a7f048618c8b356e7cc5af37d81972a5d',1,'SbViewVolume::rotateCamera()']]],
-  ['rotateeltby_127',['rotateEltBy',['../classSoBBoxModelMatrixElement.html#a65ba5c678a17a2e0e1414e8cf9b63d22',1,'SoBBoxModelMatrixElement::rotateEltBy()'],['../classSoBumpMapMatrixElement.html#afaecd63e866c58535ff8fbff8ddcba4d',1,'SoBumpMapMatrixElement::rotateEltBy()'],['../classSoGLModelMatrixElement.html#a2f4764e5a4489f549342cf89eb350efd',1,'SoGLModelMatrixElement::rotateEltBy()'],['../classSoModelMatrixElement.html#a3425bc649f4ef25b2af00cb27902650b',1,'SoModelMatrixElement::rotateEltBy()']]],
-  ['rtprintf_128',['RTPrintf',['../classSoDebug.html#a5738b3477f0fa0a3b59e14cc51da8c7b',1,'SoDebug']]]
+  ['resolveoptical_120',['resolveOptical',['../SoRenderIR_8h.html#a7a5987872f168561ad992a66407e7819',1,'SoRenderIR']]],
+  ['resolveroutes_121',['resolveRoutes',['../classSoOutput.html#a8a4d22c3ae245f50060e2e6ab5272012',1,'SoOutput']]],
+  ['restrikelighting_122',['restrikeLighting',['../classSoDrawList.html#a6b511c6d9cc12affa7367f07e47aed65',1,'SoDrawList']]],
+  ['reuseappearancenodes_123',['reuseAppearanceNodes',['../classSoToVRML2Action.html#ab575be05157126fe8c66b443bc9d0d89',1,'SoToVRML2Action']]],
+  ['reusegeometrynodes_124',['reuseGeometryNodes',['../classSoToVRML2Action.html#ae6adaa8a8190c272b5c46ce29efed2fa',1,'SoToVRML2Action']]],
+  ['reusepropertynodes_125',['reusePropertyNodes',['../classSoToVRML2Action.html#a0e6471e6a88fd8720e67fd34c89d7963',1,'SoToVRML2Action']]],
+  ['rotateby_126',['rotateBy',['../classSoBumpMapMatrixElement.html#a930a3d97def85ff42bbeb90e0f70b7f3',1,'SoBumpMapMatrixElement::rotateBy()'],['../classSoLocalBBoxMatrixElement.html#a21ed13c5ee9e113d60d83832ee38a72c',1,'SoLocalBBoxMatrixElement::rotateBy()'],['../classSoModelMatrixElement.html#a73b442f437c7fcc3ed70380216bc0f9d',1,'SoModelMatrixElement::rotateBy()']]],
+  ['rotatecamera_127',['rotateCamera',['../classSbDPViewVolume.html#a67b021bbbc5a24853825d464444a8377',1,'SbDPViewVolume::rotateCamera()'],['../classSbViewVolume.html#a7f048618c8b356e7cc5af37d81972a5d',1,'SbViewVolume::rotateCamera()']]],
+  ['rotateeltby_128',['rotateEltBy',['../classSoBBoxModelMatrixElement.html#a65ba5c678a17a2e0e1414e8cf9b63d22',1,'SoBBoxModelMatrixElement::rotateEltBy()'],['../classSoBumpMapMatrixElement.html#afaecd63e866c58535ff8fbff8ddcba4d',1,'SoBumpMapMatrixElement::rotateEltBy()'],['../classSoGLModelMatrixElement.html#a2f4764e5a4489f549342cf89eb350efd',1,'SoGLModelMatrixElement::rotateEltBy()'],['../classSoModelMatrixElement.html#a3425bc649f4ef25b2af00cb27902650b',1,'SoModelMatrixElement::rotateEltBy()']]],
+  ['rtprintf_129',['RTPrintf',['../classSoDebug.html#a5738b3477f0fa0a3b59e14cc51da8c7b',1,'SoDebug']]]
 ];

@@ -582,6 +582,7 @@ var hierarchy =
           [ "SoNormal", "classSoNormal.html", null ],
           [ "SoNormalBinding", "classSoNormalBinding.html", null ],
           [ "SoPackedColor", "classSoPackedColor.html", null ],
+          [ "SoPhysicalMaterial", "classSoPhysicalMaterial.html", null ],
           [ "SoPickStyle", "classSoPickStyle.html", null ],
           [ "SoPolygonOffset", "classSoPolygonOffset.html", null ],
           [ "SoProfile", "classSoProfile.html", [
@@ -701,6 +702,7 @@ var hierarchy =
             [ "SoTextureCoordinateNormalMap", "classSoTextureCoordinateNormalMap.html", null ],
             [ "SoTextureCoordinateObject", "classSoTextureCoordinateObject.html", null ],
             [ "SoTextureCoordinatePlane", "classSoTextureCoordinatePlane.html", null ],
+            [ "SoTextureCoordinateProjection", "classSoTextureCoordinateProjection.html", null ],
             [ "SoTextureCoordinateReflectionMap", "classSoTextureCoordinateReflectionMap.html", null ]
           ] ],
           [ "SoTextureCoordinateSphere", "classSoTextureCoordinateSphere.html", null ],
@@ -930,6 +932,7 @@ var hierarchy =
         [ "SoNormalElement", "classSoNormalElement.html", [
           [ "SoGLNormalElement", "classSoGLNormalElement.html", null ]
         ] ],
+        [ "SoPhysicalMaterialElement", "classSoPhysicalMaterialElement.html", null ],
         [ "SoPolygonOffsetElement", "classSoPolygonOffsetElement.html", [
           [ "SoGLPolygonOffsetElement", "classSoGLPolygonOffsetElement.html", null ]
         ] ],
@@ -1092,6 +1095,7 @@ var hierarchy =
     [ "SoLightingRaw", "structSoLightingRaw.html", null ],
     [ "SoLightPath", "classSoLightPath.html", null ],
     [ "SoLockManager", "classSoLockManager.html", null ],
+    [ "SoRenderIR::SoMaterialBlock", "structSoRenderIR_1_1SoMaterialBlock.html", null ],
     [ "SoMaterialData", "structSoMaterialData.html", null ],
     [ "SoNodeKit", "classSoNodeKit.html", null ],
     [ "SoNodekitCatalog", "classSoNodekitCatalog.html", null ],

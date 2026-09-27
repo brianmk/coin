@@ -380,7 +380,8 @@ var group__coin__actions =
       [ "getMutableDrawList", "classSoIRRenderAction.html#ac377767d67b59159075b1288791d242c", null ],
       [ "getTypeId", "classSoIRRenderAction.html#ab3cb044780729637f3082b203ddbe1df", null ],
       [ "popPrimitiveCollector", "classSoIRRenderAction.html#aaac014d2ed5d16b1daa2a5d22e74ba89", null ],
-      [ "pushPrimitiveCollector", "classSoIRRenderAction.html#a0c5b2d6a9b08921fda3bc07d859d135d", null ]
+      [ "pushPrimitiveCollector", "classSoIRRenderAction.html#a0c5b2d6a9b08921fda3bc07d859d135d", null ],
+      [ "setModelPointsVisible", "classSoIRRenderAction.html#a3d5ea4f50537cc626ebfe6ec15ca69a3", null ]
     ] ],
     [ "SoLineHighlightRenderAction", "classSoLineHighlightRenderAction.html", [
       [ "SoLineHighlightRenderAction", "classSoLineHighlightRenderAction.html#a07ae908be3e8dd3387c5e957f4deff90", null ],

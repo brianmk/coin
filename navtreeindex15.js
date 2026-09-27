@@ -1,5 +1,11 @@
 var NAVTREEINDEX15 =
 {
+"classSoDebugError.html":[3,8,0],
+"classSoDebugError.html#a75af94a4fc4f0feb5b2ead59b04e9bbd":[3,8,0,0],
+"classSoDebugError.html#a75af94a4fc4f0feb5b2ead59b04e9bbda78c6f807e3fe112ae65acfecc8eca6ae":[3,8,0,0,0],
+"classSoDebugError.html#a75af94a4fc4f0feb5b2ead59b04e9bbda82d0263c9b2944dd4838f64a4d2db48e":[3,8,0,0,2],
+"classSoDebugError.html#a75af94a4fc4f0feb5b2ead59b04e9bbdae3f62335bdeb576ebb5271cb709086c5":[3,8,0,0,1],
+"classSoDebugError.html#a7aa553264cfd7e76d6a44795fc05c5a5":[3,8,0,3],
 "classSoDebugError.html#aa204b331242f8c9078355d6b2154bea2":[3,8,0,1],
 "classSoDebugError.html#ac615e564326854aa2c057fa681401b2f":[3,8,0,2],
 "classSoDecimationPercentageElement.html":[3,6,17],
@@ -111,8 +117,8 @@ var NAVTREEINDEX15 =
 "classSoDetailList.html#a9e8aeabea3c5346d1f5e610af98d515a":[3,4,4,7],
 "classSoDetailList.html#ad943c37febf69f78808b15a8fcaec341":[3,4,4,9],
 "classSoDetailList.html#afc8c5de6627358764bbe927456d00203":[3,4,4,4],
-"classSoDevicePixelRatioElement.html":[5,0,260],
-"classSoDevicePixelRatioElement.html#adc54fffa396dce144fce91fd0d63db96":[5,0,260,0],
+"classSoDevicePixelRatioElement.html":[5,0,261],
+"classSoDevicePixelRatioElement.html#adc54fffa396dce144fce91fd0d63db96":[5,0,261,0],
 "classSoDiffuseColorElement.html":[3,6,20],
 "classSoDiffuseColorElement.html#a1fe10db55c8ceaffcbee830f7a238a09":[3,6,20,2],
 "classSoDiffuseColorElement.html#a46934c30357f1d0ec664dea3456b8aeb":[3,6,20,0],
@@ -243,11 +249,5 @@ var NAVTREEINDEX15 =
 "classSoDragger.html#ac0517769322f58ec7c845d7e3e4a404d":[3,5,2,4],
 "classSoDragger.html#ac97a3e1f1d3d0c733dacf67a88c95e12":[3,5,2,68],
 "classSoDragger.html#ac9b06cd585ddf05ae29cb706dd7c9675":[3,5,2,10],
-"classSoDragger.html#adab411d63e761b7b9d9a4c5b12271cea":[3,5,2,9],
-"classSoDragger.html#ae00e9e57f085a8f76aa16a5b6e0b1230":[3,5,2,50],
-"classSoDragger.html#ae3869e616e1cdbc9d6e5ad9397965b98":[3,5,2,33],
-"classSoDragger.html#ae59c9f2f54b51627e3e973f61112620e":[3,5,2,55],
-"classSoDragger.html#ae67d944d4b6b8406292f5d8ee50c49f5":[3,5,2,43],
-"classSoDragger.html#aee9a570b37a492dc399c4821a59fb031":[3,5,2,16],
-"classSoDragger.html#af1993d0c1a669736e2f2235a2b666f70":[3,5,2,28]
+"classSoDragger.html#adab411d63e761b7b9d9a4c5b12271cea":[3,5,2,9]
 };

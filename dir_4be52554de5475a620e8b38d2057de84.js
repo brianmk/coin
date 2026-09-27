@@ -91,6 +91,7 @@ var dir_4be52554de5475a620e8b38d2057de84 =
     [ "SoNormalBindingElement.h", "SoNormalBindingElement_8h_source.html", null ],
     [ "SoNormalElement.h", "SoNormalElement_8h_source.html", null ],
     [ "SoOverrideElement.h", "SoOverrideElement_8h_source.html", null ],
+    [ "SoPhysicalMaterialElement.h", "SoPhysicalMaterialElement_8h_source.html", null ],
     [ "SoPickRayElement.h", "SoPickRayElement_8h_source.html", null ],
     [ "SoPickStyleElement.h", "SoPickStyleElement_8h_source.html", null ],
     [ "SoPointSizeElement.h", "SoPointSizeElement_8h_source.html", null ],

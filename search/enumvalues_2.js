@@ -22,5 +22,6 @@ var searchData=
   ['convex_19',['CONVEX',['../classSoShapeHints.html#a19a3acc8d0e36b7fa2b43339e1a4b964a41006d88add0b114dfaf545256a2aff3',1,'SoShapeHints']]],
   ['count_5frefs_20',['COUNT_REFS',['../classSoOutput.html#af5f67f92434acc6d7c7619d3ef1dfb7fae0d98ba0aaa299ac5309ba8280c54282',1,'SoOutput']]],
   ['counterclockwise_21',['COUNTERCLOCKWISE',['../classSoShapeHints.html#a8b5f51cadba677ab1fb3abb6b5bb589fa35af3b282ec837d8d00027262431d2e8',1,'SoShapeHints']]],
-  ['custom_5fcallback_22',['CUSTOM_CALLBACK',['../classSoGLRenderAction.html#af673acee2953f6f6701e38c21e2f9ee0a9ab2d71ae6738a554f1f16d48125cc44',1,'SoGLRenderAction']]]
+  ['custom_5fcallback_22',['CUSTOM_CALLBACK',['../classSoGLRenderAction.html#af673acee2953f6f6701e38c21e2f9ee0a9ab2d71ae6738a554f1f16d48125cc44',1,'SoGLRenderAction']]],
+  ['cylindrical_23',['CYLINDRICAL',['../classSoTextureCoordinateProjection.html#ab672da4c650d42d8f3a1ad09793409b5a86ed41d85c723821c26cc573ab1b3bcd',1,'SoTextureCoordinateProjection']]]
 ];

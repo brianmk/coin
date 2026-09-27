@@ -14,6 +14,7 @@
     <class kind="struct">SoLightingBlock</class>
     <class kind="struct">SoLightingData</class>
     <class kind="struct">SoLightingRaw</class>
+    <class kind="struct">SoRenderIR::SoMaterialBlock</class>
     <class kind="struct">SoMaterialData</class>
     <class kind="struct">SoPixelTextData</class>
     <class kind="struct">SoRasterState</class>
@@ -72,24 +73,24 @@
   </compound>
   <compound kind="file">
     <name>SoVulkanImageCopy.h</name>
-    <path>/home/runner/work/coin/coin/include/Inventor/rendering/</path>
+    <path>/home/runner/work/coin/coin/include/Inventor/rendering/vulkan/</path>
     <filename>SoVulkanImageCopy_8h.html</filename>
   </compound>
   <compound kind="file">
     <name>SoVulkanRenderTarget.h</name>
-    <path>/home/runner/work/coin/coin/include/Inventor/rendering/</path>
+    <path>/home/runner/work/coin/coin/include/Inventor/rendering/vulkan/</path>
     <filename>SoVulkanRenderTarget_8h.html</filename>
   </compound>
   <compound kind="file">
     <name>SoVulkanViewMode.h</name>
-    <path>/home/runner/work/coin/coin/include/Inventor/rendering/</path>
+    <path>/home/runner/work/coin/coin/include/Inventor/rendering/vulkan/</path>
     <filename>SoVulkanViewMode_8h.html</filename>
   </compound>
   <compound kind="file">
     <name>SoVulkanViewSettings.h</name>
-    <path>/home/runner/work/coin/coin/include/Inventor/rendering/</path>
+    <path>/home/runner/work/coin/coin/include/Inventor/rendering/vulkan/</path>
     <filename>SoVulkanViewSettings_8h.html</filename>
-    <includes id="SoVulkanViewMode_8h" name="SoVulkanViewMode.h" local="no" import="no" module="no" objc="no">Inventor/rendering/SoVulkanViewMode.h</includes>
+    <includes id="SoVulkanViewMode_8h" name="SoVulkanViewMode.h" local="no" import="no" module="no" objc="no">Inventor/rendering/vulkan/SoVulkanViewMode.h</includes>
     <class kind="struct">SoVulkanViewSettings</class>
   </compound>
   <compound kind="struct">
@@ -39198,6 +39199,13 @@
       <anchor>a0c5b2d6a9b08921fda3bc07d859d135d</anchor>
       <arglist>(PrimitiveCollector *collector)</arglist>
     </member>
+    <member kind="function">
+      <type>void</type>
+      <name>setModelPointsVisible</name>
+      <anchorfile>classSoIRRenderAction.html</anchorfile>
+      <anchor>a3d5ea4f50537cc626ebfe6ec15ca69a3</anchor>
+      <arglist>(bool on)</arglist>
+    </member>
     <member kind="function" static="yes">
       <type>static void</type>
       <name>addMethod</name>
@@ -42544,6 +42552,10 @@
       <anchor>a29721e0893cd0d000ef4026384d35653</anchor>
       <arglist>()</arglist>
     </member>
+  </compound>
+  <compound kind="struct">
+    <name>SoRenderIR::SoMaterialBlock</name>
+    <filename>structSoRenderIR_1_1SoMaterialBlock.html</filename>
   </compound>
   <compound kind="class">
     <name>SoMaterialBundle</name>
@@ -53364,6 +53376,219 @@
     </member>
   </compound>
   <compound kind="class">
+    <name>SoPhysicalMaterial</name>
+    <filename>classSoPhysicalMaterial.html</filename>
+    <base>SoNode</base>
+    <member kind="function">
+      <type></type>
+      <name>SoPhysicalMaterial</name>
+      <anchorfile>classSoPhysicalMaterial.html</anchorfile>
+      <anchor>a61914b84c81199a2d2a41da502836155</anchor>
+      <arglist>(void)</arglist>
+    </member>
+    <member kind="function">
+      <type>void</type>
+      <name>callback</name>
+      <anchorfile>classSoPhysicalMaterial.html</anchorfile>
+      <anchor>a2a8dc53776994ecc6f770abfbdf6cb3a</anchor>
+      <arglist>(SoCallbackAction *action) override</arglist>
+    </member>
+    <member kind="function">
+      <type>void</type>
+      <name>doAction</name>
+      <anchorfile>classSoPhysicalMaterial.html</anchorfile>
+      <anchor>a12acf4b799570f1fbb22cfa1c406d003</anchor>
+      <arglist>(SoAction *action) override</arglist>
+    </member>
+    <member kind="function">
+      <type>SoType</type>
+      <name>getTypeId</name>
+      <anchorfile>classSoPhysicalMaterial.html</anchorfile>
+      <anchor>a691932dfa0db8f24a5ceff03055ef5fa</anchor>
+      <arglist>(void) const override</arglist>
+    </member>
+    <member kind="function" static="yes">
+      <type>static SoType</type>
+      <name>getClassTypeId</name>
+      <anchorfile>classSoPhysicalMaterial.html</anchorfile>
+      <anchor>a28336a366a927a7c4b1c4a4af182755f</anchor>
+      <arglist>(void)</arglist>
+    </member>
+    <member kind="function" static="yes">
+      <type>static void</type>
+      <name>initClass</name>
+      <anchorfile>classSoPhysicalMaterial.html</anchorfile>
+      <anchor>a05be2b9dae67c039f4f774980e2b63ea</anchor>
+      <arglist>(void)</arglist>
+    </member>
+    <member kind="variable">
+      <type>SoMFBool</type>
+      <name>enabled</name>
+      <anchorfile>classSoPhysicalMaterial.html</anchorfile>
+      <anchor>af4871690494a2454caed7242b778b6cf</anchor>
+      <arglist></arglist>
+    </member>
+    <member kind="variable">
+      <type>SoMFFloat</type>
+      <name>metalness</name>
+      <anchorfile>classSoPhysicalMaterial.html</anchorfile>
+      <anchor>a6fb242cd7c48116cf1b521eb9edc9207</anchor>
+      <arglist></arglist>
+    </member>
+    <member kind="variable">
+      <type>SoMFFloat</type>
+      <name>roughness</name>
+      <anchorfile>classSoPhysicalMaterial.html</anchorfile>
+      <anchor>aad4a19d67e3d816fc9b101e6ff33ea2e</anchor>
+      <arglist></arglist>
+    </member>
+    <member kind="variable">
+      <type>SoSFFloat</type>
+      <name>roughnessStrength</name>
+      <anchorfile>classSoPhysicalMaterial.html</anchorfile>
+      <anchor>abf77f1559d79b9b0e366db265b04196f</anchor>
+      <arglist></arglist>
+    </member>
+    <member kind="variable">
+      <type>SoSFFloat</type>
+      <name>transmissionAbsorption</name>
+      <anchorfile>classSoPhysicalMaterial.html</anchorfile>
+      <anchor>a5847ef8b8f5b019bc625ce427cca431d</anchor>
+      <arglist></arglist>
+    </member>
+    <member kind="variable">
+      <type>SoSFFloat</type>
+      <name>transmissionIor</name>
+      <anchorfile>classSoPhysicalMaterial.html</anchorfile>
+      <anchor>a7d367674bc128d0c609aa97b458b411c</anchor>
+      <arglist></arglist>
+    </member>
+    <member kind="function" protection="protected" virtualness="virtual">
+      <type>virtual</type>
+      <name>~SoPhysicalMaterial</name>
+      <anchorfile>classSoPhysicalMaterial.html</anchorfile>
+      <anchor>abd20567ce4cccf7441ddbc0894509e5b</anchor>
+      <arglist>()</arglist>
+    </member>
+    <member kind="function" protection="protected">
+      <type>const SoFieldData *</type>
+      <name>getFieldData</name>
+      <anchorfile>classSoPhysicalMaterial.html</anchorfile>
+      <anchor>a8d0c8d7cda024432ad568a5f711abc2e</anchor>
+      <arglist>(void) const override</arglist>
+    </member>
+    <member kind="function" protection="protected" static="yes">
+      <type>static const SoFieldData **</type>
+      <name>getFieldDataPtr</name>
+      <anchorfile>classSoPhysicalMaterial.html</anchorfile>
+      <anchor>a46e0ca84669c7b8ea610c758ff5a9e00</anchor>
+      <arglist>(void)</arglist>
+    </member>
+  </compound>
+  <compound kind="class">
+    <name>SoPhysicalMaterialElement</name>
+    <filename>classSoPhysicalMaterialElement.html</filename>
+    <base>SoReplacedElement</base>
+    <member kind="function">
+      <type>SoElement *</type>
+      <name>copyMatchInfo</name>
+      <anchorfile>classSoPhysicalMaterialElement.html</anchorfile>
+      <anchor>a8b12e6894fd0291427ad70712a770fd8</anchor>
+      <arglist>(void) const override</arglist>
+    </member>
+    <member kind="function">
+      <type>void</type>
+      <name>init</name>
+      <anchorfile>classSoPhysicalMaterialElement.html</anchorfile>
+      <anchor>a3bfe31d10d988d6ac1147f3fcd29acba</anchor>
+      <arglist>(SoState *state) override</arglist>
+    </member>
+    <member kind="function">
+      <type>SbBool</type>
+      <name>matches</name>
+      <anchorfile>classSoPhysicalMaterialElement.html</anchorfile>
+      <anchor>aa558aaa6c9af77fbba4de4e3fe90648a</anchor>
+      <arglist>(const SoElement *element) const override</arglist>
+    </member>
+    <member kind="function">
+      <type>void</type>
+      <name>print</name>
+      <anchorfile>classSoPhysicalMaterialElement.html</anchorfile>
+      <anchor>a9ee15319bc809692d611a4824fddebe0</anchor>
+      <arglist>(FILE *file) const override</arglist>
+    </member>
+    <member kind="function" static="yes">
+      <type>static void *</type>
+      <name>createInstance</name>
+      <anchorfile>classSoPhysicalMaterialElement.html</anchorfile>
+      <anchor>a8d8fb707b2e00fc0447c543985ea5d6f</anchor>
+      <arglist>(void)</arglist>
+    </member>
+    <member kind="function" static="yes">
+      <type>static void</type>
+      <name>get</name>
+      <anchorfile>classSoPhysicalMaterialElement.html</anchorfile>
+      <anchor>a1b8e9bc7c582d80af8469e2c2d0a6d08</anchor>
+      <arglist>(SoState *const state, SbBool &amp;enabled, float &amp;metalness, float &amp;roughness)</arglist>
+    </member>
+    <member kind="function" static="yes">
+      <type>static void</type>
+      <name>get</name>
+      <anchorfile>classSoPhysicalMaterialElement.html</anchorfile>
+      <anchor>a170e77103fdbdbf63d13d8df8552a533</anchor>
+      <arglist>(SoState *const state, SbBool &amp;enabled, float &amp;metalness, float &amp;roughness, const int materialIndex)</arglist>
+    </member>
+    <member kind="function" static="yes">
+      <type>static int</type>
+      <name>getClassStackIndex</name>
+      <anchorfile>classSoPhysicalMaterialElement.html</anchorfile>
+      <anchor>a1dbcb68ceaca6ba6afbae3a866f00e15</anchor>
+      <arglist>(void)</arglist>
+    </member>
+    <member kind="function" static="yes">
+      <type>static SoType</type>
+      <name>getClassTypeId</name>
+      <anchorfile>classSoPhysicalMaterialElement.html</anchorfile>
+      <anchor>a3fbcb170d0b600b3dd092d3391b54aa4</anchor>
+      <arglist>(void)</arglist>
+    </member>
+    <member kind="function" static="yes">
+      <type>static void</type>
+      <name>getOptics</name>
+      <anchorfile>classSoPhysicalMaterialElement.html</anchorfile>
+      <anchor>a6f1ec55e7e614bc842ca7b6c29108ab2</anchor>
+      <arglist>(SoState *const state, float &amp;transmissionIor, float &amp;transmissionAbsorption)</arglist>
+    </member>
+    <member kind="function" static="yes">
+      <type>static void</type>
+      <name>getStrengths</name>
+      <anchorfile>classSoPhysicalMaterialElement.html</anchorfile>
+      <anchor>a4a55f376d305fdfeb2a7e0cb3653bcdb</anchor>
+      <arglist>(SoState *const state, float &amp;roughnessStrength, float &amp;normalStrength, float &amp;emissiveIntensity)</arglist>
+    </member>
+    <member kind="function" static="yes">
+      <type>static void</type>
+      <name>initClass</name>
+      <anchorfile>classSoPhysicalMaterialElement.html</anchorfile>
+      <anchor>a688cc31b1691a16eb5cfa472a93dec78</anchor>
+      <arglist>(void)</arglist>
+    </member>
+    <member kind="function" static="yes">
+      <type>static void</type>
+      <name>set</name>
+      <anchorfile>classSoPhysicalMaterialElement.html</anchorfile>
+      <anchor>a2dcfb7becedd6dd90f0b66acbe105446</anchor>
+      <arglist>(SoState *const state, SoNode *const node, const std::vector&lt; unsigned char &gt; &amp;enabled, const std::vector&lt; float &gt; &amp;metalness, const std::vector&lt; float &gt; &amp;roughness, const float roughnessStrength, const float normalStrength, const float emissiveIntensity, const float transmissionIor, const float transmissionAbsorption)</arglist>
+    </member>
+    <member kind="function" protection="protected" virtualness="virtual">
+      <type>virtual</type>
+      <name>~SoPhysicalMaterialElement</name>
+      <anchorfile>classSoPhysicalMaterialElement.html</anchorfile>
+      <anchor>ae3567d0e6dafdc58de2aaff3d7838e93</anchor>
+      <arglist>()</arglist>
+    </member>
+  </compound>
+  <compound kind="class">
     <name>SoPickAction</name>
     <filename>classSoPickAction.html</filename>
     <base>SoAction</base>
@@ -57636,6 +57861,13 @@
       <anchorfile>classSoRenderManager.html</anchorfile>
       <anchor>a2bfcd506a76be364a7826f4dd78a83f9</anchor>
       <arglist>(const SbVec2s &amp;newsize)</arglist>
+    </member>
+    <member kind="function">
+      <type>void</type>
+      <name>updateClippingPlanes</name>
+      <anchorfile>classSoRenderManager.html</anchorfile>
+      <anchor>abc7e32e729bbb0f90b38344a6674784f</anchor>
+      <arglist>(void)</arglist>
     </member>
     <member kind="function" static="yes">
       <type>static void</type>
@@ -73630,6 +73862,157 @@
     </member>
   </compound>
   <compound kind="class">
+    <name>SoTextureCoordinateProjection</name>
+    <filename>classSoTextureCoordinateProjection.html</filename>
+    <base>SoTextureCoordinateFunction</base>
+    <member kind="enumvalue">
+      <name>BOX</name>
+      <anchorfile>classSoTextureCoordinateProjection.html</anchorfile>
+      <anchor>ab672da4c650d42d8f3a1ad09793409b5adbe291ed3cd6b07201f15240527ff3bd</anchor>
+      <arglist></arglist>
+    </member>
+    <member kind="enumvalue">
+      <name>CYLINDRICAL</name>
+      <anchorfile>classSoTextureCoordinateProjection.html</anchorfile>
+      <anchor>ab672da4c650d42d8f3a1ad09793409b5a86ed41d85c723821c26cc573ab1b3bcd</anchor>
+      <arglist></arglist>
+    </member>
+    <member kind="enumeration">
+      <type></type>
+      <name>Mapping</name>
+      <anchorfile>classSoTextureCoordinateProjection.html</anchorfile>
+      <anchor>ab672da4c650d42d8f3a1ad09793409b5</anchor>
+      <arglist></arglist>
+    </member>
+    <member kind="enumvalue">
+      <name>PLANAR</name>
+      <anchorfile>classSoTextureCoordinateProjection.html</anchorfile>
+      <anchor>ab672da4c650d42d8f3a1ad09793409b5a9b06cf81bd9844d7446451d8edf87fd2</anchor>
+      <arglist></arglist>
+    </member>
+    <member kind="enumvalue">
+      <name>BOX</name>
+      <anchorfile>classSoTextureCoordinateProjection.html</anchorfile>
+      <anchor>ab672da4c650d42d8f3a1ad09793409b5adbe291ed3cd6b07201f15240527ff3bd</anchor>
+      <arglist></arglist>
+    </member>
+    <member kind="enumvalue">
+      <name>SPHERICAL</name>
+      <anchorfile>classSoTextureCoordinateProjection.html</anchorfile>
+      <anchor>ab672da4c650d42d8f3a1ad09793409b5a87b54389a4a35c226a426228c0f889b1</anchor>
+      <arglist></arglist>
+    </member>
+    <member kind="enumvalue">
+      <name>CYLINDRICAL</name>
+      <anchorfile>classSoTextureCoordinateProjection.html</anchorfile>
+      <anchor>ab672da4c650d42d8f3a1ad09793409b5a86ed41d85c723821c26cc573ab1b3bcd</anchor>
+      <arglist></arglist>
+    </member>
+    <member kind="enumvalue">
+      <name>PLANAR</name>
+      <anchorfile>classSoTextureCoordinateProjection.html</anchorfile>
+      <anchor>ab672da4c650d42d8f3a1ad09793409b5a9b06cf81bd9844d7446451d8edf87fd2</anchor>
+      <arglist></arglist>
+    </member>
+    <member kind="enumvalue">
+      <name>SPHERICAL</name>
+      <anchorfile>classSoTextureCoordinateProjection.html</anchorfile>
+      <anchor>ab672da4c650d42d8f3a1ad09793409b5a87b54389a4a35c226a426228c0f889b1</anchor>
+      <arglist></arglist>
+    </member>
+    <member kind="function">
+      <type></type>
+      <name>SoTextureCoordinateProjection</name>
+      <anchorfile>classSoTextureCoordinateProjection.html</anchorfile>
+      <anchor>a4490968b500f80be88a2f3d03e359cfb</anchor>
+      <arglist>(void)</arglist>
+    </member>
+    <member kind="function">
+      <type>void</type>
+      <name>callback</name>
+      <anchorfile>classSoTextureCoordinateProjection.html</anchorfile>
+      <anchor>ac577bc75eee3af0126fe1d0c6f2806b6</anchor>
+      <arglist>(SoCallbackAction *action) override</arglist>
+    </member>
+    <member kind="function">
+      <type>void</type>
+      <name>doAction</name>
+      <anchorfile>classSoTextureCoordinateProjection.html</anchorfile>
+      <anchor>a7929b7f1c391485b699cdd692019cdd0</anchor>
+      <arglist>(SoAction *action) override</arglist>
+    </member>
+    <member kind="function">
+      <type>SoType</type>
+      <name>getTypeId</name>
+      <anchorfile>classSoTextureCoordinateProjection.html</anchorfile>
+      <anchor>abbb9983149f3c3fc4d21cd9c1bbddc51</anchor>
+      <arglist>(void) const override</arglist>
+    </member>
+    <member kind="function">
+      <type>void</type>
+      <name>pick</name>
+      <anchorfile>classSoTextureCoordinateProjection.html</anchorfile>
+      <anchor>ab9b82b523886140731137813a1dbfd1b</anchor>
+      <arglist>(SoPickAction *action) override</arglist>
+    </member>
+    <member kind="function" static="yes">
+      <type>static SoType</type>
+      <name>getClassTypeId</name>
+      <anchorfile>classSoTextureCoordinateProjection.html</anchorfile>
+      <anchor>aba255c8b07fe87096d19844df2ad0e40</anchor>
+      <arglist>(void)</arglist>
+    </member>
+    <member kind="function" static="yes">
+      <type>static void</type>
+      <name>initClass</name>
+      <anchorfile>classSoTextureCoordinateProjection.html</anchorfile>
+      <anchor>afa4db5086cf51e94aa985e81e51f0f0f</anchor>
+      <arglist>(void)</arglist>
+    </member>
+    <member kind="variable">
+      <type>SoSFEnum</type>
+      <name>mapping</name>
+      <anchorfile>classSoTextureCoordinateProjection.html</anchorfile>
+      <anchor>ad45318e1801d0234fea93088ef1b9b57</anchor>
+      <arglist></arglist>
+    </member>
+    <member kind="variable">
+      <type>SoSFVec3f</type>
+      <name>offset</name>
+      <anchorfile>classSoTextureCoordinateProjection.html</anchorfile>
+      <anchor>aa3a7f576b82f7378647328ca994681d6</anchor>
+      <arglist></arglist>
+    </member>
+    <member kind="variable">
+      <type>SoSFVec3f</type>
+      <name>scale</name>
+      <anchorfile>classSoTextureCoordinateProjection.html</anchorfile>
+      <anchor>aaf9196e6b9c063e0b422bf02aed0594e</anchor>
+      <arglist></arglist>
+    </member>
+    <member kind="function" protection="protected" virtualness="virtual">
+      <type>virtual</type>
+      <name>~SoTextureCoordinateProjection</name>
+      <anchorfile>classSoTextureCoordinateProjection.html</anchorfile>
+      <anchor>a85d8463edb6352136f3e911d4bd9c5c4</anchor>
+      <arglist>()</arglist>
+    </member>
+    <member kind="function" protection="protected">
+      <type>const SoFieldData *</type>
+      <name>getFieldData</name>
+      <anchorfile>classSoTextureCoordinateProjection.html</anchorfile>
+      <anchor>ad3750543cd52e66ada26eb1ca201192f</anchor>
+      <arglist>(void) const override</arglist>
+    </member>
+    <member kind="function" protection="protected" static="yes">
+      <type>static const SoFieldData **</type>
+      <name>getFieldDataPtr</name>
+      <anchorfile>classSoTextureCoordinateProjection.html</anchorfile>
+      <anchor>a742a0a23537fff5ee7cfad1448ce44ee</anchor>
+      <arglist>(void)</arglist>
+    </member>
+  </compound>
+  <compound kind="class">
     <name>SoTextureCoordinateReflectionMap</name>
     <filename>classSoTextureCoordinateReflectionMap.html</filename>
     <base>SoTextureCoordinateFunction</base>
@@ -87453,6 +87836,13 @@
       <arglist></arglist>
     </member>
     <member kind="variable">
+      <type>bool</type>
+      <name>edgeOverlay</name>
+      <anchorfile>structSoVulkanViewSettings.html</anchorfile>
+      <anchor>aed043b615d731f7d3bd13a89918937f7</anchor>
+      <arglist></arglist>
+    </member>
+    <member kind="variable">
       <type>int</type>
       <name>envMap</name>
       <anchorfile>structSoVulkanViewSettings.html</anchorfile>
@@ -87460,10 +87850,38 @@
       <arglist></arglist>
     </member>
     <member kind="variable">
+      <type>float</type>
+      <name>hdrExposure</name>
+      <anchorfile>structSoVulkanViewSettings.html</anchorfile>
+      <anchor>a9a02aceda04fe5b79c23dc1b3b94223f</anchor>
+      <arglist></arglist>
+    </member>
+    <member kind="variable">
+      <type>bool</type>
+      <name>hdrOutput</name>
+      <anchorfile>structSoVulkanViewSettings.html</anchorfile>
+      <anchor>afd5f77d0db662357f76ccc9df31586f9</anchor>
+      <arglist></arglist>
+    </member>
+    <member kind="variable">
+      <type>int</type>
+      <name>hdrToneMap</name>
+      <anchorfile>structSoVulkanViewSettings.html</anchorfile>
+      <anchor>a83318f79a39faa9192e339c8bd67cc9e</anchor>
+      <arglist></arglist>
+    </member>
+    <member kind="variable">
       <type>bool</type>
       <name>pathTracingDenoise</name>
       <anchorfile>structSoVulkanViewSettings.html</anchorfile>
       <anchor>a539f657200fe2b05677fd404ea913076</anchor>
+      <arglist></arglist>
+    </member>
+    <member kind="variable">
+      <type>float</type>
+      <name>pathTracingGlassIor</name>
+      <anchorfile>structSoVulkanViewSettings.html</anchorfile>
+      <anchor>a129ba729ac4b824afb0896ea0e2251cf</anchor>
       <arglist></arglist>
     </member>
     <member kind="variable">
@@ -88558,6 +88976,7 @@
     <class kind="class">SoNormalBindingElement</class>
     <class kind="class">SoNormalElement</class>
     <class kind="class">SoOverrideElement</class>
+    <class kind="class">SoPhysicalMaterialElement</class>
     <class kind="class">SoPickRayElement</class>
     <class kind="class">SoPickStyleElement</class>
     <class kind="class">SoPointSizeElement</class>
