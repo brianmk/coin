@@ -41,11 +41,16 @@ layout(set = 0, binding = 6, std140) uniform PresentFrame {
 
 layout(push_constant) uniform PresentPush {
     vec4 u_present;  // x = width, y = height, z = denoiseOn, w = frameIndex
-    vec4 u_origin;   // x = viewport origin x, y = viewport origin y (pixels)
+    vec4 u_origin;   // x = viewport origin x, y = viewport origin y (pixels),
+                     // z = empty-scene flag (1 = synthesize the background
+                     // gradient here; the storage image holds only a flat
+                     // clear because there was no geometry to trace), w unused
     vec4 u_denoise;  // x = OIDN result available (sample denoised buffer)
                      // y = denoise upscale factor, z = HDR output,
                      // w = diffuse-white gain (1.0 = reference white)
     vec4 u_tone;     // x = highlight rolloff (0 = clip, 1..3 = filmic), yzw reserved
+    vec4 u_bgTop;    // rgb = viewport sky gradient top colour (empty scene)
+    vec4 u_bgBottom; // rgb = viewport sky gradient bottom colour (empty scene)
 } pc;
 
 layout(location = 0) out vec4 fragColor;
@@ -176,6 +181,25 @@ void main()
     ivec2 px = ivec2(viewportCoord);
     const int width = int(max(pc.u_present.x, 1.0));
     const int height = int(max(pc.u_present.y, 1.0));
+
+    // Empty scene: there was no traceable geometry, so the TLAS was never
+    // built and the storage image only holds a flat clear (see
+    // SoRTXRenderBackend::recordAccelerationStructures).  Synthesize the
+    // configured
+    // viewport background here instead, exactly as the sky/miss shader does,
+    // so opening a new empty document under path tracing shows the user's
+    // gradient (or solid colour) rather than the flat clear.  The
+    // normalization matches the storage-image sampling below (uv.y is the
+    // row fraction the compute tracer uses as its gradient parameter) and the
+    // background is at the far plane, so the edge overlay is never occluded.
+    if (pc.u_origin.z > 0.5) {
+        vec2 uv = viewportCoord / textureSize(u_rtImage, 0);
+        float t = clamp(uv.y, 0.0, 1.0);
+        gl_FragDepth = 1.0;
+        fragColor = presentColor(mix(pc.u_bgTop.rgb, pc.u_bgBottom.rgb, t));
+        return;
+    }
+
     const int idx = px.y * width + px.x;
     gl_FragDepth = sceneDepth(px, idx);
 

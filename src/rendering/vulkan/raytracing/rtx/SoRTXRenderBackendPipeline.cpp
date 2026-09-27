@@ -996,15 +996,18 @@ SoRTXRenderBackend::createPipelines()
 
   layoutCI.pSetLayouts = &this->presentSetLayout;
   // The present shader receives width/height/denoiseOn/frameIndex via
-  // u_present, the viewport origin via u_origin, the denoiser flag/scale and
-  // the HDR output/exposure via u_denoise and the tone-mapping operator via
-  // u_tone (the present pass must run inside the caller's render pass, so a
-  // compute denoise pass cannot be dispatched there; the edge-stopping filter
-  // lives in PresentFragment.glsl instead).
+  // u_present, the viewport origin and the empty-scene flag via u_origin, the
+  // denoiser flag/scale and the HDR output/exposure via u_denoise, the
+  // tone-mapping operator via u_tone, and the viewport background gradient via
+  // u_bgTop/u_bgBottom (the background is synthesized in-shader for an empty
+  // scene, whose storage image holds only a flat clear).  The present pass must
+  // run inside the caller's render pass, so a compute denoise pass cannot be
+  // dispatched there; the edge-stopping filter lives in PresentFragment.glsl
+  // instead.
   VkPushConstantRange presentPush {};
   presentPush.stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
   presentPush.offset = 0;
-  presentPush.size = 16 * sizeof(float);
+  presentPush.size = 24 * sizeof(float);
   layoutCI.pPushConstantRanges = &presentPush;
   layoutCI.pushConstantRangeCount = 1;
   if (vkCreatePipelineLayout(this->device, &layoutCI, this->allocator,
