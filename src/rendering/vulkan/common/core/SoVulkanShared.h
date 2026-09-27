@@ -1,0 +1,776 @@
+// src/rendering/vulkan/common/core/SoVulkanShared.h
+//
+// Shared, internal Vulkan device-level primitives used by both the raster
+// (SoVulkanRenderBackend) and ray-tracing (SoRTXRenderBackend) backends plus
+// the orchestration layer.  This header is internal to Coin's Vulkan renderer
+// (not installed, not public API).  Keep everything inline / POD so a
+// translation unit that does not use a helper does not pull an out-of-line
+// definition.
+
+#ifndef COIN_SOVULKANSHARED_H
+#define COIN_SOVULKANSHARED_H
+
+#include <chrono>
+#include <cstdio>
+#include <cstdlib>
+#include <cstdint>
+#include <cstring>
+#include <functional>
+#include <vector>
+
+#include <Inventor/rendering/vulkan/SoVulkanImageCopy.h>
+#include <vulkan/vulkan.h>
+
+#include "rendering/vulkan/common/core/SoVulkanResult.h"
+
+namespace SoVulkanShared {
+
+// Human-readable name for the VkResult codes the renderer can encounter.  The
+// shared primitives below report through SoVulkan::Result, which carries a
+// reason; naming the failing VkResult is what turns a bare "failed" into an
+// actionable diagnostic.  Any code not enumerated falls back to its numeric
+// value rather than a misleading label.
+inline std::string
+vkResultName(VkResult result)
+{
+  switch (result) {
+  case VK_SUCCESS: return "VK_SUCCESS";
+  case VK_NOT_READY: return "VK_NOT_READY";
+  case VK_TIMEOUT: return "VK_TIMEOUT";
+  case VK_EVENT_SET: return "VK_EVENT_SET";
+  case VK_EVENT_RESET: return "VK_EVENT_RESET";
+  case VK_INCOMPLETE: return "VK_INCOMPLETE";
+  case VK_ERROR_OUT_OF_HOST_MEMORY: return "VK_ERROR_OUT_OF_HOST_MEMORY";
+  case VK_ERROR_OUT_OF_DEVICE_MEMORY: return "VK_ERROR_OUT_OF_DEVICE_MEMORY";
+  case VK_ERROR_INITIALIZATION_FAILED: return "VK_ERROR_INITIALIZATION_FAILED";
+  case VK_ERROR_DEVICE_LOST: return "VK_ERROR_DEVICE_LOST";
+  case VK_ERROR_MEMORY_MAP_FAILED: return "VK_ERROR_MEMORY_MAP_FAILED";
+  case VK_ERROR_LAYER_NOT_PRESENT: return "VK_ERROR_LAYER_NOT_PRESENT";
+  case VK_ERROR_EXTENSION_NOT_PRESENT: return "VK_ERROR_EXTENSION_NOT_PRESENT";
+  case VK_ERROR_FEATURE_NOT_PRESENT: return "VK_ERROR_FEATURE_NOT_PRESENT";
+  case VK_ERROR_INCOMPATIBLE_DRIVER: return "VK_ERROR_INCOMPATIBLE_DRIVER";
+  case VK_ERROR_TOO_MANY_OBJECTS: return "VK_ERROR_TOO_MANY_OBJECTS";
+  case VK_ERROR_FORMAT_NOT_SUPPORTED: return "VK_ERROR_FORMAT_NOT_SUPPORTED";
+  case VK_ERROR_SURFACE_LOST_KHR: return "VK_ERROR_SURFACE_LOST_KHR";
+  case VK_ERROR_OUT_OF_DATE_KHR: return "VK_ERROR_OUT_OF_DATE_KHR";
+  default: break;
+  }
+  char buf[48];
+  std::snprintf(buf, sizeof(buf), "VkResult(%d)", static_cast<int>(result));
+  return buf;
+}
+
+// Evaluate a Vulkan call in a bool-returning backend helper and, on failure,
+// emit "<context>: <expression> failed: <VkResult name>" through the enclosing
+// object's emitError() before returning false.  This exists so a helper never
+// drops a VkResult on the floor (which turns a device-lost or OOM into an
+// unexplained later failure).  Only valid inside a member function that has an
+// emitError(const char *) method -- the render backends do, the low-level
+// SoVulkanFrameRing does not (it reports through its own return value).
+#define VK_CHECK_BOOL(expr, context)                                          \
+  do {                                                                        \
+    const VkResult vkCheckRes_ = (expr);                                      \
+    if (vkCheckRes_ != VK_SUCCESS) {                                          \
+      this->emitError((std::string(context) + ": " #expr " failed: "          \
+                       + SoVulkanShared::vkResultName(vkCheckRes_)).c_str()); \
+      return false;                                                           \
+    }                                                                         \
+  } while (0)
+
+// --- Environment access --------------------------------------------------
+// Single choke point for every FC_VULKAN_* / FC_GUI_* environment lookup in
+// Coin's Vulkan renderer.  Routing all reads through here keeps the opt-out
+// policy in one place and makes the flags auditable; previously the same
+// policy was re-implemented (and in one case inverted) at each getenv() site.
+
+// Raw value (or nullptr).  Presence semantics: a variable set to any value,
+// including "0", counts as set.  Use envFlagEnabled() when the conventional
+// "VAR=0"/"false"/"off" opt-out must be honored.
+inline const char *
+envString(const char * name)
+{
+  return std::getenv(name);
+}
+
+// Presence-only test (any value, including "0"/"false"/"off").
+inline bool
+envSet(const char * name)
+{
+  return std::getenv(name) != nullptr;
+}
+
+// Integer / float value with a default when the variable is unset or empty.
+inline int
+envInt(const char * name, int defaultValue = 0)
+{
+  const char * value = std::getenv(name);
+  return value ? std::atoi(value) : defaultValue;
+}
+
+inline float
+envFloat(const char * name, float defaultValue = 0.0f)
+{
+  const char * value = std::getenv(name);
+  return value ? static_cast<float>(std::atof(value)) : defaultValue;
+}
+
+// Environment flags honor the conventional "VAR=0"/"false"/"off" opt-out
+// values.  A null value yields \a defaultValue, so a flag can be on unless
+// explicitly disabled (e.g. the retained-IR replay).
+inline bool
+envFlagEnabled(const char * name, bool defaultValue)
+{
+  const char * value = std::getenv(name);
+  if (value == nullptr) return defaultValue;
+  return std::strcmp(value, "0") != 0 && std::strcmp(value, "false") != 0 &&
+         std::strcmp(value, "off") != 0;
+}
+
+// Present-and-not-disabled, defaulting to off.
+inline bool
+envFlagEnabled(const char * name)
+{
+  return envFlagEnabled(name, false);
+}
+
+// Parse a non-negative integer with validation.  Returns \a defaultValue and
+// sets \a ok to false when \a value is null/empty or not a wholly-numeric
+// non-negative integer within int range, so a debug knob can report a bad
+// value instead of silently collapsing to 0 (like atoi).
+inline int
+parseNonNegativeInt(const char * value, int defaultValue = 0,
+                    bool * ok = nullptr)
+{
+  if (value == nullptr || *value == '\0') {
+    if (ok) *ok = false;
+    return defaultValue;
+  }
+  char * end = nullptr;
+  const long parsed = std::strtol(value, &end, 10);
+  const bool good = end != value && *end == '\0' && parsed >= 0 &&
+    parsed <= static_cast<long>(INT32_MAX);
+  if (ok) *ok = good;
+  return good ? static_cast<int>(parsed) : defaultValue;
+}
+
+// --- Breadcrumb / phase timing -------------------------------------------
+// The fcprobe profile harness keys on the monotonic microsecond clock and the
+// FC_GUI_OPEN_BREADCRUMB gate.  Both backends and the manager used to carry
+// their own copies of these primitives (three steady_clock->us converters and
+// two near-identical "since" printers); they live here so the time base and
+// the gating policy are singular.
+
+inline long
+steadyNowUs()
+{
+  return (long)std::chrono::duration_cast<std::chrono::microseconds>(
+    std::chrono::steady_clock::now().time_since_epoch()).count();
+}
+
+inline double
+steadyNowMs()
+{
+  return steadyNowUs() * 0.001;
+}
+
+inline bool
+breadcrumbsEnabled()
+{
+  static const bool enabled = envFlagEnabled("FC_GUI_OPEN_BREADCRUMB");
+  return enabled;
+}
+
+// Emit "PREFIX <startUs> <phase> dur_us=<elapsed>" once a phase has exceeded
+// `thresholdUs`, up to `logged` (a caller-owned counter, so each translation
+// unit keeps its own log budget exactly as the per-file statics did).
+inline void
+breadcrumbSince(int & logged, const char * prefix, long startUs,
+                long thresholdUs, const char * phase)
+{
+  if (!breadcrumbsEnabled()) return;
+  const long now = steadyNowUs();
+  if (logged < 30 && now - startUs >= thresholdUs) {
+    ++logged;
+    std::fprintf(stderr, "%s %ld %s dur_us=%ld\n", prefix, startUs, phase,
+                 now - startUs);
+    std::fflush(stderr);
+  }
+}
+
+// Literal-name fast path: the per-call-site static resolves the flag once, so
+// per-frame hot paths pay no getenv() at all.  Shared by both backends so the
+// env-flag policy lives in one place.
+#define COIN_VULKAN_ENV_FLAG(name) \
+  ([] { static const bool coin_env_flag_cached = \
+          SoVulkanShared::envFlagEnabled(name); \
+        return coin_env_flag_cached; }())
+
+// Cached physical-device memory properties picker.  vkGetPhysicalDeviceMemoryProperties
+// is queried once per device (not per allocation); the raster and RT backends
+// both route their memory-type search through it so the selection logic and its
+// caching are singular.
+class MemoryProperties {
+public:
+  MemoryProperties() = default;
+  explicit MemoryProperties(VkPhysicalDevice device)
+    : m_device(device) {}
+
+  void setDevice(VkPhysicalDevice device)
+  {
+    if (device != m_device) {
+      m_device = device;
+      m_valid = false;
+    }
+  }
+  VkPhysicalDevice device() const { return m_device; }
+
+  // Cached physical-device memory properties (ensured once per device).
+  const VkPhysicalDeviceMemoryProperties & properties() const
+  {
+    this->ensure();
+    return m_props;
+  }
+
+  // Pick the first memory type that exactly satisfies `desired`, with no
+  // fallback to a merely-compatible type.  On failure leaves memoryTypeIndex
+  // untouched and returns false.  This is the raster backend's policy: a
+  // buffer/image that cannot be placed in the requested property class is a
+  // hard error rather than a silent host-visible degradation.
+  bool pickExact(const VkMemoryRequirements & requirements,
+                 VkMemoryPropertyFlags desired,
+                 uint32_t & memoryTypeIndex) const
+  {
+    this->ensure();
+    if (!m_valid) return false;
+    for (uint32_t i = 0; i < m_props.memoryTypeCount; ++i) {
+      if ((requirements.memoryTypeBits & (1u << i)) &&
+          (m_props.memoryTypes[i].propertyFlags & desired) == desired) {
+        memoryTypeIndex = i;
+        return true;
+      }
+    }
+    return false;
+  }
+
+  // Pick the first memory type matching `desired`, falling back to any type
+  // the device offers for this resource.  Returns false only when no type is
+  // usable (or no device is bound).  This is the RT backend's policy: the
+  // best-effort fallback keeps a renderer allocation on memory it can use
+  // rather than failing outright.
+  bool pick(const VkMemoryRequirements & requirements,
+            VkMemoryPropertyFlags desired,
+            uint32_t & memoryTypeIndex) const
+  {
+    if (this->pickExact(requirements, desired, memoryTypeIndex)) return true;
+    this->ensure();
+    if (!m_valid) return false;
+    for (uint32_t i = 0; i < m_props.memoryTypeCount; ++i) {
+      if (requirements.memoryTypeBits & (1u << i)) {
+        memoryTypeIndex = i;
+        return true;
+      }
+    }
+    return false;
+  }
+
+private:
+  void ensure() const
+  {
+    if (m_valid) return;
+    if (m_device == VK_NULL_HANDLE) {
+      m_props = {};
+      return;
+    }
+    vkGetPhysicalDeviceMemoryProperties(m_device, &m_props);
+    m_valid = true;
+  }
+
+  VkPhysicalDevice m_device = VK_NULL_HANDLE;
+  mutable VkPhysicalDeviceMemoryProperties m_props {};
+  mutable bool m_valid = false;
+};
+
+// Deferred-destruction batching for resources replaced while recording a
+// frame.  A resource must not be destroyed while its owning submission may
+// still reference it, so destroys are queued into the slot a few frames behind
+// the producer and released once the reference is certainly drained.
+//
+// Two access styles are supported so both backends can use it without changing
+// their frame model:
+//   - ring-slot (raster backend): the caller passes an absolute frame index and
+//     deferAt/flushAt mask by batchCount (the batch that is N frames old).
+//   - current-slot (RT backend): defer() fills the current batch and the caller
+//     toggles the index and flushes the batch it just vacated.
+class PendingDestroys {
+public:
+  explicit PendingDestroys(uint32_t batchCount = 3)
+    : m_batches(batchCount ? batchCount : 1) {}
+
+  uint32_t batchCount() const { return static_cast<uint32_t>(m_batches.size()); }
+  uint32_t index() const { return m_index; }
+  void setIndex(uint32_t i) { m_index = i % m_batches.size(); }
+
+  // Ring-slot style: caller supplies an absolute frame slot.
+  void deferAt(uint32_t slot, std::function<void()> && fn)
+  {
+    m_batches[slot % m_batches.size()].push_back(std::move(fn));
+  }
+  void flushAt(uint32_t slot)
+  {
+    auto & b = m_batches[slot % m_batches.size()];
+    for (auto & fn : b) { if (fn) fn(); }
+    b.clear();
+  }
+
+  // Current-slot style (RT backend double-buffer).
+  void defer(std::function<void()> && fn)
+  {
+    m_batches[m_index].push_back(std::move(fn));
+  }
+  std::vector<std::function<void()>> & batch(uint32_t i)
+  {
+    return m_batches[i % m_batches.size()];
+  }
+  const std::vector<std::function<void()>> & batch(uint32_t i) const
+  {
+    return m_batches[i % m_batches.size()];
+  }
+
+  // Regrow the batch ring.  On shrink, only the trailing batches (the ones a
+  // new smaller ring no longer addresses) are flushed and emptied; the
+  // retained batches keep their entries because their frames may still be in
+  // flight.  Used when the caller's in-flight count changes.
+  void setBatchCount(uint32_t count)
+  {
+    if (count == 0) count = 1;
+    const uint32_t cur = this->batchCount();
+    if (count == cur) return;
+    if (count < cur) {
+      for (uint32_t i = count; i < cur; ++i) {
+        auto & b = m_batches[i];
+        for (auto & fn : b) { if (fn) fn(); }
+        b.clear();
+      }
+    }
+    m_batches.resize(count);
+    if (m_index >= count) m_index = 0;
+  }
+
+  bool empty() const
+  {
+    for (const auto & b : m_batches) { if (!b.empty()) return false; }
+    return true;
+  }
+
+  void flushAll()
+  {
+    for (auto & b : m_batches) {
+      for (auto & fn : b) { if (fn) fn(); }
+      b.clear();
+    }
+  }
+
+private:
+  std::vector<std::vector<std::function<void()>>> m_batches;
+  uint32_t m_index = 0;
+};
+
+// Memory-type picker for buffer allocation.  Given a resource's memory
+// requirements and the desired property flags it returns the index of a
+// compatible memory type.  The RT backend supplies MemoryProperties::pick as
+// its best-effort policy.
+using MemoryTypePicker =
+  std::function<bool(const VkMemoryRequirements &, VkMemoryPropertyFlags, uint32_t &)>;
+
+// Pick the memory type for a buffer and bind it after allocating.  A failure
+// leaves \a memory null and returns a Result whose message names the specific
+// stage that failed (memory-type selection, allocation, or binding) so the
+// caller can report *why* rather than a bare "allocation failed".
+inline SoVulkan::Result
+bindBufferMemory(VkDevice device, const VkAllocationCallbacks * allocator,
+                 VkBuffer buffer, const VkMemoryRequirements & requirements,
+                 VkMemoryPropertyFlags desired,
+                 const MemoryTypePicker & pick, VkDeviceMemory & memory,
+                 const void * allocPNext = nullptr)
+{
+  memory = VK_NULL_HANDLE;
+  uint32_t memoryTypeIndex = 0;
+  if (!pick(requirements, desired, memoryTypeIndex)) {
+    return SoVulkan::Result::error(
+      "no memory type satisfies the required flags (size "
+      + std::to_string(requirements.size) + ", flags "
+      + std::to_string(static_cast<uint32_t>(desired)) + ")");
+  }
+
+  VkMemoryAllocateInfo ai {};
+  ai.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
+  ai.pNext = allocPNext;
+  ai.allocationSize = requirements.size;
+  ai.memoryTypeIndex = memoryTypeIndex;
+  const VkResult allocRes = vkAllocateMemory(device, &ai, allocator, &memory);
+  if (allocRes != VK_SUCCESS) {
+    memory = VK_NULL_HANDLE;
+    return SoVulkan::Result::error("vkAllocateMemory failed: "
+                                   + vkResultName(allocRes));
+  }
+  const VkResult bindRes = vkBindBufferMemory(device, buffer, memory, 0);
+  if (bindRes != VK_SUCCESS) {
+    vkFreeMemory(device, memory, allocator);
+    memory = VK_NULL_HANDLE;
+    return SoVulkan::Result::error("vkBindBufferMemory failed: "
+                                   + vkResultName(bindRes));
+  }
+  return SoVulkan::Result::ok();
+}
+
+// Create a VkBuffer, then allocate and bind its memory.  `pick` selects the
+// memory type (raster exact-match vs RT fallback).  `deviceAddress` sets
+// VK_MEMORY_ALLOCATE_DEVICE_ADDRESS_BIT for SHADER_DEVICE_ADDRESS buffers
+// (VUID-VkMemoryAllocateInfo-flags-03339).  On any failure nothing is left
+// allocated and a Result naming the failing call is returned.
+inline SoVulkan::Result
+createBufferAllocated(VkDevice device, const VkAllocationCallbacks * allocator,
+                      VkDeviceSize size, VkBufferUsageFlags usage,
+                      VkMemoryPropertyFlags desired, bool deviceAddress,
+                      const MemoryTypePicker & pick, VkBuffer & buffer,
+                      VkDeviceMemory & memory)
+{
+  buffer = VK_NULL_HANDLE;
+  memory = VK_NULL_HANDLE;
+  VkBufferCreateInfo ci {};
+  ci.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
+  ci.size = size;
+  ci.usage = usage;
+  ci.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+  const VkResult createRes = vkCreateBuffer(device, &ci, allocator, &buffer);
+  if (createRes != VK_SUCCESS) {
+    buffer = VK_NULL_HANDLE;
+    return SoVulkan::Result::error("vkCreateBuffer failed: "
+                                   + vkResultName(createRes));
+  }
+
+  // Buffers carrying SHADER_DEVICE_ADDRESS_BIT must be allocated with the
+  // device-address memory flag (VUID-VkMemoryAllocateInfo-flags-03339).
+  VkMemoryAllocateFlagsInfo allocFlags {};
+  allocFlags.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_FLAGS_INFO;
+  allocFlags.flags = VK_MEMORY_ALLOCATE_DEVICE_ADDRESS_BIT;
+  const void * pNext = deviceAddress ? static_cast<const void *>(&allocFlags)
+                                     : nullptr;
+
+  VkMemoryRequirements requirements;
+  vkGetBufferMemoryRequirements(device, buffer, &requirements);
+  const SoVulkan::Result bindResult =
+    bindBufferMemory(device, allocator, buffer, requirements, desired, pick,
+                     memory, pNext);
+  if (!bindResult.isOk()) {
+    vkDestroyBuffer(device, buffer, allocator);
+    buffer = VK_NULL_HANDLE;
+    return bindResult;
+  }
+  return SoVulkan::Result::ok();
+}
+
+// Resolve a device entry point into its concrete dispatch type.
+// vkGetDeviceProcAddr returns a generic PFN_vkVoidFunction; converting it to
+// the real PFN_vk* type with a direct reinterpret_cast between incompatible
+// function-pointer types is conditionally-supported and trips pedantic/strict
+// (and 32-bit) compilers.  Bit-copying through memcpy is the shim the Vulkan
+// loader documentation recommends.  The static_assert guards against any ABI
+// where the two pointer widths ever differ rather than silently truncating.
+template <typename Fn>
+inline Fn
+loadDispatch(PFN_vkVoidFunction fn)
+{
+  static_assert(sizeof(Fn) == sizeof(fn),
+                "Vulkan dispatch function pointer size mismatch");
+  Fn result{};
+  std::memcpy(&result, &fn, sizeof(result));
+  return result;
+}
+
+// --- VK_KHR_synchronization2 dispatch -------------------------------------
+// The device enables VK_KHR_synchronization2 (core in Vulkan 1.3) whenever it
+// is available.  When it is, barriers and submits go through the *2 entry
+// points; otherwise the legacy vkCmdPipelineBarrier / vkQueueSubmit are used.
+// The pointers are resolved once per device in the backend initialize(); a
+// null cmdPipelineBarrier2 means "not available, use the legacy path".
+//
+// Only core pipeline stages / accesses are passed by this renderer, and those
+// share their numeric values between the legacy and _2_ enums, so the legacy
+// masks widen to the _2_ types with a plain cast.  (The renderer never uses
+// VK_PIPELINE_STAGE_ALL_COMMANDS/ALL_GRAPHICS in a barrier.)
+struct Sync2Dispatch {
+  PFN_vkCmdPipelineBarrier2KHR cmdPipelineBarrier2 = nullptr;
+  PFN_vkQueueSubmit2KHR queueSubmit2 = nullptr;
+};
+
+// Function-local static: one instance shared by every translation unit (C++11
+// inline-function semantics), so the backends can install the pointers without
+// an out-of-line definition.
+inline Sync2Dispatch &
+sync2Dispatch()
+{
+  static Sync2Dispatch dispatch;
+  return dispatch;
+}
+
+// Emit a global memory barrier through synchronization2 when available, else
+// the legacy pipeline barrier.  Mirrors the single-memory-barrier form of
+// vkCmdPipelineBarrier.
+inline void
+memoryBarrier(VkCommandBuffer cmd,
+              VkPipelineStageFlags srcStage, VkPipelineStageFlags dstStage,
+              VkAccessFlags srcMask, VkAccessFlags dstMask)
+{
+  Sync2Dispatch & d = sync2Dispatch();
+  if (d.cmdPipelineBarrier2 != nullptr) {
+    VkMemoryBarrier2 b {};
+    b.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER_2;
+    b.srcStageMask = static_cast<VkPipelineStageFlags2>(srcStage);
+    b.srcAccessMask = static_cast<VkAccessFlags2>(srcMask);
+    b.dstStageMask = static_cast<VkPipelineStageFlags2>(dstStage);
+    b.dstAccessMask = static_cast<VkAccessFlags2>(dstMask);
+    VkDependencyInfo dep {};
+    dep.sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO;
+    dep.memoryBarrierCount = 1;
+    dep.pMemoryBarriers = &b;
+    d.cmdPipelineBarrier2(cmd, &dep);
+    return;
+  }
+  VkMemoryBarrier b {};
+  b.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
+  b.srcAccessMask = srcMask;
+  b.dstAccessMask = dstMask;
+  vkCmdPipelineBarrier(cmd, srcStage, dstStage, 0, 1, &b, 0, nullptr, 0,
+                       nullptr);
+}
+
+// Build an image memory barrier for a layout transition.  The subresource
+// range defaults to the single mip / layer used by the bulk of the transition
+// sites; pass levelCount/layerCount to cover a whole image.
+inline VkImageMemoryBarrier
+imageBarrier(VkImage image, VkImageLayout oldLayout, VkImageLayout newLayout,
+             VkAccessFlags srcMask, VkAccessFlags dstMask,
+             VkImageAspectFlags aspect = VK_IMAGE_ASPECT_COLOR_BIT,
+             uint32_t levelCount = 1, uint32_t layerCount = 1)
+{
+  VkImageMemoryBarrier b {};
+  b.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+  b.oldLayout = oldLayout;
+  b.newLayout = newLayout;
+  b.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+  b.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+  b.image = image;
+  b.subresourceRange.aspectMask = aspect;
+  b.subresourceRange.baseMipLevel = 0;
+  b.subresourceRange.levelCount = levelCount;
+  b.subresourceRange.baseArrayLayer = 0;
+  b.subresourceRange.layerCount = layerCount;
+  b.srcAccessMask = srcMask;
+  b.dstAccessMask = dstMask;
+  return b;
+}
+
+// Execute an image layout transition via a single pipeline image-memory barrier.
+inline void
+imageTransition(VkCommandBuffer cmd, VkImage image,
+                VkImageLayout oldLayout, VkImageLayout newLayout,
+                VkAccessFlags srcMask, VkAccessFlags dstMask,
+                VkPipelineStageFlags srcStage, VkPipelineStageFlags dstStage,
+                VkImageAspectFlags aspect = VK_IMAGE_ASPECT_COLOR_BIT,
+                uint32_t levelCount = 1, uint32_t layerCount = 1)
+{
+  VkImageMemoryBarrier b = imageBarrier(image, oldLayout, newLayout, srcMask,
+                                        dstMask, aspect, levelCount, layerCount);
+  Sync2Dispatch & d = sync2Dispatch();
+  if (d.cmdPipelineBarrier2 != nullptr) {
+    VkImageMemoryBarrier2 b2 {};
+    b2.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2;
+    b2.srcStageMask = static_cast<VkPipelineStageFlags2>(srcStage);
+    b2.srcAccessMask = static_cast<VkAccessFlags2>(srcMask);
+    b2.dstStageMask = static_cast<VkPipelineStageFlags2>(dstStage);
+    b2.dstAccessMask = static_cast<VkAccessFlags2>(dstMask);
+    b2.oldLayout = oldLayout;
+    b2.newLayout = newLayout;
+    b2.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    b2.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    b2.image = image;
+    b2.subresourceRange = b.subresourceRange;
+    VkDependencyInfo dep {};
+    dep.sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO;
+    dep.imageMemoryBarrierCount = 1;
+    dep.pImageMemoryBarriers = &b2;
+    d.cmdPipelineBarrier2(cmd, &dep);
+    return;
+  }
+  vkCmdPipelineBarrier(cmd, srcStage, dstStage, 0, 0, nullptr, 0, nullptr, 1, &b);
+}
+
+// Execute a buffer memory barrier to make a transfer/source region visible to a
+// later access (e.g. TRANSFER_WRITE -> VERTEX_ATTRIBUTE/INDEX read).
+inline void
+bufferTransition(VkCommandBuffer cmd, VkBuffer buffer, VkDeviceSize offset,
+                 VkDeviceSize size, VkAccessFlags srcMask, VkAccessFlags dstMask,
+                 VkPipelineStageFlags srcStage, VkPipelineStageFlags dstStage)
+{
+  VkBufferMemoryBarrier b {};
+  b.sType = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER;
+  b.srcAccessMask = srcMask;
+  b.dstAccessMask = dstMask;
+  b.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+  b.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+  b.buffer = buffer;
+  b.offset = offset;
+  b.size = size;
+  Sync2Dispatch & d = sync2Dispatch();
+  if (d.cmdPipelineBarrier2 != nullptr) {
+    VkBufferMemoryBarrier2 b2 {};
+    b2.sType = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER_2;
+    b2.srcStageMask = static_cast<VkPipelineStageFlags2>(srcStage);
+    b2.srcAccessMask = static_cast<VkAccessFlags2>(srcMask);
+    b2.dstStageMask = static_cast<VkPipelineStageFlags2>(dstStage);
+    b2.dstAccessMask = static_cast<VkAccessFlags2>(dstMask);
+    b2.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    b2.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    b2.buffer = buffer;
+    b2.offset = offset;
+    b2.size = size;
+    VkDependencyInfo dep {};
+    dep.sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO;
+    dep.bufferMemoryBarrierCount = 1;
+    dep.pBufferMemoryBarriers = &b2;
+    d.cmdPipelineBarrier2(cmd, &dep);
+    return;
+  }
+  vkCmdPipelineBarrier(cmd, srcStage, dstStage, 0, 0, nullptr, 1, &b, 0, nullptr);
+}
+
+// Run a small, non-render-pass command buffer on `queue` and wait until it has
+// fully executed (vkQueueWaitIdle) before returning.  The buffer is allocated
+// from `pool`, recorded by `record` between begin/end, submitted, and freed.
+// On any Vulkan failure nothing is left allocated and a Result naming the
+// failing call is returned.  Safe for setup / host-upload paths that must
+// synchronously consume resources afterwards (the wait also retires any other
+// in-flight work on the queue).
+inline SoVulkan::Result
+withOneShotSubmit(VkDevice device, VkQueue queue, VkCommandPool pool,
+                  const VkAllocationCallbacks * /*allocator*/,
+                  const std::function<void(VkCommandBuffer)> & record)
+{
+  VkCommandBufferAllocateInfo allocInfo {};
+  allocInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
+  allocInfo.commandPool = pool;
+  allocInfo.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+  allocInfo.commandBufferCount = 1;
+  VkCommandBuffer cmd = VK_NULL_HANDLE;
+  const VkResult allocRes = vkAllocateCommandBuffers(device, &allocInfo, &cmd);
+  if (allocRes != VK_SUCCESS) {
+    return SoVulkan::Result::error("vkAllocateCommandBuffers failed: "
+                                   + vkResultName(allocRes));
+  }
+
+  VkCommandBufferBeginInfo bi {};
+  bi.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
+  bi.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+  const VkResult beginRes = vkBeginCommandBuffer(cmd, &bi);
+  if (beginRes != VK_SUCCESS) {
+    vkFreeCommandBuffers(device, pool, 1, &cmd);
+    return SoVulkan::Result::error("vkBeginCommandBuffer failed: "
+                                   + vkResultName(beginRes));
+  }
+  if (record) record(cmd);
+  const VkResult endRes = vkEndCommandBuffer(cmd);
+  if (endRes != VK_SUCCESS) {
+    vkFreeCommandBuffers(device, pool, 1, &cmd);
+    return SoVulkan::Result::error("vkEndCommandBuffer failed: "
+                                   + vkResultName(endRes));
+  }
+  VkSubmitInfo submit {};
+  submit.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
+  submit.commandBufferCount = 1;
+  submit.pCommandBuffers = &cmd;
+  const VkResult submitRes =
+    vkQueueSubmit(queue, 1, &submit, VK_NULL_HANDLE);
+  // Retire any in-flight work on the queue so resources referenced by the
+  // submission are safe to destroy synchronously on return.  Done even when
+  // the submit itself failed, to drain work queued before it.
+  const VkResult waitRes = vkQueueWaitIdle(queue);
+  vkFreeCommandBuffers(device, pool, 1, &cmd);
+  if (submitRes != VK_SUCCESS) {
+    return SoVulkan::Result::error("vkQueueSubmit failed: "
+                                   + vkResultName(submitRes));
+  }
+  if (waitRes != VK_SUCCESS) {
+    return SoVulkan::Result::error("vkQueueWaitIdle failed: "
+                                   + vkResultName(waitRes));
+  }
+  return SoVulkan::Result::ok();
+}
+
+// Copy a whole RGBA VkImage (currently in `oldLayout`) into a host-visible
+// staging buffer with a one-shot submit, then hand the mapped pixels to
+// `consume`.  The image is transitioned to TRANSFER_SRC_OPTIMAL for the copy
+// and restored to `restoreLayout` before the submit.  `pick` selects the
+// staging memory type (the backend's policy).  Returns a Result naming the
+// failing stage on any Vulkan failure, leaving nothing allocated.  This is the
+// single image-to-host primitive behind the debug frame dumps.
+inline SoVulkan::Result
+dumpImageToHost(VkDevice device, VkQueue queue, VkCommandPool pool,
+                const VkAllocationCallbacks * allocator, VkImage image,
+                VkImageLayout oldLayout, VkImageLayout restoreLayout,
+                uint32_t width, uint32_t height, const MemoryTypePicker & pick,
+                const std::function<void(const void *)> & consume)
+{
+  if (width == 0 || height == 0) {
+    return SoVulkan::Result::error("zero-width/height image");
+  }
+  const VkDeviceSize size =
+    static_cast<VkDeviceSize>(width) * static_cast<VkDeviceSize>(height) * 4;
+
+  VkBuffer staging = VK_NULL_HANDLE;
+  VkDeviceMemory stagingMem = VK_NULL_HANDLE;
+  const SoVulkan::Result allocResult =
+    createBufferAllocated(device, allocator, size,
+                          VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+                          VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT |
+                            VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+                          false, pick, staging, stagingMem);
+  if (!allocResult.isOk()) {
+    return allocResult;
+  }
+
+  const SoVulkan::Result submitResult = withOneShotSubmit(
+    device, queue, pool, allocator, [&](VkCommandBuffer cmd) {
+      SoVulkanImageCopy::recordToBuffer(
+        cmd, image, staging, oldLayout, VK_ACCESS_SHADER_WRITE_BIT,
+        VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, restoreLayout,
+        VK_ACCESS_TRANSFER_WRITE_BIT, VK_ACCESS_SHADER_WRITE_BIT,
+        VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, width, height);
+    });
+
+  if (!submitResult.isOk()) {
+    vkDestroyBuffer(device, staging, allocator);
+    vkFreeMemory(device, stagingMem, allocator);
+    return submitResult;
+  }
+
+  void * mapped = nullptr;
+  const VkResult mapRes = vkMapMemory(device, stagingMem, 0, size, 0, &mapped);
+  if (mapRes != VK_SUCCESS || mapped == nullptr) {
+    vkDestroyBuffer(device, staging, allocator);
+    vkFreeMemory(device, stagingMem, allocator);
+    return SoVulkan::Result::error(
+      mapped == nullptr && mapRes == VK_SUCCESS
+        ? "vkMapMemory returned a null pointer"
+        : "vkMapMemory failed: " + vkResultName(mapRes));
+  }
+  if (consume) consume(mapped);
+  vkUnmapMemory(device, stagingMem);
+  vkDestroyBuffer(device, staging, allocator);
+  vkFreeMemory(device, stagingMem, allocator);
+  return SoVulkan::Result::ok();
+}
+
+} // namespace SoVulkanShared
+
+#endif // COIN_SOVULKANSHARED_H

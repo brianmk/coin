@@ -80,7 +80,7 @@
 #include <Inventor/system/gl.h>
 
 #include "nodes/SoSubNodeP.h"
-#include "rendering/SoGL.h"
+#include "rendering/gl/SoGL.h"
 
 // *************************************************************************
 

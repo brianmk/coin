@@ -51,6 +51,7 @@ RegularSources = \
 	SoPackedColor.cpp \
 	SoPathSwitch.cpp \
 	SoPendulum.cpp \
+	SoPhysicalMaterial.cpp \
 	SoPerspectiveCamera.cpp \
 	SoReversePerspectiveCamera.cpp \
 	SoPickStyle.cpp \
@@ -89,6 +90,7 @@ RegularSources = \
 	SoTextureCoordinateEnvironment.cpp \
 	SoTextureCoordinateFunction.cpp \
 	SoTextureCoordinatePlane.cpp \
+	SoTextureCoordinateProjection.cpp \
 	SoTextureCoordinateNormalMap.cpp \
 	SoTextureCoordinateReflectionMap.cpp \
 	SoTextureCoordinateObject.cpp \

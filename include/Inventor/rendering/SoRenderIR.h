@@ -123,6 +123,9 @@ struct SoGeometryDesc {
 static constexpr uint32_t SO_MAT_HAS_TEXTURE = 0x1;  //!< Command carries embedded texture data
 static constexpr uint32_t SO_MAT_IS_PIXEL_TEXT = 0x2;
 static constexpr uint32_t SO_MAT_IS_PIXEL_IMAGE = 0x4;
+static constexpr uint32_t SO_MAT_HAS_ROUGHNESS_MAP = 0x8;
+static constexpr uint32_t SO_MAT_HAS_NORMAL_MAP = 0x10;
+static constexpr uint32_t SO_MAT_HAS_EMISSIVE_MAP = 0x20;
 
 // --- Feature flags (SoMaterialData::featureFlags) ---
 static constexpr uint32_t SO_FEAT_BASE_COLOR = 0x1;   //!< Flat/unlit rendering (BASE_COLOR light model)
@@ -324,14 +327,37 @@ struct SoMaterialData {
   // SoVertexProperty colors carry independent vertex alpha instead.
   bool     vertexColorAlphaIncludesOpacity = false;
 
-  // Opaque texture handles supplied by a producer or backend integration.
-  // The IR does not interpret or own these objects.
-  void *   diffuseTexture = nullptr;
-  void *   normalTexture = nullptr;
-  void *   emissiveTexture = nullptr;
+  // Optional embedded secondary PBR maps, sampled with the base texture
+  // coordinates.  Empty (pixels == nullptr) means the map is not used and the
+  // corresponding strength is ignored.
+  SoTextureData roughnessTexture;
+  SoTextureData normalTexture;
+  SoTextureData emissiveTexture;
+  float    roughnessStrength = 1.0f;
+  float    normalStrength = 1.0f;
+  float    emissiveIntensity = 1.0f;
 
   float    metalness = 0.0f;
   float    roughness = 0.5f;
+  // True when metalness/roughness were authored (a physical/PBR material)
+  // rather than left at their defaults.  When false the backends use the
+  // legacy Blinn-Phong model verbatim, so existing scenes are unchanged.
+  bool     physicalMaterial = false;
+
+  // Optical (transmission/glass) model.  transmissionIor and
+  // transmissionAbsorption describe the material's dielectric response
+  // (refraction index and Beer-Lambert absorption strength).  The transmittance
+  // itself is opacity (== 1 - transparency), already carried by diffuse[3], so
+  // both backends derive their transmission from one place.  Defaults match
+  // air -> window glass.
+  float    transmissionIor = 1.5f;
+  float    transmissionAbsorption = 0.0f;
+  // True when the material authored its own optics rather than leaving them at
+  // the struct defaults.  Consumer-side glass settings (the path tracer's
+  // global viewer IOR/absorption) are only a fallback: they must not override a
+  // material that supplied its own values.  Until per-material authoring lands
+  // this stays false, so the viewer setting remains the effective default.
+  bool     transmissionAuthored = false;
 
   uint32_t flags = 0;
   uint32_t featureFlags = 0;
@@ -589,6 +615,98 @@ COIN_DLL_API int fillLightingBlock(SoLightingBlock & block,
                                    const SoLightingData & world,
                                    const SbMatrix * toEye);
 
+/*!
+  \brief Effective ambient term for one material under a scene ambient.
+
+  The raster and ray-traced backends must agree on how a per-material ambient
+  colour combines with the scene ambient.  The raster fragment shader applies
+  this in-shader (`ambientLight * materialAmbient`); the path tracer pre-
+  multiplies it into the material record.  Both funnel through this single
+  definition so the convention cannot drift between the two backends.
+*/
+COIN_DLL_API SbVec3f effectiveMaterialAmbient(const SbVec3f & sceneAmbient,
+                                              const SbVec4f & materialAmbient);
+
+/*!
+  \struct SoMaterialBlock
+  \brief Canonical mirror of a command's material parameters, shared by every
+  retained backend's material staging.
+
+  The raster backend copies these fields into its per-draw DrawBlock UBO and
+  the path tracer copies them into its RTMaterial record, so the semantic
+  mapping (which SoMaterialData field lands in which slot, and its default)
+  lives in exactly one place.  Producers fill it with packMaterialBlock().
+
+  The source diffuse is carried here for the backends that stage it in the
+  material record (the path tracer); the raster backend still passes diffuse
+  through its per-draw push constant to keep per-vertex/per-face colour
+  working, and simply ignores \c diffuse.
+
+  Two slots are context-dependent and are left for the caller after packing:
+  \c params[2] (the evaluated light count) and, in the path tracer, an optional
+  PBR gate override in \c pbr[2].
+*/
+struct COIN_DLL_API SoMaterialBlock {
+  float diffuse[4];   // offset 0
+  float ambient[4];   // offset 16
+  float specular[4];  // offset 32
+  float emissive[4];  // offset 48
+  float params[4];    // offset 64: x=shininess, y=twoSided,
+                      //   z=lightCount (caller), w=shadingModel
+  float pbr[4];       // offset 80: x=metalness, y=roughness,
+                      //   z=physicalMaterial, w=reserved
+  float mapParams[4]; // offset 96: x=roughnessStrength, y=normalStrength,
+                      //   z=emissiveIntensity, w=mapPresenceFlags
+  float optical[4];   // offset 112: x=transmissionIor, y=transmissionAbsorption,
+                      //   z=transmission (opacity), w=transmissionAuthored flag
+};
+static_assert(sizeof(SoMaterialBlock) == 128,
+              "SoMaterialBlock must be 8 tightly packed vec4 (std140/std430)");
+// Per-field offset locks.  A size-only guard passes even if two same-sized
+// fields swap, silently remapping a value into the wrong shader slot; the
+// offsets catch that.  Keep in lockstep with the std140 layout the raster
+// DrawBlock UBO and the RTMaterial mirror are built from.
+static_assert(offsetof(SoMaterialBlock, diffuse) == 0,
+              "SoMaterialBlock.diffuse must be at offset 0");
+static_assert(offsetof(SoMaterialBlock, ambient) == 16,
+              "SoMaterialBlock.ambient must be at offset 16");
+static_assert(offsetof(SoMaterialBlock, specular) == 32,
+              "SoMaterialBlock.specular must be at offset 32");
+static_assert(offsetof(SoMaterialBlock, emissive) == 48,
+              "SoMaterialBlock.emissive must be at offset 48");
+static_assert(offsetof(SoMaterialBlock, params) == 64,
+              "SoMaterialBlock.params must be at offset 64");
+static_assert(offsetof(SoMaterialBlock, pbr) == 80,
+              "SoMaterialBlock.pbr must be at offset 80");
+static_assert(offsetof(SoMaterialBlock, mapParams) == 96,
+              "SoMaterialBlock.mapParams must be at offset 96");
+static_assert(offsetof(SoMaterialBlock, optical) == 112,
+              "SoMaterialBlock.optical must be at offset 112");
+
+/*!
+  \brief Fill a SoMaterialBlock from a command's SoMaterialData.
+
+  One definition of the material mapping for every retained backend.  The
+  light count (params[2]) and the path tracer's PBR gate override (pbr[2]) are
+  left to the caller, which alone knows the effective lighting and the
+  backend's gate policy.
+*/
+COIN_DLL_API void packMaterialBlock(SoMaterialBlock & block,
+                                    const SoMaterialData & material);
+
+/*!
+  \brief Apply the scene's global glass optics to a packed material.
+
+  \c optical[3] (the transmissionAuthored flag) decides precedence: when the
+  material did not author its own optics, the viewer's global IOR/absorption
+  are the effective defaults; when it did, the authored \c optical[0..1]
+  survive untouched.  Shared by every backend that has a viewer-level glass
+  setting, so a per-material dielectric is never silently replaced.
+*/
+COIN_DLL_API void resolveOptical(SoMaterialBlock & block,
+                                 float globalIor,
+                                 float globalAbsorption);
+
 } // namespace SoRenderIR
 
 /*!
@@ -655,7 +773,9 @@ public:
   void clear();
   void reserve(int count);
 
-  //! Return the generation number incremented when clear() starts a new frame.
+  //! Return a process-unique generation, changed on construction and by
+  //! clear().  Backends key GPU resource caches on it, so distinct draw lists
+  //! (even at the same address) can never alias each other's cache entries.
   uint32_t getGeneration() const { return generation; }
 
   void addCommand(const SoRenderCommand & cmd);

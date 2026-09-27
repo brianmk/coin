@@ -125,7 +125,7 @@
 #endif // COIN_DEBUG
 
 #include "nodes/SoSubNodeP.h"
-#include "rendering/SoGL.h"
+#include "rendering/gl/SoGL.h"
 
 SO_NODE_SOURCE(SoIndexedMarkerSet);
 

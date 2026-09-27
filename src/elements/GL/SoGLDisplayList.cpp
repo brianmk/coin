@@ -62,7 +62,7 @@
 #include <Inventor/misc/SoGLDriverDatabase.h>
 
 #include "glue/glp.h"
-#include "rendering/SoGL.h"
+#include "rendering/gl/SoGL.h"
 #include "coindefs.h"
 
 #ifndef COIN_WORKAROUND_NO_USING_STD_FUNCS

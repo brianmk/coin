@@ -54,7 +54,7 @@
 #include <Inventor/system/gl.h>
 
 #include "glue/glp.h"
-#include "rendering/SoGL.h"
+#include "rendering/gl/SoGL.h"
 
 // *************************************************************************
 

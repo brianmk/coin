@@ -196,7 +196,7 @@
 #include <Inventor/misc/SoState.h>
 #include <Inventor/system/gl.h>
 
-#include "rendering/SoGL.h"
+#include "rendering/gl/SoGL.h"
 #include "nodes/SoSubNodeP.h"
 
 /*!

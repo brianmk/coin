@@ -60,6 +60,8 @@ layout(set = 1, binding = 0, std140) uniform DrawBlock {
     vec4  u_materialParams;       // offset 176: x=shininess, y=twoSided,
                                   //            z=lightCount, w=shadingModel
     mat4  u_proj;                 // offset 192: projection (view/model above)
+    vec4  u_materialPbr;          // offset 256: x=metalness, y=roughness,
+                                  //            z=physical-material enabled
 } draw;
 
 layout(location = 0) in vec3 a_position;

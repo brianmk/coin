@@ -85,8 +85,8 @@
 #include "coindefs.h" // COIN_OBSOLETED()
 #include "glue/GLUWrapper.h"
 #include "nodes/SoSubNodeP.h"
-#include "rendering/SoGLNurbs.h"
-#include "rendering/SoGL.h"
+#include "rendering/gl/SoGLNurbs.h"
+#include "rendering/gl/SoGL.h"
 #include "SoNurbsP.h"
 
 /*!

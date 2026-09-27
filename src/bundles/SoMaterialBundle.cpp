@@ -57,7 +57,7 @@
 #include "SbBasicP.h"
 
 #include "glue/glp.h"
-#include "rendering/SoGL.h"
+#include "rendering/gl/SoGL.h"
 
 #define FLAG_COLORONLY  0x01
 #define FLAG_NVIDIA_BUG 0x02

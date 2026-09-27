@@ -146,6 +146,14 @@ public:
   AutoClippingStrategy getAutoClipping(void) const;
   void setNearPlaneValue(float value);
   float getNearPlaneValue(void) const;
+  // Recompute the camera's near/far clipping planes from the current scene
+  // bounding box, exactly as the next render() would, but without rendering.
+  // FreeCAD's Vulkan viewport integration calls this while the hidden GL
+  // viewer is not rendering: the view is display-only there, so nothing else
+  // refreshes the shared camera's near/far and SoRayPickAction (which derives
+  // its ray from those fields) would otherwise clip the origin planes away
+  // whenever the scene was empty when the camera was last framed.
+  void updateClippingPlanes(void);
   void setTexturesEnabled(const SbBool onoff);
   SbBool isTexturesEnabled(void) const;
   void setDoubleBuffer(const SbBool enable);

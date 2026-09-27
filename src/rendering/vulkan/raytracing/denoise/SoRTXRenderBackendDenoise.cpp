@@ -1,0 +1,1330 @@
+// src/rendering/vulkan/raytracing/denoise/SoRTXRenderBackendDenoise.cpp
+
+// The denoise concern of the Vulkan RTX backend: the table of contents selects
+// one of the external denoiser backends (Intel OIDN on the CPU/GPU, NVIDIA
+// RTX via OptiX + CUDA, or AMD DNSR) that the path tracer feeds its first-
+// bounce G-buffers into, and publishes the denoised rgba into the present
+// descriptor set's DenoisedBuffer (binding 5).  The OptiX/CUDA ("rtx") half
+// lives in SoRTXRenderBackendRtx.cpp; this TU holds the shared dispatch, the
+// OIDN host path and the denoise staging/readback lifecycle.
+//
+// The G-buffers written by the raygen are device-local storage buffers:
+//   - accumBuffer   (binding 4)  rgba: rgb = radiance sum, a = sample count
+//   - albedoBuffer  (binding 14) rgba: rgb = first-hit albedo, a = validity
+//   - normalBuffer  (binding 5)  rgba: rgb = world normal, a = valid
+//   - positionBuffer(binding 6)  rgba: rgb = world position, a = hit distance
+// The denoiser wants a per-pixel color/average plus albedo and normal guides.
+// To move them between Vulkan and the denoiser, the hub device-local buffers
+// are copied into host-visible staging (recordDenoiseReadback, on the one-shot
+// command buffer), the denoiser runs after the submission's queue wait
+// (updateDenoise), and the result is copied back into the device-local
+// denoisedBuffer bound at present binding 5.
+
+#include "rendering/vulkan/raytracing/rtx/SoRTXRenderBackend.h"
+#include "rendering/vulkan/common/core/SoVulkanConfig.h"
+#include "rendering/vulkan/common/core/SoVulkanVma.h"
+#include <Inventor/errors/SoDebugError.h>
+#include <algorithm>
+#include <array>
+#include <chrono>
+#include <cmath>
+#include <cstdlib>
+#include <cstring>
+#include <string>
+#include <thread>
+#include <rendering/vulkan/raytracing/rtx/SoRTXRenderBackendP.h>
+
+#include "vk_mem_alloc.h"
+
+using namespace SoRTXBackend;
+
+void
+SoRTXRenderBackend::setupOidnDevice()
+{
+#if COIN_BUILD_OIDN
+  if (this->oidnDevice) return;
+  // We feed the denoiser from host-visible staging (oidnSetSharedFilterImage
+  // with CPU pointers), so a CPU device is the correct target.  If the user
+  // explicitly selects a CUDA device the staging would need to be device
+  // memory; keep it simple and robust with the CPU device.
+  this->oidnDevice = oidnNewDevice(OIDN_DEVICE_TYPE_CPU);
+  if (!this->oidnDevice) {
+    this->emitError("OIDN denoiser: failed to create a CPU device");
+    return;
+  }
+  oidnCommitDevice(this->oidnDevice);
+#endif
+}
+
+bool
+SoRTXRenderBackend::configureOidnFilter()
+{
+#if COIN_BUILD_OIDN
+  this->setupOidnDevice();
+  if (!this->oidnDevice) {
+    if (SoVulkanConfig::get().rtxDebug.denoiserDebug) {
+      fprintf(stderr, "[DENOISE] OIDN device null\n");
+    }
+    return false;
+  }
+  if (this->oidnFilter) return true;
+  this->oidnFilter = oidnNewFilter(this->oidnDevice, "RT");
+  if (!this->oidnFilter) {
+    this->emitError("OIDN denoiser: failed to create RT filter");
+    return false;
+  }
+  // RT filter: HDR path-tracer radiance, guided by the (clean, first-hit)
+  // albedo + normal G-buffers.  HIGH quality: the denoiser runs exactly once
+  // per run, on the final accumulated frame (denoise-at-target), and the work
+  // is offloaded to the async worker, so the extra cost is hidden behind the
+  // still-accumulating present instead of costing interactive frame rate.
+  oidnSetFilterBool(this->oidnFilter, "hdr", true);
+  oidnSetFilterInt(this->oidnFilter, "quality", OIDN_QUALITY_HIGH);
+  // Our albedo/normal guides are the first-hit G-buffer, i.e. noise-free, but
+  // OIDN's RT filter defaults cleanAux=false and therefore PREFILTERS them.
+  // Prefiltering clean guides blurs them, which weakens the edge-stopping
+  // between adjacent surfaces and leaves the denoised output mottled/under-
+  // denoised.  Declaring them clean skips the prefilter and denoises far more
+  // aggressively while keeping edges sharp.
+  oidnSetFilterBool(this->oidnFilter, "cleanAux", true);
+  return true;
+#else
+  return false;
+#endif
+}
+
+bool
+SoRTXRenderBackend::createDenoiseBackend()
+{
+  if (this->denoiseWidth == 0 || this->denoiseHeight == 0) return false;
+  // Resize: if the staging/output already exist but the resolution changed,
+  // tear them down first so they are recreated at the new dimensions.  A
+  // runtime denoiser change (denoiseKindDirty, set by setDenoiserFilter)
+  // forces the same teardown so the new backend is configured on the next
+  // frame even without a resize.
+  if (this->denoisedBuffer != VK_NULL_HANDLE &&
+      (this->denoiseStagedWidth != this->denoiseWidth ||
+       this->denoiseStagedHeight != this->denoiseHeight ||
+       this->denoiseKindDirty)) {
+    // destroyDenoiser() is a full teardown that zeroes denoiseWidth/Height,
+    // but here we are mid-recreation at the same working resolution; snapshot
+    // the dimensions (and re-set them) so the rest of createDenoiseBackend()
+    // still allocates the buffers at the current extent instead of falling
+    // through to a zero-size allocation (an nvidia zero-size device object
+    // returns VK_ERROR_DEVICE_LOST and poisons the frame).
+    const uint32_t width = this->denoiseWidth;
+    const uint32_t height = this->denoiseHeight;
+    this->destroyDenoiser();
+    this->denoiseWidth = width;
+    this->denoiseHeight = height;
+  }
+  if (this->denoisedBuffer != VK_NULL_HANDLE) return true;
+
+  // Resolve the backend from the user's stored choice.  The preference set by
+  // setDenoiserFilter() (denoiseKindPref) survives the teardown above, so a
+  // viewport resize or runtime denoiser change re-creates the SAME backend
+  // instead of silently falling back to the OIDN CPU device.  The
+  // FC_VULKAN_PT_DENOISER env var seeds denoiseKindPref on the first
+  // resolution.  Only when nothing was specified do we default to OIDN.
+  // DNSR degrades to OIDN when the FFX SDK is not built in.
+  // Always re-resolve from denoiseKindPref: destroyDenoiser() (called above on
+  // a resize or a runtime denoiser switch) zeroes denoiseKind, so restoring it
+  // from the preference unconditionally is what makes a runtime
+  // setDenoiserFilter() -> createDenoiseBackend() transition actually take
+  // effect instead of leaving the denoiser inactive (denoiseKind == None).
+  this->denoiseKind = this->denoiseKindPref;
+  if (this->denoiseKind != DenoiseRtx && this->denoiseKind != DenoiseOidn &&
+      this->denoiseKind != DenoiseDnsr && this->denoiseKind != DenoiseNone) {
+    this->denoiseKind = DenoiseOidn;
+  }
+  if (!this->denoiseKindExplicit && this->denoiseKindPref == DenoiseNone) {
+    // First resolution, no explicit preference: honour the env var, then fall
+    // back to the default (OIDN).  An explicit "none" selection is a real
+    // user choice and must not be overwritten by the env/default fallback.
+    if (const char * sel = SoVulkanShared::envString("FC_VULKAN_PT_DENOISER")) {
+      if (std::strcmp(sel, "rtx") == 0) {
+        this->denoiseKind = DenoiseRtx;
+        this->denoiseKindPref = DenoiseRtx;
+      }
+      else if (std::strcmp(sel, "dnsr") == 0) {
+        this->denoiseKind = DenoiseDnsr;
+        this->denoiseKindPref = DenoiseDnsr;
+      }
+      else if (std::strcmp(sel, "none") == 0) {
+        this->denoiseKind = DenoiseNone;
+        this->denoiseKindPref = DenoiseNone;
+      }
+      else {
+        this->denoiseKind = DenoiseOidn;
+        this->denoiseKindPref = DenoiseOidn;
+      }
+    }
+    else {
+      this->denoiseKind = DenoiseOidn;
+      this->denoiseKindPref = DenoiseOidn;
+    }
+    this->denoiseKindExplicit = true;
+  }
+  this->denoiseKindDirty = false;
+
+  if (SoVulkanConfig::get().rtxDebug.denoiserDebug) {
+    fprintf(stderr,
+            "[DENOISE] resolved kind=%d explicit=%d pref=%d ptEnabled=%d\n",
+            static_cast<int>(this->denoiseKind),
+            this->denoiseKindExplicit ? 1 : 0,
+            static_cast<int>(this->denoiseKindPref),
+            this->ptEnabled ? 1 : 0);
+  }
+
+  // The denoiser working resolution was already computed by
+  // createPathTracingBuffers() from denoiseScale (setDenoiserScale): a scale
+  // > 1 runs the host-side filter at reduced resolution (cheaper) and the
+  // present pass bilinearly upscales it back to the viewport.  denoiseScale
+  // itself is preserved here (the present push constant carries it), so do
+  // NOT reset it to 1.0 -- createDenoiseBackend() is re-entered on every
+  // (re)create and would otherwise clobber the user's scale.
+
+  // The albedo G-buffer (present/RT binding 14) is written UNCONDITIONALLY by
+  // the path tracer (PathTrace.glsl writes albedos[index] on every traced
+  // pixel), so it must exist and be bound whenever the tracer runs -- even with
+  // no denoiser.  It used to be created only on the denoiser paths below, so
+  // switching to DenoiseNone freed it (destroyDenoiser) and left binding 14
+  // pointing at the freed buffer; the next trace then wrote freed device
+  // memory, which the driver reports as VK_ERROR_DEVICE_LOST (the "only edges"
+  // fallback).  Create it here, before the DenoiseNone early return, so the
+  // binding is always valid; the guarded creation below then becomes a no-op.
+  {
+    const VkDeviceSize gbBytes =
+      static_cast<VkDeviceSize>(this->ptBufferWidth) * this->ptBufferHeight * 16;
+    if (this->albedoBuffer == VK_NULL_HANDLE) {
+      if (!this->createDeviceLocalBuffer(
+            gbBytes, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT |
+              VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
+            this->albedoBuffer, this->albedoMemory)) {
+        this->emitError("failed to create albedo G-buffer");
+        return false;
+      }
+      if (!this->updateDescriptors()) {
+        this->emitError("failed to refresh descriptors for albedo buffer");
+        return false;
+      }
+    }
+  }
+
+  if (this->denoiseKind == DenoiseNone || !this->ptEnabled) {
+    return true;
+  }
+
+  // Set when the host-visible staging block (OIDN/DNSR) cannot be allocated;
+  // the device-local denoised/albedo buffers still get created so descriptor
+  // bindings stay valid, but the host-side denoiser backends are skipped.
+  bool stagingFailed = false;
+
+  // Host-visible staging buffers: one mapped block covering color, albedo,
+  // normal, motion and output for the current resolution.  Allocates a single
+  // host-visible buffer so the maps stay valid for the life of the backend
+  // and the denoiser can read the G-buffer rows directly.  Regions are laid
+  // out as [0]=color, [1]=albedo, [2]=normal, [3]=motion, [4]=output (the
+  // readback copies the four inputs and the denoiser writes one output).
+  // The real per-pixel validity comes from the sample count in color[3], so
+  // the position buffer is never staged.  The block is 5x imageBytes -- the
+  // four inputs plus the output -- which is the working set a host-side
+  // denoiser needs; anything larger just wastes host-visible memory, the
+  // constrained resource that fails the allocation.
+  //
+  // The RTX path needs no host staging: it copies the G-buffers device-to-
+  // device into CUDA-Vulkan interop images and runs OptiX entirely on the
+  // GPU, so skip the host-coherent block (several image-sized regions is the
+  // exact allocation that can run the driver out of host-visible memory) and
+  // only allocate it for the host-side OIDN backend.  The DNSR/DNSR pass is
+  // also device-local (it reads the G-buffers directly), so it takes the same
+  // no-staging path.
+  const VkDeviceSize pixelBytes = 4 * sizeof(float);
+  // Denoiser working resolution (scaled by denoiseScale) -- the size of the
+  // OIDN filter inputs/output and of the denoisedBuffer the present pass
+  // upscales from.
+  const VkDeviceSize imageBytes =
+    static_cast<VkDeviceSize>(this->denoiseWidth) * this->denoiseHeight *
+    pixelBytes;
+  // The G-buffer readback copies are FULL path-tracing resolution (the raygen
+  // writes the accum/albedo/normal/motion buffers at the viewport size); only
+  // the denoiser's internal working set and its output are scaled.  So the
+  // host staging block is 4 full-res input regions plus, when scaled, a
+  // low-res OIDN working set (color+albedo+normal+motion+output), else a
+  // single full-res output region.
+  const bool scaled = this->denoiseEffectiveScale > 1.5f;
+  const VkDeviceSize gbBytes =
+    static_cast<VkDeviceSize>(this->ptBufferWidth) * this->ptBufferHeight *
+    pixelBytes;
+  if (this->denoiseKind != DenoiseRtx && this->denoiseKind != DenoiseDnsr) {
+    const VkDeviceSize totalBytes = gbBytes * 4 + (scaled ? 5 : 1) * imageBytes;
+    if (!this->createHostVisibleBuffer(
+          totalBytes, VK_BUFFER_USAGE_TRANSFER_DST_BIT |
+            VK_BUFFER_USAGE_TRANSFER_SRC_BIT |
+            VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
+          this->denoiseColorBuf, this->denoiseColorMem,
+          &this->denoiseStagingPtr)) {
+      // The host-visible staging block is the constrained allocation (several
+      // image-sized regions at viewport resolution); if the driver cannot back
+      // it, degrade gracefully rather than failing the whole path-tracing
+      // buffer setup (which previously cascaded through createPathTracingBuffers
+      // into renderExternal and VK_ERROR_DEVICE_LOST).  Mark the staging as
+      // unavailable so the OIDN/DNSR backends are skipped, but keep going so
+      // the device-local denoised/albedo buffers (which the present shader
+      // bindings depend on) are still created and the descriptors stay valid.
+      this->emitError("failed to create denoiser staging buffer; disabling denoiser");
+      stagingFailed = true;
+    }
+    else {
+      // The four logical regions share one backing allocation; derive the
+      // handles by offset.  We keep VkBuffer handles identical (the staging
+      // buffer) and only the mapped pointers differ, which is fine for the
+      // host-side denoisers.
+      this->denoiseAlbedoBuf = this->denoiseColorBuf;
+      this->denoiseNormalBuf = this->denoiseColorBuf;
+      this->denoiseGuideBuf = this->denoiseColorBuf;
+      this->denoiseMotionBuf = this->denoiseColorBuf;
+      this->denoiseOutBuf = this->denoiseColorBuf;
+      this->denoiseAlbedoMem = this->denoiseColorMem;
+      this->denoiseNormalMem = this->denoiseColorMem;
+      this->denoiseGuideMem = this->denoiseColorMem;
+      this->denoiseMotionMem = this->denoiseColorMem;
+      this->denoiseOutMem = this->denoiseColorMem;
+    }
+  }
+
+  // Device-local output image bound at present binding 5.  The present
+  // shader reads it as a StorageBuffer of vec4.  It is written and read only
+  // on the graphics queue family (submitDenoiseCopy() runs the copy there), so
+  // the default EXCLUSIVE sharing is correct.
+  if (!this->createDeviceLocalBuffer(
+        imageBytes, VK_BUFFER_USAGE_TRANSFER_DST_BIT |
+          VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
+        this->denoisedBuffer, this->denoisedMemory)) {
+    this->emitError("failed to create denoised output buffer");
+    return false;
+  }
+
+  // Albedo G-buffer (binding 14): written by the raygen and read back as the
+  // albedo guide.  Device-local STORAGE + TRANSFER_SRC so the readback can
+  // copy it to host staging.  This is a RAYGEN G-BUFFER and is always FULL
+  // resolution (ptBufferWidth/Height), regardless of the denoiser scale.
+  // Refresh descriptors once after both it and the denoised output exist so
+  // no descriptor is left unwritten/undefined.
+  if (this->albedoBuffer == VK_NULL_HANDLE) {
+    if (!this->createDeviceLocalBuffer(
+          gbBytes, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT |
+            VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
+          this->albedoBuffer, this->albedoMemory)) {
+      this->emitError("failed to create albedo G-buffer");
+      return false;
+    }
+    if (!this->updateDescriptors()) {
+      this->emitError("failed to refresh descriptors for albedo buffer");
+      return false;
+    }
+  }
+
+  // Backend-specific setup.
+#if COIN_BUILD_OIDN
+  if (this->denoiseKind == DenoiseOidn) {
+    if (stagingFailed || !this->configureOidnFilter()) {
+      this->emitError("OIDN denoiser unavailable; disabling denoise");
+      this->denoiseKind = DenoiseNone;
+    }
+  }
+#endif
+
+#if COIN_BUILD_RTX_DENOISER
+  if (this->denoiseKind == DenoiseRtx) {
+    this->rtxModelKind = []() {
+      const char * m = SoVulkanShared::envString("FC_VULKAN_PT_RTX_MODEL");
+      if (m && std::strcmp(m, "TEMPORAL") == 0)
+        return OPTIX_DENOISER_MODEL_KIND_TEMPORAL_AOV;
+      if (m && std::strcmp(m, "ALBEDO") == 0) return OPTIX_DENOISER_MODEL_KIND_AOV;
+      return OPTIX_DENOISER_MODEL_KIND_AOV;
+    }();
+
+    // The CUDA/OptiX denoiser runs by importing Vulkan device memory into
+    // CUDA (VK_KHR_external_memory_fd) and is therefore only valid when the
+    // Vulkan device is an NVIDIA GPU.  The ray-query path tracer itself is
+    // vendor-neutral: on an AMD/Intel RT-capable device it renders fine, so
+    // only the denoiser must be gated here and degraded to OIDN.
+    if (!this->deviceIsNvidia) {
+      if (SoVulkanConfig::get().rtxDebug.denoiserDebug) {
+        fprintf(stderr,
+                "[DENOISE] RTX denoiser unavailable: Vulkan device vendor "
+                "0x%04x is not NVIDIA; using OIDN\n",
+                this->deviceVendorID);
+      }
+      this->denoiseKind = DenoiseOidn;
+#if COIN_BUILD_OIDN
+      if (!this->configureOidnFilter()) {
+        this->emitError("OIDN fallback unavailable; disabling denoise");
+        this->denoiseKind = DenoiseNone;
+      }
+#endif
+    }
+    else if (this->initRtxCuda() && this->initRtxDenoiser()) {
+      this->denoiserActive = true;
+    }
+    else {
+      this->emitError("RTX denoiser unavailable; degrading to OIDN");
+      // Free only the CUDA/OptiX state; the staging buffers (Vulkan) are
+      // still valid and the OIDN filter below reuses them.
+      this->teardownRtxDenoiser();
+      this->denoiseKind = DenoiseOidn;
+#if COIN_BUILD_OIDN
+      if (!this->configureOidnFilter()) {
+        this->emitError("OIDN fallback unavailable; disabling denoise");
+        this->denoiseKind = DenoiseNone;
+      }
+#endif
+    }
+  }
+#endif
+
+  if (this->denoiseKind == DenoiseDnsr) {
+#if COIN_BUILD_DNSR_DENOISER
+    // The DNSR prefilter runs on the GPU over the device-local G-buffers (no
+    // host staging), so it only needs its pipeline + descriptor set.  A
+    // failure degrades to OIDN exactly like the RTX path.
+    if (this->createDnsrPipeline()) {
+      this->denoiserActive = true;
+    }
+    else {
+      this->emitError("DNSR denoiser unavailable; degrading to OIDN");
+      this->destroyDnsrResources();
+      this->denoiseKind = DenoiseOidn;
+#if COIN_BUILD_OIDN
+      if (!this->configureOidnFilter()) {
+        this->emitError("OIDN fallback unavailable; disabling denoise");
+        this->denoiseKind = DenoiseNone;
+      }
+#endif
+    }
+#else
+    // DNSR not built: degrade to OIDN with a message.  Keep the degradation
+    // OUTSIDE the build guard so selecting "dnsr" always falls back to OIDN
+    // instead of leaving the denoiser inactive (with denoiseKind still DNSR the
+    // configured check below matches neither OIDN nor RTX and the denoiser
+    // turns off, showing raw grainy output).
+    this->emitError("AMD DNSR denoiser is not built in; falling back to OIDN");
+    this->denoiseKind = DenoiseOidn;
+#if COIN_BUILD_OIDN
+    if (!this->configureOidnFilter()) {
+      this->emitError("OIDN fallback unavailable; disabling denoise");
+      this->denoiseKind = DenoiseNone;
+    }
+#endif
+#endif
+  }
+
+  // Confirm a backend was actually configured for the resolved kind.  The
+  // degraded paths above reset denoiseKind to Oidn and reconfigure the OIDN
+  // filter; if none of the built backends could configure (e.g. OIDN not
+  // linked and RTX unavailable) the denoiser stays inactive so the frame
+  // loop does not bother recording readbacks it can never service.
+  bool configured = false;
+#if COIN_BUILD_OIDN
+  if (this->denoiseKind == DenoiseOidn && this->oidnFilter) configured = true;
+#endif
+#if COIN_BUILD_RTX_DENOISER
+  if (this->denoiseKind == DenoiseRtx && this->rtxDenoiser) configured = true;
+#endif
+#if COIN_BUILD_DNSR_DENOISER
+  if (this->denoiseKind == DenoiseDnsr && this->dnsrPipelineReady) configured = true;
+#endif
+  if (!configured) {
+    if (SoVulkanConfig::get().rtxDebug.denoiserDebug) {
+      fprintf(stderr, "[DENOISE] no backend configured for kind=%d\n",
+              static_cast<int>(this->denoiseKind));
+    }
+    this->denoiserActive = false;
+    this->releaseDenoiseStaging();
+    return true;
+  }
+  this->denoiserActive = true;
+  this->denoiseStagedWidth = this->denoiseWidth;
+  this->denoiseStagedHeight = this->denoiseHeight;
+  if (SoVulkanConfig::get().rtxDebug.denoiserDebug) {
+    fprintf(stderr, "[DENOISE] backend configured kind=%d active=%s\n",
+            static_cast<int>(this->denoiseKind),
+            this->denoiserActive ? "yes" : "no");
+  }
+  return true;
+}
+
+bool
+SoRTXRenderBackend::submitDenoiseCopy(VkCommandBuffer cmd)
+{
+  // Always submit on the graphics queue.  The copy used to run on a dedicated
+  // compute queue under FC_VULKAN_ASYNC_COMPUTE, but every branch host-waited
+  // for completion, so it never actually overlapped graphics work -- it only
+  // added cross-queue buffer-ownership and command-buffer-family hazards.  A
+  // single graphics-queue submit followed by a queue drain is simple and
+  // correct.
+  VkSubmitInfo si {};
+  si.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
+  si.commandBufferCount = 1;
+  si.pCommandBuffers = &cmd;
+  if (vkQueueSubmit(this->queue, 1, &si, VK_NULL_HANDLE) != VK_SUCCESS) {
+    this->emitError("denoise copy: vkQueueSubmit failed");
+    return false;
+  }
+  if (!this->drainQueue("denoise copy", this->queue)) return false;
+  return true;
+}
+
+void
+SoRTXRenderBackend::recordDenoiseReadback(VkCommandBuffer cmd)
+{
+  if (!this->denoiserActive) return;
+  // The DNSR/DNSR pass reads the device-local G-buffers directly (no host
+  // staging), so it needs no readback recorded here; its dispatch happens in
+  // updateDenoise() after the frame's queue wait.
+  if (this->denoiseKind == DenoiseDnsr) return;
+  // Input copies are FULL path-tracing resolution (the raygen writes the
+  // accum/albedo/normal/motion G-buffers at the viewport size); only the
+  // denoiser's internal working set and output are scaled.  ptBufferWidth/Height
+  // are the full PT buffer dims and are what the G-buffer readback must copy.
+  const VkDeviceSize stride =
+    static_cast<VkDeviceSize>(this->ptBufferWidth) * this->ptBufferHeight * 16;
+
+#if COIN_BUILD_RTX_DENOISER
+  // RTX reads the G-buffers through the CUDA-Vulkan interop images: the
+  // denoiser kernel (OptiX) is imported over the same device memory, so the
+  // G-buffers are copied device-to-device and no host staging is involved.
+  if (this->denoiseKind == DenoiseRtx && this->rtxInteropReady) {
+    SoVulkanShared::memoryBarrier(
+      cmd,
+      VK_PIPELINE_STAGE_RAY_TRACING_SHADER_BIT_KHR |
+        VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+      VK_PIPELINE_STAGE_TRANSFER_BIT, VK_ACCESS_SHADER_WRITE_BIT,
+      VK_ACCESS_TRANSFER_READ_BIT);
+
+    if (this->accumBuffer != VK_NULL_HANDLE && this->rtxColorVk != VK_NULL_HANDLE) {
+      VkBufferCopy c0 {0, 0, stride};
+      vkCmdCopyBuffer(cmd, this->accumBuffer, this->rtxColorVk, 1, &c0);
+    }
+    if (this->albedoBuffer != VK_NULL_HANDLE && this->rtxAlbedoVk != VK_NULL_HANDLE) {
+      VkBufferCopy c1 {0, 0, stride};
+      vkCmdCopyBuffer(cmd, this->albedoBuffer, this->rtxAlbedoVk, 1, &c1);
+    }
+    if (this->normalBuffer != VK_NULL_HANDLE && this->rtxNormalVk != VK_NULL_HANDLE) {
+      VkBufferCopy c2 {0, 0, stride};
+      vkCmdCopyBuffer(cmd, this->normalBuffer, this->rtxNormalVk, 1, &c2);
+    }
+    if (this->motionBuffer != VK_NULL_HANDLE && this->rtxMotionVk != VK_NULL_HANDLE) {
+      VkBufferCopy cM {0, 0, stride};
+      vkCmdCopyBuffer(cmd, this->motionBuffer, this->rtxMotionVk, 1, &cM);
+    }
+
+    // Make the copies visible to the CUDA driver (COMPUTE stage) after the
+    // Vulkan queue waits idle.
+    SoVulkanShared::memoryBarrier(
+      cmd, VK_PIPELINE_STAGE_TRANSFER_BIT,
+      VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_ACCESS_TRANSFER_WRITE_BIT,
+      VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT);
+    this->oidnReadbackPending = TRUE;
+    return;
+  }
+#endif
+
+  // Host-side denoisers (OIDN/DNSR): copy into the mapped staging allocation.
+  // The host-visible staging buffer is one allocation with five sequential
+  // image-sized regions; the denoiser indexes them via denoiseStagingPtr +
+  // region offset.
+  if (this->denoiseColorBuf == VK_NULL_HANDLE) return;
+  if (this->accumBuffer == VK_NULL_HANDLE) return;
+
+  SoVulkanShared::memoryBarrier(
+    cmd,
+    VK_PIPELINE_STAGE_RAY_TRACING_SHADER_BIT_KHR |
+      VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+    VK_PIPELINE_STAGE_TRANSFER_BIT, VK_ACCESS_SHADER_WRITE_BIT,
+    VK_ACCESS_TRANSFER_READ_BIT);
+
+  // color (accum average), albedo, normal, motion.  The position buffer is not
+  // needed: the present shader's denoised-alpha test uses the averaged color's
+  // w (set from the sample count in updateDenoise), which distinguishes empty
+  // pixels from ones with a primary hit.
+  //
+  // Preferred path: the denoiser G-buffer normalize/downsample compute pass
+  // reads the device-local G-buffers and writes the (optionally downsampled,
+  // always normalized) working set straight into the mapped staging block, so
+  // the CPU OIDN worker only runs the filter.  This avoids a host round-trip
+  // of the full-res G-buffers and swaps a serial 2M-fragment CPU normalize/
+  // downsample for a parallel GPU dispatch.  Fall back to the device->host
+  // copy (worker does the normalize/downsample) when the pass is unavailable.
+  const bool useGpuDownsample = this->denoiseDownsampleValid &&
+    this->denoiseStagingPtr != nullptr;
+  if (useGpuDownsample) {
+    const uint32_t gbW = this->ptBufferWidth;
+    const uint32_t gbH = this->ptBufferHeight;
+    const uint32_t w = this->denoiseWidth;
+    const uint32_t h = this->denoiseHeight;
+    const bool scaled = this->denoiseEffectiveScale > 1.5f;
+    // Sub-sample factors (nearest), matching the host worker: gx = x*sx clamped.
+    const uint32_t sx = std::max(1u, (gbW + w - 1) / w);
+    const uint32_t sy = std::max(1u, (gbH + h - 1) / h);
+    const VkDeviceSize outStride = static_cast<VkDeviceSize>(w) * h * 16;
+    const VkDeviceSize gbStride = static_cast<VkDeviceSize>(gbW) * gbH * 16;
+    // vec4-element (byte/16) offsets of the four working-set regions.
+    const VkDeviceSize baseBytes = scaled ? 4 * gbStride : 0;
+    const VkDeviceSize b0 = baseBytes;
+    const VkDeviceSize b1 = scaled ? baseBytes + outStride : gbStride;
+    const VkDeviceSize b2 = scaled ? baseBytes + 2 * outStride : 2 * gbStride;
+    const VkDeviceSize b3 = scaled ? baseBytes + 3 * outStride : 3 * gbStride;
+
+    DenoiseDownsamplePush push;
+    push.full[0] = gbW;
+    push.full[1] = gbH;
+    push.full[2] = sx;
+    push.full[3] = sy;
+    push.reg[0] = static_cast<uint32_t>(b0 / 16);
+    push.reg[1] = static_cast<uint32_t>(b1 / 16);
+    push.reg[2] = static_cast<uint32_t>(b2 / 16);
+    push.reg[3] = static_cast<uint32_t>(b3 / 16);
+    push.num[0] = w * h;
+
+    // The G-buffers were written by the raygen/compute tracer earlier in this
+    // command buffer; make the writes visible to this compute dispatch.
+    SoVulkanShared::memoryBarrier(
+      cmd,
+      VK_PIPELINE_STAGE_RAY_TRACING_SHADER_BIT_KHR |
+        VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+      VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_ACCESS_SHADER_WRITE_BIT,
+      VK_ACCESS_SHADER_READ_BIT);
+
+    vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE,
+                      this->denoiseDownsamplePipeline);
+    vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE,
+                            this->denoiseDownsamplePipelineLayout, 0, 1,
+                            &this->denoiseDownsampleDescriptorSet, 0, nullptr);
+    vkCmdPushConstants(cmd, this->denoiseDownsamplePipelineLayout,
+                       VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(push), &push);
+    vkCmdDispatch(cmd, (w + 7) / 8, (h + 7) / 8, 1);
+
+    // Make the working-set writes visible to the host (the worker reads them
+    // from the HOST_COHERENT staging block).
+
+    SoVulkanShared::memoryBarrier(
+      cmd, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_HOST_BIT,
+      VK_ACCESS_SHADER_WRITE_BIT,
+      VK_ACCESS_HOST_READ_BIT | VK_ACCESS_HOST_WRITE_BIT);
+    // The worker must NOT re-apply the normalize/downsample the GPU did.
+    this->oidnGpuPrepared = true;
+  }
+  else {
+    this->oidnGpuPrepared = false;
+    VkBufferCopy c0 {0, 0, stride};
+    vkCmdCopyBuffer(cmd, this->accumBuffer, this->denoiseColorBuf, 1, &c0);
+    if (this->albedoBuffer != VK_NULL_HANDLE) {
+      VkBufferCopy c1 {0, stride, stride};
+      vkCmdCopyBuffer(cmd, this->albedoBuffer, this->denoiseColorBuf, 1, &c1);
+    }
+    if (this->normalBuffer != VK_NULL_HANDLE) {
+      VkBufferCopy c2 {0, 2 * stride, stride};
+      vkCmdCopyBuffer(cmd, this->normalBuffer, this->denoiseColorBuf, 1, &c2);
+    }
+    if (this->motionBuffer != VK_NULL_HANDLE) {
+      VkBufferCopy cM {0, 3 * stride, stride};
+      vkCmdCopyBuffer(cmd, this->motionBuffer, this->denoiseColorBuf, 1, &cM);
+    }
+
+    SoVulkanShared::memoryBarrier(
+      cmd, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_HOST_BIT,
+      VK_ACCESS_TRANSFER_WRITE_BIT,
+      VK_ACCESS_HOST_READ_BIT | VK_ACCESS_HOST_WRITE_BIT);
+  }
+  this->oidnReadbackPending = TRUE;
+}
+
+void
+SoRTXRenderBackend::updateDenoise()
+{
+  if (!this->denoiserActive || this->denoisedBuffer == VK_NULL_HANDLE) return;
+
+#if COIN_BUILD_OIDN
+  // Async OIDN completion handoff.  The worker owns the staging block and the
+  // OIDN filter from the moment the denoise-at-target launched until it sets
+  // oidnWorkerDone.  These two states are handled here, before the
+  // ptDenoisePending gating below, so the copy-back and converge run exactly
+  // once the worker publishes, independent of whether the target latch is
+  // still set, and the in-flight case does not fall through to the "no
+  // denoiser ran" convergence below.
+  if (this->oidnWorkerDone) {
+    // Worker published the denoised result in the staging output region.
+    // Snap the resolved dimensions (stored at backend creation; the staging
+    // well is stable for the life of the backend).
+    const uint32_t w = this->denoiseWidth;
+    const uint32_t h = this->denoiseHeight;
+    const VkDeviceSize outStride = static_cast<VkDeviceSize>(w) * h * 16;
+    const VkDeviceSize gbStride =
+      static_cast<VkDeviceSize>(this->ptBufferWidth) * this->ptBufferHeight * 16;
+    const bool scaled = this->denoiseEffectiveScale > 1.5f;
+    const VkDeviceSize outOffset = scaled
+      ? (4 * gbStride + 4 * outStride) : 4 * gbStride;
+    if (this->oidnWorker.joinable()) {
+      this->oidnWorker.join();
+    }
+    const bool workerFailed = this->oidnWorkerFailed;
+    this->oidnWorkerDone = FALSE;
+    this->oidnWorkerRunning = FALSE;
+    this->oidnWorkerFailed = FALSE;
+    if (this->oidnLaunchGeneration != this->ptRunGeneration) {
+      // The run this worker was launched for was reset or restarted while the
+      // CPU filter ran (a camera/scene/background change, a fresh start, or a
+      // mode switch).  The staging output is the OLD view's denoised image;
+      // publishing it here would copy it into denoisedBuffer and then
+      // convergeAfterDenoise() would freeze the NEW view on that stale (often
+      // black/partly-background) image and abort the new accumulation.  Drop
+      // the result and let the current run proceed to its own target (or the
+      // settle counter auto-restart it).  The worker is joined and its flags
+      // cleared above, so the staging block is free for the next readback.
+      this->denoiseResultReady = FALSE;
+      if (SoVulkanConfig::get().rtxDebug.denoiseTiming) {
+        fprintf(stderr,
+                "[DENOISE] OIDN async worker DISCARDED stale result "
+                "(launched gen=%u, current gen=%u)\n",
+                this->oidnLaunchGeneration, this->ptRunGeneration);
+      }
+      return;
+    }
+    if (workerFailed) {
+      // The worker reported an OIDN error, so the staging output region is
+      // black/invalid.  Do not copy it into the present buffer or publish it
+      // as a denoised result; converge on the raw/edge-stopped image instead.
+      // The error was already logged once by the worker.
+      this->denoiseResultReady = FALSE;
+      this->convergeAfterDenoise();
+      return;
+    }
+    if (w > 0 && h > 0 && this->denoiseOutBuf != VK_NULL_HANDLE) {
+      // Copy the denoiser output back to the device-local denoisedBuffer
+      // (present binding 5) on a one-shot command buffer, then publish the
+      // result.  The frame's own submission has already been waited on, and
+      // the staging is HOST_COHERENT so the worker's writes are visible here.
+      VkCommandBuffer cmd = this->beginTransientCommandBuffer();
+      if (cmd != VK_NULL_HANDLE) {
+        SoVulkanShared::memoryBarrier(
+          cmd, VK_PIPELINE_STAGE_HOST_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT,
+          VK_ACCESS_HOST_WRITE_BIT, VK_ACCESS_TRANSFER_READ_BIT);
+        VkBufferCopy cOut {outOffset, 0, outStride};
+        vkCmdCopyBuffer(cmd, this->denoiseOutBuf, this->denoisedBuffer, 1,
+                        &cOut);
+        SoVulkanShared::memoryBarrier(
+          cmd, VK_PIPELINE_STAGE_TRANSFER_BIT,
+          VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
+          VK_ACCESS_TRANSFER_WRITE_BIT, VK_ACCESS_SHADER_READ_BIT);
+        if (vkEndCommandBuffer(cmd) != VK_SUCCESS) {
+          this->emitError("denoise copy: vkEndCommandBuffer failed");
+          this->denoiseResultReady = FALSE;
+          this->convergeAfterDenoise();
+          return;
+        }
+        // Submit the denoiser-output copy and block until it completes.  A
+        // failed submit/wait means the device-local denoisedBuffer was not
+        // written, so do not publish a result.
+        const bool copyOk = this->submitDenoiseCopy(cmd);
+        this->denoiseResultReady = copyOk ? TRUE : FALSE;
+        if (!copyOk) {
+          this->convergeAfterDenoise();
+          return;
+        }
+
+        if (SoVulkanConfig::get().debug.blackDebug) {
+          float * dbg = static_cast<float *>(this->denoiseStagingPtr);
+          // The color/albedo regions the worker read.  On the GPU-prepared path
+          // the working set lives at the scaled/lower region (4*gbStride, k*outStride
+          // apart), not the full-res input regions the old CPU path filled; point
+          // the debug at the same base the worker used so accumMid/litRow are
+          // truthful instead of reading the stale offset-0 staging.
+          float * colorR = dbg;
+          float * albR = dbg + gbStride / 4;
+          if (this->oidnGpuPrepared && scaled) {
+            colorR = dbg + (4 * gbStride) / 4;
+            albR = dbg + (4 * gbStride + outStride) / 4;
+          }
+          [[maybe_unused]] float * nrmR = dbg + 2 * gbStride / 4;
+          const int mid = ((h / 2) * w + w / 2) * 4;
+          // scan a horizontal strip at mid-height for lit (alpha>0) color runs
+          int litPixels = 0;
+          for (int x = 0; x < w; ++x) {
+            if (colorR[((h / 2) * w + x) * 4 + 3] > 0.0f) { litPixels++; }
+          }
+          // vertical extent of lit pixels
+          int litTop = -1, litBottom = -1;
+          for (int y = 0; y < h; ++y) {
+            int rowLit = 0;
+            for (int x = 0; x < w; x += 8) {
+              if (colorR[(y * w + x) * 4 + 3] > 0.0f) { rowLit++; }
+            }
+            if (rowLit > 0) { if (litTop < 0) litTop = y; litBottom = y; }
+          }
+          fprintf(stderr,
+                  "[BLACKOIDN] %ux%u accumMid=(%.3f,%.3f,%.3f,%.1f) "
+                  "albedoMid=(%.3f,%.3f,%.3f,%.1f) litRow=%d/%u litTop=%d litBottom=%d outMid=(%.3f,%.3f,%.3f,%.1f)\n",
+                  w, h,
+                  colorR[mid], colorR[mid + 1], colorR[mid + 2], colorR[mid + 3],
+                  albR[mid], albR[mid + 1], albR[mid + 2], albR[mid + 3],
+                  litPixels, w, litTop, litBottom,
+                  (dbg + outOffset / 4)[mid],
+                  (dbg + outOffset / 4)[mid + 1],
+                  (dbg + outOffset / 4)[mid + 2],
+                  (dbg + outOffset / 4)[mid + 3]);
+        }
+
+        this->convergeAfterDenoise();
+      }
+      else {
+        this->denoiseResultReady = FALSE;
+        this->convergeAfterDenoise();
+      }
+      if (SoVulkanConfig::get().rtxDebug.denoiseTiming) {
+        fprintf(stderr, "[DENOISE] OIDN async worker published (%ux%u gen=%u)\n",
+                w, h, this->ptRunGeneration);
+      }
+    }
+    else {
+      this->denoiseResultReady = FALSE;
+      this->convergeAfterDenoise();
+    }
+    return;
+  }
+  if (this->oidnWorkerRunning) {
+    // Worker still in flight: keep the run alive (do not accumulate further or
+    // converge) so the refresh loop keeps pulling frames and the present shows
+    // the fresh in-shader edge-stopped mean until the result is published.
+    // The readback was already recorded once; the gating in
+    // recordTraceAndPresent (!oidnWorkerRunning) prevents a new readback from
+    // overwriting the staging block the worker is reading.
+    return;
+  }
+#endif
+
+  // Denoise-at-target: the denoiser runs exactly once, when the accumulation
+  // reaches the target sample count (ptDenoisePending, set by the state
+  // machine in updatePathTracingState).  Re-denoising a changing partial
+  // image every accumulating frame is what churns the presented output and
+  // reads as "keeps getting grainy after I move the camera."  While
+  // accumulating toward the target the present shader shows the in-shader
+  // edge-stopped running mean, which is monotonic and clean; the denoised
+  // result is published once, on the final accumulated frame, and kept for
+  // the idle view.
+  if (!this->ptDenoisePending) {
+    return;
+  }
+  // Not accumulating means the target was never reached for this run (e.g. a
+  // move reset it); clear the latch so it does not fire against stale data.
+  if (!this->ptAccumulating && !this->ptConverged) {
+    this->ptDenoisePending = FALSE;
+    this->denoiseResultReady = FALSE;
+    return;
+  }
+  // Don't publish the denoiser output for a barely-accumulated frame: the
+  // denoiser is trained on partially converged images, so a 1-2 sample frame
+  // comes out blurred/junk.  Below the threshold the present shader shows the
+  // raw / in-shader edge-stopped accumulation instead.
+  if (this->denoiseMinSamples > 0 &&
+      this->ptFrameIndex + 1 < this->denoiseMinSamples) {
+    this->ptDenoisePending = FALSE;
+    this->denoiseResultReady = FALSE;
+    return;
+  }
+
+#if COIN_BUILD_RTX_DENOISER
+  // GPU-side path: the G-buffers were copied device-to-device into the CUDA
+  // interop images; normalize the accum sum -> average with the embedded CUDA
+  // kernel, run OptiX on the real device pointers, then blit the device output
+  // image back to the present's denoisedBuffer.  No host round-trip.
+  if (this->denoiseKind == DenoiseRtx && this->rtxInteropReady) {
+    const uint32_t w = this->denoiseWidth;
+    const uint32_t h = this->denoiseHeight;
+    const double t0 = std::chrono::duration<double>(
+      std::chrono::steady_clock::now().time_since_epoch()).count();
+    const bool wantCudaSignal = this->rtxInteropSemaphoresReady &&
+                                this->denoisedBuffer != VK_NULL_HANDLE;
+    if (!this->updateRtxDenoise(w, h, wantCudaSignal)) {
+      if (this->rtxCudaSignalPending) {
+        this->consumeVulkanSemaphore(this->rtxCudaToVkSem);
+        this->rtxCudaSignalPending = false;
+      }
+      this->denoiseResultReady = FALSE;
+      this->convergeAfterDenoise();
+      return;
+    }
+    // Copy the CUDA output image (interop device buffer) back to the
+    // device-local denoisedBuffer bound at present binding 5.
+    VkCommandBuffer cmd = this->beginTransientCommandBuffer();
+    if (cmd == VK_NULL_HANDLE) {
+      if (this->rtxCudaSignalPending) {
+        this->consumeVulkanSemaphore(this->rtxCudaToVkSem);
+        this->rtxCudaSignalPending = false;
+      }
+      this->emitError(
+        "RTX denoiser: could not allocate the output-copy command buffer");
+      this->drainQueue("RTX denoiser");
+      this->denoiseResultReady = FALSE;
+      this->convergeAfterDenoise();
+      return;
+    }
+    SoVulkanShared::memoryBarrier(
+      cmd, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+      VK_PIPELINE_STAGE_TRANSFER_BIT, VK_ACCESS_SHADER_WRITE_BIT,
+      VK_ACCESS_TRANSFER_READ_BIT);
+    const VkDeviceSize stride = static_cast<VkDeviceSize>(w) * h * 16;
+    VkBufferCopy cOut {0, 0, stride};
+    vkCmdCopyBuffer(cmd, this->rtxOutputVk, this->denoisedBuffer, 1, &cOut);
+    SoVulkanShared::memoryBarrier(
+      cmd, VK_PIPELINE_STAGE_TRANSFER_BIT,
+      VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, VK_ACCESS_TRANSFER_WRITE_BIT,
+      VK_ACCESS_SHADER_READ_BIT);
+    const VkResult endResult = vkEndCommandBuffer(cmd);
+    if (endResult != VK_SUCCESS) {
+      this->emitError(("RTX denoiser: vkEndCommandBuffer failed: "
+                       + SoVulkanShared::vkResultName(endResult)).c_str());
+    }
+    VkSubmitInfo si {};
+    si.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
+    si.commandBufferCount = 1;
+    si.pCommandBuffers = &cmd;
+    const bool waitCudaSignal =
+      this->rtxInteropSemaphoresReady && this->rtxCudaSignalPending &&
+      this->rtxCudaToVkSem != VK_NULL_HANDLE;
+    VkPipelineStageFlags waitStage = VK_PIPELINE_STAGE_TRANSFER_BIT;
+    if (waitCudaSignal) {
+      si.waitSemaphoreCount = 1;
+      si.pWaitSemaphores = &this->rtxCudaToVkSem;
+      si.pWaitDstStageMask = &waitStage;
+    }
+    // A command buffer that failed to end must not be submitted.
+    const VkResult submitResult = endResult == VK_SUCCESS
+      ? vkQueueSubmit(this->queue, 1, &si, VK_NULL_HANDLE) : endResult;
+    const VkResult waitResult = submitResult == VK_SUCCESS
+      ? vkQueueWaitIdle(this->queue) : submitResult;
+    if (submitResult == VK_SUCCESS && waitResult == VK_SUCCESS) {
+      this->rtxCudaSignalPending = false;
+      this->denoiseResultReady = TRUE;
+      this->convergeAfterDenoise();
+    }
+    else {
+      if (submitResult != VK_SUCCESS) {
+        this->emitError(("RTX denoiser: output-copy submit failed: "
+                         + SoVulkanShared::vkResultName(submitResult)).c_str());
+      }
+      else {
+        this->emitError(("RTX denoiser: output-copy vkQueueWaitIdle failed: "
+                         + SoVulkanShared::vkResultName(waitResult)).c_str());
+      }
+      if (this->rtxCudaSignalPending) {
+        this->consumeVulkanSemaphore(this->rtxCudaToVkSem);
+        this->rtxCudaSignalPending = false;
+      }
+      // Final drain before the caller's frame continues; report a failure so a
+      // device-lost drain is never silent.
+      this->drainQueue("RTX denoiser: output-copy drain");
+      this->denoiseResultReady = FALSE;
+      this->convergeAfterDenoise();
+    }
+    if (SoVulkanConfig::get().rtxDebug.denoiseTiming) {
+      const double t1 = std::chrono::duration<double>(
+        std::chrono::steady_clock::now().time_since_epoch()).count();
+      fprintf(stderr, "[DENOISE] kind=2 frame denoise took %.1f ms (%ux%u)\n",
+              (t1 - t0) * 1000.0, w, h);
+    }
+    return;
+  }
+#endif
+
+#if COIN_BUILD_DNSR_DENOISER
+  // DNSR (prefilter) path: a single device-local GPU compute pass over the
+  // path tracer's G-buffers at native path-tracing resolution, so there is no
+  // host staging and no scaling.  The pass writes denoisedBuffer directly.
+  if (this->denoiseKind == DenoiseDnsr && this->dnsrPipelineReady) {
+    const uint32_t w = this->ptBufferWidth;
+    const uint32_t h = this->ptBufferHeight;
+    const double t0 = std::chrono::duration<double>(
+      std::chrono::steady_clock::now().time_since_epoch()).count();
+    const bool ok = this->dispatchDnsrDenoise(w, h);
+    this->denoiseResultReady = ok ? TRUE : FALSE;
+    this->convergeAfterDenoise();
+    if (SoVulkanConfig::get().rtxDebug.denoiseTiming) {
+      const double t1 = std::chrono::duration<double>(
+        std::chrono::steady_clock::now().time_since_epoch()).count();
+      fprintf(stderr, "[DENOISE] kind=3 DNSR prefilter took %.1f ms (%ux%u)\n",
+              (t1 - t0) * 1000.0, w, h);
+    }
+    return;
+  }
+#endif
+
+  if (this->denoiseColorBuf == VK_NULL_HANDLE || this->denoiseStagingPtr == nullptr) {
+    this->denoiseResultReady = FALSE;
+    this->convergeAfterDenoise();
+    return;
+  }
+  const uint32_t w = this->denoiseWidth;
+  const uint32_t h = this->denoiseHeight;
+  const VkDeviceSize outStride = static_cast<VkDeviceSize>(w) * h * 16;
+  // The G-buffer readback copied FULL-resolution inputs; the denoiser's own
+  // working set (and its output) live at the scaled resolution at/after
+  // offset 4*gbStride.
+  const uint32_t gbW = this->ptBufferWidth;
+  const uint32_t gbH = this->ptBufferHeight;
+  const VkDeviceSize gbStride =
+    static_cast<VkDeviceSize>(gbW) * gbH * 16;
+  const bool scaled = this->denoiseEffectiveScale > 1.5f;
+  uint8_t * wbase = static_cast<uint8_t *>(this->denoiseStagingPtr);
+  // Full-res G-buffer inputs (from the readback).
+  float * color = reinterpret_cast<float *>(wbase);
+  float * albedo = reinterpret_cast<float *>(wbase + gbStride);
+  float * normal = reinterpret_cast<float *>(wbase + 2 * gbStride);
+  float * motion = reinterpret_cast<float *>(wbase + 3 * gbStride);
+  // Denoiser output region (scaled).
+  float * out = reinterpret_cast<float *>(wbase + (scaled
+    ? 4 * gbStride + 4 * outStride : 4 * gbStride));
+#if COIN_BUILD_OIDN
+  if (this->denoiseKind == DenoiseOidn && this->oidnFilter) {
+    // Confirm the readback request was actually issued (it is recorded on the
+    // one-shot command buffer and only set when the copy is recorded).
+    if (this->oidnReadbackPending) {
+      // Offload the CPU-side OIDN work (normalize the accum average, run the
+      // filter, stamp the validity mask) to a worker thread so the GUI thread
+      // is not blocked for the tens of milliseconds OIDN's CPU device takes.
+      // The staging block is HOST_VISIBLE|HOST_COHERENT, so the worker's
+      // writes to the output region are visible to the device-side copy-back
+      // below without an explicit flush.  The OIDN filter is owned by the
+      // worker for the duration of oidnWorkerRunning; the render thread must
+      // not submit to it while the worker holds it.
+      if (this->oidnWorkerRunning) {
+        // A worker is already in flight (a previous frame's launch).  It owns
+        // the staging block: do not run another denoise, and keep the run in
+        // progress so the present keeps the (fresh) in-shader edge-stopped
+        // image for this frame instead of publishing a stale denoise result.
+        return;
+      }
+      // Snapshot the dims the worker needs; the staging pointer is stable for
+      // the life of the backend (mapped once in createDenoiseBackend()).
+      const uint64_t pixels = static_cast<uint64_t>(w) * h;
+      this->oidnReadbackPending = FALSE;
+      // Snapshot the run this worker denoises for.  The CPU filter runs for
+      // tens of milliseconds, so the user can move the camera (or edit the
+      // scene) and reset the run before it finishes; the completion handler
+      // compares this against ptRunGeneration and discards a superseded result
+      // instead of publishing it against the new view.
+      this->oidnLaunchGeneration = this->ptRunGeneration;
+      this->oidnWorkerRunning = TRUE;
+      this->oidnWorkerDone = FALSE;
+      this->oidnWorkerFailed = FALSE;
+      if (this->oidnWorker.joinable()) {
+        this->oidnWorker.join();
+      }
+      this->oidnWorker = std::thread([this, color, albedo, normal, motion, out,
+                                      w, h, pixels, scaled, gbW, gbH]() {
+        const auto wStart = std::chrono::steady_clock::now();
+        // Test hook: widen the worker's in-flight window so a camera move can
+        // be timed to land inside it deterministically (see the generation
+        // guard above).  Zero-cost when unset.
+        if (const char * delay = SoVulkanShared::envString("FC_VULKAN_PT_OIDN_DELAY_MS")) {
+          bool delayOk = false;
+          const int ms = SoVulkanShared::parseNonNegativeInt(delay, 0, &delayOk);
+          if (!delayOk) {
+            // Worker thread: report via stderr rather than the backend's error
+            // sink, which is not touched from this thread.
+            std::fprintf(stderr,
+                         "[OIDN] FC_VULKAN_PT_OIDN_DELAY_MS is not a valid "
+                         "non-negative integer; ignoring (%s)\n", delay);
+          }
+          else if (ms > 0) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(ms));
+          }
+        }
+        // Effective OIDN input pointers.  At native resolution (scale 1) the
+        // filter reads the full-res G-buffer regions directly.  At reduced
+        // scale the readback staged full-res G-buffers; downsample them into
+        // a low-res scratch working set (nearest-neighbour subsample -- the
+        // denoiser only needs approximate guides and will smooth the sampled
+        // noise) because the filter itself runs at the scaled resolution.
+        float * cIn = color;
+        float * aIn = albedo;
+        float * nIn = normal;
+        float * mIn = motion;
+        if (scaled) {
+          uint8_t * sb = static_cast<uint8_t *>(this->denoiseStagingPtr)
+                     + 4 * (static_cast<VkDeviceSize>(gbW) * gbH * 16);
+          const VkDeviceSize oStride = static_cast<VkDeviceSize>(w) * h * 16;
+          float * lColor = reinterpret_cast<float *>(sb);
+          float * lAlbedo = reinterpret_cast<float *>(sb + oStride);
+          float * lNormal = reinterpret_cast<float *>(sb + 2 * oStride);
+          float * lMotion = reinterpret_cast<float *>(sb + 3 * oStride);
+          const uint32_t sx = std::max(1u, (gbW + w - 1) / w);
+          const uint32_t sy = std::max(1u, (gbH + h - 1) / h);
+          if (!this->oidnGpuPrepared) {
+            for (uint32_t y = 0; y < h; ++y) {
+              const uint32_t gy = std::min(gbH - 1u, y * sy);
+              for (uint32_t x = 0; x < w; ++x) {
+                const uint32_t gx = std::min(gbW - 1u, x * sx);
+                const uint32_t gi = gy * gbW + gx;
+                const uint32_t oi = y * w + x;
+                const float * c = color + gi * 4;
+                const float * a = albedo + gi * 4;
+                const float * n = normal + gi * 4;
+                const float * mo = motion + gi * 4;
+                float * lc = lColor + oi * 4;
+                float * la = lAlbedo + oi * 4;
+                float * ln = lNormal + oi * 4;
+                float * lm = lMotion + oi * 4;
+                lc[0]=c[0]; lc[1]=c[1]; lc[2]=c[2]; lc[3]=c[3];
+                la[0]=a[0]; la[1]=a[1]; la[2]=a[2]; la[3]=a[3];
+                ln[0]=n[0]; ln[1]=n[1]; ln[2]=n[2]; ln[3]=n[3];
+                lm[0]=mo[0]; lm[1]=mo[1]; lm[2]=mo[2]; lm[3]=mo[3];
+              }
+            }
+          }
+          cIn = lColor; aIn = lAlbedo; nIn = lNormal; mIn = lMotion;
+        }
+        // Normalize the accum sum -> average: the sample count sits in the
+        // w channel of each color texel and is consumed here; the present
+        // shader's denoised-alpha test uses the normalized w (1.0 = hit) to
+        // reject denoised pixels with no primary hit.
+        //
+        // This is a hot loop over the whole (reduced-res) image, so keep it
+        // cheap: a sample count is never negative, so test w directly instead
+        // of the libm std::fabs (a debug/-O0 build turns that into a call),
+        // and turn the three divides into a single reciprocal + multiplies.
+        if (!this->oidnGpuPrepared) {
+          for (uint64_t i = 0, s4 = 0; i < pixels; ++i, s4 += 4) {
+            float * base = cIn + s4;
+            const float count = base[3] > 1.0e-5f ? base[3] : 0.0f;
+            if (count > 0.0f) {
+              const float inv = 1.0f / count;
+              base[0] *= inv;
+              base[1] *= inv;
+              base[2] *= inv;
+              base[3] = 1.0f;
+            }
+            else {
+              base[3] = 0.0f;
+            }
+          }
+        }
+        // OIDN 2.x's "RT" filter rejects OIDN_FORMAT_FLOAT4 for these inputs
+        // (oidnErr=3 "unsupported input image format" -> black output).  The
+        // buffers are packed vec4 (w = sample count / validity) with a 16-byte
+        // pixel stride; presenting the leading 3 components as FLOAT3 with the
+        // same stride makes OIDN read only RGB and skip the packed alpha, so
+        // the downstream float4 indexing below is still valid.
+        oidnSetSharedFilterImage(this->oidnFilter, "color", cIn,
+                                 OIDN_FORMAT_FLOAT3, w, h, 0, 16,
+                                 static_cast<size_t>(w) * 16);
+        oidnSetSharedFilterImage(this->oidnFilter, "albedo", aIn,
+                                 OIDN_FORMAT_FLOAT3, w, h, 0, 16,
+                                 static_cast<size_t>(w) * 16);
+        oidnSetSharedFilterImage(this->oidnFilter, "normal", nIn,
+                                 OIDN_FORMAT_FLOAT3, w, h, 0, 16,
+                                 static_cast<size_t>(w) * 16);
+        // Motion-vector guide: the RT filter's optional 'motion' input is a
+        // FLOAT2 screen-space NDC vector (current -> previous).  Our motion
+        // region stores a vec4 per pixel (x,y = NDC delta, z = validity); the
+        // 16-byte pixel/row stride presents the leading 2 components so OIDN
+        // consumes only x,y.  The validity flag (z) is unused by OIDN 2.x's
+        // motion input; a zero vector means "no motion".
+        oidnSetSharedFilterImage(this->oidnFilter, "motion", mIn,
+                                 OIDN_FORMAT_FLOAT2, w, h, 0, 16,
+                                 static_cast<size_t>(w) * 16);
+        oidnSetSharedFilterImage(this->oidnFilter, "output", out,
+                                 OIDN_FORMAT_FLOAT3, w, h, 0, 16,
+                                 static_cast<size_t>(w) * 16);
+        oidnCommitFilter(this->oidnFilter);
+        oidnExecuteFilter(this->oidnFilter);
+        // OIDN executes asynchronously on the device's internal threads;
+        // sync so the output region and the validity stamp below are fully
+        // written before the render thread reads them.
+        oidnSyncDevice(this->oidnDevice);
+        // OIDN can fail silently and leave the output region black (e.g. an
+        // unsupported input image format).  Always probe the error state --
+        // oidnGetDeviceError() clears it, so this must run before the optional
+        // debug print -- and record a failure so the render thread rejects the
+        // black result instead of publishing it as a successful denoise.
+        {
+          const char * omsg = nullptr;
+          const OIDNError oerr = oidnGetDeviceError(this->oidnDevice, &omsg);
+          if (oerr != OIDN_ERROR_NONE) {
+            this->oidnWorkerFailed = TRUE;
+            fprintf(stderr, "[DENOISE] OIDN error %d: %s\n",
+                    static_cast<int>(oerr), omsg ? omsg : "(null)");
+          }
+        }
+        // Stamp the per-pixel validity mask from the (already normalized)
+        // color region so the present shader can reject denoised pixels with
+        // no primary hit (its DenoisedBuffer alpha test).
+        for (uint64_t i = 0; i < pixels; ++i) {
+          out[i * 4 + 3] = cIn[i * 4 + 3];
+        }
+        // Publish completion with a single signal.  oidnWorkerRunning is NOT
+        // cleared here: it is owned by the render thread, which clears it in
+        // the oidnWorkerDone branch (after join) and in releaseDenoiseStaging().
+        // Writing running=FALSE before done=TRUE left a window in which the
+        // render thread could observe running=FALSE AND done=FALSE (the two
+        // atomics are independent), fall through the worker-running guard, and
+        // convergeAfterDenoise() with denoiseResultReady=FALSE -- publishing no
+        // denoised result so the run idled on the raw/edge-stopped image.
+        if (SoVulkanConfig::get().rtxDebug.denoiseTiming) {
+          const auto wEnd = std::chrono::steady_clock::now();
+          fprintf(stderr, "[DENOISE] OIDN async worker total=%.1fms (%ux%u)\n",
+                  std::chrono::duration<double, std::milli>(wEnd - wStart).count(),
+                  w, h);
+        }
+        this->oidnWorkerDone = TRUE;
+      });
+      // The worker owns the staging block and the filter now; do not block
+      // here.  The present pass for THIS frame already shows the fresh
+      // in-shader edge-stopped mean; the denoised result is published on the
+      // frame that observes oidnWorkerDone (copy-back + converge below).
+      if (SoVulkanConfig::get().rtxDebug.denoiseTiming) {
+        fprintf(stderr, "[DENOISE] OIDN async worker launched (%ux%u gen=%u)\n",
+                w, h, this->ptRunGeneration);
+      }
+      return;
+    }
+  }
+#endif
+
+  // (RTX denoising is handled by the interop path returned above; the host
+  // OIDN path below is the only host-side denoiser.)
+
+  // Reaching here means no denoiser actually produced a result this frame
+  // (OIDN was not pending/active, or the async worker was launched above and
+  // this is reached only when there was nothing to denoise).  Simulate a
+  // converged-no-result transition so the run does not retry forever.
+  this->denoiseResultReady = FALSE;
+  this->convergeAfterDenoise();
+}
+
+void
+SoRTXRenderBackend::convergeAfterDenoise()
+{
+  // Denoise-at-target completion: the accumulated image is final.  Stop
+  // accumulating (ptAccumulating FALSE), publish the denoised result and mark
+  // converged so getPathTracingRefining() goes FALSE and the viewport keeps
+  // the (raw or denoised) target image without busy-looping.  ptIdleFrames
+  // starts at 0 so the refresh loop requests a few frames that present the
+  // just-published denoised result before it idles; the converged branch in
+  // updatePathTracingState saturates it without auto-restarting.
+  this->ptDenoisePending = FALSE;
+  this->ptConverged = TRUE;
+  this->ptAccumulating = FALSE;
+  this->ptIdleFrames = 0;
+  this->ptWasMoving = FALSE;
+}
+
+void
+SoRTXRenderBackend::releaseDenoiseStaging()
+{
+#if COIN_BUILD_OIDN
+  // A resize/denoiser-swap can tear the staging block down while the async
+  // worker is still reading/writing it and the OIDN filter.  The worker owns
+  // both for the duration of oidnWorkerRunning (and sets oidnWorkerDone when
+  // it is finished), so wait on it before unmapping/freeing the host staging
+  // and releasing the OIDN filter/device in destroyDenoiser().
+  if (this->oidnWorker.joinable()) {
+    this->oidnWorker.join();
+  }
+  this->oidnWorkerRunning = FALSE;
+  this->oidnWorkerDone = FALSE;
+  this->oidnWorkerFailed = FALSE;
+#endif
+  if (this->denoiseColorBuf != VK_NULL_HANDLE) {
+    const VkBuffer buf = this->denoiseColorBuf;
+    const VmaAllocation mem = this->denoiseColorMem;
+    // The staging pointer is VMA's persistent mapping
+    // (VMA_ALLOCATION_CREATE_MAPPED_BIT), so there is no vmaMapMemory to
+    // balance before vmaDestroyBuffer.
+    this->denoiseStagingPtr = nullptr;
+    // denoiseColorBuf is the single allocation; the alias handles do not
+    // own it.
+    this->denoiseColorBuf = VK_NULL_HANDLE;
+    this->denoiseColorMem = nullptr;
+    this->denoiseAlbedoBuf = VK_NULL_HANDLE;
+    this->denoiseNormalBuf = VK_NULL_HANDLE;
+    this->denoiseGuideBuf = VK_NULL_HANDLE;
+    this->denoiseMotionBuf = VK_NULL_HANDLE;
+    this->denoiseOutBuf = VK_NULL_HANDLE;
+    this->denoiseAlbedoMem = nullptr;
+    this->denoiseNormalMem = nullptr;
+    this->denoiseGuideMem = nullptr;
+    this->denoiseMotionMem = nullptr;
+    this->denoiseOutMem = nullptr;
+    VmaAllocator vma = this->vmaAllocator;
+    this->deferDestroy([vma, buf, mem]() {
+      vmaDestroyBuffer(vma, buf, mem);
+    });
+  }
+  // The device-local denoised output and albedo G-buffer are kept across a
+  // mid-life degrade (they underpin the present shader bindings 5 and 14 and
+  // are only freed by destroyDenoiser()/shutdown()), so a failed OIDN staging
+  // allocation does not leave dangling descriptors.
+  this->denoiseResultReady = FALSE;
+}
+
+void
+SoRTXRenderBackend::destroyDenoiser()
+{
+  this->releaseDenoiseStaging();
+
+  // Device-local denoised output (present binding 5) and albedo G-buffer
+  // (binding 14).  Free them only on full teardown, not on a mid-life degrade
+  // (releaseDenoiseStaging above keeps them so the descriptor set stays
+  // valid); the whole backend is going away here so it is safe.
+  if (this->denoisedBuffer != VK_NULL_HANDLE) {
+    const VkBuffer buf = this->denoisedBuffer;
+    const VmaAllocation mem = this->denoisedMemory;
+    this->denoisedBuffer = VK_NULL_HANDLE;
+    this->denoisedMemory = nullptr;
+    VmaAllocator vma = this->vmaAllocator;
+    this->deferDestroy([vma, buf, mem]() {
+      vmaDestroyBuffer(vma, buf, mem);
+    });
+  }
+  if (this->albedoBuffer != VK_NULL_HANDLE) {
+    const VkBuffer buf = this->albedoBuffer;
+    const VmaAllocation mem = this->albedoMemory;
+    this->albedoBuffer = VK_NULL_HANDLE;
+    this->albedoMemory = nullptr;
+    VmaAllocator vma = this->vmaAllocator;
+    this->deferDestroy([vma, buf, mem]() {
+      vmaDestroyBuffer(vma, buf, mem);
+    });
+  }
+
+#if COIN_BUILD_OIDN
+  if (this->oidnFilter) {
+    oidnReleaseFilter(this->oidnFilter);
+    this->oidnFilter = nullptr;
+  }
+  if (this->oidnDevice) {
+    oidnReleaseDevice(this->oidnDevice);
+    this->oidnDevice = nullptr;
+  }
+#endif
+
+#if COIN_BUILD_RTX_DENOISER
+  this->teardownRtxDenoiser();
+#endif
+
+  // DNSR/DNSR pipeline, layout, module and descriptor set.  Defined
+  // unconditionally (inert when COIN_BUILD_DNSR_DENOISER=0).
+  this->destroyDnsrResources();
+
+  this->denoiserActive = false;
+  this->denoiseKind = DenoiseNone;
+  this->denoiseWidth = 0;
+  this->denoiseHeight = 0;
+  this->denoiseStagedWidth = 0;
+  this->denoiseStagedHeight = 0;
+  this->oidnReadbackPending = FALSE;
+  this->oidnGpuPrepared = false;
+  this->denoiseDownsampleValid = false;
+}

@@ -146,7 +146,7 @@
 
 #include "nodes/SoSubNodeP.h"
 #include "caches/SoGlyphCache.h"
-#include "rendering/SoRenderIRP.h"
+#include "rendering/backend/SoRenderIRP.h"
 
 // The "lean and mean" define is a workaround for a Cygwin bug: when
 // windows.h is included _after_ one of the X11 or GLX headers above

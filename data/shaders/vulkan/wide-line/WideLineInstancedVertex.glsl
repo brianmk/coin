@@ -44,16 +44,17 @@ layout(set = 1, binding = 0, std140) uniform DrawBlock {
     mat4  u_proj;                 // offset 192
 } draw;
 
-// Instance-rate attributes: the segment endpoints/colors (binding 0) and the
-// per-instance model matrix (binding 1, same locations as the visual pass).
+// Instance-rate attributes: the segment endpoints/colors (binding 0).  One
+// instance is one segment, so the per-instance model matrix (binding 1, used
+// by the visual pass) must NOT be read here: with instanceCount == segment
+// count the instance index advances per segment and every segment after the
+// first would read the next command's ring slot instead of its own model.
+// All segments of a command share one model, which is already in the per-draw
+// DrawBlock, so take it from there.
 layout(location = 0) in vec4 a_p0;
 layout(location = 1) in vec4 a_p1;
 layout(location = 2) in vec4 a_c0;
 layout(location = 3) in vec4 a_c1;
-layout(location = 4) in vec4 a_iModelRow0;
-layout(location = 5) in vec4 a_iModelRow1;
-layout(location = 6) in vec4 a_iModelRow2;
-layout(location = 7) in vec4 a_iModelRow3;
 
 layout(location = 0) out vec4 v_color;
 // Declared for interface compatibility with WideLineFragment.glsl, which always
@@ -73,7 +74,7 @@ void main()
     const float kNearEps = 1.0e-5;
     v_lineDistance = 0.0;
 
-    mat4 model = mat4(a_iModelRow0, a_iModelRow1, a_iModelRow2, a_iModelRow3);
+    mat4 model = draw.u_model;
     mat4 mvp = draw.u_proj * draw.u_view * model;
 
     vec4 c0 = mvp * vec4(a_p0.xyz, 1.0);

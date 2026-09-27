@@ -210,7 +210,7 @@
 #include <Inventor/system/gl.h>
 
 #include "nodes/SoSubNodeP.h"
-#include "rendering/SoGL.h"
+#include "rendering/gl/SoGL.h"
 #include "glue/glp.h"
 #include "io/SoWriterefCounter.h"
 

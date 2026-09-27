@@ -38,8 +38,8 @@
 */
 
 #include "caches/SoVBOCache.h"
-#include "rendering/SoVBO.h"
-#include "rendering/SoVertexArrayIndexer.h"
+#include "rendering/gl/SoVBO.h"
+#include "rendering/gl/SoVertexArrayIndexer.h"
 #include <Inventor/lists/SbList.h>
 
 class SoVBOCacheP {
