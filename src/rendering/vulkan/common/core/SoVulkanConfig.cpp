@@ -42,6 +42,25 @@ uint32_t readPositiveUint(const char * name, uint32_t fallback)
   return static_cast<uint32_t>(parsed);
 }
 
+// Read a non-negative uint32; a missing/invalid value keeps the default.  Like
+// readPositiveUint but accepts 0 (an explicit "off" for a >= 0 threshold).
+uint32_t readNonNegativeUint(const char * name, uint32_t fallback)
+{
+  const char * value = SoVulkanShared::envString(name);
+  if (value == nullptr || *value == '\0') {
+    return fallback;
+  }
+  char * end = nullptr;
+  const long long parsed = std::strtoll(value, &end, 10);
+  if (end == value || parsed < 0) {
+    return fallback;
+  }
+  if (parsed > static_cast<long long>(UINT32_MAX)) {
+    return UINT32_MAX;
+  }
+  return static_cast<uint32_t>(parsed);
+}
+
 // Optional overrides: nullopt means "leave the caller's default".
 std::optional<uint32_t> optionalUintInRange(const char * name, int lo, int hi)
 {
@@ -103,6 +122,8 @@ Config load()
     readNonNegativeFloat("FC_VULKAN_GEOM_LOD_PIXELS", 1.0f);
   c.geometryLod.maxIndices =
     readPositiveUint("FC_VULKAN_GEOM_LOD_MAX_INDEX", 64000000u);
+  c.geometryLod.minPrims =
+    readNonNegativeUint("FC_VULKAN_GEOM_LOD_MIN_PRIMS", 256u);
 
   // Presence-only diagnostics (see RtxDebug): any value enables them.  The
   // fill debug is the exception: it historically honored the "0"/"false"/
@@ -234,12 +255,13 @@ void dump()
   const Config & c = get();
   std::fprintf(stderr,
                "[VKCONFIG] geomLod enabled=%d always=%d stats=%d "
-               "pixels=%.3f maxIndex=%u\n",
+               "pixels=%.3f maxIndex=%u minPrims=%u\n",
                c.geometryLod.enabled ? 1 : 0,
                c.geometryLod.always ? 1 : 0,
                c.geometryLod.stats ? 1 : 0,
                static_cast<double>(c.geometryLod.minAreaPixels),
-               c.geometryLod.maxIndices);
+               c.geometryLod.maxIndices,
+               c.geometryLod.minPrims);
   std::fprintf(stderr,
                "[VKCONFIG] rtxDebug rtDebug=%d rtGeo=%d rtFill=%d ptDebug=%d "
                "denoiser=%d denoiseTiming=%d asyncTiming=%d\n",
