@@ -3,7 +3,7 @@ name: Awesome Documentation Build
 on:
   workflow_dispatch:  # Allow manual triggers
   push:
-    branches: [ master, freecad-master ]
+    branches: [ master, dev ]
 
 # peaceiris/actions-gh-pages pushes the generated site to the gh-pages
 # branch; the default GITHUB_TOKEN is read-only, so grant contents: write.
