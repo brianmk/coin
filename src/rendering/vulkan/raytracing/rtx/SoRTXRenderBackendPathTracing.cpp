@@ -1110,7 +1110,14 @@ SoRTXRenderBackend::recordTraceAndPresent(const SoRenderParams & params,
     this->rtxViewMode == RtxViewMode::RtxModePathTrace ||
     this->rtxViewMode == RtxViewMode::RtxModePathTraceMax;
   const bool accumBufferValid = this->ptAccumulating || this->ptConverged;
-  const float presentPush[16] = {
+  // No traceable geometry: the storage image was flat-cleared in the AS phase
+  // (see recordAccelerationStructures); the present shader synthesizes the
+  // configured background gradient from these values instead of showing the
+  // flat clear.  Without the flag a brand-new empty document under path
+  // tracing reads as a flat (usually dark) top colour rather than the user's
+  // gradient, until the first object gives the tracer a sky to miss against.
+  const bool emptyScene = this->tlas == VK_NULL_HANDLE;
+  const float presentPush[24] = {
     static_cast<float>(size[0]),
     static_cast<float>(size[1]),
     pathTraceMode && this->ptEnabled && this->ptDenoise && accumBufferValid
@@ -1118,7 +1125,7 @@ SoRTXRenderBackend::recordTraceAndPresent(const SoRenderParams & params,
     static_cast<float>(this->ptFrameIndex),
     static_cast<float>(origin[0]),
     static_cast<float>(origin[1]),
-    0.0f,
+    emptyScene ? 1.0f : 0.0f,
     0.0f,
     (this->denoiseResultReady && (this->ptAccumulating || this->ptConverged))
       ? 1.0f : 0.0f,
@@ -1128,7 +1135,15 @@ SoRTXRenderBackend::recordTraceAndPresent(const SoRenderParams & params,
     static_cast<float>(this->hdrToneMap),
     0.0f,
     0.0f,
-    0.0f};
+    0.0f,
+    this->lastBgTopColors[0],
+    this->lastBgTopColors[1],
+    this->lastBgTopColors[2],
+    1.0f,
+    this->lastBgBottomColors[0],
+    this->lastBgBottomColors[1],
+    this->lastBgBottomColors[2],
+    1.0f};
   if (SoVulkanConfig::get().rtxDebug.denoiseTiming) {
     fprintf(stderr,
             "[DENOISE-STATE] ord=%u frame=%u accum=%d pend=%d ready=%d "
