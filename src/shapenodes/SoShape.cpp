@@ -530,6 +530,7 @@ private:
       }
       this->action->applyRenderStage(command);
       command.userData = this->shape;
+      command.isFeatureEdge = this->shape->isFeatureEdgeSet();
       this->action->addCommand(std::move(command));
     }
     this->primitiveRanges.clear();
@@ -970,6 +971,14 @@ SbBool
 SoShape::generateRetainedPrimitives(SoIRRenderAction *)
 {
   return FALSE;
+}
+
+bool
+SoShape::isFeatureEdgeSet() const
+{
+  // Only FreeCAD's SoBrepEdgeSet (and future feature-edge producers) override
+  // this; every other shape is ordinary geometry.
+  return false;
 }
 
 void

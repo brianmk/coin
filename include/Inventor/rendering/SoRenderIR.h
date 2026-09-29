@@ -795,6 +795,11 @@ struct SoRenderCommand {
   SoLightingHandle lightingHandle = 0;
   int32_t          materialIndex = 0; //!< Effective Inventor material index.
   uint64_t         objectId = 0;   //!< Optional producer semantic identity.
+  //! True when the producer reports this as the model's B-Rep feature-edge
+  //! line set (SoShape::isFeatureEdgeSet()).  The Vulkan edge overlay
+  //! restricts its uniform-color redraw to these commands so the Draft grid
+  //! and other annotation line sets keep their own per-part colors.
+  bool             isFeatureEdge = false;
   SoPixelRasterData pixelRaster;
 #if defined(COIN_RENDER_LEGACY_API)
   // Legacy spelling of the same payload (SoPixelTextData). The consumer

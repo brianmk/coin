@@ -78,6 +78,11 @@ public:
                            SbVec3f & center) =  0;
   void getPrimitiveCount(SoGetPrimitiveCountAction * action) override;
 
+  //! True when this shape's line output is the model's B-Rep feature edges.
+  //! Overridden by FreeCAD's SoBrepEdgeSet; the Vulkan edge overlay uses it to
+  //! redraw only real feature edges with its uniform edge color.
+  virtual bool isFeatureEdgeSet() const;
+
   static void getScreenSize(SoState * const state, const SbBox3f & boundingbox,
                             SbVec2s & rectsize);
   static float getDecimatedComplexity(SoState * state, float complexity);

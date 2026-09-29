@@ -1143,7 +1143,11 @@ SoVulkanRenderBackend::buildWorkItems(const SoDrawList & drawlist,
         // overlays re-draws both sets instead of cancelling out -- a triangle
         // is wanted by the tess overlay even while the edge overlay is active,
         // and a line by the edge overlay even while the tess overlay is.
-        const bool wantEdge = isEdgeOverlay && lineTopo;
+        // The edge overlay re-draws only real B-Rep feature edges
+        // (SoBrepEdgeSet), not every line command: the Draft grid, dimensions
+        // and other annotation line sets keep their own per-part colors.
+        const bool wantEdge = isEdgeOverlay && lineTopo
+          && command.isFeatureEdge;
         const bool wantPoints = wireframeFillMode == SoDrawStyleElement::POINTS;
         const bool wantTess = tessellationOverlay && triTopo;
         if (!wantEdge && !wantPoints && !wantTess) continue;
