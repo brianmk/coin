@@ -83,7 +83,6 @@ public:
     float shininess;
     int32_t lightmodel;
     int32_t blending;
-    int32_t separateblending;
     int32_t blend_sfactor;
     int32_t blend_dfactor;
     int32_t alpha_blend_sfactor;
@@ -97,7 +96,10 @@ public:
     float alphatestvalue;
     SbUniqueId diffusenodeid;
     SbUniqueId transpnodeid;
-    uint32_t reserved[4];
+    // separate blending flag, taken from the trailing ABI-reserved block so the
+    // struct keeps its original size and field offsets.
+    int32_t separateblending;
+    uint32_t reserved[3];
   };
 
   virtual void setDiffuseElt(SoNode*,  int32_t numcolors,

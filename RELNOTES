@@ -10,6 +10,43 @@ compatibility of your source code when upgrading the library.
 
 
 
+Unreleased ABI-breaking changes (retained IR / Vulkan renderer)
+==============================================================
+
+NOTE: no version has been assigned yet.  The changes below alter the ABI of
+public classes and must land with a major version / soname bump; consumers
+must be rebuilt against the new headers.
+
+New virtual functions (vtable layout changes):
+  - SoNode::IRRender(SoIRRenderAction *)
+  - SoShape::isFeatureEdgeSet() const
+  - SoShape::canRenderSortedTriangles() const
+  - SoLazyElement::setAlphaTestSemanticElt(int, float)
+
+Changed virtual function signature (vtable call incompatibility):
+  - SoLazyElement::enableBlendingElt() and its SoGLLazyElement override now
+    take an extra SbBool separate argument.
+
+New public class data members (sizeof / field-offset changes):
+  - SoState: private int depth.
+  - SoLazyElement::CoinState: SbBool separateblending,
+    int semanticalphatestfunc.
+  - SoGLLazyElement::GLState: int32_t separateblending, taken from the
+    trailing reserved[] block so GLState keeps its original size.
+
+Kept ABI-compatible on purpose:
+  - SoElement::getDepth()/setDepth() remain out-of-line exported symbols;
+    the inline SoState::getElement() fast path reads SoElement::depth
+    directly through the existing SoState friendship.
+
+Source-only / additive (no ABI impact): the new SoIRRenderAction, SoRenderIR,
+SoVulkan* and SoDevicePixelRatioElement classes; SoTransparencyType::Type
+numeric values are unchanged.
+
+Recommended before release: bump the major version so COIN_SO_VERSION
+(COIN_MAJOR_VERSION * 20) changes, and rebuild all consumers.
+
+
 Coin 4.0.10
 ==========
 
