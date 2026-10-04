@@ -1,13 +1,6 @@
 #ifndef COIN_GLUE_GLSLP_H
 #define COIN_GLUE_GLSLP_H
 
-/**************************************************************************\
- * Copyright (c) Kongsberg Oil & Gas Technologies AS
- * All rights reserved.
- *
- * This file is part of Coin, a 3D graphics library.
-\**************************************************************************/
-
 #ifndef COIN_INTERNAL
 #error this is a private header file
 #endif
