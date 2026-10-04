@@ -7,41 +7,11 @@
 #ifndef COIN_SOVULKANPIPELINECACHE_H
 #define COIN_SOVULKANPIPELINECACHE_H
 
-/**************************************************************************\
- * Copyright (c) Kongsberg Oil & Gas Technologies AS
- * All rights reserved.
- *
- * Redistribution and use in source and binary forms, with or without
- * modification, are permitted provided that the following conditions are
- * met:
- *
- * Redistributions of source code must retain the above copyright notice,
- * this list of conditions and the following disclaimer.
- *
- * Redistributions in binary form must reproduce the above copyright
- * notice, this list of conditions and the following disclaimer in the
- * documentation and/or other materials provided with the distribution.
- *
- * Neither the name of the copyright holder nor the names of its
- * contributors may be used to endorse or promote products derived from
- * this software without specific prior written permission.
- *
- * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
- * "AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT
- * LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR
- * A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT
- * HOLDER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL,
- * SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT
- * LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE,
- * DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY
- * THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
- * (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
- * OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
-\**************************************************************************/
-
 #include <cstdint>
 #include <functional>
 #include <string>
+#include <tuple>
+#include <type_traits>
 #include <unordered_map>
 #include <vector>
 
@@ -52,6 +22,19 @@
 static inline size_t vkPipelineHashCombine(size_t hash, size_t value)
 {
   return hash ^ (value + 0x9e3779b9 + (hash << 6) + (hash >> 2));
+}
+
+// Fold a key's fields() tuple into a hash.  Deriving both the hash and
+// operator== from the same list keeps them consistent by construction.
+template <class Tuple>
+static inline size_t vkPipelineHashFields(const Tuple & fields)
+{
+  return std::apply([](const auto &... field) {
+    size_t hash = 0;
+    ((hash = vkPipelineHashCombine(
+        hash, std::hash<std::decay_t<decltype(field)>>{}(field))), ...);
+    return hash;
+  }, fields);
 }
 
 /*!
@@ -93,37 +76,24 @@ struct PipelineKey {
   //! expands the segment on the GPU from an instance-rate endpoint buffer.
   bool wideLineInstanced = false;
 
+  //! Single source of truth for pipeline identity: operator== and the hash both
+  //! derive from this list, so they cannot drift apart.
+  auto fields() const
+  {
+    return std::tie(renderPass, topology, fillMode, cullMode, ccwFrontFace,
+                    depthTestEnable, depthWriteEnable, depthFunction,
+                    depthBiasEnable, depthBiasConstantFactor,
+                    depthBiasSlopeFactor, blendEnable, blendSrcRGB, blendDstRGB,
+                    blendSrcAlpha, blendDstAlpha, blendEquationRGB,
+                    blendEquationAlpha, stencilEnable, stencilFunction,
+                    stencilReference, stencilCompareMask, stencilWriteMask,
+                    stencilFailOp, stencilZFailOp, stencilZPassOp, sampleCount,
+                    wideLine, wideLineInstanced);
+  }
+
   bool operator==(const PipelineKey & other) const
   {
-    return renderPass == other.renderPass && topology == other.topology &&
-      fillMode == other.fillMode && cullMode == other.cullMode &&
-      ccwFrontFace == other.ccwFrontFace &&
-      depthTestEnable == other.depthTestEnable &&
-      depthWriteEnable == other.depthWriteEnable &&
-      depthFunction == other.depthFunction &&
-      depthBiasEnable == other.depthBiasEnable &&
-      (!depthBiasEnable ||
-       (depthBiasConstantFactor == other.depthBiasConstantFactor &&
-        depthBiasSlopeFactor == other.depthBiasSlopeFactor)) &&
-      blendEnable == other.blendEnable &&
-      (!blendEnable ||
-       (blendSrcRGB == other.blendSrcRGB &&
-        blendDstRGB == other.blendDstRGB &&
-        blendSrcAlpha == other.blendSrcAlpha &&
-        blendDstAlpha == other.blendDstAlpha &&
-        blendEquationRGB == other.blendEquationRGB &&
-        blendEquationAlpha == other.blendEquationAlpha)) &&
-      stencilEnable == other.stencilEnable &&
-      (!stencilEnable ||
-       (stencilFunction == other.stencilFunction &&
-        stencilReference == other.stencilReference &&
-        stencilCompareMask == other.stencilCompareMask &&
-        stencilWriteMask == other.stencilWriteMask &&
-        stencilFailOp == other.stencilFailOp &&
-        stencilZFailOp == other.stencilZFailOp &&
-        stencilZPassOp == other.stencilZPassOp)) &&
-      sampleCount == other.sampleCount && wideLine == other.wideLine &&
-      wideLineInstanced == other.wideLineInstanced;
+    return this->fields() == other.fields();
   }
 };
 
@@ -131,42 +101,7 @@ struct PipelineKeyHash
 {
   size_t operator()(const PipelineKey & key) const
   {
-    size_t hash = std::hash<uintptr_t>()(
-      reinterpret_cast<uintptr_t>(key.renderPass));
-    hash = vkPipelineHashCombine(hash, std::hash<uint32_t>()(key.topology));
-    hash = vkPipelineHashCombine(hash, std::hash<uint32_t>()(key.fillMode));
-    hash = vkPipelineHashCombine(hash, std::hash<uint32_t>()(key.cullMode));
-    hash = vkPipelineHashCombine(hash, std::hash<uint32_t>()(key.ccwFrontFace));
-    hash = vkPipelineHashCombine(hash, std::hash<uint32_t>()(key.depthTestEnable));
-    hash = vkPipelineHashCombine(hash, std::hash<uint32_t>()(key.depthWriteEnable));
-    hash = vkPipelineHashCombine(hash, std::hash<uint32_t>()(key.depthFunction));
-    hash = vkPipelineHashCombine(hash, std::hash<uint32_t>()(key.depthBiasEnable));
-    hash = vkPipelineHashCombine(hash,
-                                 std::hash<float>()(key.depthBiasConstantFactor));
-    hash = vkPipelineHashCombine(hash,
-                                 std::hash<float>()(key.depthBiasSlopeFactor));
-    hash = vkPipelineHashCombine(hash, std::hash<uint32_t>()(key.blendEnable));
-    hash = vkPipelineHashCombine(hash, std::hash<uint32_t>()(key.blendSrcRGB));
-    hash = vkPipelineHashCombine(hash, std::hash<uint32_t>()(key.blendDstRGB));
-    hash = vkPipelineHashCombine(hash, std::hash<uint32_t>()(key.blendSrcAlpha));
-    hash = vkPipelineHashCombine(hash, std::hash<uint32_t>()(key.blendDstAlpha));
-    hash = vkPipelineHashCombine(hash,
-                                 std::hash<uint32_t>()(key.blendEquationRGB));
-    hash = vkPipelineHashCombine(hash,
-                                 std::hash<uint32_t>()(key.blendEquationAlpha));
-    hash = vkPipelineHashCombine(hash, std::hash<uint32_t>()(key.stencilEnable));
-    hash = vkPipelineHashCombine(hash, std::hash<uint32_t>()(key.stencilFunction));
-    hash = vkPipelineHashCombine(hash, std::hash<uint32_t>()(key.stencilReference));
-    hash = vkPipelineHashCombine(hash, std::hash<uint32_t>()(key.stencilCompareMask));
-    hash = vkPipelineHashCombine(hash, std::hash<uint32_t>()(key.stencilWriteMask));
-    hash = vkPipelineHashCombine(hash, std::hash<uint32_t>()(key.stencilFailOp));
-    hash = vkPipelineHashCombine(hash, std::hash<uint32_t>()(key.stencilZFailOp));
-    hash = vkPipelineHashCombine(hash, std::hash<uint32_t>()(key.stencilZPassOp));
-    hash = vkPipelineHashCombine(hash, std::hash<uint32_t>()(key.sampleCount));
-    hash = vkPipelineHashCombine(hash, std::hash<uint32_t>()(key.wideLine));
-    hash = vkPipelineHashCombine(hash,
-                                 std::hash<uint32_t>()(key.wideLineInstanced));
-    return hash;
+    return vkPipelineHashFields(key.fields());
   }
 };
 
@@ -174,9 +109,12 @@ struct PipelineKeyHash
 struct BackgroundPipelineKey {
   VkRenderPass renderPass = VK_NULL_HANDLE;
   uint32_t sampleCount = 1;
+
+  auto fields() const { return std::tie(renderPass, sampleCount); }
+
   bool operator==(const BackgroundPipelineKey & other) const
   {
-    return renderPass == other.renderPass && sampleCount == other.sampleCount;
+    return this->fields() == other.fields();
   }
 };
 
@@ -184,10 +122,7 @@ struct BackgroundPipelineKeyHash
 {
   size_t operator()(const BackgroundPipelineKey & key) const
   {
-    size_t hash = std::hash<uintptr_t>()(
-      reinterpret_cast<uintptr_t>(key.renderPass));
-    hash = vkPipelineHashCombine(hash, std::hash<uint32_t>()(key.sampleCount));
-    return hash;
+    return vkPipelineHashFields(key.fields());
   }
 };
 

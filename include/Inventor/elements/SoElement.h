@@ -128,31 +128,20 @@ SoElement::getConstElement(SoState * const state,
   return element;
 }
 
-// trivial accessors kept inline for the hot getElement() fast path.
-inline void
-SoElement::setDepth(const int depth)
-{
-  this->depth = depth;
-}
-
-inline int
-SoElement::getDepth(void) const
-{
-  return this->depth;
-}
-
 // SoState::getElement() is the hottest call in the library -- every element
 // accessor funnels through it.  Defined here (not SoState.h) because it
 // dereferences SoElement: the common already-at-depth case stays inline with
 // no call/virtual/assert; only the rare copy-on-write push goes out of line
-// to SoState::getElementPush() (SoState.cpp).
+// to SoState::getElementPush() (SoState.cpp).  It reads SoElement::depth
+// directly (SoState is a friend), so getDepth()/setDepth() stay out-of-line
+// exported symbols instead of being inlined away.
 inline SoElement *
 SoState::getElement(const int stackindex)
 {
   if (stackindex >= this->numstacks || this->stack[stackindex] == NULL)
     return NULL;
   SoElement * element = this->stack[stackindex];
-  if (element->getDepth() < this->depth)
+  if (element->depth < this->depth)
     return this->getElementPush(stackindex, element);
   return element;
 }

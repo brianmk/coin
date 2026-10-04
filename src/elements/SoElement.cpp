@@ -649,6 +649,24 @@ SoElement::getIdFromStackIndex(const int stackIndex)
 }
 
 /*!
+  Sets the depth value of the element instance in the state stack.
+*/
+void
+SoElement::setDepth(const int depth)
+{
+  this->depth = depth;
+}
+
+/*!
+  Returns the state stack depth value of the element instance.
+*/
+int
+SoElement::getDepth(void) const
+{
+  return this->depth;
+}
+
+/*!
   \fn void SoElement::capture(SoState * const state) const;
 
   This function does whatever is necessary in the state for caching
