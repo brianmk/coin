@@ -43,6 +43,11 @@ if(COIN_BUILD_VULKAN_RENDERER)
 		SoVulkanRenderManager.cpp
 		SoVulkanRenderBackend/VmaImpl.cpp
 	)
+	# The Vulkan backend's GLSL sources under data/shaders/vulkan are the single
+	# source of truth: compile them to SPIR-V and embed them as generated
+	# headers.  No generated shader data is checked in.
+	include("${PROJECT_SOURCE_DIR}/cmake/CoinCompileSpirv.cmake")
+	coin_compile_vulkan_shaders(COIN_VULKAN_SHADER_HEADERS)
 endif()
 
 # Files excluded from public API documentation, included in complete documentation.
@@ -83,6 +88,11 @@ if(COIN_BUILD_SINGLE_LIB)
 	foreach(SRCFILE ${COIN_RENDERING_FILES} ${COIN_VULKAN_RENDERING_FILES})
 		set(COIN_SOURCE ${COIN_SOURCE} rendering/${SRCFILE} CACHE INTERNAL "COIN_SOURCE")
 	endforeach(SRCFILE)
+	if(COIN_BUILD_VULKAN_RENDERER)
+		# Listing the generated shader headers makes the Coin target depend on
+		# their custom commands so SPIR-V is always embedded before compiling.
+		set(COIN_SOURCE ${COIN_SOURCE} ${COIN_VULKAN_SHADER_HEADERS} CACHE INTERNAL "COIN_SOURCE")
+	endif()
 else()
 	add_library(rendering OBJECT ${COIN_RENDERING_FILES})
 	if(COIN_BUILD_VULKAN_RENDERER)
@@ -91,6 +101,7 @@ else()
 		# sources (and every other Coin target) at Coin's default standard.
 		add_library(vulkanrendering OBJECT ${COIN_VULKAN_RENDERING_FILES})
 		target_compile_features(vulkanrendering PRIVATE cxx_std_17)
+		target_sources(vulkanrendering PRIVATE ${COIN_VULKAN_SHADER_HEADERS})
 	endif()
 endif()
 
