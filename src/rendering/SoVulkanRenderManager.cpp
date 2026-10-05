@@ -1050,13 +1050,24 @@ SoVulkanRenderManagerP::setClippingPlanes(void)
   // Publish the planes onto the shared camera node too: it is the clipping
   // authority other Coin consumers read (SoRayPickAction's ray depth range), and
   // FreeCAD keeps the GL viewer hidden (fields would stay at near=0 for ortho).
+  //
+  // The private near/far above are measured from the *effective* camera, which
+  // the zoom wall backs off to `position - forward*cameraShiftZ`.  Picking and
+  // the other camera-node consumers start from the unshifted node position, so
+  // the same world depth range there is [near - shiftZ, far - shiftZ].  Publish
+  // that instead: with an orthographic camera `SoCamera::viewBoundingBox`
+  // places the node inside the geometry's depth extent, so the shift is
+  // non-zero and the raw planes would offset the pick's depth range by it,
+  // making hover select the face behind the camera-facing one (or nothing).
   // Write only on change: setValue() notifies unconditionally and the FreeCAD
   // camera has a sensor, so an unconditional write would render every frame idle.
-  if (camera->nearDistance.getValue() != newnear) {
-    camera->nearDistance = newnear;
+  const float publishNear = newnear - shiftZ;
+  const float publishFar = newfar - shiftZ;
+  if (camera->nearDistance.getValue() != publishNear) {
+    camera->nearDistance = publishNear;
   }
-  if (camera->farDistance.getValue() != newfar) {
-    camera->farDistance = newfar;
+  if (camera->farDistance.getValue() != publishFar) {
+    camera->farDistance = publishFar;
   }
 }
 
