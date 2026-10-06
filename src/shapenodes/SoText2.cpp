@@ -450,8 +450,17 @@ SoText2::IRRender(SoIRRenderAction * action)
   command.pixelText.originY = pixelOrigin[1];
   SoRenderIR::fillRenderStateFromState(state, command.state);
   SoRenderIR::ensureMaterialBlendState(command.state, command.material);
-  command.pass = SoRenderIR::isMaterialTransparent(command.material)
-    ? SO_RENDERPASS_TRANSPARENT : SO_RENDERPASS_OPAQUE;
+  // SoText2 is a screen-space annotation: the GL path rasterises it with
+  // glDrawPixels from the raster position, so scene geometry never occludes it.
+  // Mirror that in the IR by disabling the depth test and forcing ALWAYS; the
+  // backend routes depth-disabled commands to its on-top pass (after opaque and
+  // transparent), so 2D text no longer z-fights coplanar geometry such as the
+  // face a numeric sketch label sits on.  Pinning the pass to OPAQUE keeps it
+  // out of the transparent work list, so the on-top pass draws it exactly once.
+  command.state.depth.enabled = FALSE;
+  command.state.depth.writeEnabled = FALSE;
+  command.state.depth.func = SO_DEPTH_ALWAYS;
+  command.pass = SO_RENDERPASS_OPAQUE;
   command.lightingHandle = SoRenderIR::fillLightingFromState(
     state, action->getMutableDrawList());
   action->getMutableDrawList().addCommand(command);
