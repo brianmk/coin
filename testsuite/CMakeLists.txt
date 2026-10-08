@@ -76,7 +76,15 @@ create_file_test("models/io/incorrect" "testIncorrectFile" true "(bug039|bug055-
 # Include all extracted '*Tests.cpp' files in the target.
 FILE(GLOB COIN_TEST_SOURCES "${CMAKE_CURRENT_BINARY_DIR}/*Test.cpp")
 
-add_executable(CoinTests TestSuiteMain.cpp TestSuiteUtils.cpp TestSuiteMisc.cpp ${COIN_TEST_SOURCES})
+# Hand-written regression tests that live in the testsuite directory rather
+# than in an implementation file (see IRRetainedCacheTest.cpp).
+add_executable(CoinTests
+	TestSuiteMain.cpp
+	TestSuiteUtils.cpp
+	TestSuiteMisc.cpp
+	IRRetainedCacheTest.cpp
+	${COIN_TEST_SOURCES}
+)
 set_target_properties(CoinTests PROPERTIES DEBUG_POSTFIX "${CMAKE_DEBUG_POSTFIX}")
 target_link_libraries(CoinTests Coin ${COIN_TARGET_LINK_LIBRARIES})
 target_include_directories(CoinTests PRIVATE
@@ -154,6 +162,12 @@ endfunction()
 # enabled.  Skips itself (via SKIP_RETURN_CODE) when no Vulkan driver is present.
 if(COIN_BUILD_VULKAN_RENDERER)
 	coin_add_vulkan_test(NAME VulkanSmokeTest SOURCES VulkanSmokeTest.cpp
+		LABELS requires-vulkan)
+	# End-to-end regression for the retained-geometry staleness bug: renders two
+	# offscreen frames and asserts the drawn line moves when only inherited state
+	# (or a shape field) changes.  Skips (77) without a Vulkan device.
+	coin_add_vulkan_test(NAME VulkanGeometryStalenessTest
+		SOURCES VulkanGeometryStalenessTest.cpp
 		LABELS requires-vulkan)
 endif()
 

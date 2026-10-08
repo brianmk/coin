@@ -123,6 +123,10 @@ struct VulkanCachedCommand {
   uint32_t compositeEpoch = 0;
   // Content hash of the uploaded streams: pointer identity misses in-place edits.
   uint64_t contentHash = 0;
+  // Retained-IR build id of the uploaded streams (SoGeometryDesc::retainedGeneration).  Pointer
+  // identity alone misses a rebuild that reused the freed streams' address, which the allocator
+  // routinely does; this changes whenever the producer tessellated anew.
+  uint64_t geometryGeneration = 0;
 
   // Pipeline-resolution fast path (getOrCreatePipeline()): last PipelineKey +
   // handle stored verbatim; a field match skips rebuild + cache lookup.

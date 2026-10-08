@@ -102,6 +102,7 @@ void stampGeometryKeys(VulkanCachedCommand & entry,
   entry.texcoordStride = geometry.texcoordStride;
   entry.normalCount = geometry.normalCount;
   entry.contentHash = hashGeometryContent(geometry);
+  entry.geometryGeneration = geometry.retainedGeneration;
 }
 
 void packInterleavedVertices(const SoGeometryDesc & geometry, uint8_t * vertices)
@@ -738,14 +739,16 @@ SoVulkanRenderBackend::updateGeometryCache(const SoDrawList & drawlist,
       entry.indexCount == geometry.indexCount &&
       entry.normalCount == geometry.normalCount &&
       entry.vertexStride == vertexStride &&
-      entry.texcoordStride == geometry.texcoordStride;
-    // Change detection.  Retained geometry (SoGeometryDesc::retained) guarantees
-    // pointers change exactly when content does (rebuild reallocates), so pointer
-    // identity suffices and the FNV walk is skipped; replayed frames
-    // (geometryContentUnchanged) are bit-identical, also skipped.  Otherwise
+      entry.texcoordStride == geometry.texcoordStride &&
+      entry.geometryGeneration == geometry.retainedGeneration;
+    // Change detection.  Retained geometry (SoGeometryDesc::retained) is identified by its
+    // pointers/counts plus the producer's build id (retainedGeneration): a rebuild commonly
+    // reuses the freed streams' address, so pointers alone would keep the previous GPU buffer.
+    // Replayed frames (geometryContentUnchanged) are bit-identical, also skipped.  Otherwise
     // (arena streams rewriting the same pointer in place) use the content hash.
     const bool pointerIdentitySufficient =
-      geometry.retained || geometryContentUnchanged;
+      (geometry.retained && geometry.retainedGeneration != 0) ||
+      geometryContentUnchanged;
     const bool geometryMatches = identityMatches &&
       (pointerIdentitySufficient ||
        entry.contentHash == hashGeometryContent(geometry));

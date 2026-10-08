@@ -86,9 +86,16 @@ struct SoGeometryDesc {
   std::shared_ptr<const std::vector<float>>    texcoordOwner;
   std::shared_ptr<const std::vector<uint32_t>> indexOwner;
 
-  //!< Producer guarantees stable shape-retained streams whose pointers change exactly with
-  //!< content; backends may then skip the content hash. False for in-place-rewritten arenas.
+  //!< Producer guarantees shape-retained streams whose content only changes on a rebuild, which
+  //!< retainedGeneration identifies; a backend may then skip the content hash. False for
+  //!< in-place-rewritten arenas.
   bool                retained = false;
+
+  //!< Monotonic id of the retained-IR build these streams came from, 0 for non-retained
+  //!< (frame-arena) geometry.  A rebuild routinely reuses the address of the streams it just
+  //!< freed, so a backend keyed on pointer identity must compare this too, or it keeps the
+  //!< previous GPU buffer even though the content changed.
+  uint64_t            retainedGeneration = 0;
 };
 
 // --- Material flags (SoMaterialData::flags) ---
