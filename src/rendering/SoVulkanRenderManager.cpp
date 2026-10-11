@@ -1381,9 +1381,10 @@ SoVulkanRenderManagerP::prepareRenderParams(SbBool clearwindow,
 
   int dbgRestamped = -1;
   if (irReplayed) {
-    // Camera-only frame: restamp the frame view into every non-overlay command
+    // Camera-only frame: restamp the frame view into every retained command
     // carrying the previous traversal's view element (sub-camera commands keep
-    // their own). Lighting is world-space and needs no re-derivation.
+    // their own; the freshly recorded overlay/decoration commands already have
+    // it). Lighting is world-space and needs no re-derivation.
     if (this->lastFrameViewValid) {
       const long replayT0 = wantCpuTiming ? vkRenderBreadcrumbNowUs() : 0;
       // SbMatrix is exactly float[4][4], so a full-storage bit-compare detects
@@ -1452,14 +1453,21 @@ SoVulkanRenderManagerP::prepareRenderParams(SbBool clearwindow,
   }
   else if (!this->lastFrameViewValid) {
     // Remember the view bits this traversal stamped so the next replay can restamp.
+    // Sample the retained region, not "the first non-overlay command": a scene whose
+    // retained region is only promoted annotations (an overlay-flagged preview with no
+    // other geometry) has no non-overlay command at all, and leaving lastFrameViewValid
+    // FALSE would skip the restamp for exactly that scene shape.
     const int numCommands = list.getNumCommands();
-    for (int i = 0; i < numCommands; ++i) {
-      const SoRenderCommand & command = list.getCommand(i);
-      if (command.pass != SO_RENDERPASS_OVERLAY) {
-        this->lastFrameView = command.viewMatrix;
-        this->lastFrameViewValid = TRUE;
-        break;
-      }
+    const int numRetained = static_cast<int>(this->mainCommandCount);
+    for (int i = 0; i < numCommands && i < numRetained; ++i) {
+      this->lastFrameView = list.getCommand(i).viewMatrix;
+      this->lastFrameViewValid = TRUE;
+      break;
+    }
+    if (SoVulkanShared::envFlagEnabled("COIN_VULKAN_BACKEND_DEBUG")) {
+      // Invariant: a retained region of any pass composition must arm the restamp.
+      SoVulkanDebug::post("[RTDBG] lastViewArmed retained=%d armed=%d\n",
+                          numRetained, this->lastFrameViewValid ? 1 : 0);
     }
   }
   const long sortT0 = wantCpuTiming ? vkRenderBreadcrumbNowUs() : 0;
