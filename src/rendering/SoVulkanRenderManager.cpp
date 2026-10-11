@@ -1394,20 +1394,55 @@ SoVulkanRenderManagerP::prepareRenderParams(SbBool clearwindow,
         SbMat lastView;
         this->lastFrameView.getValue(lastView);
         const int numCommands = list.getNumCommands();
+        // The retained region is what the last main traversal recorded; everything
+        // after it is the overlay/decoration scene re-recorded this frame, which
+        // already carries the current view.
+        const int numRetained = static_cast<int>(this->mainCommandCount);
         int restamped = 0;
+        int retainedOverlay = 0;
+        int staleOverlayBefore = 0;
         for (int i = 0; i < numCommands; ++i) {
           SoRenderCommand & command = list.getCommand(i);
-          if (command.pass == SO_RENDERPASS_OVERLAY) {
-            continue;
+          if (i >= numRetained) {
+            break;
           }
           SbMat cmdView;
           command.viewMatrix.getValue(cmdView);
-          if (std::memcmp(&cmdView[0][0], &lastView[0][0], sizeof(cmdView)) == 0) {
-            command.viewMatrix = params.viewMatrix;
-            ++restamped;
+          if (std::memcmp(&cmdView[0][0], &lastView[0][0], sizeof(cmdView)) != 0) {
+            // Sub-camera commands keep their own view.
+            continue;
           }
+          if (command.pass == SO_RENDERPASS_OVERLAY) {
+            // Annotation subtrees (Gui::So3DAnnotation, e.g. the PartDesign previews)
+            // record inline and then promote their commands to the OVERLAY pass, but
+            // they stay in the retained main list.  Skipping them here left them with
+            // the previous camera's view matrix, so a preview was replayed where the
+            // old camera put it until something else forced a re-record.
+            ++retainedOverlay;
+            ++staleOverlayBefore;
+          }
+          command.viewMatrix = params.viewMatrix;
+          ++restamped;
         }
         dbgRestamped = restamped;
+        if (SoVulkanShared::envFlagEnabled("COIN_VULKAN_BACKEND_DEBUG")) {
+          int staleOverlayAfter = 0;
+          for (int i = 0; i < numRetained && i < list.getNumCommands(); ++i) {
+            const SoRenderCommand & command = list.getCommand(i);
+            if (command.pass != SO_RENDERPASS_OVERLAY) {
+              continue;
+            }
+            SbMat cmdView;
+            command.viewMatrix.getValue(cmdView);
+            if (std::memcmp(&cmdView[0][0], &params.viewMatrix[0][0], sizeof(cmdView)) != 0) {
+              ++staleOverlayAfter;
+            }
+          }
+          SoVulkanDebug::post(
+              "[RTDBG] retained=%d retainedOverlay=%d staleOverlayBefore=%d "
+              "staleOverlayAfter=%d restamped=%d\n",
+              numRetained, retainedOverlay, staleOverlayBefore, staleOverlayAfter, dbgRestamped);
+        }
         this->lastFrameView = params.viewMatrix;
       }
       if (wantCpuTiming) {
