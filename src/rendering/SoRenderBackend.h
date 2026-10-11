@@ -91,7 +91,6 @@ public:
 protected:
   void setInitialized(SbBool state);
   void setInitParams(const SoRenderBackendInitParams & params);
-  const SoRenderBackendInitParams & getInitParams() const;
 
   void emitLog(const char * message) const;
   void emitError(const char * message) const;

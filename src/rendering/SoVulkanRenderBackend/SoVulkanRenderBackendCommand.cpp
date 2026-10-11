@@ -438,9 +438,10 @@ SoVulkanRenderBackend::updateLightingUniforms(const SoDrawList & drawlist,
   }
 
   SbMat m;
-  // Overlay geometry spanning the frame (selection highlight) is frame-camera
-  // geometry: it must use the frame view/proj, not the scene camera's stale,
-  // one-frame-lagging matrices.  Overlays with their own viewport keep theirs.
+  // Overlay geometry spanning the frame (selection highlight, annotation subtree) is
+  // frame-camera geometry: it uses the frame view/proj rather than the command's own
+  // matrices, which a retained replay may not have restamped yet.  Overlays with their
+  // own viewport (navigation cube) keep theirs.
   const bool frameCameraOverlay = isFrameCameraOverlay(command, params);
   if (command.state.raster.scissorEnabled
       && command.pass == SO_RENDERPASS_OVERLAY && !frameCameraOverlay) {
@@ -697,9 +698,9 @@ SoVulkanRenderBackend::recordDrawCommand(const SoDrawList & drawlist,
   }
 
   SbMat projValue;
-  // Overlay with its own camera/viewport (NaviCube) uses its own projection;
-  // overlay spanning the frame (selection highlight) shares the frame projection
-  // in params, since the scene camera's near/far lag a frame during navigation.
+  // Overlay with its own camera/viewport (NaviCube) uses its own projection; an overlay
+  // spanning the frame (selection highlight, annotation subtree) shares the frame
+  // projection in params, whose near/far are this frame's.
   const bool frameCameraOverlay = isFrameCameraOverlay(command, params);
   if (overlayPass && !frameCameraOverlay) {
     command.projMatrix.getValue(projValue);

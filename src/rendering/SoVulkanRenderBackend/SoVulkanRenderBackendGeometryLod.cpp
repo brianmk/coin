@@ -18,7 +18,7 @@
 // kept until the content hash changes.  Commands over COIN_VULKAN_GEOM_LOD_MAX_INDEX
 // fall back to the full draw to bound memory.  Validation caveat: a nav-cube-only
 // run exercises neither the document geometry nor the indexed path;
-// tools/fcprobe/vk_geomlod_probe.py checks a real indexed Part.
+// FreeCAD-DevTools fcprobe/vk_geomlod_probe.py checks a real indexed Part.
 
 #include "rendering/SoVulkanRenderBackend.h"
 #include "rendering/SoVulkanDebug.h"

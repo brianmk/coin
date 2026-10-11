@@ -35,12 +35,6 @@ SoRenderBackend::setInitParams(const SoRenderBackendInitParams & params)
   this->initparams = params;
 }
 
-const SoRenderBackendInitParams &
-SoRenderBackend::getInitParams() const
-{
-  return this->initparams;
-}
-
 void
 SoRenderBackend::emitLog(const char * message) const
 {

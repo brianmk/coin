@@ -171,22 +171,6 @@ SoIRBuffer::clear()
   this->totalAllocated = 0;
 }
 
-void
-SoIRBuffer::reserve(size_t bytes)
-{
-  // Ensure the first chunk is at least this large
-  if (this->chunks.empty()) {
-    std::unique_ptr<Chunk> c(new Chunk);
-    c->data.resize(std::max(bytes, MIN_CHUNK_SIZE));
-    this->chunks.push_back(std::move(c));
-  } else if (bytes > this->chunks[0]->data.size()) {
-    // Only resize the first chunk if it hasn't been used yet
-    if (this->chunks[0]->cursor == 0) {
-      this->chunks[0]->data.resize(bytes);
-    }
-  }
-}
-
 void *
 SoIRBuffer::allocate(size_t bytes, size_t alignment)
 {
@@ -238,22 +222,9 @@ SoDrawList::truncate(int count)
 }
 
 void
-SoDrawList::reserve(int count)
-{
-  this->commands.reserve(static_cast<size_t>(count));
-}
-
-void
 SoDrawList::addCommand(const SoRenderCommand & cmd)
 {
   this->commands.push_back(cmd);
-}
-
-SoRenderCommand &
-SoDrawList::emplaceCommand()
-{
-  this->commands.emplace_back();
-  return this->commands.back();
 }
 
 int
@@ -301,7 +272,6 @@ bool rawEqual(const SoLightingRaw & a, const SoLightingRaw & b)
   if (a.hasRaw != b.hasRaw) return false;
   if (!a.hasRaw) return true;
   if (a.lights.size() != b.lights.size()) return false;
-  // NOTE: viewUsed is deliberately NOT compared: setups are world-space/view-independent, so
   // identical raw geometry is the same light; comparing it would fragment dedup and inflate the lighting ring.
   for (size_t i = 0; i < a.lights.size(); ++i) {
     if (!rawLightEqual(a.lights[i], b.lights[i])) return false;
@@ -310,20 +280,6 @@ bool rawEqual(const SoLightingRaw & a, const SoLightingRaw & b)
 }
 
 } // namespace
-
-SoLightingHandle
-SoDrawList::addLightingSetup(const SoLightingData & lighting)
-{
-  for (size_t i = 0; i < this->lightingSetups.size(); ++i) {
-    if (lightingEqual(this->lightingSetups[i], lighting) &&
-        rawEqual(this->lightingRaws[i], SoLightingRaw())) {
-      return static_cast<SoLightingHandle>(i + 1);
-    }
-  }
-  this->lightingSetups.push_back(lighting);
-  this->lightingRaws.emplace_back();
-  return static_cast<SoLightingHandle>(this->lightingSetups.size());
-}
 
 SoLightingHandle
 SoDrawList::addLightingSetup(const SoLightingData & lighting,

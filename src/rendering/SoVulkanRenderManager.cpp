@@ -69,9 +69,6 @@ long vkRenderBreadcrumbNowUs()
   return SoVulkanShared::steadyNowUs();
 }
 
-int vkLightFrameDbgBudget = 192;
-int vkLightFpDbgBudget = 192;
-
 // Content fingerprint of the first \a mainCount commands: mixes model matrix,
 // geometry pointers and counts. The scene bbox/auto-clip planes depend on main
 // geometry + world transform; command count alone is unsound (moving a body
@@ -271,7 +268,7 @@ public:
   //! the total count is unchanged; else it holds out-of-range indices.
   int lastSortCommandCount = -1;
   //! Child pointers last installed in frameRoot, avoiding child-list churn on navigation.
-  SoNode * rootChildren[4] = {nullptr, nullptr, nullptr, nullptr};
+  SoNode * rootChildren[2] = {nullptr, nullptr};
   SbBool rootChildrenValid = FALSE;
 
   //! Current render-affecting graph fingerprint (see graphFingerprintWalk).
@@ -1195,21 +1192,18 @@ SoVulkanRenderManagerP::prepareRenderParams(SbBool clearwindow,
       // Reuse the traversal root; only touch children when the set changes, so
       // the refcount stays balanced and navigation stops re-notifying.
       SoSeparator * root = this->frameRoot;
-      SoNode * const want[4] = { this->camera, this->scene,
-                                 nullptr, nullptr };
+      SoNode * const want[2] = { this->camera, this->scene };
       const SbBool sameChildren = this->rootChildrenValid &&
         this->rootChildren[0] == want[0] &&
-        this->rootChildren[1] == want[1] &&
-        this->rootChildren[2] == want[2] &&
-        this->rootChildren[3] == want[3];
+        this->rootChildren[1] == want[1];
       if (!sameChildren) {
         root->removeAllChildren();
-        for (int i = 0; i < 4; ++i) {
+        for (int i = 0; i < 2; ++i) {
           if (want[i]) {
             root->addChild(want[i]);
           }
         }
-        for (int i = 0; i < 4; ++i) {
+        for (int i = 0; i < 2; ++i) {
           this->rootChildren[i] = want[i];
         }
         this->rootChildrenValid = TRUE;
@@ -1284,7 +1278,7 @@ SoVulkanRenderManagerP::prepareRenderParams(SbBool clearwindow,
     // Main region is whatever the MAIN IR action recorded; on a fresh document
     // that is often just the hidden anchor cube (~36 vertices). Do not assume
     // "the scene rendered" because main > 0: check mainMaxVc against the shape's
-    // real vertex count (tools/fcprobe/vk_geomlod_probe.py guards this).
+    // real vertex count (FreeCAD-DevTools fcprobe/vk_geomlod_probe.py guards this).
     const int numMain = static_cast<int>(this->mainCommandCount);
     if (numMain < list.getNumCommands()) {
       list.truncate(numMain);

@@ -30,7 +30,8 @@
     - The production OpenGL viewport still renders through SoGLRenderAction and
       never traverses the IR.
     - SoGLRenderBackend consumes a SoDrawList only as a testsuite reference
-      (testsuite/drawlist-gl-test.cpp); it is not built into libCoin.
+      (the vendored library builds it for the raster path; no separate GL-inspection
+      target exists in this fork, so GL/IR divergence is not covered by CI).
 
   \note Lifetime: geometry and texture pointers are borrowed from the producer and
   refer to the current SoIRRenderAction frame's storage. Do not retain them after
@@ -502,10 +503,17 @@ struct SoRenderCommand {
   SoRenderPassType pass = SO_RENDERPASS_OPAQUE;
   SoLightingHandle lightingHandle = 0;
   SoPixelTextData pixelText;
-  uint64_t         sortKey = 0; //!< Backend-computed key used by sorting.
+  uint64_t         sortKey = 0; //!< Key from SoDrawList::buildSortedOrder() (not the backend).
   void *           userData = nullptr; //!< Opaque, non-owned producer data.
   //! Producer reports this as the model's B-Rep feature-edge line set (SoShape::isFeatureEdgeSet()); the Vulkan edge overlay redraws only these.
   bool             isFeatureEdge = false;
+  //! Producer marks this command as belonging to an annotation subtree
+  //! (Gui::So3DAnnotation).  The raster backend draws these after the other
+  //! overlay commands, with the depth buffer cleared first, which is what the GL
+  //! path gets from its delayed-annotation replay; the command keeps its own depth
+  //! test, so the subtree still self-occludes.  Without it a full-viewport
+  //! annotation is depth-rejected by the scene it is annotating.
+  bool             isAnnotation = false;
 };
 
 /*! \class SoDrawList \brief Commands and auxiliary tables for one frame.
@@ -518,14 +526,10 @@ public:
 
   //! Clear commands and per-frame tables, beginning a new frame generation.
   void clear();
-  void reserve(int count);
-
   //! Return the generation number incremented when clear() starts a new frame.
   uint32_t getGeneration() const { return generation; }
 
   void addCommand(const SoRenderCommand & cmd);
-  SoRenderCommand & emplaceCommand();
-
   int getNumCommands() const;
   //! Remove commands beyond index count without reordering remaining commands.
   void truncate(int count);
@@ -533,7 +537,6 @@ public:
   const SoRenderCommand & getCommand(int i) const;
 
   //! Add or reuse a lighting setup and return its stable 1-based handle.
-  SoLightingHandle addLightingSetup(const SoLightingData & lighting);
 
   //! Variant carrying scene-space inputs (SoLightingRaw) alongside the setup; the raw entry
   //! participates in dedup so same-world setups from different light nodes/cameras stay separate.

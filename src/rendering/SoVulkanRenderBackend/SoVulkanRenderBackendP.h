@@ -75,13 +75,12 @@ namespace CoinVulkanDetail {
 
 
   inline uint32_t s_debugPushCount = 0;
-  inline int s_lightLog = 0;
 
 // Number of per-draw lighting UBO slots a frame will consume: each non-overlay
 // command is drawn once, again when the overlay redraw is active (opaque,
 // non-transparent only; tessellation redraws triangles, LINES redraws lines,
 // POINTS everything), plus the on-top pass for depth-disabled commands; overlay
-// commands draw a second time in the overlay block.  recordDrawCommand() bails
+// commands are drawn once, in the overlay block.  recordDrawCommand() bails
 // before claiming a slot for skipped commands, so this worst case is a safe bound.
   inline uint32_t
 countDrawCommands(const SoDrawList & drawlist, const int wireframeFillMode,
@@ -378,7 +377,8 @@ hashTextureContent(const SoTextureData & texture)
 constexpr uint32_t VULKAN_VERTEX_STRIDE = 32;
 // Largest vertex count a single command may upload.  Flat-shaded CAD expands to 3 unique
 // vertices per triangle, so a Voron-class assembly reaches tens of millions in one command;
-// the old 10M ceiling silently dropped such objects.  Override COIN_VULKAN_MAX_VERTEX_COUNT.
+// the old 10M ceiling silently dropped such objects.  (No override knob: the ceiling is
+// this compile-time constant.)
 constexpr int MAX_VERTEX_COUNT = 64000000;
 
 // The projection matrix lives in the per-draw DrawBlock UBO, not here, so the push block

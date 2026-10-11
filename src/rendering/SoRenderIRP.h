@@ -16,7 +16,6 @@ public:
   ~SoIRBuffer() = default;
 
   void clear();
-  void reserve(size_t bytes);
   void * allocate(size_t bytes, size_t alignment = alignof(float));
 
   template <typename T>
@@ -24,7 +23,6 @@ public:
     return static_cast<T *>(this->allocate(count * sizeof(T), alignment));
   }
 
-  size_t size() const { return this->totalAllocated; }
 
 private:
   static constexpr size_t MIN_CHUNK_SIZE = 1024 * 1024; // 1 MB

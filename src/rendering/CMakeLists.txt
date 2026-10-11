@@ -80,7 +80,6 @@ set(COIN_RENDERING_INTERNAL_FILES
 	SoVulkanRenderBackend/SoVulkanRenderBackendP.h
 	SoVulkanRenderBackend/SoVulkanRenderPassCache.h
 	SoVulkanShared.h
-	SoVulkanRenderManager.h
 )
 
 # build library

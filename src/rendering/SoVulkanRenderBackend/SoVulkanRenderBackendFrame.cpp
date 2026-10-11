@@ -1408,19 +1408,26 @@ SoVulkanRenderBackend::recordOverlayBlock(const SoDrawList & drawlist,
   // Overlays draw in recorded (insertion) order, matching GL: the draw-list sorted
   // order is a painter's algorithm from main-scene camera-space depth, meaningless
   // for screen-space overlays (it would shuffle the navigation cube's panels).
+  //
+  // Two sweeps.  The first is the ordinary one: selection highlights and sub-viewport
+  // widgets (navigation cube, axis cross).  A full-frame highlight must depth-test
+  // against scene depth, so its depth is not cleared; only sub-viewport widgets clear
+  // depth, and only when their rect changes.  The second sweep is the annotation
+  // subtrees (Gui::So3DAnnotation), which GL replays after clearing the depth buffer so
+  // they composite over the scene while still self-occluding -- a full-viewport
+  // annotation cannot be forced on top by promotion alone, because its rect is the whole
+  // frame and clearing the frame would also drop the scene depth the highlights need.
+  int annotationCount = 0;
   int lastClearX = -1, lastClearY = -1, lastClearW = -1, lastClearH = -1;
   const SbVec2s frameSize = params.viewport.getViewportSizePixels();
   for (int i = 0; i < drawlist.getNumCommands(); ++i) {
     const SoRenderCommand & command = drawlist.getCommand(i);
-    if (command.pass != SO_RENDERPASS_OVERLAY) continue;
+    if (command.pass != SO_RENDERPASS_OVERLAY || command.isAnnotation) continue;
     const SoRasterState & raster = command.state.raster;
     if (!raster.scissorEnabled || raster.scissorWidth <= 0 ||
         raster.scissorHeight <= 0) {
       continue;
     }
-    // The selection/preselection highlight is a full-frame overlay that must depth-test
-    // against scene depth (NOT be forced on top), so its depth is not cleared.  Only
-    // sub-viewport widgets (navigation cube, axis cross) clear depth.
     const bool fullFrameOverlay =
       raster.scissorWidth == frameSize[0] && raster.scissorHeight == frameSize[1];
     if (raster.scissorX != lastClearX || raster.scissorY != lastClearY ||
@@ -1436,6 +1443,30 @@ SoVulkanRenderBackend::recordOverlayBlock(const SoDrawList & drawlist,
     }
     this->recordDrawCommand(drawlist, command, target, params, renderPass,
                             false, -1, nullptr, true, ctx);
+  }
+
+  bool annotationDepthCleared = false;
+  for (int i = 0; i < drawlist.getNumCommands(); ++i) {
+    const SoRenderCommand & command = drawlist.getCommand(i);
+    if (command.pass != SO_RENDERPASS_OVERLAY || !command.isAnnotation) continue;
+    const SoRasterState & raster = command.state.raster;
+    if (!raster.scissorEnabled || raster.scissorWidth <= 0 ||
+        raster.scissorHeight <= 0) {
+      continue;
+    }
+    if (!annotationDepthCleared) {
+      // One clear for the whole annotation group, as the GL delayed replay does.
+      this->recordOverlayDepthClear(command, target, ctx);
+      annotationDepthCleared = true;
+    }
+    ++annotationCount;
+    this->recordDrawCommand(drawlist, command, target, params, renderPass,
+                            false, -1, nullptr, true, ctx);
+  }
+
+  if (COIN_VULKAN_ENV_FLAG("COIN_VULKAN_BACKEND_DEBUG")) {
+    SoVulkanDebug::post("[RTDBG] overlayAnnotations=%d annotationDepthCleared=%d\n",
+                        annotationCount, annotationDepthCleared ? 1 : 0);
   }
 }
 
@@ -1461,7 +1492,6 @@ SoVulkanRenderBackend::recordTracedComposite(const SoDrawList & drawlist,
     if (topo == SO_TOPOLOGY_TRIANGLES) continue;
     if (topo == SO_TOPOLOGY_TRIANGLE_STRIP) continue;
 
-    [[maybe_unused]] const SoRasterState & raster = command.state.raster;
     // Apply the command's own viewport/scissor if set, else the whole-surface default.
     this->applyCommandViewport(command, target, ctx);
     this->applyScissor(command, target, ctx);

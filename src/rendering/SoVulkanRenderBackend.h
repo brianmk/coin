@@ -38,7 +38,7 @@ VK_DEFINE_HANDLE(VmaAllocation)
 /*!
   \brief Cached GPU geometry for one retained SoRenderCommand.
 
-  One interleaved vertex buffer (fixed 48-byte stride: position + normal +
+  One interleaved vertex buffer (fixed 32-byte stride: position + normal +
   color + texcoord) and one optional uint32 index buffer.  The layout is fixed
   so a single static vertex-input state is shared by every pipeline.
 */
@@ -233,11 +233,16 @@ public:
     \brief Declare that this backend only composites overlays and residual
     geometry on top of a frame drawn by another renderer.
 
-    While that composite mode is active the manager drives this backend through
+    While that composite mode is active the caller drives this backend through
     renderExternalOverlay()/renderOverlaysOnly() only, so updateGeometryCache()
     also sweeps stale entries on overlays-only frames, evicting triangle
     commands this backend no longer visits.  Must stay false for a backend that
     also does full raster renders, whose cache must survive an overlay pass.
+
+    Note: nothing in the FreeCAD viewport calls these two entry points, nor
+    setOverlayCompositeMode(); they belong to the external/secondary-command-buffer
+    (ray tracing composite) integration, which lives outside this tree.  Do not
+    delete them as dead code without checking that integration first.
   */
   void setOverlayCompositeMode(SbBool enabled);
 
