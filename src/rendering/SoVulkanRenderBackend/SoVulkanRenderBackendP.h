@@ -185,6 +185,30 @@ isPatternedLine(const SoRenderCommand & command)
   return pattern != 0xFFFF && pattern != 0;
 }
 
+  // Segment count of a line command (0 when the topology is not a line set).
+  inline uint32_t
+lineSegmentCount(const SoRenderCommand & command)
+{
+  const SoPrimitiveTopology topology = command.geometry.topology;
+  if (topology != SO_TOPOLOGY_LINES && topology != SO_TOPOLOGY_LINE_STRIP) {
+    return 0;
+  }
+  const uint32_t count = (command.geometry.indexCount && command.geometry.indices)
+    ? command.geometry.indexCount : command.geometry.vertexCount;
+  if (topology == SO_TOPOLOGY_LINE_STRIP) return count > 1 ? count - 1 : 0;
+  return count / 2;
+}
+
+// A line set this large is where the CPU quad expansion starts to dominate the
+// per-frame cost: the expansion pre-pass splits it across workers (see
+// expandWideLinesParallel()) and interaction LOD may downgrade it to the plain
+// 1px path.  Smaller sets -- the Sketcher grid's division lines, a NaviCube
+// edge, a GUI tracker -- are cheap to expand either way, and downgrading them
+// is a visible quality change for as long as frames keep coming (their
+// configured SoDrawStyle width vanishes mid-navigation), so they keep the wide
+// path.
+constexpr uint32_t kLargeLineSetMinSegments = 2048;
+
   inline bool
 isWideLine(const SoRenderCommand & command, const int fillModeOverride,
            const bool interactionLod = false)
@@ -195,9 +219,12 @@ isWideLine(const SoRenderCommand & command, const int fillModeOverride,
   if (!lineTopology || fillModeOverride >= 0) return false;
   // A stipple needs the expanded path regardless of width, so interaction LOD must not downgrade it.
   if (isPatternedLine(command)) return true;
-  // During camera interaction draw wide lines as plain 1px GPU lines rather than expand
-  // segments to quads; full width returns when the camera stops.
-  return command.state.raster.lineWidth > 1.0f && !interactionLod;
+  if (command.state.raster.lineWidth <= 1.0f) return false;
+  // During camera interaction draw a large wide-line set as plain 1px GPU
+  // lines rather than expand every segment to a quad (the dominant navigation
+  // cost on edge-heavy scenes); full width returns when the camera stops.
+  return !interactionLod ||
+    lineSegmentCount(command) < kLargeLineSetMinSegments;
 }
 
   // True when a wide line is drawn by the GPU-instanced vertex shader rather than the

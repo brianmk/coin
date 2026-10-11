@@ -34,9 +34,6 @@ using namespace CoinVulkanDetail;
 
 namespace {
 
-// Below this many segments, dispatch/join cost (~tens of us) outweighs splitting.
-constexpr uint32_t kWideLineSplitMinSegments = 2048;
-
 // Row-major SbMat product, identical to the lambda in expandWideLines().
 inline void wlineMultiplyMat(const SbMat & a, const SbMat & b, SbMat & out)
 {
@@ -734,7 +731,7 @@ SoVulkanRenderBackend::expandWideLinesParallel(const SoDrawList & drawlist,
       command.pass != SO_RENDERPASS_OVERLAY &&
       geometry.topology == SO_TOPOLOGY_LINES &&
       !isPatternedLine(command) &&
-      count / 2 >= kWideLineSplitMinSegments;
+      count / 2 >= kLargeLineSetMinSegments;
     if (canSplit && splittable) {
       splitCmds.push_back(&command);
     }
