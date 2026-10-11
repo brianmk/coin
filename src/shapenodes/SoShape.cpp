@@ -55,6 +55,7 @@ class SoVBO;
 #include <cstdlib>
 #include <vector>
 #include <memory>
+#include <atomic>
 
 #ifdef HAVE_CONFIG_H
 #include <config.h>
@@ -368,10 +369,15 @@ soshape_material_equal(const SoMaterialData & a, const SoMaterialData & b)
 // are shape-retained streams (stable pointers); per-vertex material indices re-derive batch
 // assignment/colors from the *current* traversal state so material changes are honoured.
 // (Materialization half of the IR render cache; run after generatePrimitives and on cache replay.)
+// Monotonic id handed out to every retained-IR rebuild, whether or not the build ends up
+// reusing a freed stream's address; see SoGeometryDesc::retainedGeneration.
+static std::atomic<uint64_t> soshape_retained_generation(0);
+
 static void
 soshape_emit_ir_commands(SoIRRenderAction * action, SoShape * shape,
                          SoState * state, const SoIRRetainedGeometry & geom,
-                         bool retained, std::vector<SoIRBatch> & batchScratch)
+                         bool retained, uint64_t retainedGeneration,
+                         std::vector<SoIRBatch> & batchScratch)
 {
   const std::vector<float> & positions = *geom.positions;
   const std::vector<float> & normals = *geom.normals;
@@ -487,10 +493,14 @@ soshape_emit_ir_commands(SoIRRenderAction * action, SoShape * shape,
     command.geometry.positionOwner = geom.positions;
     command.geometry.normalOwner = geom.normals;
     command.geometry.texcoordOwner = geom.texcoords;
-    // Position/normal/texcoord are shape-retained buffers (stable pointer, new one on
-    // change), so the backend can trust pointer identity without re-hashing. Per-vertex-color
-    // commands are NOT retained: their colors come from the in-place-rewritten arena.
+    // Position/normal/texcoord are shape-retained buffers, so the backend may trust pointer
+    // identity without re-hashing -- but only together with retainedGeneration: a rebuild
+    // routinely gets the just-freed block back from the allocator, so equal pointers do NOT
+    // by themselves mean unchanged content. Per-vertex-color commands are NOT retained: their
+    // colors come from the in-place-rewritten arena.
     command.geometry.retained = retained && (colors == nullptr);
+    command.geometry.retainedGeneration
+      = command.geometry.retained ? retainedGeneration : 0;
     command.modelMatrix = SoModelMatrixElement::get(state);
     command.viewMatrix = SoViewingMatrixElement::get(state);
     command.projMatrix = SoProjectionMatrixElement::get(state);
@@ -588,6 +598,8 @@ public:
     if (this->bboxcache) { this->bboxcache->unref(); }
     if (this->pvcache) { this->pvcache->unref(); }
     delete this->bumprender;
+    delete this->irNormalMatch;
+    delete this->irTexCoordMatch;
   }
   enum {
     RENDERCNT_BITS = 4,     // bits needed to store rendercnt
@@ -622,6 +634,35 @@ public:
   std::vector<SoIRRetainedGeometry> irRuns;
   bool irCacheValid;
   float irCacheComplexity = -1.0f;
+
+  // Vertex-data source the retained IR was tessellated from.  A shape is notified only by
+  // changes to its OWN fields (SoShape::notify), while the vertex data usually comes from a
+  // sibling/ancestor SoCoordinate3 -- the pattern FreeCAD's Sketcher edit mode uses when it
+  // rewrites point/line coordinates on every drag step.  Such a rewrite leaves irCacheValid
+  // set and the IR would replay the previous positions forever.  SoCoordinateElement carries
+  // the id of the node that supplied it (SoReplacedElement::nodeId) and SoNode::notify()
+  // re-bumps a node's id on any change, so comparing the source ids/count against the ones the
+  // cached streams were built from detects that in O(1).  An SoVertexProperty node is the
+  // other vertex source and can likewise be edited without notifying its shape.
+  SbUniqueId irCoordNodeId = 0;
+  int32_t irCoordNum = 0;
+  SbUniqueId irVertexPropNodeId = 0;
+
+  // The retained streams also bake in normals and texture coordinates read from inherited
+  // elements, and a sibling/ancestor SoNormal or SoTextureCoordinate2 rewrite reaches the
+  // shape exactly the same way a SoCoordinate3 rewrite does (no notify).  Neither element
+  // offers one source id to compare -- SoMultiTextureCoordinateElement keeps an id per
+  // texture unit -- so instead snapshot each element's own match info and let it compare
+  // itself against the live element.  This is the SoCache identity mechanism with none of
+  // the unrelated elements a full cache would also capture (which would over-invalidate).
+  SoElement * irNormalMatch = nullptr;
+  SoElement * irTexCoordMatch = nullptr;
+
+  // Monotonic id of the build that produced irRuns, published per command as
+  // SoGeometryDesc::retainedGeneration.  Backends keyed on pointer identity need it because a
+  // rebuild routinely reuses the address of the streams it just freed, so equal pointers do
+  // not imply equal content.
+  uint64_t irGeneration = 0;
 
   // Reusable scratch for the IR command emitter: the batch vector is rebuilt each
   // run/frame, so keeping its capacity across frames avoids a heap allocation per emission.
@@ -932,7 +973,7 @@ SoShape::IRRender(SoIRRenderAction * action)
       }
     }
     if (boxRun.positions) {
-      soshape_emit_ir_commands(action, this, state, boxRun, false,
+      soshape_emit_ir_commands(action, this, state, boxRun, false, 0,
                                PRIVATE(this)->irBatchScratch);
     }
     return;
@@ -955,13 +996,36 @@ SoShape::IRRender(SoIRRenderAction * action)
   // runs unlocked into a local buffer and only the cheap swap/snapshot is locked, while
   // emitting from a snapshot keeps the shared_ptr streams alive across a concurrent edit.
   std::vector<SoIRRetainedGeometry> emitRuns;
+  // Build id of emitRuns, snapshotted together with it (see the emit loop below).
+  uint64_t emitGeneration = 0;
   const float complexity = SoComplexityElement::get(state);
+  // The cached IR bakes vertex data read from the traversal state, so it must also be
+  // invalidated when that data changes without notifying this shape (see the irCoordNodeId
+  // comment in SoShapeP).  Reading the source identity is O(1) and only ever forces a rebuild
+  // when the coordinates really were re-supplied, so the retained-IR fast path is preserved.
+  const SoCoordinateElement * coordsource = SoCoordinateElement::getInstance(state);
+  const SbUniqueId coordNodeId = coordsource ? coordsource->getNodeId() : 0;
+  const int32_t coordNum = coordsource ? coordsource->getNum() : 0;
+  const SbUniqueId vertexPropNodeId = vertexProperty ? vertexProperty->getNodeId() : 0;
+  // Normals/texcoords come from inherited elements just like the coordinates, so they need
+  // the same state-change detection; see the irNormalMatch comment in SoShapeP.
+  const SoNormalElement * normalsource = SoNormalElement::getInstance(state);
+  const SoMultiTextureCoordinateElement * texcoordsource =
+    SoMultiTextureCoordinateElement::getInstance(state);
   PRIVATE(this)->lock();
   const bool cacheValid =
     PRIVATE(this)->irCacheValid && !PRIVATE(this)->irRuns.empty() &&
-    PRIVATE(this)->irCacheComplexity == complexity;
+    PRIVATE(this)->irCacheComplexity == complexity &&
+    PRIVATE(this)->irCoordNodeId == coordNodeId &&
+    PRIVATE(this)->irCoordNum == coordNum &&
+    PRIVATE(this)->irVertexPropNodeId == vertexPropNodeId &&
+    normalsource && PRIVATE(this)->irNormalMatch &&
+    PRIVATE(this)->irNormalMatch->matches(normalsource) &&
+    texcoordsource && PRIVATE(this)->irTexCoordMatch &&
+    PRIVATE(this)->irTexCoordMatch->matches(texcoordsource);
   if (cacheValid) {
     emitRuns = PRIVATE(this)->irRuns;
+    emitGeneration = PRIVATE(this)->irGeneration;
   }
   PRIVATE(this)->unlock();
 
@@ -976,6 +1040,16 @@ SoShape::IRRender(SoIRRenderAction * action)
     PRIVATE(this)->irRuns.swap(built);
     PRIVATE(this)->irCacheValid = !PRIVATE(this)->irRuns.empty();
     PRIVATE(this)->irCacheComplexity = complexity;
+    PRIVATE(this)->irCoordNodeId = coordNodeId;
+    PRIVATE(this)->irCoordNum = coordNum;
+    PRIVATE(this)->irVertexPropNodeId = vertexPropNodeId;
+    delete PRIVATE(this)->irNormalMatch;
+    PRIVATE(this)->irNormalMatch =
+      normalsource ? normalsource->copyMatchInfo() : nullptr;
+    delete PRIVATE(this)->irTexCoordMatch;
+    PRIVATE(this)->irTexCoordMatch =
+      texcoordsource ? texcoordsource->copyMatchInfo() : nullptr;
+    PRIVATE(this)->irGeneration = ++soshape_retained_generation;
     // The walk touched every vertex: record its local bbox for getBBox()'s auto-clip query instead of re-traversing.
     if (!assembler.getBBox().isEmpty()) {
       PRIVATE(this)->irBBox = assembler.getBBox();
@@ -983,15 +1057,19 @@ SoShape::IRRender(SoIRRenderAction * action)
       PRIVATE(this)->irBBoxValid = true;
     }
     emitRuns = PRIVATE(this)->irRuns;
+    emitGeneration = PRIVATE(this)->irGeneration;
     PRIVATE(this)->unlock();
   }
 
   // Emitting writes the shape-owned batch scratch, so guard it with the same mutex as the cache:
   // notify()/IRRender may run on different threads, and a second IRRender (a shared shape from
   // another viewport) would race on irBatchScratch. Retained geometry itself is read unlocked.
+  // emitGeneration is snapshotted with emitRuns (not read here) so a concurrent rebuild on
+  // another viewport cannot stamp these streams with a build id that is not theirs.
   PRIVATE(this)->lock();
   for (const SoIRRetainedGeometry & run : emitRuns) {
     soshape_emit_ir_commands(action, this, state, run, true,
+                             emitGeneration,
                              PRIVATE(this)->irBatchScratch);
   }
   PRIVATE(this)->unlock();
@@ -2397,3 +2475,152 @@ SoShape::validatePVCache(SoGLRenderAction * action)
 
 
 #undef PRIVATE
+
+// *************************************************************************
+
+#ifdef COIN_TEST_SUITE
+
+#include <Inventor/SbVec2s.h>
+#include <Inventor/SbViewportRegion.h>
+#include <Inventor/actions/SoIRRenderAction.h>
+#include <Inventor/nodes/SoCoordinate3.h>
+#include <Inventor/nodes/SoLineSet.h>
+#include <Inventor/nodes/SoNormal.h>
+#include <Inventor/nodes/SoNormalBinding.h>
+#include <Inventor/nodes/SoSeparator.h>
+#include <Inventor/nodes/SoTexture2.h>
+#include <Inventor/nodes/SoTextureCoordinate2.h>
+#include <Inventor/rendering/SoRenderIR.h>
+#include <vector>
+
+struct SoShapeIRProbe {
+  bool has;
+  const float * positions;
+  uint64_t generation;
+  std::vector<float> pos;
+  std::vector<float> nrm;
+  std::vector<float> tex;
+  SoShapeIRProbe(void) : has(false), positions(NULL), generation(0) {}
+};
+
+static SoShapeIRProbe
+soshape_ir_probe(SoIRRenderAction & action)
+{
+  SoShapeIRProbe probe;
+  const SoDrawList & list = action.getDrawList();
+  if (list.getNumCommands() == 0) return probe;
+  const SoGeometryDesc & geometry = list.getCommand(0).geometry;
+  probe.has = true;
+  probe.positions = geometry.positions;
+  probe.generation = geometry.retainedGeneration;
+  if (geometry.positions && geometry.vertexCount) {
+    probe.pos.assign(geometry.positions,
+                     geometry.positions + 3 * geometry.vertexCount);
+  }
+  if (geometry.normals && geometry.normalCount) {
+    probe.nrm.assign(geometry.normals,
+                     geometry.normals + 3 * geometry.normalCount);
+  }
+  if (geometry.texcoords && geometry.vertexCount) {
+    const uint32_t stride =
+      (geometry.texcoordStride ? geometry.texcoordStride : 16u) / 4u;
+    probe.tex.assign(geometry.texcoords,
+                     geometry.texcoords + stride * geometry.vertexCount);
+  }
+  return probe;
+}
+
+// The retained IR bakes vertex data read from *inherited* elements, but a shape is
+// only notified by changes to its own fields: FreeCAD's Sketcher rewrites a sibling
+// SoCoordinate3 on every drag step and the shapes' SoNormal/SoTextureCoordinate2 can
+// be rewritten the same way.  Such a rewrite must drop the retained runs, an
+// untouched shape must keep hitting them, and every rebuild must publish a fresh
+// SoGeometryDesc::retainedGeneration -- a rebuild routinely gets the just-freed
+// stream address back from the allocator, so a backend keyed on pointer identity
+// would otherwise keep serving the previous GPU buffer.
+BOOST_AUTO_TEST_CASE(irRetainedCacheFollowsInheritedState)
+{
+  SoSeparator * root = new SoSeparator;
+  root->ref();
+  SoCoordinate3 * coords = new SoCoordinate3;
+  coords->point.set1Value(0, 0.0f, 0.0f, 0.0f);
+  coords->point.set1Value(1, 1.0f, 0.0f, 0.0f);
+  root->addChild(coords);
+  SoNormalBinding * nbind = new SoNormalBinding;
+  nbind->value = SoNormalBinding::PER_VERTEX_INDEXED;
+  root->addChild(nbind);
+  SoNormal * normals = new SoNormal;
+  normals->vector.set1Value(0, 0.0f, 0.0f, 1.0f);
+  normals->vector.set1Value(1, 0.0f, 0.0f, 1.0f);
+  root->addChild(normals);
+  SoTexture2 * texture = new SoTexture2;
+  unsigned char pixel[3] = { 255, 128, 0 };
+  texture->image.setValue(SbVec2s(1, 1), 3, pixel);
+  root->addChild(texture);
+  SoTextureCoordinate2 * texcoords = new SoTextureCoordinate2;
+  texcoords->point.set1Value(0, 0.0f, 0.0f);
+  texcoords->point.set1Value(1, 1.0f, 0.0f);
+  root->addChild(texcoords);
+  SoLineSet * lines = new SoLineSet;
+  lines->numVertices.set1Value(0, 2);
+  root->addChild(lines);
+
+  SoIRRenderAction action(SbViewportRegion(800, 600));
+
+  action.apply(root);
+  const SoShapeIRProbe built = soshape_ir_probe(action);
+  BOOST_CHECK_MESSAGE(built.has, "IR action recorded no geometry command");
+  BOOST_CHECK_MESSAGE(built.generation != 0,
+                      "retained geometry carries no retainedGeneration");
+  BOOST_CHECK_MESSAGE(built.pos.size() == 6, "expected two line vertices");
+
+  // An untouched shape must keep the cache (no per-frame re-tessellation).
+  action.apply(root);
+  const SoShapeIRProbe idle = soshape_ir_probe(action);
+  BOOST_CHECK_MESSAGE(idle.generation == built.generation,
+                      "unchanged frame rebuilt the retained IR");
+  BOOST_CHECK_MESSAGE(idle.positions == built.positions,
+                      "unchanged frame replaced the retained streams");
+
+  // Sibling SoCoordinate3 rewrite (never notifies the shape).
+  coords->point.set1Value(1, 0.0f, 1.0f, 0.0f);
+  action.apply(root);
+  const SoShapeIRProbe moved = soshape_ir_probe(action);
+  BOOST_CHECK_MESSAGE(moved.generation != idle.generation,
+                      "sibling SoCoordinate3 rewrite did not rebuild the retained IR");
+  BOOST_CHECK_MESSAGE(moved.pos != built.pos,
+                      "sibling SoCoordinate3 rewrite replayed stale positions");
+
+  // Sibling SoNormal rewrite.
+  const std::vector<float> staleNormals = moved.nrm;
+  normals->vector.set1Value(0, 0.0f, 1.0f, 0.0f);
+  normals->vector.set1Value(1, 0.0f, 1.0f, 0.0f);
+  action.apply(root);
+  const SoShapeIRProbe renormalled = soshape_ir_probe(action);
+  BOOST_CHECK_MESSAGE(renormalled.nrm != staleNormals,
+                      "sibling SoNormal rewrite replayed stale normals");
+
+  // Sibling SoTextureCoordinate2 rewrite.
+  const std::vector<float> staleTexcoords = renormalled.tex;
+  texcoords->point.set1Value(1, 0.0f, 1.0f);
+  action.apply(root);
+  const SoShapeIRProbe retextured = soshape_ir_probe(action);
+  BOOST_CHECK_MESSAGE(retextured.tex != staleTexcoords,
+                      "sibling SoTextureCoordinate2 rewrite replayed stale texcoords");
+
+  // Every rebuild publishes a fresh build id (the backend's ABA guard).
+  uint64_t previous = retextured.generation;
+  for (int i = 0; i < 8; ++i) {
+    lines->touch();  // SoShape::notify(): drops the retained runs
+    coords->point.set1Value(1, 0.0f, 2.0f + float(i), 0.0f);
+    action.apply(root);
+    const SoShapeIRProbe rebuilt = soshape_ir_probe(action);
+    BOOST_CHECK_MESSAGE(rebuilt.generation > previous,
+                        "rebuild did not advance retainedGeneration");
+    previous = rebuilt.generation;
+  }
+
+  root->unref();
+}
+
+#endif // COIN_TEST_SUITE
